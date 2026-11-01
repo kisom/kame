@@ -836,12 +836,15 @@ fn footnote_origin(page_top: f32, body_left: f32, placement: &FootnotePlacement)
 ///
 /// The number is set at the END of the anchored range — the pen after the last
 /// anchored glyph — so it clears the word's ink instead of printing inside it.
-/// An anchor that ends on a visual line break has no following pen position on
-/// its line (the text continues on the next one), so it falls back to the range
-/// start and stays with its line. The mark is raised a tenth of the line down
-/// from the line top, which puts a 0.62× numeral near the cap height rather
-/// than on the body baseline, and X is clamped into the measure so a word flush
-/// to the right edge cannot push the number into the margin.
+/// An anchor that ends exactly at a visual line's end resolves to that line:
+/// cosmic-text drops the trailing wrap space from the line's glyph run, so the
+/// last word of every wrapped line ends there, and `caret_x` already returns
+/// the pen after its last glyph. Only an end that falls outside every line's
+/// glyph range (inside the dropped wrap whitespace) falls back to the range
+/// start. The mark is raised a tenth of the line down from the line top, which
+/// puts a 0.62× numeral near the cap height rather than on the body baseline,
+/// and X is clamped into the measure so a word flush to the right edge cannot
+/// push the number into the margin.
 fn superscript_origin(
     layout: &BlockLayout,
     anchor: &Anchor,
@@ -853,7 +856,7 @@ fn superscript_origin(
     let end_line = layout
         .lines
         .iter()
-        .find(|line| end >= line.start && end < line.end);
+        .find(|line| end >= line.start && end <= line.end);
     let (line, x) = match end_line {
         Some(line) => (*line, caret_x(layout, end)),
         None => (caret_line(layout, anchor.start)?, caret_x(layout, anchor.start)),
@@ -1896,8 +1899,11 @@ mod tests {
         assert!((origin.y - (block_top + line.y + line.height * 0.1)).abs() < 0.01);
         assert!(origin.y > block_top + line.y, "the mark is lifted");
 
-        // An anchor that ends on a line break has no room after its last glyph,
-        // so the mark falls back to the range start on the same line.
+        // An anchor ending exactly at a visual line's end — which is where the
+        // last word of every wrapped line ends, since cosmic-text drops the
+        // trailing wrap space — resolves to that line and puts the mark after
+        // its last glyph. It must not fall back to the line start and print
+        // over the first word.
         let long = "Typography is the craft of endowing human language with a durable \
 visual form, and thus with an independent existence. Its heartwood is calligraphy."
             .to_string();
@@ -1917,9 +1923,29 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         };
         let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width)
             .expect("position");
+        let last_glyph_x = caret_x(&layout, first_line.end - 1);
+        let line_end_x = caret_x(&layout, first_line.end);
         assert!(
-            (origin.x - (body_left + caret_x(&layout, first_line.start))).abs() < 0.01,
-            "an anchor ending on a break keeps its line and falls back to the start"
+            line_end_x > last_glyph_x,
+            "the pen after the line's last glyph is past its ink"
+        );
+        assert!(
+            (origin.x - (body_left + line_end_x)).abs() < 0.01,
+            "an anchor ending at a line end sits after the last glyph, got {} wanted {}",
+            origin.x,
+            body_left + line_end_x
+        );
+        assert!(
+            origin.x > body_left + last_glyph_x,
+            "the mark clears the last glyph instead of overprinting it"
+        );
+        assert!(
+            origin.x > body_left + caret_x(&layout, first_line.start),
+            "the mark is not back at the line start"
+        );
+        assert!(
+            (origin.y - (block_top + first_line.y + first_line.height * 0.1)).abs() < 0.01,
+            "the mark stays on the line the anchor ends on"
         );
         assert!(
             origin.x <= body_left + body_width,

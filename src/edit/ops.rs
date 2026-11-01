@@ -293,6 +293,21 @@ pub fn apply(doc: &mut Document, op: &Op) {
                 );
                 block.text.insert_str(*offset, text);
             }
+            // An insertion strictly inside a note's range must widen the note,
+            // otherwise the note silently drops coverage of the inserted text
+            // (`shift_anchors` only moves anchors whose start is at or after the
+            // edit, which would leave such an anchor's end stale). Marginal and
+            // footnote anchors are points (start == end), so this never matches
+            // them.
+            let delta = text.len();
+            for annotation in doc.annotations.iter_mut() {
+                let anchor = &mut annotation.anchor;
+                if anchor.block_id == *block_id && anchor.start < *offset && *offset < anchor.end {
+                    anchor.end = anchor.end.checked_add(delta).expect(
+                        "anchor end overflowed usize: insert length inconsistent with document text",
+                    );
+                }
+            }
             shift_anchors(&mut doc.annotations, *block_id, *offset, text.len() as isize);
         }
         Op::DeleteText {
@@ -718,6 +733,92 @@ mod tests {
         assert_eq!(d.blocks[0].text, "heéllo");
         assert_eq!(d.annotations[0].anchor.start, 4);
         assert_eq!(d.annotations[0].anchor.end, 6);
+    }
+
+    /// An insertion strictly inside a note's range must extend the note's end.
+    /// `shift_anchors` skips anchors that start before the edit, so without the
+    /// insert-side straddle case a note on "world" would silently keep covering
+    /// only "wXorl".
+    #[test]
+    fn insert_inside_annotation_range_extends_its_end() {
+        let mut d = doc("hello world");
+        let id = d.blocks[0].id;
+        d.annotations.push(note(id, 6, 11)); // covers "world"
+        let op = Op::InsertText {
+            block_id: id,
+            offset: 7, // strictly inside 6..11
+            text: "X".into(),
+        };
+        apply(&mut d, &op);
+        assert_eq!(d.blocks[0].text, "hello wXorld");
+        assert_eq!(d.annotations[0].anchor.start, 6, "start must not move");
+        assert_eq!(d.annotations[0].anchor.end, 12, "end must grow by the insert");
+        assert_eq!(&d.blocks[0].text[6..12], "wXorld");
+    }
+
+    /// The same case with a multi-byte payload: the extension is the byte length.
+    #[test]
+    fn insert_inside_annotation_range_extends_end_by_byte_len() {
+        let mut d = doc("hello world");
+        let id = d.blocks[0].id;
+        d.annotations.push(note(id, 6, 11));
+        let op = Op::InsertText {
+            block_id: id,
+            offset: 8,
+            text: "éé".into(), // four bytes
+        };
+        apply(&mut d, &op);
+        assert_eq!(d.annotations[0].anchor.start, 6);
+        assert_eq!(d.annotations[0].anchor.end, 15);
+    }
+
+    /// Inserting at or before a note's start still shifts both ends (unchanged
+    /// behaviour): the insert-side straddle case must not swallow this one.
+    #[test]
+    fn insert_at_or_before_annotation_start_shifts_both_ends() {
+        let mut d = doc("hello world");
+        let id = d.blocks[0].id;
+        d.annotations.push(note(id, 6, 11));
+
+        apply(
+            &mut d,
+            &Op::InsertText {
+                block_id: id,
+                offset: 6, // exactly at the note's start
+                text: "X".into(),
+            },
+        );
+        assert_eq!(d.blocks[0].text, "hello Xworld");
+        assert_eq!(d.annotations[0].anchor.start, 7);
+        assert_eq!(d.annotations[0].anchor.end, 12);
+
+        apply(
+            &mut d,
+            &Op::InsertText {
+                block_id: id,
+                offset: 0, // well before the note
+                text: ">> ".into(),
+            },
+        );
+        assert_eq!(d.annotations[0].anchor.start, 10);
+        assert_eq!(d.annotations[0].anchor.end, 15);
+    }
+
+    /// Inserting after a note's end leaves it untouched.
+    #[test]
+    fn insert_after_annotation_end_leaves_it_unchanged() {
+        let mut d = doc("hello world");
+        let id = d.blocks[0].id;
+        d.annotations.push(note(id, 0, 5)); // covers "hello"
+        let op = Op::InsertText {
+            block_id: id,
+            offset: 8,
+            text: "X".into(),
+        };
+        apply(&mut d, &op);
+        assert_eq!(d.blocks[0].text, "hello woXrld");
+        assert_eq!(d.annotations[0].anchor.start, 0);
+        assert_eq!(d.annotations[0].anchor.end, 5);
     }
 
     #[test]

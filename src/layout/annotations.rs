@@ -14,6 +14,9 @@ use crate::model::{Annotation, AnnotationId, AnnotationKind, Block};
 pub const FOOTNOTE_GAP: f32 = 24.0;
 /// Baseline-to-baseline advance between consecutive footnote entries.
 pub const FOOTNOTE_LINE_HEIGHT: f32 = 18.0;
+/// Clear space between one margin body's last line and the next placement
+/// below it.
+pub const MARGIN_GAP: f32 = 6.0;
 
 /// A margin-column position for one marginal or note annotation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,13 +39,18 @@ pub struct FootnotePlacement {
 ///
 /// All placements share one x: the margin column begins one `margin_size`
 /// gutter to the right of the body measure. Annotations are returned in column
-/// order (ascending Y, ties in document order). When two notes would land
-/// within one margin line vertically, the later one is pushed down to clear
-/// the earlier one, so crowded anchors stack downward instead of
-/// overprinting. The advance is [`LayoutConfig::body_line_height`] (or
-/// `margin_size` when that is larger), because the body line height is the
-/// typical height of the note text itself: advancing by the gutter alone lets
-/// stacked notes overlap.
+/// order (ascending Y, ties in document order). When a note would land inside
+/// the previous note's rendered body, it is pushed down below that body, so
+/// crowded anchors stack downward instead of overprinting.
+///
+/// The advance is the height the previous body actually occupies plus
+/// [`MARGIN_GAP`], floored by [`LayoutConfig::body_line_height`] and
+/// `margin_size`. A one-line advance is not enough: a margin body can wrap to
+/// half a dozen lines in a narrow gutter, and the next placement would then
+/// print on top of its last lines. `body_heights` carries the shaped height of
+/// each annotation's rendered body, keyed by annotation id, as measured by the
+/// caller; annotations missing from it (a `Note`, whose body lives in a popover,
+/// or a body that has not been shaped yet) fall back to the one-line floor.
 ///
 /// Annotations whose anchor does not resolve to a line (unknown block, empty
 /// block, offset past the text) are omitted rather than guessed at.
@@ -58,6 +66,7 @@ pub fn place_marginalia<L: Borrow<BlockLayout>>(
     annotations: &[Annotation],
     blocks: &[Block],
     layouts: &[L],
+    body_heights: &[(AnnotationId, f32)],
     config: &LayoutConfig,
 ) -> Vec<MarginalPlacement> {
     let x = config.body_width + config.margin_size;
@@ -83,22 +92,39 @@ pub fn place_marginalia<L: Borrow<BlockLayout>>(
     // deterministic rather than dependent on sort stability.
     anchored.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
 
-    // One body line of clearance: the note text is set at body size, so a
-    // margin_size-only advance would let consecutive notes overlap. A
-    // non-positive margin_size cannot separate notes on its own; the line
-    // height still does.
-    let advance = config.margin_size.max(config.body_line_height);
+    // Floors for the advance: the body line height is the typical height of the
+    // note text, and a non-positive margin_size cannot separate notes on its
+    // own. Whichever is larger wins, then the previous body's real height.
+    let floor = config.margin_size.max(config.body_line_height);
+    let body_height = |id: AnnotationId| {
+        body_heights
+            .iter()
+            .find(|(candidate, _)| *candidate == id)
+            .map(|(_, height)| *height)
+            .unwrap_or(0.0)
+            .max(0.0)
+    };
 
     let mut placements = Vec::with_capacity(anchored.len());
-    let mut previous: Option<f32> = None;
+    // Y and body height of the placement above this one.
+    let mut previous: Option<(f32, f32)> = None;
     for (index, anchor_y) in anchored {
+        let id = annotations[index].id;
+        let height = body_height(id);
         let y = match previous {
-            Some(previous_y) if anchor_y < previous_y + advance => previous_y + advance,
-            _ => anchor_y,
+            Some((previous_y, previous_height)) => {
+                let advance = floor.max(previous_height + MARGIN_GAP);
+                if anchor_y < previous_y + advance {
+                    previous_y + advance
+                } else {
+                    anchor_y
+                }
+            }
+            None => anchor_y,
         };
-        previous = Some(y);
+        previous = Some((y, height));
         placements.push(MarginalPlacement {
-            annotation_id: annotations[index].id,
+            annotation_id: id,
             x,
             y,
         });
@@ -252,7 +278,7 @@ dance, on a page, of pen, eye and hand.";
         assert!(layouts[0].lines.len() >= 3, "paragraph should wrap");
 
         let ann = marginal(blocks[0].id, offset_in(&layouts, 1));
-        let placed = place_marginalia(&[ann.clone()], &blocks, &layouts, &config);
+        let placed = place_marginalia(&[ann.clone()], &blocks, &layouts, &[], &config);
 
         assert_eq!(placed.len(), 1);
         assert_eq!(placed[0].annotation_id, ann.id);
@@ -275,7 +301,7 @@ dance, on a page, of pen, eye and hand.";
         let first = marginal(blocks[0].id, offset);
         let second = marginal(blocks[0].id, offset);
 
-        let placed = place_marginalia(&[first.clone(), second.clone()], &blocks, &layouts, &config);
+        let placed = place_marginalia(&[first.clone(), second.clone()], &blocks, &layouts, &[], &config);
         assert_eq!(placed.len(), 2);
 
         let a = placed
@@ -301,6 +327,64 @@ dance, on a page, of pen, eye and hand.";
     }
 
     #[test]
+    fn a_wrapped_body_pushes_the_next_marginal_past_all_of_its_lines() {
+        let (blocks, layouts) = laid_out(PARA);
+        let config = config();
+        let offset = offset_in(&layouts, 1);
+        let first = marginal(blocks[0].id, offset);
+        let second = marginal(blocks[0].id, offset);
+
+        // A six-line body in the narrow gutter: the one-line advance that used
+        // to be the only clearance would print the second note over the last
+        // five lines of the first.
+        let six_lines = config.body_line_height * 6.0;
+        assert!(six_lines > config.body_line_height);
+        let heights = [(first.id, six_lines)];
+
+        let placed = place_marginalia(
+            &[first.clone(), second.clone()],
+            &blocks,
+            &layouts,
+            &heights,
+            &config,
+        );
+        let a = placed
+            .iter()
+            .find(|p| p.annotation_id == first.id)
+            .expect("first marginal placed");
+        let b = placed
+            .iter()
+            .find(|p| p.annotation_id == second.id)
+            .expect("second marginal placed");
+
+        assert_eq!(
+            a.y, layouts[0].lines[1].y,
+            "the first note still keeps its anchor line"
+        );
+        assert!(
+            b.y - a.y >= six_lines + MARGIN_GAP - 0.01,
+            "the next note must clear the first body's six lines plus the gap; advance was {}",
+            b.y - a.y
+        );
+
+        // A body shorter than one line must not shrink the advance below the
+        // one-line floor.
+        let short = [(first.id, 4.0)];
+        let placed = place_marginalia(
+            &[first.clone(), second],
+            &blocks,
+            &layouts,
+            &short,
+            &config,
+        );
+        assert!(
+            (placed[1].y - placed[0].y - config.body_line_height).abs() < 0.01,
+            "a short body still advances by a full line, got {}",
+            placed[1].y - placed[0].y
+        );
+    }
+
+    #[test]
     fn stacking_advance_uses_the_larger_of_gutter_and_line() {
         let (blocks, layouts) = laid_out(PARA);
         let mut config = config();
@@ -309,7 +393,7 @@ dance, on a page, of pen, eye and hand.";
         let first = marginal(blocks[0].id, offset);
         let second = marginal(blocks[0].id, offset);
 
-        let placed = place_marginalia(&[first, second], &blocks, &layouts, &config);
+        let placed = place_marginalia(&[first, second], &blocks, &layouts, &[], &config);
         assert_eq!(placed.len(), 2);
         assert!(
             (placed[1].y - placed[0].y - 40.0).abs() < 0.01,
@@ -345,7 +429,7 @@ dance, on a page, of pen, eye and hand.";
         let config = config();
         let n = note(blocks[0].id, offset_in(&layouts, 0));
 
-        let placed = place_marginalia(&[n.clone()], &blocks, &layouts, &config);
+        let placed = place_marginalia(&[n.clone()], &blocks, &layouts, &[], &config);
         assert_eq!(placed.len(), 1, "a Note also marks the margin");
         assert_eq!(placed[0].annotation_id, n.id);
         assert_eq!(placed[0].x, config.body_width + config.margin_size);
@@ -358,7 +442,7 @@ dance, on a page, of pen, eye and hand.";
         let foot = footnote(blocks[0].id, 0);
         let orphan = marginal(Uuid::new_v4(), 0);
 
-        let placed = place_marginalia(&[foot, orphan], &blocks, &layouts, &config);
+        let placed = place_marginalia(&[foot, orphan], &blocks, &layouts, &[], &config);
         assert!(
             placed.is_empty(),
             "only resolvable margin annotations place"
@@ -374,7 +458,7 @@ dance, on a page, of pen, eye and hand.";
         let top = marginal(blocks[0].id, offset_in(&layouts, 0));
         let bottom = marginal(blocks[0].id, offset_in(&layouts, lines.len() - 1));
 
-        let placed = place_marginalia(&[top.clone(), bottom.clone()], &blocks, &layouts, &config);
+        let placed = place_marginalia(&[top.clone(), bottom.clone()], &blocks, &layouts, &[], &config);
         assert_eq!(placed.len(), 2);
         assert_eq!(placed[0].annotation_id, top.id);
         assert_eq!(placed[0].y, lines[0].y);
@@ -442,7 +526,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn no_annotations_place_nothing() {
         let (blocks, layouts) = laid_out(PARA);
-        assert!(place_marginalia(&[], &blocks, &layouts, &config()).is_empty());
+        assert!(place_marginalia(&[], &blocks, &layouts, &[], &config()).is_empty());
         assert!(place_footnotes(&[], 400.0).is_empty());
     }
 }

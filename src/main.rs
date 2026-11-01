@@ -832,6 +832,38 @@ fn footnote_origin(page_top: f32, body_left: f32, placement: &FootnotePlacement)
     Pos2::new(body_left, page_top + placement.y)
 }
 
+/// Page position of a footnote's superscript number.
+///
+/// The number is set at the END of the anchored range — the pen after the last
+/// anchored glyph — so it clears the word's ink instead of printing inside it.
+/// An anchor that ends on a visual line break has no following pen position on
+/// its line (the text continues on the next one), so it falls back to the range
+/// start and stays with its line. The mark is raised a tenth of the line down
+/// from the line top, which puts a 0.62× numeral near the cap height rather
+/// than on the body baseline, and X is clamped into the measure so a word flush
+/// to the right edge cannot push the number into the margin.
+fn superscript_origin(
+    layout: &BlockLayout,
+    anchor: &Anchor,
+    body_left: f32,
+    block_top: f32,
+    body_width: f32,
+) -> Option<Pos2> {
+    let end = anchor.end.max(anchor.start);
+    let end_line = layout
+        .lines
+        .iter()
+        .find(|line| end >= line.start && end < line.end);
+    let (line, x) = match end_line {
+        Some(line) => (*line, caret_x(layout, end)),
+        None => (caret_line(layout, anchor.start)?, caret_x(layout, anchor.start)),
+    };
+    Some(Pos2::new(
+        body_left + x.clamp(0.0, body_width),
+        block_top + line.y + line.height * 0.1,
+    ))
+}
+
 // --- eframe application ----------------------------------------------------
 
 struct KameApp {
@@ -1207,7 +1239,20 @@ impl KameApp {
         // --- marginalia and note markers -------------------------------------
         // `place_marginalia` works in block space, so each placement is
         // composed with its block's page top (and the body's left edge).
-        let margins = place_marginalia(&annotations, blocks, &layouts, &config);
+        //
+        // Stacking needs the height each margin body actually renders to, not a
+        // one-line guess: a body that wraps to six lines must push the next
+        // placement past all six, or the notes overprint.
+        let body_heights: Vec<(AnnotationId, f32)> = annotations
+            .iter()
+            .filter(|annotation| annotation.kind == AnnotationKind::Marginal)
+            .filter_map(|annotation| {
+                self.annotation_textures
+                    .body_height(annotation.id)
+                    .map(|height| (annotation.id, height))
+            })
+            .collect();
+        let margins = place_marginalia(&annotations, blocks, &layouts, &body_heights, &config);
         let by_id: HashMap<AnnotationId, &Annotation> = annotations
             .iter()
             .map(|annotation| (annotation.id, annotation))
@@ -1291,7 +1336,9 @@ impl KameApp {
             }
         }
 
-        // Superscript number at each footnote's anchor.
+        // Superscript number at each footnote's anchor. Drawn after the range's
+        // last glyph (see `superscript_origin`) so it sits beside the anchored
+        // word rather than overprinting its ink.
         for placement in &footnotes {
             let Some(annotation) = by_id.get(&placement.annotation_id) else {
                 continue;
@@ -1302,12 +1349,17 @@ impl KameApp {
             else {
                 continue;
             };
-            let Some(line) = caret_line(layouts[index], annotation.anchor.start) else {
+            let Some(origin) = superscript_origin(
+                &layouts[index],
+                &annotation.anchor,
+                body_left,
+                tops[index],
+                config.body_width,
+            ) else {
                 continue;
             };
-            let x = caret_x(layouts[index], annotation.anchor.start).min(config.body_width);
             painter.text(
-                Pos2::new(body_left + x + 1.0, tops[index] + line.y + 1.0),
+                origin,
                 Align2::LEFT_TOP,
                 placement.number.to_string(),
                 FontId::proportional(config.body_size * 0.62),
@@ -1799,6 +1851,79 @@ mod tests {
         assert_eq!(
             footnote_origin(50.0, 200.0, &footnote),
             Pos2::new(200.0, 950.0)
+        );
+    }
+
+    #[test]
+    fn a_footnote_superscript_clears_the_anchored_word() {
+        let mut renderer = GlyphRenderer::new(LayoutConfig::default());
+        let body_width = renderer.config().body_width;
+        let block = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: crate::model::BlockKind::Paragraph,
+            text: "Craft, not content: the making is the meaning.".to_string(),
+            spans: Vec::new(),
+        };
+        let layout = renderer.layout(&block);
+        let body_left = 200.0;
+        let block_top = 60.0;
+
+        // The mark for "Craft" (0..5) belongs after the "t", at the pen of byte
+        // 5 — not at the pen of byte 0, which is inside the word's ink.
+        let anchor = Anchor {
+            block_id: block.id,
+            start: 0,
+            end: 5,
+        };
+        let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width)
+            .expect("a footnote on a laid-out block has a superscript position");
+        let start_x = caret_x(&layout, 0);
+        let end_x = caret_x(&layout, 5);
+        assert!(end_x > start_x, "the anchor covers more than its first glyph");
+        assert!(
+            (origin.x - (body_left + end_x)).abs() < 0.01,
+            "the number sits at the range end, got {} wanted {}",
+            origin.x,
+            body_left + end_x
+        );
+        assert!(
+            origin.x >= body_left + start_x,
+            "the number must not fall back inside the word"
+        );
+
+        // Raised off the line top so a 0.62× numeral reads as a superscript.
+        let line = layout.lines[0];
+        assert!((origin.y - (block_top + line.y + line.height * 0.1)).abs() < 0.01);
+        assert!(origin.y > block_top + line.y, "the mark is lifted");
+
+        // An anchor that ends on a line break has no room after its last glyph,
+        // so the mark falls back to the range start on the same line.
+        let long = "Typography is the craft of endowing human language with a durable \
+visual form, and thus with an independent existence. Its heartwood is calligraphy."
+            .to_string();
+        let wrapped = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: crate::model::BlockKind::Paragraph,
+            text: long,
+            spans: Vec::new(),
+        };
+        let layout = renderer.layout(&wrapped);
+        assert!(layout.lines.len() >= 2, "the paragraph wraps");
+        let first_line = layout.lines[0];
+        let anchor = Anchor {
+            block_id: wrapped.id,
+            start: first_line.start,
+            end: first_line.end,
+        };
+        let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width)
+            .expect("position");
+        assert!(
+            (origin.x - (body_left + caret_x(&layout, first_line.start))).abs() < 0.01,
+            "an anchor ending on a break keeps its line and falls back to the start"
+        );
+        assert!(
+            origin.x <= body_left + body_width,
+            "the mark is clamped inside the measure"
         );
     }
 

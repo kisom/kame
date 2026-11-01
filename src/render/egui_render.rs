@@ -215,7 +215,18 @@ impl LayoutCache {
 /// fingerprint covers the rendered string plus the column and size, so a
 /// renumbered footnote re-rasterizes while an idle frame uploads nothing.
 pub struct AnnotationTextureCache {
-    entries: HashMap<AnnotationId, CachedTexture>,
+    entries: HashMap<AnnotationId, AnnotationEntry>,
+}
+
+/// One cached annotation texture plus the shaped height of its text.
+///
+/// The height is the layout box's height (every wrapped line included), not
+/// the ink rectangle: margin stacking clears whole lines, so a body that wraps
+/// to six lines must reserve six lines even where the glyphs stop early.
+struct AnnotationEntry {
+    fingerprint: u64,
+    block: BlockTexture,
+    height: f32,
 }
 
 impl Default for AnnotationTextureCache {
@@ -264,6 +275,7 @@ impl AnnotationTextureCache {
             spans: Vec::new(),
         };
         let layout = renderer.layout_in_column(&block, width, size);
+        let body_height = layout.height;
         let (image, left, top) = renderer.rasterize(&layout, color);
         let size_px = [image.width() as usize, image.height() as usize];
         if size_px[0] == 0 || size_px[1] == 0 {
@@ -278,15 +290,24 @@ impl AnnotationTextureCache {
         );
         self.entries.insert(
             annotation_id,
-            CachedTexture {
+            AnnotationEntry {
                 fingerprint,
                 block: BlockTexture { texture, left, top },
+                height: body_height,
             },
         );
     }
 
     pub fn get(&self, annotation_id: AnnotationId) -> Option<&BlockTexture> {
         self.entries.get(&annotation_id).map(|cached| &cached.block)
+    }
+
+    /// Shaped height of the annotation body, in layout pixels. Callers use it
+    /// to stack margin notes by the space they actually occupy.
+    pub fn body_height(&self, annotation_id: AnnotationId) -> Option<f32> {
+        self.entries
+            .get(&annotation_id)
+            .map(|cached| cached.height)
     }
 
     /// Drops textures for annotations that left the document.
@@ -998,6 +1019,34 @@ mod tests {
             .map(|run| run.line_w)
             .fold(0.0_f32, f32::max);
         assert!(widest <= 169.0, "a line overflows the column: {widest}");
+    }
+
+    #[test]
+    fn annotation_texture_reports_the_height_its_body_wraps_to() {
+        let ctx = Context::default();
+        let mut renderer = GlyphRenderer::new(config());
+        let id = Uuid::new_v4();
+        let mut cache = AnnotationTextureCache::new();
+        let note = "Typography is the craft of endowing human language with a durable \
+visual form, and thus with an independent existence.";
+        cache.sync(&ctx, &mut renderer, id, note, 120.0, 12.0, [0, 0, 0]);
+
+        let height = cache
+            .body_height(id)
+            .expect("a shaped body reports its height");
+        let line = 12.0 * 1.4;
+        assert!(
+            height >= 3.0 * line - 0.01,
+            "a body that wraps to several lines must report them all, got {height}"
+        );
+
+        // The height tracks the body: a one-line note is shorter than the
+        // wrapped one, so margin stacking can tell them apart.
+        let short = Uuid::new_v4();
+        cache.sync(&ctx, &mut renderer, short, "a note", 120.0, 12.0, [0, 0, 0]);
+        let short_height = cache.body_height(short).expect("height");
+        assert!(short_height < height);
+        assert!(cache.body_height(Uuid::new_v4()).is_none(), "unknown ids have no height");
     }
 
     #[test]

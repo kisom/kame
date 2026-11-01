@@ -241,6 +241,22 @@ mod tests {
         image.pixels().filter(|pixel| pixel[3] > 0).count()
     }
 
+    /// Bounding box of painted pixels as `(left, top, right, bottom)` with
+    /// exclusive maxima, or `None` when nothing was painted.
+    fn painted_extents(image: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
+        let mut bounds: Option<(u32, u32, u32, u32)> = None;
+        for (x, y, pixel) in image.enumerate_pixels() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            bounds = Some(match bounds {
+                None => (x, y, x + 1, y + 1),
+                Some((l, t, r, b)) => (l.min(x), t.min(y), r.max(x + 1), b.max(y + 1)),
+            });
+        }
+        bounds
+    }
+
     #[test]
     fn rasterize_produces_non_blank_image() {
         let mut fs = FontSystem::new();
@@ -275,34 +291,97 @@ mod tests {
         let mut atlas = GlyphAtlas::new();
         let (image, left, top) = atlas.rasterize(&mut fs, &layout, [0, 0, 0]);
 
+        let canvas_right = left + image.width() as i32;
+        let canvas_bottom = top + image.height() as i32;
+
+        // Every glyph's *placed ink* rectangle must lie inside the returned
+        // `[left, left + width) x [top, top + height)` window. The rectangle is
+        // the pen plus the mask's left side bearing and size — not the pen
+        // origin, which sits left of the ink whenever the bearing is positive.
+        let mut cache = SwashCache::new();
         let mut glyphs = 0;
         for run in layout.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
                 let phys = glyph.physical((0.0, run.line_y), 1.0);
+                let Some(mask) = cache.get_image(&mut fs, phys.cache_key) else {
+                    continue;
+                };
+                if mask.placement.width == 0 || mask.placement.height == 0 {
+                    continue;
+                }
+                let ink_left = phys.x + mask.placement.left;
+                let ink_top = phys.y - mask.placement.top;
+                let ink_right = ink_left + mask.placement.width as i32;
+                let ink_bottom = ink_top + mask.placement.height as i32;
+
                 assert!(
-                    phys.x >= left && phys.x < left + image.width() as i32,
-                    "glyph pen x {} outside canvas [{left}, {})",
-                    phys.x,
-                    left + image.width() as i32
+                    ink_left >= left && ink_right <= canvas_right,
+                    "glyph ink x range [{ink_left}, {ink_right}) outside canvas \
+                     [{left}, {canvas_right})"
                 );
                 assert!(
-                    phys.y >= top && phys.y < top + image.height() as i32,
-                    "glyph baseline y {} outside canvas [{top}, {})",
-                    phys.y,
-                    top + image.height() as i32
+                    ink_top >= top && ink_bottom <= canvas_bottom,
+                    "glyph ink y range [{ink_top}, {ink_bottom}) outside canvas \
+                     [{top}, {canvas_bottom})"
                 );
                 glyphs += 1;
             }
         }
         assert!(glyphs > 0, "no glyphs were shaped");
+        assert!(ink_pixels(&image) > 0, "no glyph pixels were painted");
 
-        // The canvas spans at least the shaped line's advance width.
+        // Independent check of the returned window, derived from the *layout*
+        // (`LayoutRun::line_top` / `line_y` and the `LayoutLine` bands) rather
+        // than by recomputing `glyph.physical` the way the implementation does.
+        let (ink_l, ink_t, ink_r, ink_b) =
+            painted_extents(&image).expect("canvas has no painted pixels");
+        let ink_l = left + ink_l as i32;
+        let ink_t = top + ink_t as i32;
+        let ink_r = left + ink_r as i32;
+        let ink_b = top + ink_b as i32;
+
+        assert!(
+            ink_l >= 0 && ink_r <= canvas_right && ink_r > ink_l,
+            "painted ink columns [{ink_l}, {ink_r}) are not inside the block"
+        );
+
+        // "Hello" is one line with no descenders, so its ink must sit between
+        // the line's top and its baseline. `line_top`/`line_y` are layout data,
+        // not glyph placements.
         let run = layout.buffer.layout_runs().next().unwrap();
         assert!(
-            image.width() as f32 >= run.line_w,
-            "canvas width {} is narrower than the line ({})",
-            image.width(),
-            run.line_w
+            ink_t >= run.line_top.floor() as i32 - 1,
+            "painted ink starts at y {ink_t}, above the line top {}",
+            run.line_top
+        );
+        assert!(
+            ink_b <= run.line_y.ceil() as i32 + 2,
+            "painted ink ends at y {ink_b}, below the baseline {} — `Hello` has no \
+             descenders",
+            run.line_y
+        );
+
+        // …and inside the band the layout reports for that line.
+        let line = layout.lines.first().expect("layout reported no lines");
+        assert!(
+            ink_t as f32 >= line.y - 1.0 && ink_b as f32 <= line.y + line.height + 1.0,
+            "painted ink rows [{ink_t}, {ink_b}) fall outside the line band [{}, {})",
+            line.y,
+            line.y + line.height
+        );
+
+        // The canvas is cropped to ink, so its four edges must coincide (within
+        // a pixel of antialiasing) with the painted pixels. A block- or
+        // line-wide canvas would leave slack at an edge; the old
+        // `width() >= line_w` assertion was the reverse of the true relation and
+        // only passed because this particular ink happens to be ~35px wide.
+        assert!(
+            ink_l - left <= 1
+                && ink_t - top <= 1
+                && canvas_right - ink_r <= 1
+                && canvas_bottom - ink_b <= 1,
+            "canvas [{left}, {canvas_right}) x [{top}, {canvas_bottom}) is not cropped \
+             to the painted ink [{ink_l}, {ink_r}) x [{ink_t}, {ink_b})"
         );
     }
 

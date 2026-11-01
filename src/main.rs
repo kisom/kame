@@ -20,11 +20,11 @@ use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
-use crate::layout::{anchor_to_y, BlockLayout, LayoutConfig};
+use crate::layout::{BlockLayout, LayoutConfig};
 use crate::model::{Block, Document};
 use crate::render::egui_render::{
     caret_line, caret_x, command_for_event, next_boundary, offset_at, prev_boundary, Command,
-    GlyphRenderer, TextureCache,
+    GlyphRenderer, LayoutCache, TextureCache,
 };
 use crate::storage::{Db, DbError};
 
@@ -75,6 +75,9 @@ struct Session {
     db: Db,
     caret: Cursor,
     last_error: Option<String>,
+    /// Set when a write failed. Further mutations are refused until a write
+    /// succeeds, so the in-memory undo cursor cannot drift from the DB cursor.
+    save_failed: bool,
 }
 
 impl Session {
@@ -118,6 +121,7 @@ impl Session {
             db,
             caret,
             last_error: None,
+            save_failed: false,
         })
     }
 
@@ -130,30 +134,61 @@ impl Session {
     }
 
     /// Persists the head document and the undo cursor together, the write
-    /// path for undo/redo.
-    fn save_state(&mut self) {
-        if let Err(err) = self
+    /// path for undo/redo. Returns whether the write landed.
+    fn save_state(&mut self) -> bool {
+        match self
             .db
             .save_state(self.editor.document(), self.editor.cursor())
         {
-            self.last_error = Some(format!("save failed: {err}"));
+            Ok(()) => {
+                self.clear_save_error();
+                true
+            }
+            Err(err) => {
+                self.mark_save_failed(err);
+                false
+            }
         }
     }
 
     /// Persists one applied edit (op + head + cursor in one transaction).
-    fn record(&mut self, op: &Op) {
-        if let Err(err) = self.db.record_edit(self.editor.document(), op) {
-            self.last_error = Some(format!("save failed: {err}"));
+    /// Returns whether the write landed.
+    fn record(&mut self, op: &Op) -> bool {
+        match self.db.record_edit(self.editor.document(), op) {
+            Ok(_) => {
+                self.clear_save_error();
+                true
+            }
+            Err(err) => {
+                self.mark_save_failed(err);
+                false
+            }
+        }
+    }
+
+    /// A failed write makes the session read-only: the in-memory history can
+    /// no longer be trusted to match the DB, so further mutations would write
+    /// an op log that disagrees with the head cursor.
+    fn mark_save_failed(&mut self, err: impl std::fmt::Display) {
+        self.save_failed = true;
+        self.last_error = Some(format!("save failed — editing disabled: {err}"));
+    }
+
+    /// A later successful write re-establishes the head/log relationship.
+    /// "A later successful write" here means `record`/`save_state`; commands
+    /// are suppressed while the flag is set, so in practice a restart or an
+    /// explicit retry resolves it.
+    fn clear_save_error(&mut self) {
+        if self.save_failed {
+            self.save_failed = false;
+            self.last_error = None;
         }
     }
 
     /// Applies `result` from an editor command and persists it.
     fn commit(&mut self, result: Result<Op, EditError>) -> bool {
         match result {
-            Ok(op) => {
-                self.record(&op);
-                true
-            }
+            Ok(op) => self.record(&op),
             Err(err) => {
                 self.last_error = Some(err.to_string());
                 false
@@ -183,15 +218,18 @@ impl Session {
     // --- editing commands --------------------------------------------------
 
     fn insert(&mut self, text: &str) -> bool {
+        if self.save_failed {
+            return false;
+        }
         let caret = self.valid_caret();
         match self.editor.insert_text(&caret, text) {
             Ok(op) => {
-                self.record(&op);
+                let saved = self.record(&op);
                 self.caret = Cursor {
                     block_id: caret.block_id,
                     offset: caret.offset + text.len(),
                 };
-                true
+                saved
             }
             Err(err) => {
                 self.last_error = Some(err.to_string());
@@ -212,6 +250,9 @@ impl Session {
     }
 
     fn backspace(&mut self) -> bool {
+        if self.save_failed {
+            return false;
+        }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
             return false;
@@ -258,6 +299,9 @@ impl Session {
     }
 
     fn delete_forward(&mut self) -> bool {
+        if self.save_failed {
+            return false;
+        }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
             return false;
@@ -283,6 +327,9 @@ impl Session {
     }
 
     fn split(&mut self) -> bool {
+        if self.save_failed {
+            return false;
+        }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
             return false;
@@ -305,6 +352,9 @@ impl Session {
     /// Inserts pasted text one line per block: each newline becomes a
     /// paragraph break, so the block model keeps its one-paragraph invariant.
     fn paste(&mut self, text: &str) -> bool {
+        if self.save_failed {
+            return false;
+        }
         let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut changed = false;
         for (index, line) in normalised.split('\n').enumerate() {
@@ -319,21 +369,40 @@ impl Session {
     }
 
     fn undo(&mut self) -> bool {
-        if self.editor.undo().is_none() {
+        if self.save_failed {
             return false;
         }
+        let Some(op) = self.editor.undo() else {
+            return false;
+        };
         self.save_state();
-        self.caret = clamp_cursor(self.editor.document(), self.caret);
+        self.place_caret_from(&op);
         true
     }
 
     fn redo(&mut self) -> bool {
-        if self.editor.redo().is_none() {
+        if self.save_failed {
             return false;
         }
+        let Some(op) = self.editor.redo() else {
+            return false;
+        };
         self.save_state();
-        self.caret = clamp_cursor(self.editor.document(), self.caret);
+        self.place_caret_from(&op);
         true
+    }
+
+    /// Moves the caret to the position implied by an applied undo/redo op.
+    ///
+    /// The editor clamps a stale offset but does not move the caret, so an
+    /// undo of text typed mid-block used to leave the caret past the erased
+    /// span — the next insert then landed in the wrong place.
+    fn place_caret_from(&mut self, op: &Op) {
+        if let Some(caret) = caret_for_op(self.editor.document(), op) {
+            self.set_caret(caret);
+        } else {
+            self.caret = clamp_cursor(self.editor.document(), self.caret);
+        }
     }
 
     fn move_left(&mut self) {
@@ -416,34 +485,89 @@ fn clamp_cursor(document: &Document, cursor: Cursor) -> Cursor {
     }
 }
 
-/// Maps a click to a caret inside the block under it. A click past the last
-/// block lands at the end of the document.
+/// Caret position implied by an applied op: the start of erased text, the end
+/// of inserted text, or the start of a block that now exists.
+///
+/// `Op::Batch` members are scanned in order, skipping members whose block did
+/// not survive the operation (undoing a split returns a batch whose first
+/// member deletes the block the split created; the text member that follows
+/// carries the split point).
+fn caret_for_op(document: &Document, op: &Op) -> Option<Cursor> {
+    let existing = |block_id: crate::model::BlockId| {
+        document
+            .blocks
+            .iter()
+            .any(|block| block.id == block_id)
+            .then_some(block_id)
+    };
+    match op {
+        Op::InsertText {
+            block_id,
+            offset,
+            text,
+        } => existing(*block_id).map(|block_id| Cursor {
+            block_id,
+            offset: offset + text.len(),
+        }),
+        Op::DeleteText {
+            block_id, start, ..
+        } => existing(*block_id).map(|block_id| Cursor {
+            block_id,
+            offset: *start,
+        }),
+        Op::InsertBlock { block, .. } | Op::DeleteBlock { block, .. } => {
+            existing(block.id).map(|block_id| Cursor {
+                block_id,
+                offset: 0,
+            })
+        }
+        Op::Batch { ops } => ops.iter().find_map(|member| caret_for_op(document, member)),
+        _ => None,
+    }
+}
+
+/// Maps a click to a caret in the nearest block, by vertical distance.
+///
+/// Clicks in the page padding above or below the text, and in the gap between
+/// two blocks, used to fall through to `last().end` and jump the caret to the
+/// end of the document. The nearest block now wins and the click's X is
+/// clamped into that block's column.
 fn hit_test(
     blocks: &[Block],
-    layouts: &[BlockLayout],
+    layouts: &[&BlockLayout],
     tops: &[f32],
     heights: &[f32],
     body_left: f32,
     pos: Pos2,
 ) -> Option<Cursor> {
-    for (index, block) in blocks.iter().enumerate() {
+    let count = blocks
+        .len()
+        .min(layouts.len())
+        .min(tops.len())
+        .min(heights.len());
+    let mut nearest: Option<(usize, f32)> = None;
+    for index in 0..count {
         let top = tops[index];
-        if pos.y >= top && pos.y <= top + heights[index] {
-            let offset = offset_at(
-                &layouts[index],
-                pos.x - body_left,
-                pos.y - top,
-                block.text.len(),
-            );
-            return Some(Cursor {
-                block_id: block.id,
-                offset,
-            });
+        let bottom = top + heights[index];
+        let distance = if pos.y < top {
+            top - pos.y
+        } else if pos.y > bottom {
+            pos.y - bottom
+        } else {
+            0.0
+        };
+        if nearest.map_or(true, |(_, best)| distance < best) {
+            nearest = Some((index, distance));
         }
     }
-    blocks.last().map(|block| Cursor {
+    let (index, _) = nearest?;
+    let block = &blocks[index];
+    let x = (pos.x - body_left).max(0.0);
+    let y = (pos.y - tops[index]).clamp(0.0, heights[index]);
+    let offset = offset_at(layouts[index], x, y, block.text.len());
+    Some(Cursor {
         block_id: block.id,
-        offset: block.text.len(),
+        offset,
     })
 }
 
@@ -462,6 +586,7 @@ fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f
 struct KameApp {
     session: Session,
     renderer: GlyphRenderer,
+    layouts: LayoutCache,
     textures: TextureCache,
     path: PathBuf,
 }
@@ -473,6 +598,7 @@ impl KameApp {
         Ok(KameApp {
             session,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
+            layouts: LayoutCache::new(),
             textures: TextureCache::new(),
             path,
         })
@@ -608,15 +734,11 @@ impl KameApp {
     fn draw_surface(&mut self, ui: &mut egui::Ui) {
         let config = self.renderer.config();
 
-        // Shape every block once for this frame; the layouts drive both the
-        // texture cache and caret/click mapping.
-        let mut layouts: Vec<BlockLayout> = Vec::new();
-        {
-            let document = self.session.document();
-            for block in &document.blocks {
-                layouts.push(self.renderer.layout(block));
-            }
-        }
+        // Shape only blocks whose content changed since the last frame; an
+        // idle repaint shapes nothing, and an edit re-shapes one block.
+        let layouts = self
+            .layouts
+            .sync(&mut self.renderer, &self.session.document().blocks);
 
         self.textures.sync(
             ui.ctx(),
@@ -671,13 +793,10 @@ impl KameApp {
         let mut clicked_caret = None;
 
         if let Some(index) = blocks.iter().position(|block| block.id == caret.block_id) {
-            let line_y = anchor_to_y(blocks, &layouts, caret.block_id, caret.offset).unwrap_or(0.0);
-            let line_height = layouts[index]
-                .lines
-                .iter()
-                .find(|line| (line.y - line_y).abs() < 0.5)
-                .map_or(config.body_line_height, |line| line.height);
-            let x = caret_x(&layouts[index], caret.offset);
+            let (line_y, line_height) = caret_line(layouts[index], caret.offset)
+                .map(|line| (line.y, line.height))
+                .unwrap_or((0.0, config.body_line_height));
+            let x = caret_x(layouts[index], caret.offset);
             let top = tops[index] + line_y;
             painter.rect_filled(
                 Rect::from_min_size(Pos2::new(body_left + x, top), Vec2::new(1.5, line_height)),
@@ -917,5 +1036,138 @@ mod tests {
         assert_eq!(session.document().blocks.len(), 1);
         assert_eq!(session.caret.block_id, first_block_id(&session));
         assert_eq!(session.caret.offset, 0);
+    }
+
+    /// FIX 1: undo/redo derive the caret from the op they applied, so typing
+    /// after Ctrl-Z inserts where the erased text was.
+    #[test]
+    fn undo_and_redo_move_the_caret_to_the_affected_span() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        let block_id = first_block_id(&session);
+        session.insert("abc");
+        session.set_caret(Cursor {
+            block_id,
+            offset: 1,
+        });
+        session.insert("XY");
+        assert_eq!(session.document().blocks[0].text, "aXYbc");
+        assert_eq!(session.caret.offset, 3);
+
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].text, "abc");
+        assert_eq!(
+            session.caret.offset, 1,
+            "undo parks the caret at the start of the erased span"
+        );
+
+        assert!(session.redo());
+        assert_eq!(session.document().blocks[0].text, "aXYbc");
+        assert_eq!(
+            session.caret.offset, 3,
+            "redo parks the caret after the reinserted text"
+        );
+    }
+
+    /// FIX 2: clicks in the page padding or between blocks go to the nearest
+    /// block, never to the end of the document.
+    #[test]
+    fn clicks_in_padding_or_gaps_pick_the_nearest_block() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("one");
+        session.split();
+        session.insert("two");
+        session.split();
+        session.insert("three");
+        assert_eq!(session.document().blocks.len(), 3);
+
+        let config = LayoutConfig::default();
+        let mut renderer = GlyphRenderer::new(config);
+        let blocks = session.document().blocks.clone();
+        let layouts: Vec<BlockLayout> = blocks.iter().map(|block| renderer.layout(block)).collect();
+        let layout_refs: Vec<&BlockLayout> = layouts.iter().collect();
+        let heights: Vec<f32> = blocks
+            .iter()
+            .zip(layouts.iter())
+            .map(|(block, layout)| block_height(block, layout, &config))
+            .collect();
+        let mut tops = Vec::new();
+        let mut y = PAGE_PADDING;
+        for height in &heights {
+            tops.push(y);
+            y += height + BLOCK_GAP;
+        }
+        let body_left = 100.0;
+
+        // Top page padding: the old hit_test fell through to last().end.
+        let cursor = hit_test(
+            &blocks,
+            &layout_refs,
+            &tops,
+            &heights,
+            body_left,
+            Pos2::new(body_left, 1.0),
+        )
+        .expect("a click in the padding still lands somewhere");
+        assert_eq!(cursor.block_id, blocks[0].id);
+        assert_eq!(cursor.offset, 0);
+
+        // The gap between blocks one and two belongs to a neighbour, never to
+        // the last block in the document.
+        let gap_y = tops[0] + heights[0] + BLOCK_GAP * 0.5;
+        let cursor = hit_test(
+            &blocks,
+            &layout_refs,
+            &tops,
+            &heights,
+            body_left,
+            Pos2::new(body_left, gap_y),
+        )
+        .expect("a click in the gap still lands somewhere");
+        assert_ne!(cursor.block_id, blocks[2].id);
+        assert!(cursor.block_id == blocks[0].id || cursor.block_id == blocks[1].id);
+    }
+
+    /// FIX 4: a failed write makes the session read-only instead of letting
+    /// memory and DB history diverge; the flag clears on the next good write.
+    #[test]
+    fn a_save_failure_suppresses_edits_until_a_write_succeeds() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("abc");
+        let block_id = first_block_id(&session);
+        assert_eq!(session.history(), (1, 0));
+
+        // Simulate the state a failed record_edit leaves behind.
+        session.save_failed = true;
+        session.last_error = Some("save failed — editing disabled: disk full".into());
+
+        assert!(!session.insert("d"), "insert is refused while save failed");
+        assert!(!session.backspace());
+        assert!(!session.split());
+        assert!(!session.undo());
+        assert_eq!(session.document().blocks[0].text, "abc");
+        assert_eq!(session.history(), (1, 0), "history did not advance");
+        assert!(session.last_error.is_some(), "the error stays visible");
+
+        // Movement is not a mutation and is still allowed.
+        session.set_caret(Cursor {
+            block_id,
+            offset: 3,
+        });
+        session.move_left();
+        assert_eq!(session.caret.offset, 2);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 3,
+        });
+
+        // A successful write resolves the failure and re-enables editing.
+        assert!(session.save_state());
+        assert!(!session.save_failed);
+        assert!(session.last_error.is_none());
+        assert!(session.insert("d"));
+        assert_eq!(session.document().blocks[0].text, "abcd");
     }
 }

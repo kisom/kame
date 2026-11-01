@@ -100,11 +100,11 @@ impl TextureCache {
         ctx: &Context,
         renderer: &mut GlyphRenderer,
         blocks: &[Block],
-        layouts: &[BlockLayout],
+        layouts: &[&BlockLayout],
         color: [u8; 3],
     ) {
         let mut live = HashSet::with_capacity(blocks.len());
-        for (block, layout) in blocks.iter().zip(layouts) {
+        for (block, layout) in blocks.iter().zip(layouts.iter().copied()) {
             live.insert(block.id);
             let fingerprint = block_fingerprint(block);
             let up_to_date = self
@@ -144,7 +144,70 @@ impl TextureCache {
     }
 }
 
-/// Content hash used to decide whether a block's texture is stale.
+/// Per-block shaping cache, rebuilt only when a block's content changes.
+///
+/// Keyed by the same [`block_fingerprint`] as the texture cache, so a frame
+/// with no edits shapes nothing and an edit re-shapes only the block it
+/// touched. Layouts of blocks that left the document are dropped.
+pub struct LayoutCache {
+    entries: HashMap<BlockId, CachedLayout>,
+}
+
+struct CachedLayout {
+    fingerprint: u64,
+    layout: BlockLayout,
+}
+
+impl Default for LayoutCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LayoutCache {
+    pub fn new() -> LayoutCache {
+        LayoutCache {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Returns one layout per block, in document order, shaping only blocks
+    /// whose fingerprint changed since the last call.
+    pub fn sync(&mut self, renderer: &mut GlyphRenderer, blocks: &[Block]) -> Vec<&BlockLayout> {
+        let mut live = HashSet::with_capacity(blocks.len());
+        for block in blocks {
+            live.insert(block.id);
+            let fingerprint = block_fingerprint(block);
+            let up_to_date = self
+                .entries
+                .get(&block.id)
+                .is_some_and(|cached| cached.fingerprint == fingerprint);
+            if up_to_date {
+                continue;
+            }
+            let layout = renderer.layout(block);
+            self.entries.insert(
+                block.id,
+                CachedLayout {
+                    fingerprint,
+                    layout,
+                },
+            );
+        }
+        self.entries.retain(|id, _| live.contains(id));
+        blocks
+            .iter()
+            .map(|block| &self.entries[&block.id].layout)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Content hash used to decide whether a block's texture or layout is stale.
 fn block_fingerprint(block: &Block) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     format!("{:?}", block.kind).hash(&mut hasher);
@@ -163,6 +226,8 @@ pub struct GlyphRenderer {
     atlas: GlyphAtlas,
     config: LayoutConfig,
     rasterizes_since_clear: u32,
+    #[cfg(test)]
+    layout_calls: u64,
 }
 
 impl GlyphRenderer {
@@ -177,6 +242,8 @@ impl GlyphRenderer {
             atlas: GlyphAtlas::new(),
             config,
             rasterizes_since_clear: 0,
+            #[cfg(test)]
+            layout_calls: 0,
         }
     }
 
@@ -187,7 +254,16 @@ impl GlyphRenderer {
     /// Shapes one block with the configured column width. Callers keep the
     /// returned layouts for the frame to map carets and clicks.
     pub fn layout(&mut self, block: &Block) -> BlockLayout {
+        #[cfg(test)]
+        {
+            self.layout_calls += 1;
+        }
         layout_block(&mut self.font_system, block, &self.config)
+    }
+
+    #[cfg(test)]
+    pub fn layout_calls(&self) -> u64 {
+        self.layout_calls
     }
 
     /// Paints `layout` into an ink-cropped RGBA image and returns it with its
@@ -450,7 +526,8 @@ mod tests {
         let layouts: Vec<BlockLayout> = blocks.iter().map(|b| renderer.layout(b)).collect();
         let mut cache = TextureCache::new();
 
-        cache.sync(&ctx, &mut renderer, &blocks, &layouts, [10, 10, 10]);
+        let layout_refs: Vec<&BlockLayout> = layouts.iter().collect();
+        cache.sync(&ctx, &mut renderer, &blocks, &layout_refs, [10, 10, 10]);
         assert_eq!(cache.len(), 2);
 
         let texture = cache.get(blocks[0].id).expect("first block texture");
@@ -472,12 +549,14 @@ mod tests {
         let mut blocks = vec![paragraph("Hello"), paragraph("World")];
         let mut layouts: Vec<BlockLayout> = blocks.iter().map(|b| renderer.layout(b)).collect();
         let mut cache = TextureCache::new();
-        cache.sync(&ctx, &mut renderer, &blocks, &layouts, [0, 0, 0]);
+        let refs: Vec<&BlockLayout> = layouts.iter().collect();
+        cache.sync(&ctx, &mut renderer, &blocks, &refs, [0, 0, 0]);
         let first_size = cache.get(blocks[0].id).unwrap().texture.size();
 
         blocks[0].text = "Hello, much longer line".to_string();
         layouts = blocks.iter().map(|b| renderer.layout(b)).collect();
-        cache.sync(&ctx, &mut renderer, &blocks, &layouts, [0, 0, 0]);
+        let refs: Vec<&BlockLayout> = layouts.iter().collect();
+        cache.sync(&ctx, &mut renderer, &blocks, &refs, [0, 0, 0]);
         assert_ne!(
             cache.get(blocks[0].id).unwrap().texture.size(),
             first_size,
@@ -486,8 +565,58 @@ mod tests {
 
         blocks.pop();
         layouts = blocks.iter().map(|b| renderer.layout(b)).collect();
-        cache.sync(&ctx, &mut renderer, &blocks, &layouts, [0, 0, 0]);
+        let refs: Vec<&BlockLayout> = layouts.iter().collect();
+        cache.sync(&ctx, &mut renderer, &blocks, &refs, [0, 0, 0]);
         assert_eq!(cache.len(), 1, "the removed block's texture is dropped");
+    }
+
+    /// FIX 3: shaping is cached by content fingerprint, so a repaint with no
+    /// edits re-shapes nothing and an edit re-shapes only its own block.
+    #[test]
+    fn layout_cache_shapes_only_changed_blocks() {
+        let mut renderer = GlyphRenderer::new(config());
+        let mut blocks = vec![paragraph("Hello"), paragraph("World")];
+        let mut cache = LayoutCache::new();
+
+        let layouts = cache.sync(&mut renderer, &blocks);
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(
+            renderer.layout_calls(),
+            2,
+            "the first sync lays out every block"
+        );
+
+        let layouts = cache.sync(&mut renderer, &blocks);
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(
+            renderer.layout_calls(),
+            2,
+            "an unchanged frame must not re-shape anything"
+        );
+
+        blocks[0].text = "Hello, much longer line".to_string();
+        let layouts = cache.sync(&mut renderer, &blocks);
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(
+            renderer.layout_calls(),
+            3,
+            "only the changed block is re-shaped"
+        );
+        assert_eq!(cache.len(), 2);
+
+        blocks.pop();
+        let layouts = cache.sync(&mut renderer, &blocks);
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(
+            renderer.layout_calls(),
+            3,
+            "removing a block does not require shaping"
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "the removed block's cached layout is dropped"
+        );
     }
 
     #[test]

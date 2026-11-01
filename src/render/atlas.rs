@@ -22,6 +22,15 @@ impl GlyphAtlas {
         }
     }
 
+    /// Drops every cached glyph mask.
+    ///
+    /// `SwashCache` never evicts entries on its own, so a long-lived process
+    /// that keeps arranging new text would grow without bound. Callers clear
+    /// it periodically; the masks are cheap to regenerate.
+    pub fn clear_cache(&mut self) {
+        self.cache = SwashCache::new();
+    }
+
     /// Rasterize `layout` into an `RgbaImage` painted in `color`, returning the
     /// image together with its block-relative offset `(left, top)`.
     ///

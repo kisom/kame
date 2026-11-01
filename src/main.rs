@@ -13,18 +13,23 @@ mod model;
 mod render;
 mod storage;
 
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use egui::{Color32, Pos2, Rect, Sense, Vec2};
+use egui::{Align2, Color32, FontId, Id, Order, Pos2, Rect, Sense, Vec2};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
-use crate::layout::{BlockLayout, LayoutConfig};
-use crate::model::{Block, Document};
+use crate::layout::reading_order;
+use crate::layout::{
+    place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
+    MarginalPlacement, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
+};
+use crate::model::{Anchor, Annotation, AnnotationId, AnnotationKind, Block, Document};
 use crate::render::egui_render::{
-    caret_line, caret_x, command_for_event, next_boundary, offset_at, prev_boundary, Command,
-    GlyphRenderer, LayoutCache, TextureCache,
+    caret_line, caret_x, command_for_event, next_boundary, offset_at, prev_boundary, range_rects,
+    word_at, AnnotationTextureCache, Command, GlyphRenderer, LayoutCache, TextureCache,
 };
 use crate::storage::{Db, DbError};
 
@@ -32,12 +37,30 @@ use crate::storage::{Db, DbError};
 const BACKGROUND: Color32 = Color32::from_rgb(247, 243, 235);
 /// Warm near-black ink used for rasterized glyphs.
 const BODY_INK: [u8; 3] = [32, 29, 25];
+/// Lighter ink for the apparatus in the margin and at the foot.
+const APPARATUS_INK: [u8; 3] = [86, 79, 69];
 /// Caret colour: a muted vermilion that reads against both faces.
 const CARET_INK: Color32 = Color32::from_rgb(176, 58, 46);
+/// Selection band (translucent, so the prose still reads through it).
+const SELECTION_FILL: Color32 = Color32::from_rgba_premultiplied(58, 78, 112, 62);
+/// A note's anchored range: a faint amber wash.
+const NOTE_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(178, 138, 38, 38);
+/// A footnote's anchored range and superscript marker.
+const FOOTNOTE_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(54, 96, 132, 34);
+/// Ink for the footnote superscript number.
+const FOOTNOTE_MARK: Color32 = Color32::from_rgb(54, 96, 132);
+/// A marginal note's anchored range.
+const MARGINAL_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(96, 96, 96, 26);
+/// Hairline rule above the footnotes.
+const RULE_INK: Color32 = Color32::from_rgb(150, 141, 126);
+/// Margin marker for a Note.
+const NOTE_MARK: Color32 = Color32::from_rgb(140, 104, 40);
 /// Space above the first block and below the last.
 const PAGE_PADDING: f32 = 36.0;
 /// Vertical space between blocks.
 const BLOCK_GAP: f32 = 14.0;
+/// Annotation text is set a little smaller than the prose.
+const ANNOTATION_SCALE: f32 = 0.82;
 
 type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -74,6 +97,10 @@ struct Session {
     editor: Editor,
     db: Db,
     caret: Cursor,
+    /// A dragged/shift-clicked range, oriented from where the drag began.
+    /// `caret` is always the moving end; `selection == None` means a bare
+    /// caret.
+    selection: Option<Selection>,
     last_error: Option<String>,
     /// Set when a write failed. Further mutations are refused until a write
     /// succeeds, so the in-memory undo cursor cannot drift from the DB cursor.
@@ -120,6 +147,7 @@ impl Session {
             editor,
             db,
             caret,
+            selection: None,
             last_error: None,
             save_failed: false,
         })
@@ -203,8 +231,69 @@ impl Session {
         self.caret
     }
 
+    /// Places a bare caret, dropping any selection.
     fn set_caret(&mut self, caret: Cursor) {
         self.caret = clamp_cursor(self.editor.document(), caret);
+        self.selection = None;
+    }
+
+    /// Extends the selection's moving end to `caret`, keeping the edge where
+    /// the selection began. With no selection yet, the current caret becomes
+    /// the fixed edge, so a drag selects the span it covers. Collapsing back
+    /// onto the fixed edge clears the selection.
+    fn select_to(&mut self, caret: Cursor) {
+        let origin = self
+            .selection
+            .map_or(self.caret, |selection| selection.start);
+        let caret = clamp_cursor(self.editor.document(), caret);
+        self.caret = caret;
+        self.selection = if origin == caret {
+            None
+        } else {
+            Some(Selection {
+                start: origin,
+                end: caret,
+            })
+        };
+    }
+
+    /// The selection with its ends in document order, or `None` without one.
+    fn ordered_selection(&self) -> Option<(Cursor, Cursor)> {
+        self.ordered(self.selection?)
+    }
+
+    /// Puts the two ends of `selection` in document order.
+    fn ordered(&self, selection: Selection) -> Option<(Cursor, Cursor)> {
+        let start = self.block_index(selection.start.block_id)?;
+        let end = self.block_index(selection.end.block_id)?;
+        if (start, selection.start.offset) <= (end, selection.end.offset) {
+            Some((selection.start, selection.end))
+        } else {
+            Some((selection.end, selection.start))
+        }
+    }
+
+    /// Deletes the selected range, leaving the caret where it began.
+    ///
+    /// Returns `true` when there was nothing to delete or the delete landed in
+    /// the database, `false` only on a failed write.
+    fn delete_selected(&mut self) -> bool {
+        let Some(selection) = self.selection.take() else {
+            return true;
+        };
+        let Some((start, end)) = self.ordered(selection) else {
+            return true;
+        };
+        if start == end {
+            return true;
+        }
+        let result = self.editor.delete_selection(&Selection { start, end });
+        if self.commit(result) {
+            self.caret = start;
+            true
+        } else {
+            false
+        }
     }
 
     fn block_index(&self, block_id: crate::model::BlockId) -> Option<usize> {
@@ -219,6 +308,10 @@ impl Session {
 
     fn insert(&mut self, text: &str) -> bool {
         if self.save_failed {
+            return false;
+        }
+        // Typing over a selection replaces it.
+        if self.selection.is_some() && !self.delete_selected() {
             return false;
         }
         let caret = self.valid_caret();
@@ -252,6 +345,9 @@ impl Session {
     fn backspace(&mut self) -> bool {
         if self.save_failed {
             return false;
+        }
+        if self.selection.is_some() {
+            return self.delete_selected();
         }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
@@ -302,6 +398,9 @@ impl Session {
         if self.save_failed {
             return false;
         }
+        if self.selection.is_some() {
+            return self.delete_selected();
+        }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
             return false;
@@ -330,6 +429,9 @@ impl Session {
         if self.save_failed {
             return false;
         }
+        if self.selection.is_some() && !self.delete_selected() {
+            return false;
+        }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
             return false;
@@ -355,6 +457,9 @@ impl Session {
         if self.save_failed {
             return false;
         }
+        if self.selection.is_some() && !self.delete_selected() {
+            return false;
+        }
         let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut changed = false;
         for (index, line) in normalised.split('\n').enumerate() {
@@ -375,6 +480,7 @@ impl Session {
         let Some(op) = self.editor.undo() else {
             return false;
         };
+        self.selection = None;
         self.save_state();
         self.place_caret_from(&op);
         true
@@ -387,6 +493,7 @@ impl Session {
         let Some(op) = self.editor.redo() else {
             return false;
         };
+        self.selection = None;
         self.save_state();
         self.place_caret_from(&op);
         true
@@ -405,7 +512,88 @@ impl Session {
         }
     }
 
+    /// Anchors a new annotation of `kind` over the selection, or over the word
+    /// under a bare caret, and persists it.
+    ///
+    /// Returns the new id so the caller can open its popover. `None` means the
+    /// write failed (the session is now read-only) or the caret names no block.
+    fn add_annotation(&mut self, kind: AnnotationKind) -> Option<AnnotationId> {
+        if self.save_failed {
+            return None;
+        }
+        let anchor = self.annotation_anchor()?;
+        let snippet = self
+            .editor
+            .document()
+            .blocks
+            .iter()
+            .find(|block| block.id == anchor.block_id)
+            .map(|block| {
+                &block.text[anchor.start.min(block.text.len())..anchor.end.min(block.text.len())]
+            })
+            .unwrap_or("");
+        let body = default_annotation_body(&kind, snippet);
+        match self.editor.add_annotation(kind, anchor, &body) {
+            Ok(op) => {
+                let id = match &op {
+                    Op::AddAnnotation { annotation } => annotation.id,
+                    _ => return None,
+                };
+                if self.record(&op) {
+                    Some(id)
+                } else {
+                    None
+                }
+            }
+            Err(err) => {
+                self.last_error = Some(err.to_string());
+                None
+            }
+        }
+    }
+
+    /// The range an annotation anchors to: the selection (clamped to its first
+    /// block, since an anchor lives in one block), or the word under the caret.
+    fn annotation_anchor(&self) -> Option<Anchor> {
+        let document = self.editor.document();
+        if let Some((start, end)) = self.ordered_selection() {
+            let block = document
+                .blocks
+                .iter()
+                .find(|block| block.id == start.block_id)?;
+            let end = if end.block_id == start.block_id {
+                end.offset
+            } else {
+                block.text.len()
+            };
+            let start_offset = start.offset.min(end);
+            return Some(Anchor {
+                block_id: block.id,
+                start: start_offset,
+                end,
+            });
+        }
+
+        let caret = self.caret;
+        let block = document
+            .blocks
+            .iter()
+            .find(|block| block.id == caret.block_id)?;
+        let (start, end) = word_at(&block.text, caret.offset);
+        Some(Anchor {
+            block_id: block.id,
+            start,
+            end,
+        })
+    }
+
     fn move_left(&mut self) {
+        // An arrow collapses a selection to its edge before moving.
+        if let Some((start, _)) = self.ordered_selection() {
+            self.caret = start;
+            self.selection = None;
+            return;
+        }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
             return;
@@ -432,6 +620,11 @@ impl Session {
     }
 
     fn move_right(&mut self) {
+        if let Some((_, end)) = self.ordered_selection() {
+            self.caret = end;
+            self.selection = None;
+            return;
+        }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
             return;
@@ -581,6 +774,64 @@ fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f
     layout.height.max(minimum)
 }
 
+/// Default body for a newly anchored annotation.
+///
+/// v1 has no annotation body editor yet, so the body quotes the anchored
+/// words: the popover then shows what the note is about, and every annotation
+/// has visible text in the margin or at the foot.
+fn default_annotation_body(kind: &AnnotationKind, snippet: &str) -> String {
+    let snippet = shorten(snippet.trim(), 48);
+    if snippet.is_empty() {
+        return match kind {
+            AnnotationKind::Marginal => "New marginal note.".to_string(),
+            AnnotationKind::Note => "New note.".to_string(),
+            AnnotationKind::Footnote => "New footnote.".to_string(),
+        };
+    }
+    match kind {
+        AnnotationKind::Marginal => format!("Marginal note on “{snippet}”"),
+        AnnotationKind::Note => format!("Note on “{snippet}”"),
+        AnnotationKind::Footnote => format!("Footnote on “{snippet}”"),
+    }
+}
+
+/// Truncates to `max` characters (not bytes) with an ellipsis.
+fn shorten(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (index, character) in text.chars().enumerate() {
+        if index == max {
+            out.push('…');
+            break;
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// Short label for an annotation kind, shown above its body in the popover.
+fn annotation_kind_label(kind: &AnnotationKind) -> &'static str {
+    match kind {
+        AnnotationKind::Marginal => "marginal note",
+        AnnotationKind::Note => "note",
+        AnnotationKind::Footnote => "footnote",
+    }
+}
+
+/// Page position of a margin placement.
+///
+/// `place_marginalia` returns block-relative Y and body-relative X, so both
+/// offsets have to be composed here: the placement's X is measured from the
+/// body measure's left edge, its Y from the anchor block's top.
+fn margin_origin(body_left: f32, block_top: f32, placement: &MarginalPlacement) -> Pos2 {
+    Pos2::new(body_left + placement.x, block_top + placement.y)
+}
+
+/// Page position of a footnote entry: footnotes span the measure and their Y
+/// is measured from the painter's top.
+fn footnote_origin(page_top: f32, body_left: f32, placement: &FootnotePlacement) -> Pos2 {
+    Pos2::new(body_left, page_top + placement.y)
+}
+
 // --- eframe application ----------------------------------------------------
 
 struct KameApp {
@@ -588,6 +839,11 @@ struct KameApp {
     renderer: GlyphRenderer,
     layouts: LayoutCache,
     textures: TextureCache,
+    /// Margin bodies and footnote entries, shaped in their own columns.
+    annotation_textures: AnnotationTextureCache,
+    /// The note whose popover is open, and where its marker was painted.
+    open_note: Option<AnnotationId>,
+    open_note_pos: Option<Pos2>,
     path: PathBuf,
 }
 
@@ -600,11 +856,17 @@ impl KameApp {
             renderer: GlyphRenderer::new(LayoutConfig::default()),
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
+            annotation_textures: AnnotationTextureCache::new(),
+            open_note: None,
+            open_note_pos: None,
             path,
         })
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.open_note = None;
+        }
         let events = ctx.input(|input| input.events.clone());
         for event in &events {
             let Some(command) = command_for_event(event) else {
@@ -700,6 +962,7 @@ impl KameApp {
     fn show_status(&mut self, ui: &mut egui::Ui) {
         let title = self.session.document().title.clone();
         let blocks = self.session.document().blocks.len();
+        let annotations = self.session.document().annotations.len();
         let (undo, redo) = self.session.history();
         let path = self.path.display().to_string();
         let error = self.session.last_error.clone();
@@ -712,15 +975,35 @@ impl KameApp {
                     "{blocks} block{}",
                     if blocks == 1 { "" } else { "s" }
                 ));
+                ui.label(format!(
+                    "{annotations} annotation{}",
+                    if annotations == 1 { "" } else { "s" }
+                ));
                 ui.label(format!("undo {undo} · redo {redo}"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.monospace(path);
                 });
             });
+            ui.horizontal(|ui| {
+                ui.label("Annotate the selection (or the word under the caret):");
+                for (label, kind) in [
+                    ("+ Note", AnnotationKind::Note),
+                    ("+ Marginal", AnnotationKind::Marginal),
+                    ("+ Footnote", AnnotationKind::Footnote),
+                ] {
+                    if ui.small_button(label).clicked() {
+                        if let Some(id) = self.session.add_annotation(kind) {
+                            self.open_note = Some(id);
+                            self.open_note_pos = None;
+                        }
+                    }
+                }
+            });
             ui.label(
                 egui::RichText::new(
                     "Type to write · Enter new paragraph · Backspace/Delete · \
-                     Ctrl-Z undo · Ctrl-Shift-Z redo · click to place the caret",
+                     Ctrl-Z undo · Ctrl-Shift-Z redo · drag to select · \
+                     click to place the caret · click a margin marker to read its note",
                 )
                 .small()
                 .weak(),
@@ -748,23 +1031,38 @@ impl KameApp {
             BODY_INK,
         );
 
-        let blocks = &self.session.document().blocks;
+        let document = self.session.document();
+        let blocks = &document.blocks;
         let caret = self.session.caret;
+
+        // Footnote numbering is reading order, not creation order: the stored
+        // annotation vector records when a note was made, which is unrelated
+        // to where it sits in the prose.
+        let annotations = reading_order(&document.annotations, blocks);
+
         let heights: Vec<f32> = blocks
             .iter()
             .zip(layouts.iter())
             .map(|(block, layout)| block_height(block, layout, &config))
             .collect();
+        let body_bottom = PAGE_PADDING
+            + heights.iter().sum::<f32>()
+            + BLOCK_GAP * blocks.len().saturating_sub(1) as f32;
+
+        // Footnote Y values are page-local (body_bottom is measured from the
+        // painter's top), so the painter origin is added when drawing.
+        let footnotes = place_footnotes(&annotations, body_bottom);
+        let footnote_bottom = footnotes
+            .last()
+            .map(|placement| placement.y + FOOTNOTE_LINE_HEIGHT)
+            .unwrap_or(body_bottom);
 
         let page_width = config.body_width + 2.0 * config.margin_width;
-        let content_height = (PAGE_PADDING * 2.0
-            + heights.iter().sum::<f32>()
-            + BLOCK_GAP * blocks.len().saturating_sub(1) as f32)
-            .max(ui.available_height());
+        let content_height = (footnote_bottom + PAGE_PADDING).max(ui.available_height());
 
         let (response, painter) = ui.allocate_painter(
             Vec2::new(ui.available_width(), content_height),
-            Sense::click(),
+            Sense::click_and_drag(),
         );
         let page_left =
             response.rect.left() + ((response.rect.width() - page_width) * 0.5).max(0.0);
@@ -777,6 +1075,50 @@ impl KameApp {
             y += height + BLOCK_GAP;
         }
 
+        // --- annotation text -------------------------------------------------
+        // Margin bodies sit in the gutter right of the measure; footnote
+        // entries span the measure. Both are cached separately from block
+        // textures because they are shaped at another width and size.
+        let annotation_size = config.body_size * ANNOTATION_SCALE;
+        let margin_column = (config.margin_width - config.margin_size).max(40.0);
+        let footnote_number: HashMap<AnnotationId, usize> = footnotes
+            .iter()
+            .map(|placement| (placement.annotation_id, placement.number))
+            .collect();
+        let mut live = HashSet::with_capacity(annotations.len());
+        for annotation in &annotations {
+            live.insert(annotation.id);
+            match annotation.kind {
+                AnnotationKind::Marginal => self.annotation_textures.sync(
+                    ui.ctx(),
+                    &mut self.renderer,
+                    annotation.id,
+                    &annotation.body,
+                    margin_column,
+                    annotation_size,
+                    APPARATUS_INK,
+                ),
+                AnnotationKind::Footnote => {
+                    let number = footnote_number.get(&annotation.id).copied().unwrap_or(1);
+                    let entry = format!("{number}. {}", annotation.body);
+                    self.annotation_textures.sync(
+                        ui.ctx(),
+                        &mut self.renderer,
+                        annotation.id,
+                        &entry,
+                        config.body_width,
+                        annotation_size,
+                        APPARATUS_INK,
+                    );
+                }
+                // A Note keeps its body behind the margin marker, so it has no
+                // texture until the popover opens (which uses egui text).
+                AnnotationKind::Note => {}
+            }
+        }
+        self.annotation_textures.retain(&live);
+
+        // --- prose -----------------------------------------------------------
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (index, block) in blocks.iter().enumerate() {
             if let Some(texture) = self.textures.get(block.id) {
@@ -790,8 +1132,65 @@ impl KameApp {
             }
         }
 
-        let mut clicked_caret = None;
+        // --- anchored ranges -------------------------------------------------
+        // A faint wash marks what every annotation is attached to. Drawn after
+        // the glyphs so the tint sits over the paper rather than behind it.
+        for annotation in &annotations {
+            let Some(index) = blocks
+                .iter()
+                .position(|block| block.id == annotation.anchor.block_id)
+            else {
+                continue;
+            };
+            let color = match annotation.kind {
+                AnnotationKind::Marginal => MARGINAL_HIGHLIGHT,
+                AnnotationKind::Note => NOTE_HIGHLIGHT,
+                AnnotationKind::Footnote => FOOTNOTE_HIGHLIGHT,
+            };
+            for rect in range_rects(
+                layouts[index],
+                annotation.anchor.start,
+                annotation.anchor.end,
+            ) {
+                painter.rect_filled(
+                    rect.translate(Vec2::new(body_left, tops[index])),
+                    1.0,
+                    color,
+                );
+            }
+        }
 
+        // --- selection -------------------------------------------------------
+        if let Some((start, end)) = self.session.ordered_selection() {
+            let start_index = blocks.iter().position(|block| block.id == start.block_id);
+            let end_index = blocks.iter().position(|block| block.id == end.block_id);
+            if let (Some(start_index), Some(end_index)) = (start_index, end_index) {
+                for index in start_index..=end_index {
+                    let lo = if index == start_index {
+                        start.offset
+                    } else {
+                        0
+                    };
+                    let hi = if index == end_index {
+                        end.offset
+                    } else {
+                        blocks[index].text.len()
+                    };
+                    if lo >= hi {
+                        continue;
+                    }
+                    for rect in range_rects(layouts[index], lo, hi) {
+                        painter.rect_filled(
+                            rect.translate(Vec2::new(body_left, tops[index])),
+                            0.0,
+                            SELECTION_FILL,
+                        );
+                    }
+                }
+            }
+        }
+
+        // --- caret -----------------------------------------------------------
         if let Some(index) = blocks.iter().position(|block| block.id == caret.block_id) {
             let (line_y, line_height) = caret_line(layouts[index], caret.offset)
                 .map(|line| (line.y, line.height))
@@ -805,16 +1204,220 @@ impl KameApp {
             );
         }
 
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                clicked_caret = hit_test(blocks, &layouts, &tops, &heights, body_left, pos);
+        // --- marginalia and note markers -------------------------------------
+        // `place_marginalia` works in block space, so each placement is
+        // composed with its block's page top (and the body's left edge).
+        let margins = place_marginalia(&annotations, blocks, &layouts, &config);
+        let by_id: HashMap<AnnotationId, &Annotation> = annotations
+            .iter()
+            .map(|annotation| (annotation.id, annotation))
+            .collect();
+        let mut markers: Vec<(AnnotationId, Rect)> = Vec::new();
+        for placement in &margins {
+            let Some(annotation) = by_id.get(&placement.annotation_id) else {
+                continue;
+            };
+            let Some(index) = blocks
+                .iter()
+                .position(|block| block.id == annotation.anchor.block_id)
+            else {
+                continue;
+            };
+            let origin = margin_origin(body_left, tops[index], placement);
+            match annotation.kind {
+                AnnotationKind::Marginal => {
+                    // A thin rule opens the margin block, the way a printed
+                    // marginal note is set off from the measure.
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(origin.x - 7.0, origin.y + 2.0),
+                            Vec2::new(1.0, 12.0),
+                        ),
+                        0.0,
+                        RULE_INK,
+                    );
+                    if let Some(texture) = self.annotation_textures.get(annotation.id) {
+                        painter.image(
+                            texture.texture.id(),
+                            texture.rect(origin),
+                            uv,
+                            Color32::WHITE,
+                        );
+                    }
+                }
+                AnnotationKind::Note => {
+                    let center =
+                        Pos2::new(origin.x + 4.0, origin.y + config.body_line_height * 0.5);
+                    let open = self.open_note == Some(annotation.id);
+                    painter.circle_filled(center, 3.5, NOTE_MARK);
+                    painter.circle_stroke(
+                        center,
+                        if open { 7.5 } else { 6.0 },
+                        egui::Stroke::new(1.0, NOTE_MARK.gamma_multiply(0.65)),
+                    );
+                    markers.push((
+                        annotation.id,
+                        Rect::from_center_size(center, Vec2::splat(18.0)),
+                    ));
+                }
+                AnnotationKind::Footnote => {}
             }
         }
 
-        // `blocks` borrows the document; the caret move is applied after that
+        // --- footnotes -------------------------------------------------------
+        // A short rule, then numbered entries stacked below the body. The
+        // entry texture carries "N. body", so the number and its text are one
+        // rasterized run.
+        if let Some(first) = footnotes.first() {
+            let rule_y = response.rect.top() + first.y - FOOTNOTE_GAP * 0.5;
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(body_left, rule_y),
+                    Pos2::new(body_left + config.body_width * 0.34, rule_y + 1.0),
+                ),
+                0.0,
+                RULE_INK,
+            );
+        }
+        for placement in &footnotes {
+            if let Some(texture) = self.annotation_textures.get(placement.annotation_id) {
+                let origin = footnote_origin(response.rect.top(), body_left, placement);
+                painter.image(
+                    texture.texture.id(),
+                    texture.rect(origin),
+                    uv,
+                    Color32::WHITE,
+                );
+            }
+        }
+
+        // Superscript number at each footnote's anchor.
+        for placement in &footnotes {
+            let Some(annotation) = by_id.get(&placement.annotation_id) else {
+                continue;
+            };
+            let Some(index) = blocks
+                .iter()
+                .position(|block| block.id == annotation.anchor.block_id)
+            else {
+                continue;
+            };
+            let Some(line) = caret_line(layouts[index], annotation.anchor.start) else {
+                continue;
+            };
+            let x = caret_x(layouts[index], annotation.anchor.start).min(config.body_width);
+            painter.text(
+                Pos2::new(body_left + x + 1.0, tops[index] + line.y + 1.0),
+                Align2::LEFT_TOP,
+                placement.number.to_string(),
+                FontId::proportional(config.body_size * 0.62),
+                FOOTNOTE_MARK,
+            );
+        }
+
+        // --- pointer ---------------------------------------------------------
+        let shift = ui.input(|input| input.modifiers.shift);
+        let mut caret_action: Option<(Cursor, bool)> = None;
+        let mut marker_click: Option<(AnnotationId, Rect)> = None;
+        let pointer = response.interact_pointer_pos();
+        if response.drag_started() {
+            if let Some(pos) = pointer {
+                if let Some(cursor) = hit_test(blocks, &layouts, &tops, &heights, body_left, pos) {
+                    caret_action = Some((cursor, shift));
+                }
+            }
+        } else if response.dragged() {
+            if let Some(pos) = pointer {
+                if let Some(cursor) = hit_test(blocks, &layouts, &tops, &heights, body_left, pos) {
+                    caret_action = Some((cursor, true));
+                }
+            }
+        }
+        if response.clicked() {
+            if let Some(pos) = pointer {
+                if let Some(hit) = markers.iter().find(|(_, rect)| rect.contains(pos)).copied() {
+                    marker_click = Some(hit);
+                } else if let Some(cursor) =
+                    hit_test(blocks, &layouts, &tops, &heights, body_left, pos)
+                {
+                    caret_action = Some((cursor, shift));
+                }
+            }
+        }
+
+        // `blocks` borrows the document; every caret move is applied after the
         // borrow's last use.
-        if let Some(caret) = clicked_caret {
-            self.session.set_caret(caret);
+        if let Some((id, rect)) = marker_click {
+            self.open_note = if self.open_note == Some(id) {
+                None
+            } else {
+                Some(id)
+            };
+            self.open_note_pos = Some(rect.right_top() + Vec2::new(10.0, -6.0));
+        } else if let Some((cursor, extend)) = caret_action {
+            if extend {
+                self.session.select_to(cursor);
+            } else {
+                self.session.set_caret(cursor);
+            }
+            self.open_note = None;
+        }
+
+        self.show_note_popover(ui.ctx());
+    }
+
+    /// Draws the open note's body in a floating popover next to its marker.
+    fn show_note_popover(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.open_note else {
+            return;
+        };
+        let Some(annotation) = self
+            .session
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .cloned()
+        else {
+            self.open_note = None;
+            return;
+        };
+
+        let screen = ctx.content_rect();
+        let anchor = self
+            .open_note_pos
+            .unwrap_or_else(|| Pos2::new(screen.left() + 48.0, screen.top() + 140.0));
+        let pos = Pos2::new(
+            anchor.x.clamp(
+                screen.left() + 8.0,
+                (screen.right() - 280.0).max(screen.left() + 8.0),
+            ),
+            anchor.y.clamp(
+                screen.top() + 8.0,
+                (screen.bottom() - 120.0).max(screen.top() + 8.0),
+            ),
+        );
+
+        let mut close = false;
+        egui::Area::new(Id::unique("kame-note-popover"))
+            .order(Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(260.0);
+                    ui.label(
+                        egui::RichText::new(annotation_kind_label(&annotation.kind))
+                            .small()
+                            .strong(),
+                    );
+                    ui.label(&annotation.body);
+                    if ui.small_button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close {
+            self.open_note = None;
         }
     }
 }
@@ -1169,5 +1772,211 @@ mod tests {
         assert!(session.last_error.is_none());
         assert!(session.insert("d"));
         assert_eq!(session.document().blocks[0].text, "abcd");
+    }
+
+    // --- Task 12: annotations ------------------------------------------------
+
+    #[test]
+    fn placement_composition_adds_block_and_page_offsets() {
+        // place_marginalia reports body-relative x and block-relative y; the
+        // page position adds the block's top and the body's left edge.
+        let marginal = MarginalPlacement {
+            annotation_id: uuid::Uuid::new_v4(),
+            x: 652.0,
+            y: 24.0,
+        };
+        assert_eq!(
+            margin_origin(200.0, 300.0, &marginal),
+            Pos2::new(852.0, 324.0)
+        );
+
+        // Footnote Y is measured from the painter's top and spans the body.
+        let footnote = FootnotePlacement {
+            annotation_id: uuid::Uuid::new_v4(),
+            number: 2,
+            y: 900.0,
+        };
+        assert_eq!(
+            footnote_origin(50.0, 200.0, &footnote),
+            Pos2::new(200.0, 950.0)
+        );
+    }
+
+    #[test]
+    fn adding_a_note_at_a_caret_anchors_its_word_and_persists() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("The quick brown fox");
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 6,
+        });
+
+        let id = session
+            .add_annotation(AnnotationKind::Note)
+            .expect("a note over the word at the caret");
+        assert_eq!(session.document().annotations.len(), 1);
+        let annotation = &session.document().annotations[0];
+        assert_eq!(annotation.id, id);
+        assert_eq!(annotation.kind, AnnotationKind::Note);
+        assert_eq!(
+            annotation.anchor,
+            Anchor {
+                block_id,
+                start: 4,
+                end: 9,
+            },
+            "a caret anchors the word around it"
+        );
+        assert!(
+            annotation.body.contains("quick"),
+            "the default body quotes the anchored words"
+        );
+        drop(session);
+
+        let reopened = open(&path);
+        assert_eq!(reopened.document().annotations.len(), 1);
+        assert_eq!(reopened.document().annotations[0].anchor.start, 4);
+    }
+
+    #[test]
+    fn adding_an_annotation_over_a_selection_uses_the_selected_range() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("The quick brown fox");
+        let block_id = first_block_id(&session);
+
+        // Drag backwards: the anchor still comes out in document order.
+        session.set_caret(Cursor {
+            block_id,
+            offset: 15,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: 4,
+        });
+        let id = session
+            .add_annotation(AnnotationKind::Marginal)
+            .expect("a marginal over the selection");
+
+        let annotation = session
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .expect("the new annotation");
+        assert_eq!(annotation.kind, AnnotationKind::Marginal);
+        assert_eq!(
+            annotation.anchor,
+            Anchor {
+                block_id,
+                start: 4,
+                end: 15,
+            },
+            "the selected bytes become the anchor, never reversed"
+        );
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("hello world");
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 6,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: 11,
+        });
+
+        assert!(session.insert("there"));
+        assert_eq!(session.document().blocks[0].text, "hello there");
+        assert_eq!(session.caret.offset, 11);
+        assert!(session.selection.is_none());
+    }
+
+    #[test]
+    fn backspace_over_a_selection_deletes_the_range() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("hello world");
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 5,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: 11,
+        });
+
+        assert!(session.backspace());
+        assert_eq!(session.document().blocks[0].text, "hello");
+        assert_eq!(session.caret.offset, 5);
+    }
+
+    #[test]
+    fn a_note_anchor_survives_typing_above_it() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("The quick brown fox");
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 6,
+        });
+        let id = session
+            .add_annotation(AnnotationKind::Footnote)
+            .expect("a footnote on 'quick'");
+
+        // Type at the very start: every later anchor rebases by the insert.
+        session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        assert!(session.insert("Very "));
+
+        let annotation = session
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .expect("the footnote survives the edit");
+        assert_eq!(
+            annotation.anchor,
+            Anchor {
+                block_id,
+                start: 9,
+                end: 14,
+            },
+            "the anchor moved with its word, keeping the same range"
+        );
+    }
+
+    #[test]
+    fn annotation_add_is_refused_after_a_failed_save() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("abc");
+        session.save_failed = true;
+        session.last_error = Some("save failed — editing disabled: disk full".into());
+
+        assert!(session.add_annotation(AnnotationKind::Footnote).is_none());
+        assert!(session.document().annotations.is_empty());
+    }
+
+    #[test]
+    fn annotation_bodies_truncate_multibyte_text_on_a_char_boundary() {
+        assert_eq!(shorten("abc", 8), "abc");
+        assert_eq!(shorten("abcdef", 3), "abc…");
+        assert_eq!(shorten("éééé", 2), "éé…");
+        assert_eq!(
+            default_annotation_body(&AnnotationKind::Footnote, "  word  "),
+            "Footnote on “word”"
+        );
     }
 }

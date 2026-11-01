@@ -4,6 +4,8 @@
 //! body measure starting at x = 0, so a caller places a margin note at
 //! `(body_left + x, block_top + y)` and a footnote at `(body_left, block_top + y)`.
 
+use std::borrow::Borrow;
+
 use crate::layout::text::{anchor_to_y, BlockLayout, LayoutConfig};
 use crate::model::{Annotation, AnnotationId, AnnotationKind, Block};
 
@@ -35,9 +37,12 @@ pub struct FootnotePlacement {
 /// All placements share one x: the margin column begins one `margin_size`
 /// gutter to the right of the body measure. Annotations are returned in column
 /// order (ascending Y, ties in document order). When two notes would land
-/// within `config.margin_size` vertically, the later one is pushed down to
-/// clear the earlier one, so crowded anchors stack downward instead of
-/// overprinting.
+/// within one margin line vertically, the later one is pushed down to clear
+/// the earlier one, so crowded anchors stack downward instead of
+/// overprinting. The advance is [`LayoutConfig::body_line_height`] (or
+/// `margin_size` when that is larger), because the body line height is the
+/// typical height of the note text itself: advancing by the gutter alone lets
+/// stacked notes overlap.
 ///
 /// Annotations whose anchor does not resolve to a line (unknown block, empty
 /// block, offset past the text) are omitted rather than guessed at.
@@ -46,12 +51,13 @@ pub struct FootnotePlacement {
 /// block space), so a caller adds the block's page offset. Collision stacking
 /// therefore compares block-relative Y: notes anchored in different blocks that
 /// happen to sit at the same in-block Y are separated even if the blocks are far
-/// apart on the page. That is conservative — it never lets notes overprint —
-/// and the v1 document flow keeps the error small.
-pub fn place_marginalia(
+/// apart on the page. That is conservative — it avoids overprinting for notes
+/// in one block but is only approximate across blocks — and the v1 document
+/// flow keeps the error small.
+pub fn place_marginalia<L: Borrow<BlockLayout>>(
     annotations: &[Annotation],
     blocks: &[Block],
-    layouts: &[BlockLayout],
+    layouts: &[L],
     config: &LayoutConfig,
 ) -> Vec<MarginalPlacement> {
     let x = config.body_width + config.margin_size;
@@ -77,9 +83,11 @@ pub fn place_marginalia(
     // deterministic rather than dependent on sort stability.
     anchored.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
 
-    // One margin line of clearance; a non-positive `margin_size` cannot
-    // separate notes, so stacking degrades to the anchor Y (no panic).
-    let advance = config.margin_size.max(0.0);
+    // One body line of clearance: the note text is set at body size, so a
+    // margin_size-only advance would let consecutive notes overlap. A
+    // non-positive margin_size cannot separate notes on its own; the line
+    // height still does.
+    let advance = config.margin_size.max(config.body_line_height);
 
     let mut placements = Vec::with_capacity(anchored.len());
     let mut previous: Option<f32> = None;
@@ -109,7 +117,9 @@ fn is_margin(kind: &AnnotationKind) -> bool {
 /// advancing by [`FOOTNOTE_LINE_HEIGHT`] per entry.
 ///
 /// `annotations` is read in document order; only `Footnote`s take a number, so
-/// interleaved marginalia and notes do not leave gaps in the numbering.
+/// interleaved marginalia and notes do not leave gaps in the numbering. Callers
+/// must pass annotations in reading order — see [`reading_order`]; the stored
+/// vector is in creation order, which is not the same thing.
 pub fn place_footnotes(annotations: &[Annotation], doc_height: f32) -> Vec<FootnotePlacement> {
     annotations
         .iter()
@@ -121,6 +131,30 @@ pub fn place_footnotes(annotations: &[Annotation], doc_height: f32) -> Vec<Footn
             y: doc_height + FOOTNOTE_GAP + index as f32 * FOOTNOTE_LINE_HEIGHT,
         })
         .collect()
+}
+
+/// Copy `annotations` into reading order: by block position in the document,
+/// then by anchor start.
+///
+/// `Document::annotations` is in creation order, so a footnote added to an
+/// earlier paragraph after one below it would otherwise take the higher number.
+/// An annotation whose block is gone sorts last (it cannot be laid out).
+pub fn reading_order(annotations: &[Annotation], blocks: &[Block]) -> Vec<Annotation> {
+    let block_index = |id| {
+        blocks
+            .iter()
+            .position(|block| block.id == id)
+            .unwrap_or(usize::MAX)
+    };
+    let mut ordered: Vec<Annotation> = annotations.to_vec();
+    ordered.sort_by_key(|annotation| {
+        (
+            block_index(annotation.anchor.block_id),
+            annotation.anchor.start,
+            annotation.anchor.end,
+        )
+    });
+    ordered
 }
 
 #[cfg(test)]
@@ -259,11 +293,28 @@ dance, on a page, of pen, eye and hand.";
         );
         assert!(b.y > a.y, "a colliding note must be pushed down");
         assert!(
-            (b.y - a.y - config.margin_size).abs() < 0.01,
-            "stacking advance is one margin line, got {}",
+            (b.y - a.y - config.body_line_height).abs() < 0.01,
+            "stacking advance is max(margin_size, body_line_height), got {}",
             b.y - a.y
         );
         assert_eq!(a.x, b.x, "marginalia share one column");
+    }
+
+    #[test]
+    fn stacking_advance_uses_the_larger_of_gutter_and_line() {
+        let (blocks, layouts) = laid_out(PARA);
+        let mut config = config();
+        config.margin_size = 40.0;
+        let offset = offset_in(&layouts, 1);
+        let first = marginal(blocks[0].id, offset);
+        let second = marginal(blocks[0].id, offset);
+
+        let placed = place_marginalia(&[first, second], &blocks, &layouts, &config);
+        assert_eq!(placed.len(), 2);
+        assert!(
+            (placed[1].y - placed[0].y - 40.0).abs() < 0.01,
+            "a gutter wider than a line sets the advance"
+        );
     }
 
     #[test]
@@ -350,6 +401,42 @@ dance, on a page, of pen, eye and hand.";
         assert_eq!(placed[1].number, 2);
         assert_eq!(placed[0].annotation_id, anns[1].id);
         assert_eq!(placed[1].annotation_id, anns[3].id);
+    }
+
+    #[test]
+    fn reading_order_sorts_by_block_then_anchor() {
+        let first_block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "first paragraph".to_string(),
+            spans: Vec::new(),
+        };
+        let second_block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "second paragraph".to_string(),
+            spans: Vec::new(),
+        };
+        let blocks = vec![first_block, second_block];
+
+        // Created bottom-first: creation order is second block, then first.
+        let below = footnote(blocks[1].id, 0);
+        let above = footnote(blocks[0].id, 4);
+        let ordered = reading_order(&[below.clone(), above.clone()], &blocks);
+
+        assert_eq!(ordered[0].id, above.id, "the earlier paragraph reads first");
+        let placed = place_footnotes(&ordered, 400.0);
+        assert_eq!(placed[0].annotation_id, above.id);
+        assert_eq!(placed[0].number, 1);
+        assert_eq!(placed[1].annotation_id, below.id);
+        assert_eq!(placed[1].number, 2);
+
+        // Within one block, ascending anchor start wins over creation order.
+        let later = footnote(blocks[0].id, 10);
+        let earlier = footnote(blocks[0].id, 2);
+        let ordered = reading_order(&[later.clone(), earlier.clone()], &blocks);
+        assert_eq!(ordered[0].id, earlier.id);
+        assert_eq!(ordered[1].id, later.id);
     }
 
     #[test]

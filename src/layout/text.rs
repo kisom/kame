@@ -1,5 +1,7 @@
 //! Headless block layout: cosmic-text shaping and byte-offset -> Y mapping.
 
+use std::borrow::Borrow;
+
 use cosmic_text::{
     Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
 };
@@ -191,15 +193,15 @@ fn heading_line_height(config: &LayoutConfig) -> f32 {
 /// `blocks[i]`. Offsets that sit in inter-line whitespace fall forward to the
 /// next line, and an offset at the very end of the block maps to the last
 /// line (where a cursor after the final character belongs).
-pub fn anchor_to_y(
+pub fn anchor_to_y<L: Borrow<BlockLayout>>(
     blocks: &[Block],
-    layouts: &[BlockLayout],
+    layouts: &[L],
     block_id: BlockId,
     offset: usize,
 ) -> Option<f32> {
     let index = blocks.iter().position(|block| block.id == block_id)?;
     let block = &blocks[index];
-    let layout = layouts.get(index)?;
+    let layout = layouts.get(index)?.borrow();
 
     if let Some(line) = layout
         .lines

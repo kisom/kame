@@ -13,7 +13,7 @@ use egui::{ColorImage, Context, Event, Key, Modifiers, Pos2, Rect, TextureHandle
 use image::RgbaImage;
 
 use crate::layout::{layout_block, BlockLayout, LayoutConfig};
-use crate::model::{Block, BlockId};
+use crate::model::{AnnotationId, Block, BlockId};
 use crate::render::GlyphAtlas;
 
 /// Every face the layout can ask for, compiled into the binary.
@@ -207,6 +207,108 @@ impl LayoutCache {
     }
 }
 
+/// Per-annotation texture cache for margin and footnote text.
+///
+/// Annotation text is not a document block: it is shaped in its own column
+/// (the margin width, or the body measure for a footnote) at a smaller size,
+/// so it cannot share [`TextureCache`]. The key is the annotation id and the
+/// fingerprint covers the rendered string plus the column and size, so a
+/// renumbered footnote re-rasterizes while an idle frame uploads nothing.
+pub struct AnnotationTextureCache {
+    entries: HashMap<AnnotationId, CachedTexture>,
+}
+
+impl Default for AnnotationTextureCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnnotationTextureCache {
+    pub fn new() -> AnnotationTextureCache {
+        AnnotationTextureCache {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Shapes, rasterizes and uploads `text` for `annotation_id` when its
+    /// content or metrics changed. Empty text is skipped: there is nothing to
+    /// paint, and an empty raster has no ink rectangle to place.
+    pub fn sync(
+        &mut self,
+        ctx: &Context,
+        renderer: &mut GlyphRenderer,
+        annotation_id: AnnotationId,
+        text: &str,
+        width: f32,
+        size: f32,
+        color: [u8; 3],
+    ) {
+        if text.trim().is_empty() {
+            self.entries.remove(&annotation_id);
+            return;
+        }
+        let fingerprint = annotation_fingerprint(text, width, size);
+        let up_to_date = self
+            .entries
+            .get(&annotation_id)
+            .is_some_and(|cached| cached.fingerprint == fingerprint);
+        if up_to_date {
+            return;
+        }
+
+        let block = Block {
+            id: annotation_id,
+            kind: crate::model::BlockKind::Paragraph,
+            text: text.to_string(),
+            spans: Vec::new(),
+        };
+        let layout = renderer.layout_in_column(&block, width, size);
+        let (image, left, top) = renderer.rasterize(&layout, color);
+        let size_px = [image.width() as usize, image.height() as usize];
+        if size_px[0] == 0 || size_px[1] == 0 {
+            self.entries.remove(&annotation_id);
+            return;
+        }
+        let color_image = ColorImage::from_rgba_unmultiplied(size_px, image.as_raw());
+        let texture = ctx.load_texture(
+            format!("kame-annotation-{annotation_id}"),
+            color_image,
+            TextureOptions::NEAREST,
+        );
+        self.entries.insert(
+            annotation_id,
+            CachedTexture {
+                fingerprint,
+                block: BlockTexture { texture, left, top },
+            },
+        );
+    }
+
+    pub fn get(&self, annotation_id: AnnotationId) -> Option<&BlockTexture> {
+        self.entries.get(&annotation_id).map(|cached| &cached.block)
+    }
+
+    /// Drops textures for annotations that left the document.
+    pub fn retain(&mut self, live: &HashSet<AnnotationId>) {
+        self.entries.retain(|id, _| live.contains(id));
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Content hash for annotation text plus the metrics it was shaped at.
+fn annotation_fingerprint(text: &str, width: f32, size: f32) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    width.to_bits().hash(&mut hasher);
+    size.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Content hash used to decide whether a block's texture or layout is stale.
 fn block_fingerprint(block: &Block) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -259,6 +361,21 @@ impl GlyphRenderer {
             self.layout_calls += 1;
         }
         layout_block(&mut self.font_system, block, &self.config)
+    }
+
+    /// Shapes one block in a narrower column at a smaller body size, for
+    /// annotation text (margin notes and footnote entries) that does not use
+    /// the prose measure.
+    ///
+    /// The line height scales with `size`, keeping the leading proportional to
+    /// the prose setting rather than to the absolute body line height.
+    pub fn layout_in_column(&mut self, block: &Block, width: f32, size: f32) -> BlockLayout {
+        let mut config = self.config;
+        config.body_width = width.max(24.0);
+        config.body_size = size.max(6.0);
+        config.body_line_height = (size * 1.4).max(size + 2.0);
+        config.heading_size = config.body_size;
+        layout_block(&mut self.font_system, block, &config)
     }
 
     #[cfg(test)]
@@ -364,6 +481,86 @@ pub fn prev_boundary(text: &str, offset: usize) -> Option<usize> {
 pub fn next_boundary(text: &str, offset: usize) -> Option<usize> {
     let offset = offset.min(text.len());
     text[offset..].chars().next().map(|c| offset + c.len_utf8())
+}
+
+/// Block-relative rectangles covering the byte range `start..end`, one per
+/// visual line it crosses.
+///
+/// Used for selection bands and annotation highlights. The rectangles are
+/// line-height tall and `x1 > x0` is guaranteed: an empty range yields no
+/// rectangles (a caret is drawn separately) and a reversed range is
+/// normalized. Offsets beyond the layout's lines are ignored.
+pub fn range_rects(layout: &BlockLayout, start: usize, end: usize) -> Vec<Rect> {
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    if start == end {
+        return Vec::new();
+    }
+
+    let mut rects = Vec::new();
+    for line in &layout.lines {
+        let lo = start.max(line.start);
+        let hi = end.min(line.end);
+        if lo >= hi {
+            continue;
+        }
+        let x0 = caret_x(layout, lo);
+        let x1 = caret_x(layout, hi);
+        if x1 <= x0 {
+            continue;
+        }
+        rects.push(Rect::from_min_max(
+            Pos2::new(x0, line.y),
+            Pos2::new(x1, line.y + line.height),
+        ));
+    }
+    rects
+}
+
+/// The word around `offset`, as a byte range, for anchoring an annotation
+/// placed with a bare caret.
+///
+/// A caret inside a word selects that word, a caret at its end selects the
+/// word before it, and a caret at its start (or on punctuation and spaces)
+/// selects the word after it. With no word either side the range is empty at
+/// `offset`, which is still a valid zero-width anchor.
+pub fn word_at(text: &str, offset: usize) -> (usize, usize) {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '\'' || c == '’';
+
+    let before = text[..offset].chars().next_back().is_some_and(is_word);
+    if before {
+        let start = text[..offset]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word(*c))
+            .last()
+            .map_or(offset, |(index, _)| index);
+        let end = offset
+            + text[offset..]
+                .chars()
+                .take_while(|c| is_word(*c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        (start, end)
+    } else {
+        let forward = text[offset..]
+            .chars()
+            .take_while(|c| is_word(*c))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if forward > 0 {
+            (offset, offset + forward)
+        } else {
+            (offset, offset)
+        }
+    }
 }
 
 // --- input mapping ---------------------------------------------------------
@@ -711,6 +908,140 @@ mod tests {
         assert_eq!(next_boundary(text, 0), Some(1));
         assert_eq!(next_boundary(text, 1), Some(3));
         assert_eq!(next_boundary(text, 3), None);
+    }
+
+    #[test]
+    fn range_rects_split_a_range_across_visual_lines() {
+        let mut renderer = GlyphRenderer::new(LayoutConfig {
+            body_width: 160.0,
+            ..config()
+        });
+        let block = paragraph(
+            "Typography is the craft of endowing human language with a durable visual form.",
+        );
+        let layout = renderer.layout(&block);
+        assert!(layout.lines.len() >= 2, "expected a wrapped paragraph");
+        let first = layout.lines[0];
+        let second = layout.lines[1];
+
+        // From the middle of line one to the middle of line two.
+        let start = (first.start + first.end) / 2;
+        let end = (second.start + second.end) / 2;
+        let rects = range_rects(&layout, start, end);
+        assert_eq!(rects.len(), 2, "one band per covered line");
+        assert_eq!(rects[0].min.y, first.y);
+        assert_eq!(rects[1].min.y, second.y);
+        assert!(rects[0].width() > 0.0 && rects[1].width() > 0.0);
+        assert!(
+            rects[0].max.x <= config().body_width + 1.0,
+            "a selection band stays inside the measure"
+        );
+    }
+
+    #[test]
+    fn range_rects_ignore_empty_and_out_of_range_spans() {
+        let mut renderer = GlyphRenderer::new(config());
+        let block = paragraph("Hello world");
+        let layout = renderer.layout(&block);
+
+        assert!(range_rects(&layout, 3, 3).is_empty(), "a caret has no band");
+        assert_eq!(
+            range_rects(&layout, 8, 2),
+            range_rects(&layout, 2, 8),
+            "a reversed range is normalized"
+        );
+        assert!(
+            range_rects(&layout, 0, 5).len() == 1,
+            "a single-line range is one band"
+        );
+        assert_eq!(
+            range_rects(&layout, 0, 5)[0].max.x,
+            caret_x(&layout, 5),
+            "the band ends on the caret pen"
+        );
+    }
+
+    #[test]
+    fn word_at_expands_a_caret_to_its_word() {
+        let text = "The quick brown fox";
+        assert_eq!(word_at(text, 6), (4, 9), "inside 'quick'");
+        assert_eq!(word_at(text, 9), (4, 9), "at the end of a word");
+        assert_eq!(word_at(text, 4), (4, 9), "at the start of a word");
+        assert_eq!(word_at(text, 0), (0, 3));
+        assert_eq!(
+            word_at("first second", 6),
+            (6, 12),
+            "a caret on a space takes the following word"
+        );
+        assert_eq!(
+            word_at("aé b", 1),
+            (0, 3),
+            "a multi-byte word is a full byte range"
+        );
+        assert_eq!(word_at("", 0), (0, 0));
+        assert_eq!(word_at(" -- ", 2), (2, 2), "punctuation is not a word");
+    }
+
+    #[test]
+    fn annotation_texture_wraps_inside_a_narrow_margin_column() {
+        let mut renderer = GlyphRenderer::new(config());
+        let block = paragraph("Typography as an independent existence.");
+        let layout = renderer.layout_in_column(&block, 168.0, 13.12);
+        assert!(
+            layout.lines.len() >= 2,
+            "a 40-character note must wrap in 168px"
+        );
+        let widest = layout
+            .buffer
+            .layout_runs()
+            .filter(|run| !run.glyphs.is_empty())
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max);
+        assert!(widest <= 169.0, "a line overflows the column: {widest}");
+    }
+
+    #[test]
+    fn annotation_textures_cache_by_content_and_metrics() {
+        let ctx = Context::default();
+        let mut renderer = GlyphRenderer::new(config());
+        let id = Uuid::new_v4();
+        let mut cache = AnnotationTextureCache::new();
+
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            id,
+            "A margin note",
+            120.0,
+            12.0,
+            [0, 0, 0],
+        );
+        assert_eq!(cache.len(), 1);
+        let size = cache.get(id).expect("annotation texture").texture.size();
+
+        // Same text at a different column width must be re-shaped.
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            id,
+            "A margin note",
+            80.0,
+            12.0,
+            [0, 0, 0],
+        );
+        assert_eq!(cache.len(), 1);
+
+        // A renumbered footnote entry changes the text.
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            id,
+            "2. A margin note",
+            80.0,
+            12.0,
+            [0, 0, 0],
+        );
+        assert_ne!(cache.get(id).unwrap().texture.size(), size);
     }
 
     #[test]

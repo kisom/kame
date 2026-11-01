@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{shift_anchors, Annotation, Block, BlockId, BlockKind, Document};
+use crate::model::{shift_anchors, Annotation, AnnotationId, Block, BlockId, BlockKind, Document};
 
 /// A single invertible mutation of a [`Document`].
 ///
@@ -69,6 +69,17 @@ pub enum Op {
     },
     RemoveAnnotation {
         annotation: Annotation,
+    },
+    /// Replaces one note's body.
+    ///
+    /// `old_body` is what the document holds now, so [`invert`] can put it back
+    /// and undo restores the exact prior prose. A body is a whole value rather
+    /// than a removal, so there is no separate restore payload — the way there
+    /// is for a deleted block or text run.
+    SetAnnotationBody {
+        annotation_id: AnnotationId,
+        old_body: String,
+        new_body: String,
     },
     SetTitle {
         old: String,
@@ -216,6 +227,15 @@ pub fn invert(op: &Op) -> Op {
         },
         Op::RemoveAnnotation { annotation } => Op::AddAnnotation {
             annotation: annotation.clone(),
+        },
+        Op::SetAnnotationBody {
+            annotation_id,
+            old_body,
+            new_body,
+        } => Op::SetAnnotationBody {
+            annotation_id: *annotation_id,
+            old_body: new_body.clone(),
+            new_body: old_body.clone(),
         },
         Op::SetTitle { old, new } => Op::SetTitle {
             old: new.clone(),
@@ -382,6 +402,22 @@ pub fn apply(doc: &mut Document, op: &Op) {
         Op::RemoveAnnotation { annotation } => {
             doc.annotations.retain(|existing| existing.id != annotation.id);
         }
+        Op::SetAnnotationBody {
+            annotation_id,
+            old_body,
+            new_body,
+        } => {
+            let annotation = doc
+                .annotations
+                .iter_mut()
+                .find(|annotation| annotation.id == *annotation_id)
+                .unwrap_or_else(|| panic!("op references unknown annotation {annotation_id}"));
+            assert_eq!(
+                &annotation.body, old_body,
+                "SetAnnotationBody payload old_body does not match the document"
+            );
+            annotation.body = new_body.clone();
+        }
         Op::SetTitle { old, new } => {
             assert_eq!(&doc.title, old, "SetTitle payload does not match the document");
             doc.title = new.clone();
@@ -414,6 +450,10 @@ pub fn apply(doc: &mut Document, op: &Op) {
 /// - `SetBlockKind`: untouched — it has no way to express "missing", so an
 ///   incorrect `old_kind` is a hard error rather than a silent rewrite. Build
 ///   it with [`Op::set_block_kind`].
+/// - `SetAnnotationBody`: an empty `old_body` against a note that already has
+///   prose is filled in from the document, on the same "empty means missing"
+///   rule the text delete uses; a non-empty `old_body` is left alone and
+///   [`apply`] panics if it disagrees.
 /// - `Batch`: each member is normalized in turn against the same document the
 ///   batch was built from (the `Op` constructors already saw that state).
 pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
@@ -482,6 +522,32 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                 end,
                 text,
                 removed,
+            }
+        }
+        // An empty `old_body` is the only way a caller can say "I did not
+        // record the previous body", so it is filled in — but only when the
+        // note's current body is non-empty (an empty body round-trips as
+        // itself and needs no repair). A non-empty `old_body` is left alone:
+        // `apply` rejects it if it disagrees, rather than silently adopting
+        // the document's value and losing the caller's mistake.
+        Op::SetAnnotationBody {
+            annotation_id,
+            old_body,
+            new_body,
+        } => {
+            let current = doc
+                .annotations
+                .iter()
+                .find(|annotation| annotation.id == annotation_id)
+                .map(|annotation| annotation.body.clone());
+            let old_body = match current {
+                Some(body) if old_body.is_empty() => body,
+                _ => old_body,
+            };
+            Op::SetAnnotationBody {
+                annotation_id,
+                old_body,
+                new_body,
             }
         }
         // Members are normalized against the same (pre-batch) document they
@@ -701,6 +767,116 @@ mod tests {
             }
         );
         assert_eq!(invert(&undone), op, "invert must be involutive");
+    }
+
+    /// A body edit is a whole-value replacement, so its inverse swaps the two
+    /// bodies; there is no separate restore payload to lose.
+    #[test]
+    fn invert_set_annotation_body_swaps_old_and_new() {
+        let id = Uuid::new_v4();
+        let op = Op::SetAnnotationBody {
+            annotation_id: id,
+            old_body: "before".into(),
+            new_body: "after".into(),
+        };
+        assert_eq!(
+            invert(&op),
+            Op::SetAnnotationBody {
+                annotation_id: id,
+                old_body: "after".into(),
+                new_body: "before".into(),
+            }
+        );
+        assert_eq!(invert(&invert(&op)), op, "invert must be involutive");
+    }
+
+    #[test]
+    fn set_annotation_body_round_trips_through_apply_and_invert() {
+        let mut d = doc("hello");
+        let id = d.blocks[0].id;
+        let note = note(id, 0, 5);
+        let note_id = note.id;
+        d.annotations.push(note);
+        let before = d.clone();
+
+        let op = Op::SetAnnotationBody {
+            annotation_id: note_id,
+            old_body: "note".into(),
+            new_body: "a longer note".into(),
+        };
+        apply(&mut d, &op);
+        assert_eq!(d.annotations[0].body, "a longer note");
+
+        apply(&mut d, &invert(&op));
+        assert_eq!(d, before);
+    }
+
+    /// A body edit whose recorded `old_body` disagrees with the document is a
+    /// caller bug: undoing it would restore prose that never existed.
+    #[test]
+    #[should_panic(expected = "SetAnnotationBody payload old_body does not match")]
+    fn set_annotation_body_with_a_wrong_old_body_panics() {
+        let mut d = doc("hello");
+        let id = d.blocks[0].id;
+        let note = note(id, 0, 5);
+        let note_id = note.id;
+        d.annotations.push(note);
+        apply(
+            &mut d,
+            &Op::SetAnnotationBody {
+                annotation_id: note_id,
+                old_body: "not the body".into(),
+                new_body: "x".into(),
+            },
+        );
+    }
+
+    /// An op that left `old_body` out is repaired at the normalize chokepoint,
+    /// the same way a payload-less text delete is.
+    #[test]
+    fn normalize_fills_a_missing_old_body() {
+        let mut d = doc("hello");
+        let id = d.blocks[0].id;
+        let note = note(id, 0, 5);
+        let note_id = note.id;
+        d.annotations.push(note);
+
+        let repaired = normalize(
+            &d,
+            Op::SetAnnotationBody {
+                annotation_id: note_id,
+                old_body: String::new(),
+                new_body: "fresh".into(),
+            },
+        );
+        assert_eq!(
+            repaired,
+            Op::SetAnnotationBody {
+                annotation_id: note_id,
+                old_body: "note".into(),
+                new_body: "fresh".into(),
+            }
+        );
+        apply(&mut d, &repaired);
+        assert_eq!(d.annotations[0].body, "fresh");
+    }
+
+    /// A non-empty `old_body` is never rewritten by normalize: a wrong payload
+    /// stays wrong and `apply` rejects it.
+    #[test]
+    fn normalize_leaves_a_non_empty_old_body_alone() {
+        let mut d = doc("hello");
+        let id = d.blocks[0].id;
+        let note = note(id, 0, 5);
+        let note_id = note.id;
+        d.annotations.push(note);
+
+        let op = Op::SetAnnotationBody {
+            annotation_id: note_id,
+            old_body: "wrong".into(),
+            new_body: "fresh".into(),
+        };
+        assert_eq!(normalize(&d, op.clone()), op);
     }
 
     #[test]
@@ -1217,6 +1393,11 @@ mod tests {
             },
             Op::AddAnnotation {
                 annotation: annotation.clone(),
+            },
+            Op::SetAnnotationBody {
+                annotation_id: annotation.id,
+                old_body: "a".into(),
+                new_body: "b".into(),
             },
             Op::RemoveAnnotation { annotation },
             Op::SetTitle {

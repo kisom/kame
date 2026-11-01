@@ -16,7 +16,9 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::edit::ops::{apply, apply_inverse, invert, normalize, Op};
-use crate::model::{Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind, Document};
+use crate::model::{
+    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
+};
 
 /// A caret position: the block it sits in and a **byte** offset into that
 /// block's text.
@@ -55,6 +57,8 @@ pub enum EditError {
     NoNextBlock,
     /// [`Editor::delete_selection`] was given a zero-width selection.
     EmptySelection,
+    /// The annotation id names no note in the document.
+    AnnotationNotFound,
 }
 
 impl fmt::Display for EditError {
@@ -64,6 +68,7 @@ impl fmt::Display for EditError {
             EditError::OffsetOutOfRange => write!(f, "offset out of range"),
             EditError::NoNextBlock => write!(f, "no block follows this one"),
             EditError::EmptySelection => write!(f, "selection is empty"),
+            EditError::AnnotationNotFound => write!(f, "annotation not found"),
         }
     }
 }
@@ -464,6 +469,36 @@ impl Editor {
             body: body.to_string(),
         };
         Ok(self.apply_edit(Op::AddAnnotation { annotation }))
+    }
+
+    /// Replaces the body of the note `annotation_id`, returning the op that was
+    /// applied.
+    ///
+    /// The previous body travels in the op, so undo restores the exact prose.
+    /// An unknown id is [`EditError::AnnotationNotFound`]; a rejected call
+    /// leaves the document and the history untouched.
+    ///
+    /// A body that is already `new_body` still produces an op — the caller owns
+    /// the choice of whether that is an edit worth logging (the GUI compares
+    /// before calling, so per-keystroke commits only record real changes).
+    pub fn set_annotation_body(
+        &mut self,
+        annotation_id: AnnotationId,
+        new_body: &str,
+    ) -> Result<Op, EditError> {
+        let old_body = self
+            .doc
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == annotation_id)
+            .map(|annotation| annotation.body.clone())
+            .ok_or(EditError::AnnotationNotFound)?;
+        let op = Op::SetAnnotationBody {
+            annotation_id,
+            old_body,
+            new_body: new_body.to_string(),
+        };
+        Ok(self.apply_edit(op))
     }
 
     // --- caret helpers -----------------------------------------------------
@@ -1317,6 +1352,65 @@ mod tests {
             Err(EditError::BlockNotFound)
         );
         assert_eq!(e.history(), (0, 0));
+    }
+
+    #[test]
+    fn set_annotation_body_applies_and_is_undoable() {
+        let mut doc = doc_with("hello world");
+        let id = doc.blocks[0].id;
+        let annotation = note(id, 6, 11);
+        let annotation_id = annotation.id;
+        doc.annotations.push(annotation);
+
+        let mut e = Editor::new(doc);
+        let op = e
+            .set_annotation_body(annotation_id, "the world, considered")
+            .expect("set the body");
+        assert_eq!(
+            op,
+            Op::SetAnnotationBody {
+                annotation_id,
+                old_body: "note".into(),
+                new_body: "the world, considered".into(),
+            }
+        );
+        assert_eq!(
+            e.document().annotations[0].body,
+            "the world, considered",
+            "the note's body is the new prose"
+        );
+        assert_eq!(e.history(), (1, 0), "a body edit is one undo step");
+        assert_eq!(
+            serde_json::from_str::<Op>(&serde_json::to_string(&op).unwrap()).unwrap(),
+            op,
+            "the returned op must be loggable"
+        );
+
+        let undone = e.undo().expect("body edit to be undoable");
+        assert_eq!(
+            undone,
+            Op::SetAnnotationBody {
+                annotation_id,
+                old_body: "the world, considered".into(),
+                new_body: "note".into(),
+            },
+            "undo reports the swap"
+        );
+        assert_eq!(e.document().annotations[0].body, "note");
+
+        e.redo().expect("body edit to be redoable");
+        assert_eq!(e.document().annotations[0].body, "the world, considered");
+    }
+
+    #[test]
+    fn set_annotation_body_rejects_an_unknown_annotation_without_editing() {
+        let mut e = Editor::new(doc_with("hi"));
+
+        assert_eq!(
+            e.set_annotation_body(Uuid::new_v4(), "x"),
+            Err(EditError::AnnotationNotFound)
+        );
+        assert_eq!(e.history(), (0, 0), "a rejected call logs nothing");
     }
 
     #[test]

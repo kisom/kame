@@ -552,6 +552,18 @@ impl Session {
         }
     }
 
+    /// Replaces a note's body and persists it as one undoable edit.
+    ///
+    /// Returns whether the write landed; a refused edit leaves `last_error` set
+    /// so the popover's caller can see why nothing was saved.
+    fn set_annotation_body(&mut self, id: AnnotationId, body: &str) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let result = self.editor.set_annotation_body(id, body);
+        self.commit(result)
+    }
+
     /// The range an annotation anchors to: the selection (clamped to its first
     /// block, since an anchor lives in one block), or the word under the caret.
     fn annotation_anchor(&self) -> Option<Anchor> {
@@ -776,9 +788,10 @@ fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f
 
 /// Default body for a newly anchored annotation.
 ///
-/// v1 has no annotation body editor yet, so the body quotes the anchored
-/// words: the popover then shows what the note is about, and every annotation
-/// has visible text in the margin or at the foot.
+/// A new note has to say something the moment it exists — the margin note is
+/// painted, not hidden behind the popover — so the default quotes the anchored
+/// words. The body is then the author's to rewrite in the popover (see
+/// `KameApp::show_note_popover`), which is why this is only a starting point.
 fn default_annotation_body(kind: &AnnotationKind, snippet: &str) -> String {
     let snippet = shorten(snippet.trim(), 48);
     if snippet.is_empty() {
@@ -806,6 +819,12 @@ fn shorten(text: &str, max: usize) -> String {
         out.push(character);
     }
     out
+}
+
+/// egui id of the popover's body field. `handle_input` looks it up to tell
+/// whether keystrokes belong to the note instead of the document.
+fn note_body_edit_id() -> Id {
+    Id::unique("kame-note-body")
 }
 
 /// Short label for an annotation kind, shown above its body in the popover.
@@ -879,6 +898,14 @@ struct KameApp {
     /// The note whose popover is open, and where its marker was painted.
     open_note: Option<AnnotationId>,
     open_note_pos: Option<Pos2>,
+    /// The open note's body while the popover's field holds it. Seeded from the
+    /// document when the popover opens and written back to the document on
+    /// every change, so the field and the note never drift apart.
+    open_note_body: String,
+    /// Set when a popover opens, so the body field can grab focus on the frame
+    /// it first appears: a note that was just created is a note you meant to
+    /// write, and the keystrokes that follow should land in it.
+    open_note_focus: bool,
     path: PathBuf,
 }
 
@@ -894,13 +921,46 @@ impl KameApp {
             annotation_textures: AnnotationTextureCache::new(),
             open_note: None,
             open_note_pos: None,
+            open_note_body: String::new(),
+            open_note_focus: false,
             path,
         })
     }
 
+    /// Opens `id`'s popover (or closes it with `None`), seeding the editable
+    /// body from the document.
+    ///
+    /// Opening is the one moment the field has to agree with the document: after
+    /// that the field is the editor for that note and every change is committed
+    /// as it is typed.
+    fn set_open_note(&mut self, id: Option<AnnotationId>) {
+        let body = id.and_then(|id| {
+            self.session
+                .document()
+                .annotations
+                .iter()
+                .find(|annotation| annotation.id == id)
+                .map(|annotation| annotation.body.clone())
+        });
+        // A note that no longer exists cannot be edited: an undo that removed it
+        // closes the popover instead of leaving a field pointing at nothing.
+        self.open_note = match (id, body.is_some()) {
+            (Some(id), true) => Some(id),
+            _ => None,
+        };
+        self.open_note_body = body.unwrap_or_default();
+        self.open_note_focus = self.open_note.is_some();
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.open_note = None;
+            self.set_open_note(None);
+        }
+        // While the popover's body field has focus the keystrokes are the
+        // note's, not the document's: without this the same character would be
+        // inserted into both the note and the prose behind it.
+        if ctx.memory(|memory| memory.has_focus(note_body_edit_id())) {
+            return;
         }
         let events = ctx.input(|input| input.events.clone());
         for event in &events {
@@ -924,10 +984,17 @@ impl KameApp {
                     self.session.split();
                 }
                 Command::Undo => {
-                    self.session.undo();
+                    // Undo can rewrite this note's body (and can remove the note
+                    // outright), so the open popover is reseeded from the
+                    // document rather than left holding stale prose.
+                    if self.session.undo() {
+                        self.set_open_note(self.open_note);
+                    }
                 }
                 Command::Redo => {
-                    self.session.redo();
+                    if self.session.redo() {
+                        self.set_open_note(self.open_note);
+                    }
                 }
                 Command::MoveLeft => self.session.move_left(),
                 Command::MoveRight => self.session.move_right(),
@@ -1028,7 +1095,7 @@ impl KameApp {
                 ] {
                     if ui.small_button(label).clicked() {
                         if let Some(id) = self.session.add_annotation(kind) {
-                            self.open_note = Some(id);
+                            self.set_open_note(Some(id));
                             self.open_note_pos = None;
                         }
                     }
@@ -1403,11 +1470,12 @@ impl KameApp {
         // `blocks` borrows the document; every caret move is applied after the
         // borrow's last use.
         if let Some((id, rect)) = marker_click {
-            self.open_note = if self.open_note == Some(id) {
+            let open = if self.open_note == Some(id) {
                 None
             } else {
                 Some(id)
             };
+            self.set_open_note(open);
             self.open_note_pos = Some(rect.right_top() + Vec2::new(10.0, -6.0));
         } else if let Some((cursor, extend)) = caret_action {
             if extend {
@@ -1415,13 +1483,19 @@ impl KameApp {
             } else {
                 self.session.set_caret(cursor);
             }
-            self.open_note = None;
+            self.set_open_note(None);
         }
 
         self.show_note_popover(ui.ctx());
     }
 
-    /// Draws the open note's body in a floating popover next to its marker.
+    /// Draws the open note in a floating popover next to its marker, with its
+    /// body as an editable field.
+    ///
+    /// The field is seeded from the note when the popover opens and committed
+    /// back through `Session::set_annotation_body` on every change, so the prose
+    /// painted in the margin or at the foot updates as it is typed and each
+    /// commit lands in the op log as one undoable step.
     fn show_note_popover(&mut self, ctx: &egui::Context) {
         let Some(id) = self.open_note else {
             return;
@@ -1434,7 +1508,7 @@ impl KameApp {
             .find(|annotation| annotation.id == id)
             .cloned()
         else {
-            self.open_note = None;
+            self.set_open_note(None);
             return;
         };
 
@@ -1453,6 +1527,11 @@ impl KameApp {
             ),
         );
 
+        // The field edits a local copy so the closure borrows one buffer rather
+        // than `self`; the copy is committed and stored back once the area closes.
+        let mut buffer = self.open_note_body.clone();
+        let focus = self.open_note_focus;
+        let mut changed = false;
         let mut close = false;
         egui::Area::new(Id::unique("kame-note-popover"))
             .order(Order::Foreground)
@@ -1465,14 +1544,30 @@ impl KameApp {
                             .small()
                             .strong(),
                     );
-                    ui.label(&annotation.body);
+                    let field = ui.add(
+                        egui::TextEdit::multiline(&mut buffer)
+                            .id(note_body_edit_id())
+                            .desired_width(240.0)
+                            .desired_rows(3)
+                            .hint_text("Write the note…"),
+                    );
+                    changed = field.changed();
+                    if focus {
+                        field.request_focus();
+                    }
                     if ui.small_button("Close").clicked() {
                         close = true;
                     }
                 });
             });
+
+        self.open_note_focus = false;
+        if changed {
+            self.open_note_body = buffer;
+            self.session.set_annotation_body(id, &self.open_note_body);
+        }
         if close {
-            self.open_note = None;
+            self.set_open_note(None);
         }
     }
 }
@@ -2129,5 +2224,73 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             default_annotation_body(&AnnotationKind::Footnote, "  word  "),
             "Footnote on “word”"
         );
+    }
+
+    /// An authored body is document state, not a display default: it has to
+    /// survive close/reopen through the op log, and undo after the reopen must
+    /// put the generated body back.
+    #[test]
+    fn an_authored_body_persists_across_reopen() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("The quick brown fox");
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 6,
+        });
+        let id = session
+            .add_annotation(AnnotationKind::Note)
+            .expect("a note on 'quick'");
+        let generated = session.document().annotations[0].body.clone();
+        assert!(!generated.is_empty(), "a new note starts with prose");
+
+        assert!(
+            session.set_annotation_body(id, "Show that the fox is not asleep."),
+            "the body edit is applied and persisted"
+        );
+        assert_eq!(
+            session.document().annotations[0].body,
+            "Show that the fox is not asleep."
+        );
+        drop(session);
+
+        let mut reopened = open(&path);
+        assert_eq!(reopened.document().annotations.len(), 1);
+        assert_eq!(
+            reopened.document().annotations[0].body,
+            "Show that the fox is not asleep.",
+            "the authored body comes back from the head document"
+        );
+
+        // The edit is in the log, so undo after the reopen restores the body
+        // the note was created with.
+        assert!(reopened.undo(), "the body edit is undoable after a reopen");
+        assert_eq!(reopened.document().annotations[0].body, generated);
+        assert!(reopened.redo(), "and redoable");
+        assert_eq!(
+            reopened.document().annotations[0].body,
+            "Show that the fox is not asleep."
+        );
+    }
+
+    /// The popover commits keystroke by keystroke, so an empty body is a real
+    /// state (the author cleared the note) rather than a reference to the
+    /// default, and it has to round trip as such.
+    #[test]
+    fn clearing_a_body_persists_as_an_empty_body() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("word");
+        let id = session
+            .add_annotation(AnnotationKind::Marginal)
+            .expect("a marginal on 'word'");
+
+        assert!(session.set_annotation_body(id, ""));
+        assert_eq!(session.document().annotations[0].body, "");
+        drop(session);
+
+        let reopened = open(&path);
+        assert_eq!(reopened.document().annotations[0].body, "");
     }
 }

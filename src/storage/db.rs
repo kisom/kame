@@ -10,6 +10,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection};
 
+use crate::edit::Op;
 use crate::model::Document;
 
 /// Everything that can go wrong in the storage layer.
@@ -79,12 +80,21 @@ impl From<serde_json::Error> for DbError {
 }
 
 /// Schema version recorded in `PRAGMA user_version`.
+///
+/// The `ops` table was added within version 1: it is created with
+/// `CREATE TABLE IF NOT EXISTS` on every open, so a database written by the
+/// pre-ops build gains it in place without a version bump or migration.
 const SCHEMA_VERSION: i64 = 1;
 
-/// The whole document lives in the single row `id = 1`.
+/// The whole document lives in the single row `id = 1`; every edit that
+/// produced it is appended to `ops`.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS documents (
     id   INTEGER PRIMARY KEY CHECK (id = 1),
+    json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ops (
+    seq  INTEGER PRIMARY KEY AUTOINCREMENT,
     json TEXT NOT NULL
 )";
 
@@ -152,6 +162,42 @@ impl Db {
             params![json],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Appends `op` to the durable op log and returns its sequence number.
+    ///
+    /// Sequence numbers are strictly increasing; they are what
+    /// [`Db::truncate_ops_after`] cuts at. A failed insert leaves the log
+    /// unchanged (single-statement transaction).
+    pub fn append_op(&mut self, op: &Op) -> Result<i64, DbError> {
+        let json = serde_json::to_string(op)?;
+        self.conn
+            .execute("INSERT INTO ops (json) VALUES (?1)", params![json])?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Reads the whole op log in application order: `(seq, op)`, oldest first.
+    pub fn load_ops(&self) -> Result<Vec<(i64, Op)>, DbError> {
+        let mut stmt = self.conn.prepare("SELECT seq, json FROM ops ORDER BY seq")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut ops = Vec::new();
+        for row in rows {
+            let (seq, json) = row?;
+            ops.push((seq, serde_json::from_str(&json)?));
+        }
+        Ok(ops)
+    }
+
+    /// Deletes every op with a sequence number greater than `seq`.
+    ///
+    /// Called after an undo when a new edit replaces the redo tail, so the log
+    /// stays a single linear history.
+    pub fn truncate_ops_after(&mut self, seq: i64) -> Result<(), DbError> {
+        self.conn
+            .execute("DELETE FROM ops WHERE seq > ?1", params![seq])?;
         Ok(())
     }
 }
@@ -313,5 +359,70 @@ mod tests {
         assert!(!path.exists());
         let _db = Db::open(&path).unwrap();
         assert!(path.exists());
+    }
+
+    fn insert_op(offset: usize) -> Op {
+        Op::InsertText {
+            block_id: Uuid::new_v4(),
+            offset,
+            text: "x".to_string(),
+        }
+    }
+
+    #[test]
+    fn append_and_load_ops_round_trip_in_order() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        assert!(db.load_ops().unwrap().is_empty());
+
+        let first = insert_op(0);
+        let second = Op::SetTitle {
+            old: "a".to_string(),
+            new: "b".to_string(),
+        };
+        let seq1 = db.append_op(&first).unwrap();
+        let seq2 = db.append_op(&second).unwrap();
+        assert!(seq1 < seq2, "sequence numbers must increase: {seq1}, {seq2}");
+
+        let log = db.load_ops().unwrap();
+        assert_eq!(log, vec![(seq1, first), (seq2, second)]);
+    }
+
+    #[test]
+    fn ops_survive_reopen() {
+        let path = temp_db_path();
+        let op = insert_op(3);
+        {
+            let mut db = Db::open(&path).unwrap();
+            db.append_op(&op).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let log = db.load_ops().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].1, op);
+    }
+
+    #[test]
+    fn truncate_ops_after_drops_only_the_tail() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let ops: Vec<Op> = (0..4).map(insert_op).collect();
+        let seqs: Vec<i64> = ops.iter().map(|op| db.append_op(op).unwrap()).collect();
+
+        db.truncate_ops_after(seqs[1]).unwrap();
+        let log = db.load_ops().unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0], (seqs[0], ops[0].clone()));
+        assert_eq!(log[1], (seqs[1], ops[1].clone()));
+
+        // Truncating past the end is a no-op; truncating everything empties it.
+        db.truncate_ops_after(seqs[3]).unwrap();
+        assert_eq!(db.load_ops().unwrap().len(), 2);
+        db.truncate_ops_after(0).unwrap();
+        assert!(db.load_ops().unwrap().is_empty());
+
+        // A truncate is durable and ids keep increasing after it.
+        let next = db.append_op(&ops[0]).unwrap();
+        assert!(next > seqs[3]);
     }
 }

@@ -87,6 +87,10 @@ pub enum Op {
     /// the members and inverts each; [`apply_inverse`] undoes them in reverse
     /// order so a member's removal payload is re-attached before the member
     /// before it needs the document back.
+    ///
+    /// Applying a batch is atomic: [`apply`] stages the members on a copy and
+    /// commits it only when all of them have applied, so a member that panics
+    /// leaves the document untouched rather than partially edited.
     Batch {
         ops: Vec<Op>,
     },
@@ -367,10 +371,16 @@ pub fn apply(doc: &mut Document, op: &Op) {
             assert_eq!(&doc.title, old, "SetTitle payload does not match the document");
             doc.title = new.clone();
         }
+        // Stage-and-commit: the members are applied to a clone and the clone is
+        // swapped in only once every member has succeeded. A member that panics
+        // (bad payload, unknown block) therefore leaves `doc` exactly as it was,
+        // instead of half-applying the batch with no undo entry to show for it.
         Op::Batch { ops } => {
+            let mut staged = doc.clone();
             for op in ops {
-                apply(doc, op);
+                apply(&mut staged, op);
             }
+            *doc = staged;
         }
     }
 }
@@ -1168,6 +1178,48 @@ mod tests {
         assert_eq!(d.blocks.len(), 1);
         assert_eq!(d.blocks[0].text, "onetwo");
         assert_eq!(d.annotations, vec![moved]);
+    }
+
+    /// A batch is atomic: if a later member panics, the members before it must
+    /// not remain applied, or the document would be half-edited with no undo
+    /// entry that describes that state.
+    #[test]
+    fn batch_apply_leaves_the_document_untouched_when_a_member_panics() {
+        let mut d = doc("one");
+        d.blocks.push(Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "two".into(),
+            spans: Vec::new(),
+        });
+        let first = d.blocks[0].id;
+        let before = d.clone();
+
+        // The first member would succeed; the second names a block that does
+        // not exist, so `apply` panics after the first has already been staged.
+        let batch = Op::Batch {
+            ops: vec![
+                Op::InsertText {
+                    block_id: first,
+                    offset: 3,
+                    text: "X".into(),
+                },
+                Op::InsertText {
+                    block_id: Uuid::new_v4(),
+                    offset: 0,
+                    text: "Y".into(),
+                },
+            ],
+        };
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply(&mut d, &batch);
+        }));
+        assert!(outcome.is_err(), "the bad member must panic");
+        assert_eq!(
+            d, before,
+            "a failed batch commits nothing: no member's edit survives"
+        );
     }
 
     #[test]

@@ -223,11 +223,15 @@ impl Editor {
     /// with the rest, and deleting the whole document leaves one empty
     /// paragraph to type into.
     ///
-    /// v1 leaves the first and last blocks separate instead of joining them:
-    /// there is no single op that both trims two blocks and merges them.
+    /// v1 removes the interior blocks the selection covers completely and
+    /// trims the boundary blocks, but it does not merge them: joining the
+    /// first and last blocks is deferred to v2.
     ///
     /// A zero-width selection is [`EditError::EmptySelection`]: callers that
     /// delete a character at a caret build the one-character selection.
+    /// A selection that spans blocks yet covers nothing (the end of one block
+    /// to the start of the next) is also [`EditError::EmptySelection`] — it
+    /// would otherwise apply an empty batch and add a no-op undo step.
     pub fn delete_selection(&mut self, sel: &Selection) -> Result<Op, EditError> {
         self.check_cursor(sel.start)?;
         self.check_cursor(sel.end)?;
@@ -291,6 +295,14 @@ impl Editor {
                     spans: Vec::new(),
                 },
             });
+        }
+
+        // A boundary-only selection (end of one block to the start of the next)
+        // covers no text and no block: every branch above skipped. Applying the
+        // empty batch would record a history step that changes nothing, so a
+        // no-op selection is rejected exactly like a zero-width one.
+        if ops.is_empty() {
+            return Err(EditError::EmptySelection);
         }
         Ok(self.apply_edit(Op::Batch { ops }))
     }
@@ -1476,6 +1488,36 @@ mod tests {
         );
         assert_eq!(e.document().blocks[0].text, "abc");
         assert_eq!(e.history(), (0, 0));
+    }
+
+    /// FIX 3: a selection from the end of one block to the start of the next
+    /// covers no text and no block. It must be rejected, not applied as an
+    /// empty batch that adds a phantom undo step.
+    #[test]
+    fn delete_selection_rejects_a_boundary_only_selection_without_logging_it() {
+        let mut doc = doc_with("aaa");
+        let first = doc.blocks[0].id;
+        doc.blocks.push(paragraph(Uuid::new_v4(), "bbb"));
+        let second = doc.blocks[1].id;
+        let before = doc.clone();
+        let mut e = Editor::new(doc);
+
+        assert_eq!(
+            e.delete_selection(&Selection {
+                start: Cursor {
+                    block_id: first,
+                    offset: 3, // end of the first block
+                },
+                end: Cursor {
+                    block_id: second,
+                    offset: 0, // start of the next
+                },
+            }),
+            Err(EditError::EmptySelection)
+        );
+        assert_eq!(e.document(), &before, "the document is unchanged");
+        assert_eq!(e.history(), (0, 0), "no phantom undo step is recorded");
+        assert!(e.undo().is_none(), "there is nothing to undo");
     }
 
     #[test]

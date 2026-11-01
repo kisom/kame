@@ -8,7 +8,7 @@
 use std::fmt;
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::edit::Op;
 use crate::model::Document;
@@ -31,6 +31,11 @@ pub enum DbError {
     SchemaTooNew { found: i64, supported: i64 },
     /// WAL journalling could not be enabled.
     JournalMode(String),
+    /// A stored meta value could not be parsed (e.g. a corrupt `undo_cursor`).
+    ///
+    /// Kept distinct from [`DbError::Sqlite`] because it is not a database
+    /// failure: the row is there, its contents are nonsense.
+    Meta(String),
 }
 
 /// Convenience alias for [`DbError`]; kept for interface compatibility.
@@ -53,6 +58,7 @@ impl fmt::Display for DbError {
             DbError::JournalMode(mode) => {
                 write!(f, "failed to enable WAL journal mode (got {mode:?})")
             }
+            DbError::Meta(value) => write!(f, "unreadable meta value: {value}"),
         }
     }
 }
@@ -62,7 +68,10 @@ impl std::error::Error for DbError {
         match self {
             DbError::Sqlite(err) => Some(err),
             DbError::Json(err) => Some(err),
-            DbError::NoDocument | DbError::SchemaTooNew { .. } | DbError::JournalMode(_) => None,
+            DbError::NoDocument
+            | DbError::SchemaTooNew { .. }
+            | DbError::JournalMode(_)
+            | DbError::Meta(_) => None,
         }
     }
 }
@@ -87,7 +96,9 @@ impl From<serde_json::Error> for DbError {
 const SCHEMA_VERSION: i64 = 1;
 
 /// The whole document lives in the single row `id = 1`; every edit that
-/// produced it is appended to `ops`.
+/// produced it is appended to `ops`. `meta` holds the undo cursor: the number
+/// of ops in the log that are applied to the head document (`0..=n`). Head and
+/// cursor are always written in the same transaction, so they cannot disagree.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS documents (
     id   INTEGER PRIMARY KEY CHECK (id = 1),
@@ -96,7 +107,14 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS ops (
     seq  INTEGER PRIMARY KEY AUTOINCREMENT,
     json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 )";
+
+/// Key under which the applied-op count is stored in `meta`.
+const UNDO_CURSOR_KEY: &str = "undo_cursor";
 
 /// A handle to the document database.
 pub struct Db {
@@ -193,13 +211,109 @@ impl Db {
 
     /// Deletes every op with a sequence number greater than `seq`.
     ///
-    /// Called after an undo when a new edit replaces the redo tail, so the log
-    /// stays a single linear history.
+    /// A new edit after an undo discards the redo tail so the log stays a
+    /// single linear history. [`Db::record_edit`] does this itself inside the
+    /// same transaction; call this directly only for a standalone truncation.
     pub fn truncate_ops_after(&mut self, seq: i64) -> Result<(), DbError> {
         self.conn
             .execute("DELETE FROM ops WHERE seq > ?1", params![seq])?;
         Ok(())
     }
+
+    /// The stored undo cursor: how many ops of the log are applied to the head
+    /// document. `0` when nothing has recorded one yet (fresh database).
+    pub fn cursor(&self) -> Result<usize, DbError> {
+        read_cursor(&self.conn)
+    }
+
+    /// Persists one edit atomically: appends `op`, replaces the head document
+    /// with `doc`, drops any redo tail, and sets the cursor to
+    /// `current + 1` — all in one transaction.
+    ///
+    /// This is the write path for `Editor::apply_edit`. Because head, log and
+    /// cursor move together, a crash can never leave a head document that
+    /// disagrees with its history (which is what makes a second undo of the
+    /// same op impossible).
+    ///
+    /// Returns the sequence number of the appended op.
+    pub fn record_edit(&mut self, doc: &Document, op: &Op) -> Result<i64, DbError> {
+        let json = serde_json::to_string(doc)?;
+        let op_json = serde_json::to_string(op)?;
+        let tx = self.conn.transaction()?;
+        let cursor = read_cursor(&tx)?;
+        truncate_ops_to_cursor(&tx, cursor)?;
+        tx.execute("INSERT INTO ops (json) VALUES (?1)", params![op_json])?;
+        let seq = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT OR REPLACE INTO documents (id, json) VALUES (1, ?1)",
+            params![json],
+        )?;
+        write_cursor(&tx, cursor + 1)?;
+        tx.commit()?;
+        Ok(seq)
+    }
+
+    /// Persists a head document and its cursor atomically, changing no ops.
+    ///
+    /// The write path for undo/redo: the op log is untouched, the cursor moves,
+    /// and the head follows it in the same transaction.
+    pub fn save_state(&mut self, doc: &Document, cursor: usize) -> Result<(), DbError> {
+        let json = serde_json::to_string(doc)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO documents (id, json) VALUES (1, ?1)",
+            params![json],
+        )?;
+        write_cursor(&tx, cursor)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// Reads the undo cursor, defaulting to `0` when no row has been written.
+fn read_cursor(conn: &Connection) -> Result<usize, DbError> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![UNDO_CURSOR_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        None => Ok(0),
+        // A negative or non-numeric cursor is corruption, not a fresh database:
+        // silently resetting it to 0 would resurrect undone ops.
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| DbError::Meta(format!("{UNDO_CURSOR_KEY} = {value:?}"))),
+    }
+}
+
+fn write_cursor(conn: &Connection, cursor: usize) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        params![UNDO_CURSOR_KEY, cursor.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Drops every op past the first `cursor` (in `seq` order), the redo tail.
+fn truncate_ops_to_cursor(conn: &Connection, cursor: usize) -> Result<(), DbError> {
+    let keep: Option<i64> = conn
+        .query_row(
+            "SELECT seq FROM ops ORDER BY seq LIMIT 1 OFFSET ?1",
+            params![cursor as i64],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match keep {
+        // The op at `cursor` is the first unapplied one: everything from it on
+        // is redo tail.
+        Some(seq) => conn.execute("DELETE FROM ops WHERE seq >= ?1", params![seq])?,
+        // No op at that index: the tail is already empty.
+        None => 0,
+    };
+    Ok(())
 }
 
 #[cfg(test)]
@@ -424,5 +538,140 @@ mod tests {
         // A truncate is durable and ids keep increasing after it.
         let next = db.append_op(&ops[0]).unwrap();
         assert!(next > seqs[3]);
+    }
+
+    #[test]
+    fn cursor_defaults_to_zero_and_round_trips() {
+        let path = temp_db_path();
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.cursor().unwrap(), 0, "fresh database has no cursor row");
+
+        // The meta table exists and holds a single row after a write.
+        db.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('undo_cursor', '3')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(db.cursor().unwrap(), 3);
+    }
+
+    #[test]
+    fn cursor_survives_reopen() {
+        let path = temp_db_path();
+        {
+            let mut db = Db::open(&path).unwrap();
+            db.save_state(&sample_document(), 4).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.cursor().unwrap(), 4);
+    }
+
+    /// A corrupt cursor must be reported, not silently reset to 0 — resetting
+    /// would resurrect ops the user had undone.
+    #[test]
+    fn corrupt_cursor_is_an_error() {
+        let path = temp_db_path();
+        let db = Db::open(&path).unwrap();
+        db.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('undo_cursor', 'nonsense')",
+                [],
+            )
+            .unwrap();
+        match db.cursor() {
+            Err(DbError::Meta(_)) => {}
+            other => panic!("expected DbError::Meta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_edit_writes_op_head_and_cursor_together() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+
+        let mut doc = sample_document();
+        let op = insert_op(0);
+        let seq = db.record_edit(&doc, &op).unwrap();
+        assert_eq!(db.cursor().unwrap(), 1);
+        assert_eq!(db.load_document().unwrap(), doc);
+        assert_eq!(db.load_ops().unwrap(), vec![(seq, op.clone())]);
+
+        doc.title = "Second".to_string();
+        let seq2 = db.record_edit(&doc, &op).unwrap();
+        assert_eq!(db.cursor().unwrap(), 2);
+        assert_eq!(db.load_ops().unwrap().len(), 2);
+        assert!(seq2 > seq);
+    }
+
+    #[test]
+    fn save_state_moves_head_and_cursor_without_touching_the_log() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let doc = sample_document();
+        let op = insert_op(1);
+        db.record_edit(&doc, &op).unwrap();
+
+        let mut undone = doc.clone();
+        undone.title = "Undone".to_string();
+        db.save_state(&undone, 0).unwrap();
+
+        assert_eq!(db.cursor().unwrap(), 0);
+        assert_eq!(db.load_document().unwrap(), undone);
+        assert_eq!(db.load_ops().unwrap().len(), 1, "ops are untouched by undo");
+    }
+
+    /// `record_edit` after an undo replaces the redo tail inside the same
+    /// transaction, so the log can never grow a stale branch.
+    #[test]
+    fn record_edit_after_undo_truncates_the_redo_tail() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let doc = sample_document();
+
+        for offset in 0..3 {
+            db.record_edit(&doc, &insert_op(offset)).unwrap();
+        }
+        assert_eq!(db.load_ops().unwrap().len(), 3);
+
+        // Undo two: cursor 1.
+        db.save_state(&doc, 1).unwrap();
+        let replacement = insert_op(9);
+        db.record_edit(&doc, &replacement).unwrap();
+
+        let log = db.load_ops().unwrap();
+        assert_eq!(log.len(), 2, "the two undone ops are gone");
+        assert_eq!(log[1].1, replacement);
+        assert_eq!(db.cursor().unwrap(), 2);
+
+        // Undoing everything and editing again clears the log outright.
+        db.save_state(&doc, 0).unwrap();
+        db.record_edit(&doc, &replacement).unwrap();
+        let log = db.load_ops().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].1, replacement);
+        assert_eq!(db.cursor().unwrap(), 1);
+    }
+
+    /// Atomicity: a failed `record_edit` must leave head, log and cursor all
+    /// unchanged, so none of them can disagree afterwards.
+    #[test]
+    fn failed_record_edit_changes_nothing() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let original = sample_document();
+        let op = insert_op(0);
+        db.record_edit(&original, &op).unwrap();
+
+        let mut changed = original.clone();
+        changed.title = "Should not land".to_string();
+        db.conn.pragma_update(None, "query_only", true).unwrap();
+        let result = db.record_edit(&changed, &insert_op(5));
+        assert!(result.is_err(), "write must fail while read-only");
+        db.conn.pragma_update(None, "query_only", false).unwrap();
+
+        assert_eq!(db.load_document().unwrap(), original);
+        assert_eq!(db.load_ops().unwrap().len(), 1);
+        assert_eq!(db.cursor().unwrap(), 1);
     }
 }

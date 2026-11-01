@@ -38,6 +38,13 @@ pub fn to_markdown(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut ordered_index = 0usize;
     for block in &doc.blocks {
+        // An empty block carries no text and no apparatus: exporting it would
+        // only add stray blank lines. Checked before the prefix match so that a
+        // just-emptied list item cannot consume an ordered number (or reset the
+        // run) for a line that is never exported.
+        if block.text.is_empty() {
+            continue;
+        }
         let prefix = match block.kind {
             BlockKind::Heading { level } => {
                 ordered_index = 0;
@@ -56,11 +63,6 @@ pub fn to_markdown(doc: &Document) -> String {
                 String::new()
             }
         };
-        // An empty block carries no text and no apparatus: exporting it would
-        // only add stray blank lines.
-        if block.text.is_empty() {
-            continue;
-        }
         let markers = by_block.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
         parts.push(format!("{prefix}{}", render_block_text(block, markers)));
     }
@@ -129,45 +131,132 @@ fn numbered_footnotes(doc: &Document) -> Vec<(usize, &crate::model::Annotation)>
 ///
 /// `footnotes` holds `(byte offset, number)` pairs; the marker is inserted just
 /// after the anchored range.
+///
+/// The text is cut at every span edge (and every footnote offset) and the
+/// active style set is taken per segment, the way `layout::text::styled_spans`
+/// styles runs. Delimiters are closed innermost-first at each boundary and
+/// reopened only for styles that keep covering the following text, so the
+/// markers stay properly nested even when spans overlap — emitting each span's
+/// pair independently would cross them (`*abcde**fghij*klmno**`) and CommonMark
+/// would print the asterisks literally.
 fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
     let text = block.text.as_str();
-    // (offset, ordering class, tiebreak, marker)
-    let mut markers: Vec<(usize, u8, usize, String)> = Vec::new();
 
-    for span in &block.spans {
-        let start = snap_up(text, span.start);
-        let end = snap_down(text, span.end);
+    // Span edges snapped to char boundaries, then pulled in past whitespace: a
+    // delimiter hugging a space (`**Hello **world`) is read as literal
+    // asterisks, so emphasis has to start and end on a glyph.
+    let spans: Vec<(usize, usize, SpanStyle)> = block
+        .spans
+        .iter()
+        .filter_map(|span| {
+            let start = snap_up(text, span.start);
+            let end = snap_down(text, span.end);
+            let (start, end) = trim_whitespace_edges(text, start, end);
+            (start < end).then(|| (start, end, span.style.clone()))
+        })
+        .collect();
+
+    // Footnote markers snapped the same way, in deterministic order.
+    let mut footnotes: Vec<(usize, usize)> = footnotes
+        .iter()
+        .map(|(offset, number)| (snap_down(text, *offset), *number))
+        .collect();
+    footnotes.sort_unstable();
+
+    let mut bounds = Vec::with_capacity(spans.len() * 2 + footnotes.len() + 2);
+    bounds.push(0);
+    bounds.push(text.len());
+    for (start, end, _) in &spans {
+        bounds.push(*start);
+        bounds.push(*end);
+    }
+    for (offset, _) in &footnotes {
+        bounds.push(*offset);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut out = String::with_capacity(text.len() + bounds.len() * 2 + footnotes.len() * 4);
+    // Delimiters currently open, outermost first: always a prefix of `wanted`
+    // for the segment being emitted, which is what keeps the output nested.
+    let mut open: Vec<SpanStyle> = Vec::new();
+    for window in bounds.windows(2) {
+        let (start, end) = (window[0], window[1]);
         if start >= end {
             continue;
         }
-        let delimiter = match span.style {
-            SpanStyle::Bold => "**",
-            SpanStyle::Italic => "*",
-        };
-        // Open outermost first (largest extent) and close innermost first
-        // (latest start), so nested spans produce valid `**a *b***` runs.
-        markers.push((start, 2, usize::MAX - end, delimiter.to_string()));
-        markers.push((end, 0, usize::MAX - start, delimiter.to_string()));
-    }
+        let wanted: Vec<SpanStyle> = style_order()
+            .into_iter()
+            .filter(|style| {
+                spans
+                    .iter()
+                    .any(|(s, e, covered)| covered == style && *s <= start && *e >= end)
+            })
+            .collect();
 
-    for (offset, number) in footnotes {
-        let offset = snap_down(text, *offset);
-        markers.push((offset, 1, *number, format!("[^{number}]")));
-    }
-
-    markers.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-
-    let mut out = String::with_capacity(text.len() + markers.len() * 2);
-    let mut cursor = 0;
-    for (offset, _, _, marker) in markers {
-        if offset > cursor {
-            out.push_str(&text[cursor..offset]);
-            cursor = offset;
+        // Close from the inside out, but only what stopped covering the text.
+        // A style that still covers it but sits under one that just ended stays
+        // open and its run extends, rather than being reopened with a stack of
+        // adjacent asterisks that no parser can unpick.
+        while let Some(innermost) = open.last().cloned() {
+            if wanted.contains(&innermost) {
+                break;
+            }
+            out.push_str(delimiter(&innermost));
+            open.pop();
         }
-        out.push_str(&marker);
+        // A marker at a span edge belongs after the closing and before the
+        // opening delimiters, matching where the superscript renders.
+        for (_, number) in footnotes.iter().filter(|(offset, _)| *offset == start) {
+            out.push_str(&format!("[^{number}]"));
+        }
+        for style in &wanted {
+            if !open.contains(style) {
+                out.push_str(delimiter(style));
+                open.push(style.clone());
+            }
+        }
+        out.push_str(&text[start..end]);
     }
-    out.push_str(&text[cursor..]);
+    while let Some(style) = open.pop() {
+        out.push_str(delimiter(&style));
+    }
+    // A marker past the last glyph has no segment of its own to sit in.
+    for (_, number) in footnotes.iter().filter(|(offset, _)| *offset == text.len()) {
+        out.push_str(&format!("[^{number}]"));
+    }
     out
+}
+
+/// Opening order for the two emphasis styles: bold outside, italic inside, so
+/// a segment carrying both exports as `**a *b***`.
+fn style_order() -> [SpanStyle; 2] {
+    [SpanStyle::Bold, SpanStyle::Italic]
+}
+
+fn delimiter(style: &SpanStyle) -> &'static str {
+    match style {
+        SpanStyle::Bold => "**",
+        SpanStyle::Italic => "*",
+    }
+}
+
+/// Pull a snapped `(start, end)` range in past leading and trailing whitespace,
+/// so emphasis sits against glyphs; returns an empty range if nothing is left.
+fn trim_whitespace_edges(text: &str, mut start: usize, mut end: usize) -> (usize, usize) {
+    while start < end {
+        match text[start..end].chars().next() {
+            Some(c) if c.is_whitespace() => start += c.len_utf8(),
+            _ => break,
+        }
+    }
+    while end > start {
+        match text[start..end].chars().next_back() {
+            Some(c) if c.is_whitespace() => end -= c.len_utf8(),
+            _ => break,
+        }
+    }
+    (start, end)
 }
 
 /// Round `offset` up to the next UTF-8 char boundary, clamped to `text.len()`.
@@ -461,5 +550,84 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(to_markdown(&doc), "###### High\n");
+    }
+
+    #[test]
+    fn span_edges_are_trimmed_past_whitespace() {
+        // Selection styling often leaves a space inside the span; a delimiter
+        // hugging that space (`**Hello **world`) is read as literal asterisks.
+        let mut trailing = paragraph("Hello world");
+        trailing.spans = vec![Span {
+            start: 0,
+            end: 6, // covers "Hello "
+            style: SpanStyle::Bold,
+        }];
+        let mut leading = paragraph("Hello world");
+        leading.spans = vec![Span {
+            start: 5,
+            end: 11, // covers " world"
+            style: SpanStyle::Bold,
+        }];
+        let mut only_space = paragraph("Hello world");
+        only_space.spans = vec![Span {
+            start: 5,
+            end: 6, // covers " " only: nothing to emphasise
+            style: SpanStyle::Bold,
+        }];
+        let doc = document(vec![trailing, leading, only_space], Vec::new());
+        assert_eq!(
+            to_markdown(&doc),
+            "**Hello** world\n\nHello **world**\n\nHello world\n"
+        );
+    }
+
+    #[test]
+    fn empty_ordered_item_does_not_skip_a_number() {
+        // Enter at the end of a list item leaves an empty item behind; it must
+        // not consume a number (nor reset the run) that no line shows.
+        let doc = document(
+            vec![
+                block(BlockKind::ListItem { ordered: true }, "First"),
+                block(BlockKind::ListItem { ordered: true }, ""),
+                block(BlockKind::ListItem { ordered: true }, "Second"),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(to_markdown(&doc), "1. First\n\n2. Second\n");
+
+        // An emptied paragraph is likewise not allowed to reset the counter.
+        let doc = document(
+            vec![
+                block(BlockKind::ListItem { ordered: true }, "First"),
+                paragraph(""),
+                block(BlockKind::ListItem { ordered: true }, "Second"),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(to_markdown(&doc), "1. First\n\n2. Second\n");
+    }
+
+    #[test]
+    fn overlapping_spans_emit_nested_delimiters() {
+        // Italic 0..10 and bold 5..15 cross; emitting each span's delimiters
+        // independently would produce `*abcde**fghij*klmno**`, which CommonMark
+        // reads as literal asterisks.
+        let mut p = paragraph("abcdefghijklmnop");
+        p.spans = vec![
+            Span {
+                start: 0,
+                end: 10,
+                style: SpanStyle::Italic,
+            },
+            Span {
+                start: 5,
+                end: 15,
+                style: SpanStyle::Bold,
+            },
+        ];
+        assert_eq!(
+            to_markdown(&document(vec![p], Vec::new())),
+            "*abcde**fghijklmno***p\n"
+        );
     }
 }

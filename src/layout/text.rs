@@ -4,10 +4,13 @@ use cosmic_text::{
     Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
 };
 
-use crate::model::{Block, BlockId, BlockKind};
+use crate::model::{Block, BlockId, BlockKind, SpanStyle};
 
-/// Body face for every block; loaded by the caller into the `FontSystem`.
-const FONT_FAMILY: &str = "EB Garamond";
+/// Body face (paragraphs, list items); loaded by the caller into the
+/// `FontSystem`.
+const BODY_FAMILY: &str = "EB Garamond";
+/// Heading face; loaded by the caller into the `FontSystem`.
+const HEADING_FAMILY: &str = "Crimson Pro";
 
 /// Metrics and column widths for headless layout.
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +57,9 @@ pub struct BlockLayout {
 
 /// Lay out one block, shaping it with cosmic-text at the configured column
 /// width. Paragraphs are justified; headings and list items are left-aligned.
+/// Headings use [`HEADING_FAMILY`]; everything else uses [`BODY_FAMILY`].
+/// `block.spans` are applied as bold/italic runs on top of the block's base
+/// attributes.
 ///
 /// The returned [`BlockLayout`] owns the cosmic-text [`Buffer`], so callers can
 /// walk `buffer.layout_runs()` for glyphs (remembering that a glyph's `y` is
@@ -63,23 +69,35 @@ pub fn layout_block(
     block: &Block,
     config: &LayoutConfig,
 ) -> BlockLayout {
-    let (size, line_height, align) = match block.kind {
-        BlockKind::Paragraph => (config.body_size, config.body_line_height, Align::Justified),
+    let (family, size, line_height, align) = match block.kind {
+        BlockKind::Paragraph => (
+            BODY_FAMILY,
+            config.body_size,
+            config.body_line_height,
+            Align::Justified,
+        ),
         BlockKind::Heading { .. } => (
+            HEADING_FAMILY,
             config.heading_size,
             heading_line_height(config),
             Align::Left,
         ),
-        BlockKind::ListItem { .. } => (config.body_size, config.body_line_height, Align::Left),
+        BlockKind::ListItem { .. } => (
+            BODY_FAMILY,
+            config.body_size,
+            config.body_line_height,
+            Align::Left,
+        ),
     };
 
     let mut buffer = Buffer::new(font_system, Metrics::new(size, line_height));
     buffer.set_size(Some(config.body_width), None);
     let attrs = Attrs::new()
-        .family(Family::Name(FONT_FAMILY))
+        .family(Family::Name(family))
         .weight(Weight::NORMAL)
         .style(Style::Normal);
-    buffer.set_text(&block.text, &attrs, Shaping::Advanced, Some(align));
+    let spans = styled_spans(block, &attrs);
+    buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
     buffer.set_wrap(Wrap::Word);
     buffer.shape_until_scroll(font_system, false);
 
@@ -105,6 +123,56 @@ pub fn layout_block(
         lines,
         height,
     }
+}
+
+/// Split the block text into `(text, attrs)` runs at span boundaries, layering
+/// `block.spans` (Bold → `Weight::BOLD`, Italic → `Style::Italic`) over `base`.
+///
+/// Runs are produced in text order and concatenate to exactly `block.text`, so
+/// cosmic-text's offsets stay aligned with the block's byte offsets. Span
+/// boundaries that fall inside a UTF-8 sequence are ignored rather than
+/// panicking on a non-char-boundary slice.
+fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'a>)> {
+    let text = block.text.as_str();
+    if text.is_empty() || block.spans.is_empty() {
+        return vec![(text, base.clone())];
+    }
+
+    let mut bounds = Vec::with_capacity(block.spans.len() * 2 + 2);
+    bounds.push(0);
+    bounds.push(text.len());
+    for span in &block.spans {
+        for bound in [span.start, span.end] {
+            let bound = bound.min(text.len());
+            if text.is_char_boundary(bound) {
+                bounds.push(bound);
+            }
+        }
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    bounds
+        .windows(2)
+        .filter(|pair| pair[0] < pair[1])
+        .map(|pair| {
+            let (start, end) = (pair[0], pair[1]);
+            let covers = |style: SpanStyle| {
+                block
+                    .spans
+                    .iter()
+                    .any(|span| span.style == style && span.start <= start && span.end >= end)
+            };
+            let mut attrs = base.clone();
+            if covers(SpanStyle::Bold) {
+                attrs = attrs.weight(Weight::BOLD);
+            }
+            if covers(SpanStyle::Italic) {
+                attrs = attrs.style(Style::Italic);
+            }
+            (&text[start..end], attrs)
+        })
+        .collect()
 }
 
 /// Line height for headings, keeping the body's leading ratio so a heading
@@ -152,7 +220,7 @@ pub fn anchor_to_y(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::BlockKind;
+    use crate::model::{BlockKind, Span};
     use cosmic_text::{Family, FontSystem};
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -167,16 +235,38 @@ dance, on a page, of pen, eye and hand.";
             .join(name)
     }
 
-    fn load_eb_garamond(fs: &mut FontSystem) {
+    fn load_fonts(fs: &mut FontSystem) {
         for file in [
             "EBGaramond-Regular.otf",
             "EBGaramond-Bold.otf",
             "EBGaramond-Italic.otf",
+            "CrimsonPro-Regular.ttf",
         ] {
             fs.db_mut()
                 .load_font_file(font_path(file))
                 .unwrap_or_else(|e| panic!("load {file}: {e}"));
         }
+    }
+
+    /// Resolve a registered face by family/weight/style.
+    fn face(
+        fs: &FontSystem,
+        family: &str,
+        weight: Weight,
+        style: Style,
+    ) -> cosmic_text::fontdb::ID {
+        fs.db()
+            .query(&cosmic_text::fontdb::Query {
+                families: &[Family::Name(family)],
+                weight,
+                style,
+                ..Default::default()
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{family} ({weight:?}, {style:?}) is registered after loading the font files"
+                )
+            })
     }
 
     fn config() -> LayoutConfig {
@@ -212,7 +302,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn justified_lines_fill_body_width() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let block = paragraph(PARA);
         let config = config();
         let l = layout_block(&mut fs, &block, &config);
@@ -238,7 +328,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn anchor_to_y_finds_line() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let block = paragraph(PARA);
         let config = config();
         let l = layout_block(&mut fs, &block, &config);
@@ -256,7 +346,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn anchor_to_y_ignores_unknown_block() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let block = paragraph(PARA);
         let config = config();
         let l = layout_block(&mut fs, &block, &config);
@@ -267,7 +357,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn line_ranges_are_ordered_and_cover_text() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let block = paragraph(PARA);
         let config = config();
         let l = layout_block(&mut fs, &block, &config);
@@ -289,7 +379,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn body_text_shapes_with_eb_garamond() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let face = fs
             .db()
             .query(&cosmic_text::fontdb::Query {
@@ -309,9 +399,122 @@ dance, on a page, of pen, eye and hand.";
     }
 
     #[test]
+    fn heading_shapes_with_crimson_pro() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let crimson = face(&fs, "Crimson Pro", Weight::NORMAL, Style::Normal);
+        let garamond = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
+        assert_ne!(crimson, garamond, "headings and body must not share a face");
+
+        let block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Heading { level: 1 },
+            text: "On the Shape of Letters".to_string(),
+            spans: Vec::new(),
+        };
+        let l = layout_block(&mut fs, &block, &config());
+        let run = l.buffer.layout_runs().next().expect("one shaped run");
+        assert!(!run.glyphs.is_empty());
+        assert!(
+            run.glyphs.iter().all(|glyph| glyph.font_id == crimson),
+            "heading glyphs did not resolve to the Crimson Pro face"
+        );
+        assert!(
+            run.glyphs.iter().all(|glyph| glyph.font_id != garamond),
+            "heading glyphs fell back to EB Garamond"
+        );
+
+        // Body text keeps the EB Garamond face.
+        let body = paragraph("Garamond");
+        let l = layout_block(&mut fs, &body, &config());
+        let run = l.buffer.layout_runs().next().expect("one shaped run");
+        assert!(run.glyphs.iter().all(|glyph| glyph.font_id == garamond));
+    }
+
+    #[test]
+    fn bold_span_shapes_with_bold_weight() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let bold_face = face(&fs, "EB Garamond", Weight::BOLD, Style::Normal);
+        let regular_face = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
+
+        let mut block = paragraph("plain bold plain");
+        block.spans = vec![Span {
+            start: 6,
+            end: 10,
+            style: SpanStyle::Bold,
+        }];
+        let l = layout_block(&mut fs, &block, &config());
+        let run = l.buffer.layout_runs().next().expect("one shaped run");
+        assert!(!run.glyphs.is_empty());
+
+        let mut bold_glyphs = 0;
+        let mut normal_glyphs = 0;
+        for glyph in run.glyphs.iter() {
+            if glyph.start >= 6 && glyph.end <= 10 {
+                bold_glyphs += 1;
+                assert_eq!(
+                    glyph.font_weight,
+                    Weight::BOLD,
+                    "span glyph kept normal weight"
+                );
+                assert_eq!(
+                    glyph.font_id, bold_face,
+                    "bold span did not use the bold face"
+                );
+            } else {
+                normal_glyphs += 1;
+                assert_eq!(glyph.font_weight, Weight::NORMAL, "plain glyph became bold");
+                assert_eq!(glyph.font_id, regular_face);
+            }
+        }
+        assert!(bold_glyphs > 0, "no glyphs shaped inside the bold span");
+        assert!(normal_glyphs > 0, "no glyphs shaped outside the bold span");
+    }
+
+    #[test]
+    fn italic_span_shapes_with_italic_face() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let italic_face = face(&fs, "EB Garamond", Weight::NORMAL, Style::Italic);
+        let regular_face = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
+
+        let mut block = paragraph("plain italic plain");
+        block.spans = vec![Span {
+            start: 6,
+            end: 12,
+            style: SpanStyle::Italic,
+        }];
+        let l = layout_block(&mut fs, &block, &config());
+        let run = l.buffer.layout_runs().next().expect("one shaped run");
+        assert!(!run.glyphs.is_empty());
+
+        let mut italic_glyphs = 0;
+        let mut normal_glyphs = 0;
+        for glyph in run.glyphs.iter() {
+            if glyph.start >= 6 && glyph.end <= 12 {
+                italic_glyphs += 1;
+                assert_eq!(glyph.font_weight, Weight::NORMAL);
+                assert_eq!(
+                    glyph.font_id, italic_face,
+                    "italic span did not use the italic face"
+                );
+            } else {
+                normal_glyphs += 1;
+                assert_eq!(glyph.font_id, regular_face, "plain glyph became italic");
+            }
+        }
+        assert!(italic_glyphs > 0, "no glyphs shaped inside the italic span");
+        assert!(
+            normal_glyphs > 0,
+            "no glyphs shaped outside the italic span"
+        );
+    }
+
+    #[test]
     fn empty_block_layouts_without_panic() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let block = paragraph("");
         let config = config();
         let id = block.id;
@@ -324,7 +527,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn heading_produces_nonzero_height() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let block = Block {
             id: Uuid::new_v4(),
             kind: BlockKind::Heading { level: 1 },
@@ -339,7 +542,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn list_item_produces_nonzero_height() {
         let mut fs = FontSystem::new();
-        load_eb_garamond(&mut fs);
+        load_fonts(&mut fs);
         let block = Block {
             id: Uuid::new_v4(),
             kind: BlockKind::ListItem { ordered: true },

@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -36,6 +37,12 @@ pub enum DbError {
     /// Kept distinct from [`DbError::Sqlite`] because it is not a database
     /// failure: the row is there, its contents are nonsense.
     Meta(String),
+    /// No snapshot with that id exists.
+    ///
+    /// Distinct from [`DbError::NoDocument`]: a fresh database is a legitimate
+    /// first launch, whereas restoring a missing snapshot means the caller
+    /// asked for something that is gone.
+    SnapshotNotFound(i64),
 }
 
 /// Convenience alias for [`DbError`]; kept for interface compatibility.
@@ -59,6 +66,7 @@ impl fmt::Display for DbError {
                 write!(f, "failed to enable WAL journal mode (got {mode:?})")
             }
             DbError::Meta(value) => write!(f, "unreadable meta value: {value}"),
+            DbError::SnapshotNotFound(id) => write!(f, "no snapshot with id {id}"),
         }
     }
 }
@@ -71,7 +79,8 @@ impl std::error::Error for DbError {
             DbError::NoDocument
             | DbError::SchemaTooNew { .. }
             | DbError::JournalMode(_)
-            | DbError::Meta(_) => None,
+            | DbError::Meta(_)
+            | DbError::SnapshotNotFound(_) => None,
         }
     }
 }
@@ -90,15 +99,20 @@ impl From<serde_json::Error> for DbError {
 
 /// Schema version recorded in `PRAGMA user_version`.
 ///
-/// The `ops` table was added within version 1: it is created with
-/// `CREATE TABLE IF NOT EXISTS` on every open, so a database written by the
-/// pre-ops build gains it in place without a version bump or migration.
+/// The `ops` and `snapshots` tables were added within version 1: they are
+/// created with `CREATE TABLE IF NOT EXISTS` on every open, so a database
+/// written by an older build gains them in place without a version bump or
+/// migration.
 const SCHEMA_VERSION: i64 = 1;
 
 /// The whole document lives in the single row `id = 1`; every edit that
 /// produced it is appended to `ops`. `meta` holds the undo cursor: the number
 /// of ops in the log that are applied to the head document (`0..=n`). Head and
 /// cursor are always written in the same transaction, so they cannot disagree.
+///
+/// `snapshots` holds complete point-in-time copies of the document as JSON,
+/// independent of both the head row and the op log: restoring one never
+/// touches either, and deleting ops never shortens a snapshot.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS documents (
     id   INTEGER PRIMARY KEY CHECK (id = 1),
@@ -111,10 +125,28 @@ CREATE TABLE IF NOT EXISTS ops (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS snapshots (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER,
+    label     TEXT,
+    json      TEXT
 )";
 
 /// Key under which the applied-op count is stored in `meta`.
 const UNDO_CURSOR_KEY: &str = "undo_cursor";
+
+/// Metadata for one stored snapshot: enough to list snapshots without loading
+/// their (potentially large) document JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotMeta {
+    /// Row id; pass it to [`Db::restore_snapshot`].
+    pub id: i64,
+    /// Unix timestamp (seconds) of when the snapshot was taken.
+    pub timestamp: i64,
+    /// Optional human-readable label, e.g. a version name.
+    pub label: Option<String>,
+}
 
 /// A handle to the document database.
 pub struct Db {
@@ -268,6 +300,76 @@ impl Db {
         tx.commit()?;
         Ok(())
     }
+
+    /// Stores a complete copy of `doc` as a point-in-time snapshot and returns
+    /// its id.
+    ///
+    /// The snapshot is independent of the head document and the op log: later
+    /// saves neither change it nor are changed by it, and it survives undo,
+    /// redo and op-log truncation. `doc` is snapshotted as given, so callers
+    /// capture the version they actually mean rather than whatever is stored.
+    pub fn create_snapshot(&mut self, doc: &Document, label: Option<&str>) -> Result<i64, DbError> {
+        let json = serde_json::to_string(doc)?;
+        self.conn.execute(
+            "INSERT INTO snapshots (timestamp, label, json) VALUES (?1, ?2, ?3)",
+            params![now_unix(), label, json],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Lists stored snapshots newest first, without loading their documents.
+    pub fn list_snapshots(&self) -> Result<Vec<SnapshotMeta>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, timestamp, label FROM snapshots ORDER BY timestamp DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SnapshotMeta {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                label: row.get(2)?,
+            })
+        })?;
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row?);
+        }
+        Ok(snapshots)
+    }
+
+    /// Reads snapshot `id` back as a [`Document`].
+    ///
+    /// This is a pure read: the head document and op log are not modified, so
+    /// restoring is `create_snapshot`'s inverse only once the caller saves the
+    /// returned document (e.g. via [`Db::save_document`] or
+    /// [`Db::save_state`]).
+    ///
+    /// Returns [`DbError::SnapshotNotFound`] when no such snapshot exists.
+    pub fn restore_snapshot(&self, id: i64) -> Result<Document, DbError> {
+        let json: String = self
+            .conn
+            .query_row(
+                "SELECT json FROM snapshots WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => DbError::SnapshotNotFound(id),
+                other => DbError::Sqlite(other),
+            })?;
+        let doc = serde_json::from_str(&json)?;
+        Ok(doc)
+    }
+}
+
+/// Current time as a Unix timestamp in whole seconds.
+///
+/// A clock before the epoch is treated as the epoch rather than an error:
+/// snapshots stay ordered by row id in that case (see [`Db::list_snapshots`]).
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Reads the undo cursor, defaulting to `0` when no row has been written.
@@ -651,6 +753,112 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].1, replacement);
         assert_eq!(db.cursor().unwrap(), 1);
+    }
+
+    /// A snapshot is a point-in-time copy: restoring it yields the document
+    /// exactly as it was when the snapshot was taken, no matter what was saved
+    /// afterwards.
+    #[test]
+    fn snapshot_then_edit_then_restore() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let doc_v1 = sample_document();
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.title = "Edited".to_string();
+        doc_v2.blocks[0].text = "hello again".to_string();
+
+        db.save_document(&doc_v1).unwrap();
+        let id = db.create_snapshot(&doc_v1, Some("v1")).unwrap();
+        db.save_document(&doc_v2).unwrap();
+        assert_eq!(db.load_document().unwrap(), doc_v2);
+
+        assert_eq!(db.restore_snapshot(id).unwrap(), doc_v1);
+        // Restoring is a read: the head document only changes when the caller
+        // saves the restored copy.
+        assert_eq!(db.load_document().unwrap(), doc_v2);
+    }
+
+    #[test]
+    fn list_snapshots_returns_meta() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let before = now_unix();
+        let mut doc = sample_document();
+        let first = db.create_snapshot(&doc, Some("v1")).unwrap();
+        doc.title = "Second".to_string();
+        let second = db.create_snapshot(&doc, None).unwrap();
+        let after = now_unix();
+
+        let snaps = db.list_snapshots().unwrap();
+        assert_eq!(snaps.len(), 2);
+        // Newest first.
+        assert_eq!(snaps[0].id, second);
+        assert_eq!(snaps[0].label, None);
+        assert_eq!(snaps[1].id, first);
+        assert_eq!(snaps[1].label.as_deref(), Some("v1"));
+        for snap in &snaps {
+            assert!(
+                snap.timestamp >= before && snap.timestamp <= after,
+                "timestamp {} outside [{before}, {after}]",
+                snap.timestamp
+            );
+        }
+    }
+
+    #[test]
+    fn snapshots_survive_reopen() {
+        let path = temp_db_path();
+        let doc = sample_document();
+        let id = {
+            let mut db = Db::open(&path).unwrap();
+            db.save_document(&doc).unwrap();
+            db.create_snapshot(&doc, Some("before restart")).unwrap()
+        };
+
+        let mut db = Db::open(&path).unwrap();
+        let snaps = db.list_snapshots().unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].id, id);
+        assert_eq!(snaps[0].label.as_deref(), Some("before restart"));
+        assert_eq!(db.restore_snapshot(id).unwrap(), doc);
+    }
+
+    #[test]
+    fn list_snapshots_is_empty_on_fresh_database() {
+        let path = temp_db_path();
+        let db = Db::open(&path).unwrap();
+        assert!(db.list_snapshots().unwrap().is_empty());
+    }
+
+    /// Restoring an id that does not exist is reported as such, not as a
+    /// corrupt document.
+    #[test]
+    fn restore_unknown_snapshot_errors() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&sample_document()).unwrap();
+        let id = db.create_snapshot(&sample_document(), None).unwrap();
+
+        match db.restore_snapshot(id + 1) {
+            Err(DbError::SnapshotNotFound(missing)) => assert_eq!(missing, id + 1),
+            other => panic!("expected DbError::SnapshotNotFound, got {other:?}"),
+        }
+    }
+
+    /// A snapshot stays independent of the head document: further saves change
+    /// nothing that was already captured, and each snapshot is its own row.
+    #[test]
+    fn snapshots_are_independent_of_later_saves() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let mut doc = sample_document();
+        let original = doc.clone();
+        let first = db.create_snapshot(&doc, None).unwrap();
+        for i in 0..3 {
+            doc.title = format!("rev {i}");
+            db.save_document(&doc).unwrap();
+        }
+        assert_eq!(db.restore_snapshot(first).unwrap(), original);
     }
 
     /// Atomicity: a failed `record_edit` must leave head, log and cursor all

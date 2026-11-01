@@ -74,6 +74,22 @@ pub enum Op {
         old: String,
         new: String,
     },
+    /// A group of ops applied in order as **one** history step.
+    ///
+    /// A command that needs more than one primitive mutation — splitting a
+    /// block, merging two, deleting a selection that spans blocks — builds its
+    /// primitives in order and wraps them here, so the op log still records one
+    /// entry per command and one undo puts the document back.
+    ///
+    /// The payload rules are unchanged: each member is built from the document
+    /// as it will be when that member applies (the [`Op`] constructors do
+    /// this), and [`apply`] still validates every payload. [`invert`] reverses
+    /// the members and inverts each; [`apply_inverse`] undoes them in reverse
+    /// order so a member's removal payload is re-attached before the member
+    /// before it needs the document back.
+    Batch {
+        ops: Vec<Op>,
+    },
 }
 
 impl Op {
@@ -201,6 +217,11 @@ pub fn invert(op: &Op) -> Op {
             old: new.clone(),
             new: old.clone(),
         },
+        // Reversing the members is what makes a batch undo in the only order
+        // that works: undo something created after the thing that created it.
+        Op::Batch { ops } => Op::Batch {
+            ops: ops.iter().rev().map(invert).collect(),
+        },
     }
 }
 
@@ -218,6 +239,15 @@ pub fn invert(op: &Op) -> Op {
 ///
 /// Straddling notes are not fully restored — see [`crate::edit::Editor::undo`].
 pub fn apply_inverse(doc: &mut Document, op: &Op) {
+    // A batch is undone member by member in reverse, each through
+    // `apply_inverse`, so *every* removal payload is re-attached — flattening
+    // it through `invert` first would lose them.
+    if let Op::Batch { ops } = op {
+        for member in ops.iter().rev() {
+            apply_inverse(doc, member);
+        }
+        return;
+    }
     apply(doc, &invert(op));
     let restore: &[Annotation] = match op {
         Op::DeleteBlock { annotations, .. } => annotations,
@@ -337,6 +367,11 @@ pub fn apply(doc: &mut Document, op: &Op) {
             assert_eq!(&doc.title, old, "SetTitle payload does not match the document");
             doc.title = new.clone();
         }
+        Op::Batch { ops } => {
+            for op in ops {
+                apply(doc, op);
+            }
+        }
     }
 }
 
@@ -354,6 +389,8 @@ pub fn apply(doc: &mut Document, op: &Op) {
 /// - `SetBlockKind`: untouched — it has no way to express "missing", so an
 ///   incorrect `old_kind` is a hard error rather than a silent rewrite. Build
 ///   it with [`Op::set_block_kind`].
+/// - `Batch`: each member is normalized in turn against the same document the
+///   batch was built from (the `Op` constructors already saw that state).
 pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
     match op {
         Op::DeleteBlock {
@@ -422,6 +459,11 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                 removed,
             }
         }
+        // Members are normalized against the same (pre-batch) document they
+        // were built from — the state every constructor saw.
+        Op::Batch { ops } => Op::Batch {
+            ops: ops.into_iter().map(|op| normalize(doc, op)).collect(),
+        },
         other => other,
     }
 }
@@ -1075,5 +1117,145 @@ mod tests {
             let json = serde_json::to_string(&op).unwrap();
             assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), op, "json: {json}");
         }
+    }
+
+    /// A batch applies its members in order, so a delete followed by an append
+    /// leaves one block holding both texts and the note re-anchored over them —
+    /// the shape `Editor::merge_with_next` builds.
+    fn merge_shaped_batch(d: &Document) -> (Block, Annotation, Annotation, Op) {
+        let first = d.blocks[0].id;
+        let second = d.blocks[1].clone();
+        let original = d.annotations[0].clone();
+        let moved = Annotation {
+            id: original.id,
+            kind: original.kind.clone(),
+            anchor: Anchor {
+                block_id: first,
+                start: d.blocks[0].text.len(),
+                end: d.blocks[0].text.len() + second.text.len(),
+            },
+            body: original.body.clone(),
+        };
+        let batch = Op::Batch {
+            ops: vec![
+                Op::delete_block(d, 1),
+                Op::InsertText {
+                    block_id: first,
+                    offset: d.blocks[0].text.len(),
+                    text: second.text.clone(),
+                },
+                Op::AddAnnotation {
+                    annotation: moved.clone(),
+                },
+            ],
+        };
+        (second, original, moved, batch)
+    }
+
+    #[test]
+    fn batch_applies_members_in_order() {
+        let mut d = doc("one");
+        d.blocks.push(Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "two".into(),
+            spans: Vec::new(),
+        });
+        d.annotations.push(note(d.blocks[1].id, 0, 3));
+        let (_second, _original, moved, batch) = merge_shaped_batch(&d);
+
+        apply(&mut d, &batch);
+        assert_eq!(d.blocks.len(), 1);
+        assert_eq!(d.blocks[0].text, "onetwo");
+        assert_eq!(d.annotations, vec![moved]);
+    }
+
+    #[test]
+    fn apply_inverse_of_a_batch_restores_every_members_payload() {
+        let mut d = doc("one");
+        d.blocks.push(Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "two".into(),
+            spans: Vec::new(),
+        });
+        d.annotations.push(note(d.blocks[1].id, 0, 3));
+        let before = d.clone();
+        let (second, original, _moved, batch) = merge_shaped_batch(&d);
+
+        apply(&mut d, &batch);
+        apply_inverse(&mut d, &batch);
+
+        assert_eq!(d.blocks.len(), 2);
+        assert_eq!(d.blocks[0].text, "one");
+        assert_eq!(d.blocks[1], second);
+        assert_eq!(
+            d.annotations,
+            vec![original],
+            "the note comes back where it was"
+        );
+        assert_eq!(d, before, "undo restores the exact prior document");
+
+        // Redo: the batch is re-applicable after its undo.
+        apply(&mut d, &batch);
+        assert_eq!(d.blocks.len(), 1);
+        assert_eq!(d.blocks[0].text, "onetwo");
+    }
+
+    #[test]
+    fn invert_batch_reverses_and_inverts_each_member() {
+        let batch = Op::Batch {
+            ops: vec![
+                Op::InsertText {
+                    block_id: Uuid::new_v4(),
+                    offset: 0,
+                    text: "ab".into(),
+                },
+                Op::InsertBlock {
+                    index: 0,
+                    block: Block {
+                        id: Uuid::new_v4(),
+                        kind: BlockKind::Paragraph,
+                        text: "b".into(),
+                        spans: Vec::new(),
+                    },
+                },
+            ],
+        };
+
+        match invert(&batch) {
+            Op::Batch { ops } => {
+                assert_eq!(ops.len(), 2);
+                assert!(
+                    matches!(ops[0], Op::DeleteBlock { .. }),
+                    "the member applied last is inverted first"
+                );
+                assert!(matches!(ops[1], Op::DeleteText { .. }));
+            }
+            other => panic!("expected a batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_survives_serde() {
+        let op = Op::Batch {
+            ops: vec![Op::InsertText {
+                block_id: Uuid::new_v4(),
+                offset: 0,
+                text: "x".into(),
+            }],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), op);
+    }
+
+    #[test]
+    fn empty_batch_is_a_no_op() {
+        let mut d = doc("text");
+        let before = d.clone();
+        apply(&mut d, &Op::Batch { ops: Vec::new() });
+        assert_eq!(d, before);
+        apply_inverse(&mut d, &Op::Batch { ops: Vec::new() });
+        assert_eq!(d, before);
     }
 }

@@ -568,6 +568,42 @@ impl Editor {
         Some((op, closer_start - marker_len))
     }
 
+    /// Applies a markdown link the caret just closed (see [`markdown_link`]):
+    /// strips the `[`…`](url)` wrapping, leaving the anchor text with a link
+    /// span over it, in one atomic op. Returns the applied op and the caret's
+    /// new offset, or `None` when the caret has not just closed a link.
+    pub fn apply_markdown_link(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
+        let (open_bracket, close_bracket, url) = {
+            let block = self.block(cursor.block_id).ok()?;
+            markdown_link(&block.text, cursor.offset)?
+        };
+        let close_paren = cursor.offset - 1;
+        // Delete `](url)` then the leading `[`: the anchor shifts left by one.
+        let rebase = |span: &Span| {
+            shift_span_on_delete(span, close_bracket, close_paren + 1)
+                .and_then(|span| shift_span_on_delete(&span, open_bracket, open_bracket + 1))
+        };
+        let spans: Vec<Span> = self
+            .block(cursor.block_id)
+            .ok()?
+            .spans
+            .iter()
+            .filter_map(rebase)
+            .chain(std::iter::once(Span {
+                start: open_bracket,
+                end: close_bracket - 1,
+                style: SpanStyle::Link { url },
+            }))
+            .collect();
+        let ops = vec![
+            Op::delete_text(&self.doc, cursor.block_id, close_bracket, close_paren + 1),
+            Op::delete_text(&self.doc, cursor.block_id, open_bracket, open_bracket + 1),
+            Op::set_spans(&self.doc, cursor.block_id, spans),
+        ];
+        let op = self.apply_edit(Op::Batch { ops });
+        Some((op, close_bracket - 1))
+    }
+
     /// Anchors a new note of `kind` over `anchor`, returning the op that was
     /// applied. The note's id is fresh, so the returned op can be persisted as
     /// is.
@@ -817,6 +853,47 @@ fn shift_span_on_delete(span: &Span, start: usize, end: usize) -> Option<Span> {
     } else {
         None
     }
+}
+
+/// The markdown link a just-typed closing `)` completes, if any.
+///
+/// Recognises `[anchor](url)` ending at `caret` (the offset just past the `)`),
+/// returning `(open_bracket, close_bracket, url)`: the anchor text is
+/// `text[open_bracket + 1..close_bracket]`. The anchor and the URL must both be
+/// non-empty.
+fn markdown_link(text: &str, caret: usize) -> Option<(usize, usize, String)> {
+    let bytes = text.as_bytes();
+    let close_paren = caret.checked_sub(1)?;
+    if bytes.get(close_paren) != Some(&b')') {
+        return None;
+    }
+    // Find the `](` that opens the URL, scanning back from the closing paren.
+    let mut close_bracket = None;
+    for i in (1..close_paren).rev() {
+        if bytes[i] == b'(' && bytes[i - 1] == b']' {
+            close_bracket = Some(i - 1);
+            break;
+        }
+    }
+    let close_bracket = close_bracket?;
+    let open_paren = close_bracket + 1;
+    // Find the `[` that opens the anchor.
+    let mut open_bracket = None;
+    for i in (0..close_bracket).rev() {
+        if bytes[i] == b'[' {
+            open_bracket = Some(i);
+            break;
+        }
+    }
+    let open_bracket = open_bracket?;
+    if open_bracket + 1 >= close_bracket {
+        return None; // empty anchor
+    }
+    let url = text[open_paren + 1..close_paren].to_string();
+    if url.is_empty() {
+        return None;
+    }
+    Some((open_bracket, close_bracket, url))
 }
 
 #[cfg(test)]
@@ -1631,6 +1708,55 @@ mod tests {
 
         // The returned op round-trips through its inverse too.
         let _ = op;
+    }
+
+    #[test]
+    fn markdown_link_detects_anchor_url_pairs() {
+        assert_eq!(
+            markdown_link("[text](http://x.com)", 20),
+            Some((0, 5, "http://x.com".to_string()))
+        );
+        // Mid-line.
+        assert_eq!(
+            markdown_link("see [text](http://x.com) here", 24),
+            Some((4, 9, "http://x.com".to_string()))
+        );
+        // No closing paren, empty anchor, or empty URL: nothing.
+        assert_eq!(markdown_link("[text](http://x.com", 19), None);
+        assert_eq!(markdown_link("[](http://x.com)", 15), None);
+        assert_eq!(markdown_link("[text]()", 8), None);
+        assert_eq!(markdown_link("plain text", 10), None);
+    }
+
+    #[test]
+    fn apply_markdown_link_replaces_with_a_link_span() {
+        let doc = doc_with("[text](http://x.com)");
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+
+        let (_, offset) = e
+            .apply_markdown_link(&Cursor {
+                block_id: id,
+                offset: 20,
+            })
+            .expect("a closing paren to apply");
+        assert_eq!(offset, 4, "caret lands after the anchor");
+        assert_eq!(e.document().blocks[0].text, "text");
+        assert_eq!(
+            e.document().blocks[0].spans,
+            vec![Span {
+                start: 0,
+                end: 4,
+                style: SpanStyle::Link {
+                    url: "http://x.com".into(),
+                },
+            }]
+        );
+        assert_eq!(e.history(), (1, 0), "one undo step");
+
+        e.undo().expect("the link is one undo step");
+        assert_eq!(e.document().blocks[0].text, "[text](http://x.com)");
+        assert!(e.document().blocks[0].spans.is_empty());
     }
 
     #[test]

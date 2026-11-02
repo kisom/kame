@@ -215,14 +215,19 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
         if start >= end {
             continue;
         }
-        let wanted: Vec<SpanStyle> = style_order()
-            .into_iter()
-            .filter(|style| {
-                spans
-                    .iter()
-                    .any(|(s, e, covered)| covered == style && *s <= start && *e >= end)
-            })
-            .collect();
+        // A link wraps everything inside it, so it goes first (outermost);
+        // emphasis nests under it in `style_order()`.
+        let mut wanted: Vec<SpanStyle> = Vec::new();
+        if let Some((_, _, style)) = spans.iter().find(|(s, e, style)| {
+            matches!(style, SpanStyle::Link { .. }) && *s <= start && *e >= end
+        }) {
+            wanted.push(style.clone());
+        }
+        wanted.extend(style_order().into_iter().filter(|style| {
+            spans
+                .iter()
+                .any(|(s, e, covered)| covered == style && *s <= start && *e >= end)
+        }));
 
         // Close from the inside out, but only what stopped covering the text.
         // A style that still covers it but sits under one that just ended stays
@@ -232,7 +237,7 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
             if wanted.contains(&innermost) {
                 break;
             }
-            out.push_str(delimiter(&innermost));
+            out.push_str(&close_delimiter(&innermost));
             open.pop();
         }
         // A marker at a span edge belongs after the closing and before the
@@ -242,14 +247,14 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
         }
         for style in &wanted {
             if !open.contains(style) {
-                out.push_str(delimiter(style));
+                out.push_str(&open_delimiter(style));
                 open.push(style.clone());
             }
         }
         push_escaped(&mut out, &text[start..end]);
     }
     while let Some(style) = open.pop() {
-        out.push_str(delimiter(&style));
+        out.push_str(&close_delimiter(&style));
     }
     // A marker past the last glyph has no segment of its own to sit in.
     for (_, number) in footnotes.iter().filter(|(offset, _)| *offset == text.len()) {
@@ -302,15 +307,27 @@ fn escape_block_start(rendered: &mut String) {
 }
 
 /// Opening order for the two emphasis styles: bold outside, italic inside, so
-/// a segment carrying both exports as `**a *b***`.
+/// a segment carrying both exports as `**a *b***`. A link is not listed here:
+/// it is pushed first and therefore sits outermost, wrapping any emphasis.
 fn style_order() -> [SpanStyle; 2] {
     [SpanStyle::Bold, SpanStyle::Italic]
 }
 
-fn delimiter(style: &SpanStyle) -> &'static str {
+/// The marker that opens `style`'s run.
+fn open_delimiter(style: &SpanStyle) -> String {
     match style {
-        SpanStyle::Bold => "**",
-        SpanStyle::Italic => "*",
+        SpanStyle::Bold => "**".to_string(),
+        SpanStyle::Italic => "*".to_string(),
+        SpanStyle::Link { .. } => "[".to_string(),
+    }
+}
+
+/// The marker that closes `style`'s run. A link is asymmetric: `[...](url)`.
+fn close_delimiter(style: &SpanStyle) -> String {
+    match style {
+        SpanStyle::Bold => "**".to_string(),
+        SpanStyle::Italic => "*".to_string(),
+        SpanStyle::Link { url } => format!("]({url})"),
     }
 }
 
@@ -477,6 +494,20 @@ mod tests {
         );
         let md = to_markdown(&doc);
         assert_eq!(md, "Before.\n\n![](/img/a.png)\n\nAfter.\n");
+    }
+
+    #[test]
+    fn links_export_as_markdown_links() {
+        let mut p = paragraph("click here");
+        p.spans = vec![Span {
+            start: 0,
+            end: 10,
+            style: SpanStyle::Link {
+                url: "http://x.com".into(),
+            },
+        }];
+        let md = to_markdown(&document(vec![p], Vec::new()));
+        assert_eq!(md, "[click here](http://x.com)\n");
     }
 
     #[test]

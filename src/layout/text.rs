@@ -283,7 +283,14 @@ fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'
             if covers(SpanStyle::Italic) {
                 attrs = attrs.style(Style::Italic);
             }
-            if links.iter().any(|(ls, le)| *ls <= start && end <= *le) {
+            // A stored hyperlink or a bare URL both read as a link, coloured the
+            // same way so the two forms are indistinguishable on the page.
+            let is_stored_link = block.spans.iter().any(|span| {
+                matches!(span.style, SpanStyle::Link { .. })
+                    && span.start <= start
+                    && span.end >= end
+            });
+            if is_stored_link || links.iter().any(|(ls, le)| *ls <= start && end <= *le) {
                 attrs = attrs.color(LINK_COLOR);
             }
             (&text[start..end], attrs)
@@ -626,6 +633,41 @@ dance, on a page, of pen, eye and hand.";
             normal_glyphs > 0,
             "no glyphs shaped outside the italic span"
         );
+    }
+
+    #[test]
+    fn link_span_colours_its_glyphs() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+
+        let mut block = paragraph("a link here");
+        block.spans = vec![Span {
+            start: 2,
+            end: 6,
+            style: SpanStyle::Link {
+                url: "http://x.com".into(),
+            },
+        }];
+        let l = layout_block(&mut fs, &block, &config());
+        let run = l.buffer.layout_runs().next().expect("one shaped run");
+
+        let mut linked = 0;
+        for glyph in run.glyphs.iter() {
+            if glyph.start >= 2 && glyph.end <= 6 {
+                linked += 1;
+                assert_eq!(
+                    glyph.color_opt,
+                    Some(LINK_COLOR),
+                    "link glyph did not carry the link colour"
+                );
+            } else {
+                assert!(
+                    glyph.color_opt.is_none(),
+                    "plain glyph took the link colour"
+                );
+            }
+        }
+        assert!(linked > 0, "no glyphs shaped inside the link span");
     }
 
     #[test]

@@ -28,6 +28,7 @@ use crate::layout::{
 };
 use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
+    SpanStyle,
 };
 use crate::render::egui_render::{
     caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word, offset_at,
@@ -1321,6 +1322,20 @@ impl Session {
         }
     }
 
+    /// Applies a markdown link the caret just closed (typed `[text](url)`): the
+    /// wrapping is stripped, the anchor text takes a link span, and the caret
+    /// lands after the anchor.
+    fn apply_markdown_link(&mut self) {
+        let caret = self.valid_caret();
+        if let Some((op, offset)) = self.editor.apply_markdown_link(&caret) {
+            self.record(&op);
+            self.caret = Cursor {
+                block_id: caret.block_id,
+                offset,
+            };
+        }
+    }
+
     /// Deletes `selection` and parks the caret at `caret_after`.
     fn delete_range(&mut self, selection: Selection, caret_after: Cursor) -> bool {
         let result = self.editor.delete_selection(&selection);
@@ -1915,8 +1930,22 @@ fn hit_test(
 }
 
 /// The URL under `cursor`, when the caret sits inside a link in that block.
+/// Stored `[text](url)` spans take precedence; a bare URL is the fallback.
 fn url_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
     let block = blocks.iter().find(|block| block.id == cursor.block_id)?;
+    if let Some(url) = block
+        .spans
+        .iter()
+        .filter_map(|span| match &span.style {
+            SpanStyle::Link { url } if span.start <= cursor.offset && cursor.offset < span.end => {
+                Some(url.clone())
+            }
+            _ => None,
+        })
+        .next()
+    {
+        return Some(url);
+    }
     link_ranges(&block.text)
         .into_iter()
         .find(|(start, end)| cursor.offset >= *start && cursor.offset < *end)
@@ -2653,6 +2682,7 @@ impl KameApp {
                     if self.session.insert(&text) {
                         self.session.apply_markdown_shortcut();
                         self.session.apply_inline_markdown();
+                        self.session.apply_markdown_link();
                     }
                 }
                 Command::Paste(text) => {
@@ -3807,6 +3837,7 @@ impl KameApp {
                             ("-  *  1.", "list item, typed at the start of a line"),
                             (">", "block quote, typed at the start of a line"),
                             ("*x*  **x**", "italic / bold emphasis, typed around a word"),
+                            ("[text](url)", "a hyperlink, typed around the anchor text"),
                             ("Ctrl +  Ctrl -", "larger / smaller type"),
                             ("Ctrl-Shift-D", "dark mode"),
                             ("F11", "fullscreen"),

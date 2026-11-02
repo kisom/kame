@@ -26,6 +26,10 @@ pub enum BlockKind {
 pub enum SpanStyle {
     Bold,
     Italic,
+    /// A hyperlink: the span covers the anchor text and `url` is the target.
+    Link {
+        url: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

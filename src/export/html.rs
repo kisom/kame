@@ -681,16 +681,25 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
                 wanted.push(match style {
                     SpanStyle::Bold => InlineTag::Bold,
                     SpanStyle::Italic => InlineTag::Italic,
+                    SpanStyle::Link { .. } => unreachable!("links are handled separately"),
                 });
             }
         }
         // A segment inside a URL wraps in an anchor, innermost so emphasis can
-        // still apply inside the link text.
+        // still apply inside the link text. Both bare URLs and stored link
+        // spans take an anchor.
         for (link_start, link_end) in &links {
             if *link_start <= start && end <= *link_end {
                 wanted.push(InlineTag::Link {
                     url: text[*link_start..*link_end].to_string(),
                 });
+            }
+        }
+        for (link_start, link_end, style) in &spans {
+            if let SpanStyle::Link { url } = style {
+                if *link_start <= start && end <= *link_end {
+                    wanted.push(InlineTag::Link { url: url.clone() });
+                }
             }
         }
 
@@ -954,6 +963,23 @@ mod tests {
         assert!(
             html.contains("<a href=\"https://example.com\">https://example.com</a>"),
             "a URL becomes a clickable anchor: {html}"
+        );
+    }
+
+    #[test]
+    fn stored_links_export_as_anchored_links() {
+        let mut p = paragraph("click here");
+        p.spans = vec![Span {
+            start: 0,
+            end: 10,
+            style: SpanStyle::Link {
+                url: "http://x.com".into(),
+            },
+        }];
+        let html = to_html(&document(vec![p], Vec::new()));
+        assert!(
+            html.contains("<a href=\"http://x.com\">click here</a>"),
+            "a stored link exports its anchor and url: {html}"
         );
     }
 

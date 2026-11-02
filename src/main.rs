@@ -848,6 +848,56 @@ impl NoticeTracker {
     }
 }
 
+/// One menu on the menu bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarMenu {
+    File,
+    Annotate,
+    View,
+    Help,
+}
+
+/// Takes an Alt+letter menu chord out of `events`, with the text egui-winit sends
+/// for the same keypress, which would otherwise land in the prose.
+///
+/// There are none on macOS, where Option plus a letter types a character.
+fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> {
+    if mac {
+        return None;
+    }
+    let (index, menu, letter) = events.iter().enumerate().find_map(|(index, event)| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if !modifiers.alt || modifiers.ctrl || modifiers.shift || modifiers.command {
+            return None;
+        }
+        let (menu, letter) = match key {
+            egui::Key::F => (BarMenu::File, "f"),
+            egui::Key::A => (BarMenu::Annotate, "a"),
+            egui::Key::V => (BarMenu::View, "v"),
+            egui::Key::H => (BarMenu::Help, "h"),
+            _ => return None,
+        };
+        Some((index, menu, letter))
+    })?;
+    events.remove(index);
+    let text = events[index..].iter().position(
+        |event| matches!(event, egui::Event::Text(text) if text.eq_ignore_ascii_case(letter)),
+    );
+    if let Some(offset) = text {
+        events.remove(index + offset);
+    }
+    Some(menu)
+}
+
 /// Something chosen from the menu bar, applied once the panel closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
@@ -2642,6 +2692,8 @@ struct KameApp {
     /// next one. Failures are reported through `Session::last_error` instead.
     notice: Option<String>,
     notice_tracker: NoticeTracker,
+    /// A menu chord waiting for the menu bar to be drawn.
+    pending_menu: Option<BarMenu>,
     /// Keeps a failed write from being discarded by a stray close, while still
     /// letting the author quit on a second request.
     close: CloseGuard,
@@ -2697,6 +2749,7 @@ impl KameApp {
             restore_picker: None,
             notice,
             notice_tracker: NoticeTracker::default(),
+            pending_menu: None,
             close: CloseGuard::default(),
             close_flow: CloseFlow::default(),
             find: None,
@@ -3039,6 +3092,11 @@ impl KameApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        // Read first, so the chord's text is gone before anything can type it.
+        if !self.dialog_open() && !self.modes.hide_chrome {
+            self.pending_menu = ctx
+                .input_mut(|input| take_menu_chord(&mut input.events, cfg!(target_os = "macos")));
+        }
         // Modes and file commands are window-level, so they are read before the
         // note field's focus check: a chord should work whether the prose or a
         // note has the keyboard.
@@ -3181,6 +3239,10 @@ impl KameApp {
         // A file dialog owns the keyboard while it is up: its label field would
         // otherwise also type into the document behind it.
         if self.dialog_open() {
+            return;
+        }
+        // So does an open menu, whose arrow keys and Enter choose an item.
+        if egui::Popup::is_any_open(ctx) {
             return;
         }
         // While the popover's body field has focus the keystrokes are the
@@ -3452,10 +3514,11 @@ impl KameApp {
         // Applied after the panel closes: some of these block on a native dialog
         // or replace the session the panel is reading.
         let mut action: Option<MenuAction> = None;
+        let pending_menu = self.pending_menu.take();
 
         egui::Panel::top("kame-status").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
+                let file_menu = ui.menu_button("File", |ui| {
                     ui.set_min_width(260.0);
                     if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
                         action = Some(MenuAction::Open);
@@ -3498,7 +3561,7 @@ impl KameApp {
                         .weak(),
                     );
                 });
-                ui.menu_button("Annotate", |ui| {
+                let annotate_menu = ui.menu_button("Annotate", |ui| {
                     ui.set_min_width(200.0);
                     for (label, kind, shortcut) in [
                         ("Note", AnnotationKind::Note, Some("Ctrl-Shift-N")),
@@ -3510,7 +3573,7 @@ impl KameApp {
                         }
                     }
                 });
-                ui.menu_button("View", |ui| {
+                let view_menu = ui.menu_button("View", |ui| {
                     ui.set_min_width(240.0);
                     ui.horizontal(|ui| {
                         ui.label(format!("Type size {:.0}", self.body_size));
@@ -3538,12 +3601,23 @@ impl KameApp {
                         }
                     }
                 });
-                ui.menu_button("Help", |ui| {
+                let help_menu = ui.menu_button("Help", |ui| {
                     ui.set_min_width(160.0);
                     if menu_item(ui, "Help", Some("F1"), false) {
                         action = Some(MenuAction::Help);
                     }
                 });
+                for (menu, response) in [
+                    (BarMenu::File, &file_menu.response),
+                    (BarMenu::Annotate, &annotate_menu.response),
+                    (BarMenu::View, &view_menu.response),
+                    (BarMenu::Help, &help_menu.response),
+                ] {
+                    if pending_menu == Some(menu) {
+                        egui::Popup::toggle_id(ui.ctx(), egui::Popup::menu(response).get_id());
+                        ui.ctx().request_repaint();
+                    }
+                }
             });
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5487,6 +5561,109 @@ mod tests {
         assert_eq!(typewriter_scroll_offset(1900.0, 400.0, 2000.0), 1600.0);
         // Content shorter than the viewport never scrolls.
         assert_eq!(typewriter_scroll_offset(300.0, 400.0, 300.0), 0.0);
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn alt_letters_open_their_menus() {
+        for (key, menu) in [
+            (egui::Key::F, BarMenu::File),
+            (egui::Key::A, BarMenu::Annotate),
+            (egui::Key::V, BarMenu::View),
+            (egui::Key::H, BarMenu::Help),
+        ] {
+            let mut events = vec![key_event(key, egui::Modifiers::ALT)];
+            assert_eq!(take_menu_chord(&mut events, false), Some(menu));
+        }
+    }
+
+    /// egui-winit sends the letter as text too, which would land in the prose.
+    #[test]
+    fn a_chord_swallows_its_own_key_and_text() {
+        let mut events = vec![
+            key_event(egui::Key::F, egui::Modifiers::ALT),
+            egui::Event::Text("f".to_string()),
+        ];
+        assert_eq!(take_menu_chord(&mut events, false), Some(BarMenu::File));
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn a_chord_leaves_other_input_alone() {
+        let mut events = vec![
+            egui::Event::Text("f".to_string()),
+            key_event(egui::Key::F, egui::Modifiers::ALT),
+            egui::Event::Text("f".to_string()),
+            egui::Event::Text("x".to_string()),
+        ];
+        assert_eq!(take_menu_chord(&mut events, false), Some(BarMenu::File));
+        assert_eq!(
+            events,
+            vec![
+                egui::Event::Text("f".to_string()),
+                egui::Event::Text("x".to_string()),
+            ]
+        );
+    }
+
+    /// Option plus a letter is how a Mac types characters like ƒ and å.
+    #[test]
+    fn alt_letters_keep_their_meaning_on_macos() {
+        let mut events = vec![
+            key_event(egui::Key::F, egui::Modifiers::ALT),
+            egui::Event::Text("ƒ".to_string()),
+        ];
+        let before = events.clone();
+        assert_eq!(take_menu_chord(&mut events, true), None);
+        assert_eq!(events, before);
+    }
+
+    #[test]
+    fn only_a_plain_alt_letter_is_a_chord() {
+        let ctrl_alt = egui::Modifiers {
+            alt: true,
+            ctrl: true,
+            ..egui::Modifiers::NONE
+        };
+        let shift_alt = egui::Modifiers {
+            alt: true,
+            shift: true,
+            ..egui::Modifiers::NONE
+        };
+        for event in [
+            key_event(egui::Key::F, ctrl_alt),
+            key_event(egui::Key::F, shift_alt),
+            key_event(egui::Key::F, egui::Modifiers::NONE),
+            key_event(egui::Key::F, egui::Modifiers::CTRL),
+            key_event(egui::Key::Q, egui::Modifiers::ALT),
+            egui::Event::Key {
+                key: egui::Key::F,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::ALT,
+            },
+            egui::Event::Key {
+                key: egui::Key::F,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::ALT,
+            },
+        ] {
+            let mut events = vec![event.clone()];
+            assert_eq!(take_menu_chord(&mut events, false), None, "{event:?}");
+            assert_eq!(events, vec![event]);
+        }
     }
 
     #[test]

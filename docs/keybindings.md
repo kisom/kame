@@ -114,6 +114,11 @@ The menu bar holds every command with its shortcut: File (open, save, import,
 export, snapshots, and the document's counts), Annotate, View (type size, dark
 mode and the view modes) and Help.
 
+On Linux, Alt-F, Alt-A, Alt-V and Alt-H open those menus; arrows and Enter then
+choose an item, and Escape closes it. There are no such chords on macOS, where
+Option plus a letter types a character. The document takes no keystrokes while a
+menu is open.
+
 The status row below it shows the document's title (hover for its path), `not
 saved yet` if it has no file, any mode badges, and the word count.
 

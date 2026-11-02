@@ -10,15 +10,32 @@ use image::RgbaImage;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform, Vector};
 
+/// Display density, in physical pixels per point, from which glyphs are
+/// antialiased in grayscale rather than LCD subpixels.
+///
+/// Below it, LCD coverage buys real horizontal resolution. From here up the
+/// pixels are fine enough that stems stay crisp without it, and the subpixel
+/// colour only shows as fringing.
+const GRAYSCALE_MIN_SCALE: f32 = 2.0;
+
+/// The mask format glyphs are rasterized in at `scale`.
+fn mask_format(scale: f32) -> Format {
+    if scale >= GRAYSCALE_MIN_SCALE {
+        Format::Alpha
+    } else {
+        Format::Subpixel
+    }
+}
+
 /// Glyph mask cache and the RGBA canvas painted by [`GlyphAtlas::rasterize`].
 ///
-/// Unlike cosmic-text's `SwashCache`, glyphs are rasterized with the subpixel
-/// (RGB) format rather than a grayscale alpha mask, so the page gets LCD
-/// subpixel antialiasing — the crisp ClearType-style look. The cache is keyed
-/// by [`CacheKey`], which already includes the subpixel bin.
+/// Unlike cosmic-text's `SwashCache`, the mask format follows the display
+/// density (see [`mask_format`]). A [`CacheKey`] already includes the size and
+/// subpixel bin but not the format, and one physical size can be reached at
+/// either density, so the format is part of the cache key too.
 pub struct GlyphAtlas {
     context: ScaleContext,
-    cache: HashMap<CacheKey, Option<SwashImage>>,
+    cache: HashMap<(CacheKey, bool), Option<SwashImage>>,
 }
 
 impl Default for GlyphAtlas {
@@ -45,23 +62,29 @@ impl GlyphAtlas {
         self.cache.clear();
     }
 
-    /// Rasterizes one glyph (or returns the cached image), in subpixel format.
-    fn get_image(&mut self, fs: &mut FontSystem, cache_key: CacheKey) -> Option<&SwashImage> {
+    /// Rasterizes one glyph for `scale` (or returns the cached image).
+    fn get_image(
+        &mut self,
+        fs: &mut FontSystem,
+        cache_key: CacheKey,
+        scale: f32,
+    ) -> Option<&SwashImage> {
+        let format = mask_format(scale);
         let Self { context, cache } = self;
         cache
-            .entry(cache_key)
-            .or_insert_with(|| rasterize_subpixel(fs, context, cache_key))
+            .entry((cache_key, matches!(format, Format::Subpixel)))
+            .or_insert_with(|| rasterize_mask(fs, context, cache_key, format))
             .as_ref()
     }
 
     /// Rasterize `layout` into an `RgbaImage`, returning the image together
     /// with its block-relative offset `(left, top)`.
     ///
-    /// Glyphs are painted in `ink` over `background` (the paper colour), using
-    /// LCD subpixel coverage, and composited per-channel so the colour fringing
-    /// is correct. `highlights` lists byte ranges whose background is a note
-    /// wash instead of the paper, so highlighted prose keeps its tint behind
-    /// the ink; each entry is `(start, end, background)`.
+    /// Glyphs are painted in `ink` over `background` (the paper colour). LCD
+    /// coverage is composited per-channel so the colour fringing is correct; a
+    /// grayscale mask needs no background. `highlights` lists byte ranges whose
+    /// background is a note wash instead of the paper, so highlighted prose
+    /// keeps its tint behind the ink; each entry is `(start, end, background)`.
     ///
     /// The canvas is cropped to the ink of the shaped glyphs, so its size is
     /// the glyph bounding box rather than the full layout column; a block with
@@ -119,7 +142,7 @@ impl GlyphAtlas {
         for run in layout.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
                 let phys = place_glyph(glyph, run.line_y, scale);
-                let Some(image) = self.get_image(fs, phys.cache_key) else {
+                let Some(image) = self.get_image(fs, phys.cache_key, scale) else {
                     continue;
                 };
                 if image.placement.width == 0 || image.placement.height == 0 {
@@ -165,7 +188,7 @@ impl GlyphAtlas {
             // `glyph.y` is line-relative: the run's baseline is the anchor.
             for glyph in run.glyphs.iter() {
                 let phys = place_glyph(glyph, run.line_y, scale);
-                let Some(image) = self.get_image(fs, phys.cache_key) else {
+                let Some(image) = self.get_image(fs, phys.cache_key, scale) else {
                     continue;
                 };
                 if image.placement.width == 0 || image.placement.height == 0 {
@@ -282,15 +305,16 @@ fn sample_pixel(
     }
 }
 
-/// Rasterizes one glyph with the swash scaler in the subpixel (RGB) format.
+/// Rasterizes one glyph with the swash scaler in `format`.
 ///
-/// This mirrors cosmic-text's `swash_image` but with [`Format::Subpixel`]
-/// instead of `Format::Alpha`, so the returned mask carries three coverage
-/// samples per pixel.
-fn rasterize_subpixel(
+/// This mirrors cosmic-text's `swash_image` but with a choice of format:
+/// [`Format::Subpixel`] carries three coverage samples per pixel, and
+/// [`Format::Alpha`] one.
+fn rasterize_mask(
     fs: &mut FontSystem,
     context: &mut ScaleContext,
     cache_key: CacheKey,
+    format: Format,
 ) -> Option<SwashImage> {
     let font = fs.get_font(cache_key.font_id, cache_key.font_weight)?;
     let mut scaler = context
@@ -315,7 +339,7 @@ fn rasterize_subpixel(
         Source::ColorBitmap(StrikeWith::BestFit),
         Source::Outline,
     ])
-    .format(Format::Subpixel)
+    .format(format)
     .offset(offset)
     .transform(if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {
         Some(Transform::skew(
@@ -476,7 +500,7 @@ mod tests {
         for run in layout.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
                 let phys = place_glyph(glyph, run.line_y, 1.0);
-                let Some(mask) = atlas.get_image(&mut fs, phys.cache_key) else {
+                let Some(mask) = atlas.get_image(&mut fs, phys.cache_key, 1.0) else {
                     continue;
                 };
                 if mask.placement.width == 0 || mask.placement.height == 0 {
@@ -690,6 +714,61 @@ dance, on a page, of pen, eye and hand.";
                 );
             }
         }
+    }
+
+    /// Number of painted pixels whose channels differ: the colour fringing of
+    /// LCD antialiasing, given black ink on white paper.
+    fn coloured_pixels(image: &RgbaImage) -> usize {
+        image
+            .pixels()
+            .filter(|pixel| pixel[3] > 0 && (pixel[0] != pixel[1] || pixel[1] != pixel[2]))
+            .count()
+    }
+
+    #[test]
+    fn glyphs_use_lcd_below_high_density_and_grayscale_from_it() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let layout = layout_block(&mut fs, &paragraph("Hello"), &config());
+        let mut atlas = GlyphAtlas::new();
+        for (scale, expect_lcd) in [
+            (1.0, true),
+            (1.5, true),
+            (1.99, true),
+            (2.0, false),
+            (3.0, false),
+        ] {
+            let (image, _, _) =
+                atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[], scale);
+            assert!(ink_pixels(&image) > 0, "nothing painted at scale {scale}");
+            assert_eq!(
+                coloured_pixels(&image) > 0,
+                expect_lcd,
+                "wrong antialiasing at scale {scale}"
+            );
+        }
+    }
+
+    /// 16 units at 2x and 32 units at 1x reach the same physical size, so they
+    /// share a `CacheKey`, yet they need different mask formats. Moving a window
+    /// between displays must not draw one with the other's mask.
+    #[test]
+    fn one_physical_size_keeps_a_mask_per_format() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let dense = layout_block(&mut fs, &paragraph("H"), &config());
+        let (gray, _, _) = atlas.rasterize(&mut fs, &dense, [0, 0, 0], [255, 255, 255], &[], 2.0);
+        assert_eq!(coloured_pixels(&gray), 0, "2x should be grayscale");
+
+        let large = LayoutConfig {
+            body_size: 32.0,
+            body_line_height: 48.0,
+            ..config()
+        };
+        let plain = layout_block(&mut fs, &paragraph("H"), &large);
+        let (lcd, _, _) = atlas.rasterize(&mut fs, &plain, [0, 0, 0], [255, 255, 255], &[], 1.0);
+        assert!(coloured_pixels(&lcd) > 0, "1x reused the grayscale mask");
     }
 
     #[test]

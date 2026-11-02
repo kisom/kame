@@ -65,6 +65,10 @@ const ANNOTATION_SCALE: f32 = 0.82;
 /// mode. It is a wash toward the page colour, not a darker tint, so dimmed
 /// prose fades into the paper instead of turning grey.
 const DIM_VEIL: Color32 = Color32::from_rgba_unmultiplied_const(247, 243, 235, 168);
+/// Ink for a failed write, in the status line and in the always-on indicator.
+const ERROR_INK: Color32 = Color32::from_rgb(168, 32, 32);
+/// Height of the failure strip drawn across the top of the central panel.
+const ERROR_STRIP_HEIGHT: f32 = 3.0;
 
 type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -201,6 +205,54 @@ fn dim_veil(enabled: bool, index: usize, caret_index: Option<usize>) -> Option<C
 fn typewriter_scroll_offset(caret_top: f32, viewport_height: f32, content_height: f32) -> f32 {
     let furthest = (content_height - viewport_height).max(0.0);
     (caret_top - viewport_height * 0.5).clamp(0.0, furthest)
+}
+
+/// The window command a mode toggle sends, or `None` when the mode lives
+/// entirely inside the frame. Fullscreen is the only mode that leaves the
+/// drawing surface, so it is the only one the window has to act on — and it
+/// must be sent in both directions: sending only the "on" edge is how a
+/// fullscreen mode enters and then cannot leave.
+fn viewport_effect(mode: ModeCommand, on: bool) -> Option<egui::ViewportCommand> {
+    match mode {
+        ModeCommand::Fullscreen => Some(egui::ViewportCommand::Fullscreen(on)),
+        ModeCommand::HideChrome
+        | ModeCommand::HideMargin
+        | ModeCommand::ParagraphFocus
+        | ModeCommand::Typewriter => None,
+    }
+}
+
+/// The failure message the always-on indicator must show, if any. Hide-chrome
+/// removes the status panel, so a failed write needs a signal that does not
+/// live in that panel; a blank message is not a failure.
+fn error_indicator(last_error: Option<&str>) -> Option<&str> {
+    last_error.filter(|error| !error.trim().is_empty())
+}
+
+/// Paints the failure signal into the page: a thin strip along the top of the
+/// central panel and a corner dot whose tooltip carries the message. It is
+/// drawn from the central panel, never the status panel, so hide-chrome cannot
+/// leave the author typing into a document that failed to save with no signal.
+fn draw_error_indicator(ui: &mut egui::Ui, error: &str) {
+    let rect = ui.max_rect();
+    {
+        let painter = ui.painter();
+        let strip = Rect::from_min_max(
+            Pos2::new(rect.left(), rect.top()),
+            Pos2::new(rect.right(), rect.top() + ERROR_STRIP_HEIGHT),
+        );
+        painter.rect_filled(strip, 0.0, ERROR_INK);
+        painter.circle_filled(Pos2::new(rect.right() - 12.0, rect.top() + 12.0), 4.0, ERROR_INK);
+    }
+    ui.interact(
+        Rect::from_center_size(
+            Pos2::new(rect.right() - 12.0, rect.top() + 12.0),
+            Vec2::splat(24.0),
+        ),
+        Id::unique("kame-error-indicator"),
+        Sense::hover(),
+    )
+    .on_hover_text(error);
 }
 
 fn main() -> eframe::Result {
@@ -1116,14 +1168,15 @@ impl KameApp {
         let toggles = ctx.input(|input| mode_commands_for_events(&input.events));
         for mode in toggles {
             let on = self.modes.toggle(mode);
-            match mode {
-                ModeCommand::Fullscreen => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
-                }
-                // Entering typewriter mode recentres at once, even if the caret
-                // has not moved since the last keystroke.
-                ModeCommand::Typewriter if on => self.typewriter_anchor = None,
-                _ => {}
+            // Most modes are painted from the flag alone; fullscreen is the one
+            // that has to ask the window, in both directions.
+            if let Some(command) = viewport_effect(mode, on) {
+                ctx.send_viewport_cmd(command);
+            }
+            // Entering typewriter mode recentres at once, even if the caret
+            // has not moved since the last keystroke.
+            if mode == ModeCommand::Typewriter && on {
+                self.typewriter_anchor = None;
             }
         }
     }
@@ -1320,7 +1373,7 @@ impl KameApp {
                 .weak(),
             );
             if let Some(error) = error {
-                ui.colored_label(Color32::from_rgb(168, 32, 32), error);
+                ui.colored_label(ERROR_INK, error);
             }
         });
     }
@@ -1821,6 +1874,7 @@ impl KameApp {
 impl eframe::App for KameApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_input(ui.ctx());
+        let error = error_indicator(self.session.last_error.as_deref()).map(str::to_owned);
         // Hide-chrome mode drops the whole top panel: it is both the toolbar
         // (annotation buttons) and the status bar, so one toggle clears both.
         if !self.modes.hide_chrome {
@@ -1836,6 +1890,11 @@ impl eframe::App for KameApp {
             .frame(egui::Frame::NONE.fill(BACKGROUND))
             .show(ui, |ui| {
                 scroll.show(ui, |ui| self.draw_surface(ui));
+                // The save-failure signal belongs to the page, not the chrome:
+                // it is painted in this panel so it outlives hide-chrome.
+                if let Some(error) = &error {
+                    draw_error_indicator(ui, error);
+                }
             });
     }
 }
@@ -1972,6 +2031,69 @@ mod tests {
             mode_commands_for_events(&events),
             vec![ModeCommand::ParagraphFocus]
         );
+    }
+
+    /// FIX 2: the mode→window dispatch is pure, so both directions of every
+    /// mode are asserted here instead of relying on an interactive Xvfb smoke —
+    /// the missing "off" edge is exactly how enter-but-not-leave shipped.
+    #[test]
+    fn viewport_effects_send_fullscreen_both_ways_and_nothing_else() {
+        use egui::ViewportCommand;
+        assert_eq!(
+            viewport_effect(ModeCommand::Fullscreen, true),
+            Some(ViewportCommand::Fullscreen(true)),
+            "the first F11 asks the window to go fullscreen"
+        );
+        assert_eq!(
+            viewport_effect(ModeCommand::Fullscreen, false),
+            Some(ViewportCommand::Fullscreen(false)),
+            "the second F11 must ask the window to leave fullscreen"
+        );
+        // The other four modes are painted from their flags and must leave the
+        // window alone in both directions.
+        for mode in [
+            ModeCommand::HideChrome,
+            ModeCommand::HideMargin,
+            ModeCommand::ParagraphFocus,
+            ModeCommand::Typewriter,
+        ] {
+            assert_eq!(
+                viewport_effect(mode, true),
+                None,
+                "{mode:?} stays inside the frame"
+            );
+            assert_eq!(
+                viewport_effect(mode, false),
+                None,
+                "{mode:?} stays inside the frame"
+            );
+        }
+    }
+
+    /// FIX 1: hide-chrome removes the whole status panel, so a failed write
+    /// would otherwise be completely silent and the author would keep typing
+    /// into a read-only document. The indicator message is read from the error
+    /// alone — never from the chrome flag — because it is painted in the
+    /// central panel, where hide-chrome cannot reach it.
+    #[test]
+    fn a_failed_save_keeps_its_indicator_when_the_chrome_is_hidden() {
+        let error = "save failed — editing disabled: disk full";
+        assert_eq!(error_indicator(Some(error)), Some(error));
+
+        let mut modes = Modes::default();
+        assert!(modes.toggle(ModeCommand::HideChrome));
+        assert!(modes.hide_chrome, "the status panel is gone in this mode");
+        assert_eq!(
+            error_indicator(Some(error)),
+            Some(error),
+            "the failure must still have a message to paint"
+        );
+
+        // A healthy session has nothing to show, and a blank message is not a
+        // failure.
+        assert_eq!(error_indicator(None), None);
+        assert_eq!(error_indicator(Some("")), None);
+        assert_eq!(error_indicator(Some("   ")), None);
     }
 
     #[test]

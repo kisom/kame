@@ -30,9 +30,9 @@ use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
 };
 use crate::render::egui_render::{
-    caret_line, caret_x, command_for_event, install_fonts, next_boundary, offset_at, prev_boundary,
-    range_rects, word_at, AnnotationTextureCache, Command, GlyphRenderer, LayoutCache,
-    TextureCache,
+    caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word, offset_at,
+    prev_boundary, prev_word, range_rects, word_at, AnnotationTextureCache, Command, GlyphRenderer,
+    LayoutCache, TextureCache,
 };
 use crate::storage::{Db, DbError, SnapshotMeta};
 
@@ -1600,6 +1600,84 @@ impl Session {
             self.caret = target;
         }
     }
+
+    /// Ctrl-arrow: move left by a whole word. A caret inside a word jumps to
+    /// its start; one between words jumps to the previous word's start. At the
+    /// start of a block the caret moves to the end of the previous block.
+    fn move_left_word(&mut self, select: bool) {
+        if !select {
+            if let Some((start, _)) = self.ordered_selection() {
+                self.caret = start;
+                self.selection = None;
+                return;
+            }
+        }
+        let caret = self.valid_caret();
+        let Some(index) = self.block_index(caret.block_id) else {
+            return;
+        };
+        let target = {
+            let document = self.editor.document();
+            let block = &document.blocks[index];
+            match prev_word(&block.text, caret.offset) {
+                Some(offset) => Cursor {
+                    block_id: block.id,
+                    offset,
+                },
+                None if index > 0 => {
+                    let previous = &document.blocks[index - 1];
+                    Cursor {
+                        block_id: previous.id,
+                        offset: previous.text.len(),
+                    }
+                }
+                None => caret,
+            }
+        };
+        if select {
+            self.select_to(target);
+        } else {
+            self.caret = target;
+        }
+    }
+
+    /// Ctrl-arrow: move right by a whole word, landing on the next word's
+    /// start. At the end of a block the caret moves to the start of the next.
+    fn move_right_word(&mut self, select: bool) {
+        if !select {
+            if let Some((_, end)) = self.ordered_selection() {
+                self.caret = end;
+                self.selection = None;
+                return;
+            }
+        }
+        let caret = self.valid_caret();
+        let Some(index) = self.block_index(caret.block_id) else {
+            return;
+        };
+        let target = {
+            let document = self.editor.document();
+            let block = &document.blocks[index];
+            match next_word(&block.text, caret.offset) {
+                Some(offset) => Cursor {
+                    block_id: block.id,
+                    offset,
+                },
+                None => match document.blocks.get(index + 1) {
+                    Some(next) => Cursor {
+                        block_id: next.id,
+                        offset: 0,
+                    },
+                    None => caret,
+                },
+            }
+        };
+        if select {
+            self.select_to(target);
+        } else {
+            self.caret = target;
+        }
+    }
 }
 
 /// Clamps a caret to a block that exists and to a character boundary inside it.
@@ -2412,6 +2490,10 @@ impl KameApp {
                 Command::SelectLeft => self.session.move_left(true),
                 Command::MoveRight => self.session.move_right(false),
                 Command::SelectRight => self.session.move_right(true),
+                Command::MoveWordLeft => self.session.move_left_word(false),
+                Command::SelectWordLeft => self.session.move_left_word(true),
+                Command::MoveWordRight => self.session.move_right_word(false),
+                Command::SelectWordRight => self.session.move_right_word(true),
                 Command::MoveUp => self.move_vertically(false, false),
                 Command::SelectUp => self.move_vertically(false, true),
                 Command::MoveDown => self.move_vertically(true, false),

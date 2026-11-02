@@ -578,6 +578,72 @@ pub fn next_boundary(text: &str, offset: usize) -> Option<usize> {
     text[offset..].chars().next().map(|c| offset + c.len_utf8())
 }
 
+/// A word character for cursor movement and selection: alphanumeric plus the
+/// apostrophe forms, so "don't" moves as one word.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\'' || c == '’'
+}
+
+/// The byte index of the first character of the next word at or after `offset`,
+/// or `None` when no word follows. A word is a maximal run of [`is_word_char`]
+/// characters; the current run (word or not) is skipped first, so moving right
+/// lands on the next word rather than the next character.
+pub fn next_word(text: &str, offset: usize) -> Option<usize> {
+    let offset = offset.min(text.len());
+    let chars: Vec<(usize, char)> = text[offset..]
+        .char_indices()
+        .map(|(i, c)| (offset + i, c))
+        .collect();
+    let n = chars.len();
+    if n == 0 {
+        return None;
+    }
+    // Skip the current run (word or non-word).
+    let mut k = 0;
+    let in_word = is_word_char(chars[0].1);
+    while k < n && (is_word_char(chars[k].1) == in_word) {
+        k += 1;
+    }
+    // Skip non-word characters to the next word's start.
+    while k < n && !is_word_char(chars[k].1) {
+        k += 1;
+    }
+    (k < n).then(|| chars[k].0)
+}
+
+/// The byte index of the first character of the previous word before `offset`,
+/// or `None` when no word precedes it. A caret inside (or at the end of) a word
+/// moves to that word's start; a caret after whitespace/punctuation skips them
+/// and moves to the previous word's start.
+pub fn prev_word(text: &str, offset: usize) -> Option<usize> {
+    let offset = offset.min(text.len());
+    if offset == 0 {
+        return None;
+    }
+    let chars: Vec<(usize, char)> = text[..offset].char_indices().collect();
+    let n = chars.len();
+    let mut k = n;
+    if is_word_char(chars[n - 1].1) {
+        // Inside (or at the end of) a word: walk left to its start.
+        while k > 0 && is_word_char(chars[k - 1].1) {
+            k -= 1;
+        }
+        return Some(chars[k].0);
+    }
+    // After whitespace/punctuation: skip them, then find the word before.
+    while k > 0 && !is_word_char(chars[k - 1].1) {
+        k -= 1;
+    }
+    if k == 0 {
+        return None;
+    }
+    let mut start = k - 1;
+    while start > 0 && is_word_char(chars[start - 1].1) {
+        start -= 1;
+    }
+    Some(chars[start].0)
+}
+
 /// Block-relative rectangles covering the byte range `start..end`, one per
 /// visual line it crosses.
 ///
@@ -676,6 +742,11 @@ pub enum Command {
     MoveDown,
     MoveLineStart,
     MoveLineEnd,
+    /// Ctrl-arrow: move by whole word rather than by character.
+    MoveWordLeft,
+    MoveWordRight,
+    SelectWordLeft,
+    SelectWordRight,
     /// Shift-arrow selection: move the caret's edge while keeping the edge where
     /// the selection began.
     SelectLeft,
@@ -773,6 +844,12 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         }
         Key::Backspace => Some(Command::Backspace),
         Key::Delete => Some(Command::Delete),
+        // Ctrl/Cmd-arrow moves by word; with Shift it extends the selection a
+        // whole word at a time.
+        Key::ArrowLeft if command && modifiers.shift => Some(Command::SelectWordLeft),
+        Key::ArrowLeft if command => Some(Command::MoveWordLeft),
+        Key::ArrowRight if command && modifiers.shift => Some(Command::SelectWordRight),
+        Key::ArrowRight if command => Some(Command::MoveWordRight),
         Key::ArrowLeft if modifiers.shift && !command => Some(Command::SelectLeft),
         Key::ArrowLeft if !command => Some(Command::MoveLeft),
         Key::ArrowRight if modifiers.shift && !command => Some(Command::SelectRight),
@@ -1094,6 +1171,32 @@ mod tests {
         assert_eq!(next_boundary(text, 0), Some(1));
         assert_eq!(next_boundary(text, 1), Some(3));
         assert_eq!(next_boundary(text, 3), None);
+    }
+
+    #[test]
+    fn word_boundaries_skip_whole_words() {
+        let text = "The quick brown fox";
+        // next_word skips the current word and any gap, landing on the next.
+        assert_eq!(next_word(text, 0), Some(4));
+        assert_eq!(next_word(text, 2), Some(4), "inside a word, skip to next");
+        assert_eq!(next_word(text, 4), Some(10));
+        assert_eq!(next_word(text, 10), Some(16));
+        assert_eq!(next_word(text, 19), None);
+
+        // prev_word: inside a word -> its start; between words -> previous.
+        assert_eq!(prev_word(text, 2), Some(0), "inside a word -> its start");
+        assert_eq!(prev_word(text, 4), Some(0), "after a gap -> previous word");
+        assert_eq!(prev_word(text, 10), Some(4));
+        assert_eq!(
+            prev_word(text, 19),
+            Some(16),
+            "at end of a word -> its start"
+        );
+        assert_eq!(prev_word(text, 0), None);
+
+        // Apostrophes stay within a word, so "don't" moves as one unit.
+        assert_eq!(next_word("don't stop", 0), Some(6));
+        assert_eq!(prev_word("don't stop", 6), Some(0));
     }
 
     #[test]

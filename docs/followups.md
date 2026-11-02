@@ -25,8 +25,9 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Markdown import
 
-- [ ] **Exercise the UI by hand.** The Import Markdown button, its file picker and
-  the discard-changes dialog have not been clicked through, on Linux or macOS.
+- [ ] **Click through the discard prompt.** The Import Markdown button and file
+  picker work on a Mac. The prompt that `Ctrl-O` and the button show before
+  replacing an unsaved document has tests but has not been tried by hand.
 - [ ] **Site-root images leave blank gaps.** `/files/images/...` cannot be found
   from the file alone, and kame reserves blank space for an image it cannot load.
   Options: ask for a site root at import, or collapse the space.
@@ -35,8 +36,10 @@ Open work, most pressing first. Tick items off or delete them as they land.
 - [ ] **Line breaks inside a block do not survive export.** Code and hard breaks
   reflow when exported and re-imported, because the exporter writes a bare
   newline. The corpus test skips export stability for those documents.
-- [ ] **Code has no typeface of its own.** It imports as plain prose, keeping its
-  line breaks and indentation but not a monospaced face.
+- [ ] **Richer Markdown elements (deferred).** Code, tables and nested lists are
+  simplified on import because the model has no equivalent. Code keeps its line
+  breaks and indentation but not a monospaced face. Supporting them is significant
+  work and is not needed yet.
 - [ ] **Decide on smart punctuation.** `---` and straight quotes import as typed,
   though posts may expect em dashes and curly quotes. Converting them on import
   would break the export round trip.

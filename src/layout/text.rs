@@ -103,33 +103,48 @@ pub fn layout_block(
     block: &Block,
     config: &LayoutConfig,
 ) -> BlockLayout {
-    let (family, size, line_height, align, style) = match block.kind {
+    // Prose paragraphs justify to the measure; headings, lists and quotes stay
+    // left-aligned so a ragged right edge reads naturally in narrow or indented
+    // columns.
+    let align = match block.kind {
+        BlockKind::Paragraph => Align::Justified,
+        _ => Align::Left,
+    };
+    layout_block_with_align(font_system, block, config, align)
+}
+
+/// [`layout_block`] with an explicit alignment, so callers shaping apparatus
+/// text (margin notes, footnote entries) can left-align it even though the
+/// block kind is a paragraph.
+pub fn layout_block_with_align(
+    font_system: &mut FontSystem,
+    block: &Block,
+    config: &LayoutConfig,
+    align: Align,
+) -> BlockLayout {
+    let (family, size, line_height, style) = match block.kind {
         BlockKind::Paragraph => (
             BODY_FAMILY,
             config.body_size,
             config.body_line_height,
-            Align::Justified,
             Style::Normal,
         ),
         BlockKind::Heading { .. } => (
             HEADING_FAMILY,
             config.heading_size,
             heading_line_height(config),
-            Align::Left,
             Style::Normal,
         ),
         BlockKind::ListItem { .. } => (
             BODY_FAMILY,
             config.body_size,
             config.body_line_height,
-            Align::Left,
             Style::Normal,
         ),
         BlockKind::BlockQuote => (
             BODY_FAMILY,
             config.body_size,
             config.body_line_height,
-            Align::Left,
             Style::Italic,
         ),
         // An image carries no prose: its text is empty, so this arm shapes an
@@ -138,7 +153,6 @@ pub fn layout_block(
             BODY_FAMILY,
             config.body_size,
             config.body_line_height,
-            Align::Left,
             Style::Normal,
         ),
     };
@@ -447,6 +461,28 @@ dance, on a page, of pen, eye and hand.";
         // The final line is not stretched to the full column.
         let last = l.lines.last().unwrap();
         assert!(line_width(&l, last) < config.body_width - 1.0);
+    }
+
+    #[test]
+    fn left_aligned_lines_are_ragged_not_stretched() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(PARA);
+        let config = config();
+        let l = layout_block_with_align(&mut fs, &block, &config, Align::Left);
+        assert!(l.lines.len() >= 3, "expected several lines");
+
+        // Left-aligned lines wrap at word boundaries and are never stretched to
+        // the measure, so at least one non-final line is clearly narrower than
+        // the column. Justified text (the paragraph default) stretches every
+        // non-final line to fill it, which is the two behaviours we are keeping
+        // apart.
+        let ragged = l
+            .lines
+            .iter()
+            .take(l.lines.len() - 1)
+            .any(|line| line_width(&l, line) < config.body_width - 8.0);
+        assert!(ragged, "left-aligned text should leave a ragged right edge");
     }
 
     #[test]

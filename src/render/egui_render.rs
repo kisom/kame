@@ -15,7 +15,7 @@ use egui::{
 };
 use image::RgbaImage;
 
-use crate::layout::{layout_block, BlockLayout, LayoutConfig};
+use crate::layout::{layout_block, layout_block_with_align, BlockLayout, LayoutConfig};
 use crate::model::{AnnotationId, AnnotationKind, Block, BlockId, BlockKind};
 use crate::render::GlyphAtlas;
 
@@ -463,14 +463,22 @@ impl GlyphRenderer {
     /// the prose measure.
     ///
     /// The line height scales with `size`, keeping the leading proportional to
-    /// the prose setting rather than to the absolute body line height.
+    /// the prose setting rather than to the absolute body line height. The text
+    /// is left-aligned: justifying a narrow margin column produces rivers of
+    /// whitespace (especially around short words like "a"), which reads as
+    /// mangled even though every glyph is intact.
     pub fn layout_in_column(&mut self, block: &Block, width: f32, size: f32) -> BlockLayout {
         let mut config = self.config;
         config.body_width = width.max(24.0);
         config.body_size = size.max(6.0);
         config.body_line_height = (size * 1.4).max(size + 2.0);
         config.heading_size = config.body_size;
-        layout_block(&mut self.font_system, block, &config)
+        layout_block_with_align(
+            &mut self.font_system,
+            block,
+            &config,
+            cosmic_text::Align::Left,
+        )
     }
 
     #[cfg(test)]

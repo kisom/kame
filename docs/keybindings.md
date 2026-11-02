@@ -14,8 +14,15 @@ macOS (`Modifiers::command`).
 | Ctrl-Shift-N / Ctrl-Shift-F | add a note (a highlight) / a footnote at the selection or the word under the caret |
 | Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |
 | Ctrl-A | select the caret's whole block (again for the whole document) |
+| Ctrl-F | find — open the find bar |
 | drag, shift-click | select |
-| Escape | close the note popover |
+| Escape | close the find bar, a dialog, or the note popover |
+
+## Search
+
+Ctrl-F opens the find bar. Matches are case-insensitive and highlight as you
+type. Enter finds the next match, Shift-Enter the previous one, and Escape
+closes the bar; the page scrolls to keep the current match in view.
 
 Block kind is also the status panel's `Block:` row — body, H1–H3 and both list
 kinds. Changing the kind is one undoable edit, and undo restores the previous

@@ -407,6 +407,47 @@ fn typewriter_scroll_offset(caret_top: f32, viewport_height: f32, content_height
     (caret_top - viewport_height * 0.5).clamp(0.0, furthest)
 }
 
+/// ASCII-fast, Unicode-correct case-insensitive character equality.
+fn char_eq_ignore_case(a: char, b: char) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        a.eq_ignore_ascii_case(&b)
+    } else {
+        a.to_lowercase().collect::<String>() == b.to_lowercase().collect::<String>()
+    }
+}
+
+/// Case-insensitive matches of `needle` across every block, in document order,
+/// as `(block_id, byte_start, byte_end)` in the original text's byte offsets.
+/// Overlapping matches are reported; an empty needle matches nothing.
+fn find_matches(document: &Document, needle: &str) -> Vec<(BlockId, usize, usize)> {
+    let mut matches = Vec::new();
+    if needle.is_empty() {
+        return matches;
+    }
+    let needle: Vec<char> = needle.chars().collect();
+    for block in &document.blocks {
+        // Match over the text's own char boundaries so byte offsets stay exact
+        // even when a query or text char lowercases to a different length.
+        let chars: Vec<(usize, char)> = block.text.char_indices().collect();
+        for i in 0..=chars.len().saturating_sub(needle.len()) {
+            let window = &chars[i..i + needle.len()];
+            if window
+                .iter()
+                .zip(&needle)
+                .all(|(&(_, c), &n)| char_eq_ignore_case(c, n))
+            {
+                let start = window[0].0;
+                let end = window
+                    .last()
+                    .map(|&(offset, c)| offset + c.len_utf8())
+                    .unwrap_or(start);
+                matches.push((block.id, start, end));
+            }
+        }
+    }
+    matches
+}
+
 /// The window command a mode toggle sends, or `None` when the mode lives
 /// entirely inside the frame. Fullscreen is the only mode that leaves the
 /// drawing surface, so it is the only one the window has to act on — and it
@@ -1526,6 +1567,23 @@ fn note_body_edit_id() -> Id {
     Id::unique("kame-note-body")
 }
 
+/// The open find bar's state. `matches` is the live result of searching
+/// `query`; `index` is the match the caret is on.
+#[derive(Default)]
+struct Find {
+    query: String,
+    matches: Vec<(BlockId, usize, usize)>,
+    index: usize,
+    /// Grab focus on the frame the bar first appears.
+    focus: bool,
+}
+
+/// egui id of the find bar's query field. `handle_input` looks it up to tell
+/// whether keystrokes belong to the find bar instead of the document.
+fn find_query_id() -> Id {
+    Id::unique("kame-find-query")
+}
+
 /// Widget id of the snapshot prompt's label field, so the prompt can give it
 /// the keyboard on the frame it opens.
 fn snapshot_label_edit_id() -> Id {
@@ -1632,6 +1690,11 @@ struct KameApp {
     /// Keeps a failed write from being discarded by a stray close, while still
     /// letting the author quit on a second request.
     close: CloseGuard,
+    /// The find bar, when it is open.
+    find: Option<Find>,
+    /// Set when a find jump moves the caret to a match that may be off-screen;
+    /// the next frame's draw scrolls the caret into view.
+    reveal_caret: bool,
 }
 
 impl KameApp {
@@ -1654,6 +1717,8 @@ impl KameApp {
             restore_picker: None,
             notice: None,
             close: CloseGuard::default(),
+            find: None,
+            reveal_caret: false,
         }
     }
 
@@ -1798,14 +1863,174 @@ impl KameApp {
         self.session.set_block_kind(caret.block_id, kind);
     }
 
+    /// Opens or closes the find bar.
+    fn toggle_find(&mut self) {
+        if self.find.take().is_some() {
+            return;
+        }
+        // The find bar and the note popover share the keyboard; only one owns it.
+        self.set_open_note(None);
+        self.find = Some(Find {
+            focus: true,
+            ..Find::default()
+        });
+    }
+
+    /// Recomputes the matches for the current query and selects the first.
+    fn refresh_find(&mut self) {
+        {
+            let Some(find) = &mut self.find else { return };
+            find.matches = find_matches(self.session.document(), &find.query);
+            find.index = 0;
+        }
+        self.jump_to_match();
+    }
+
+    /// Moves to the next (or previous) match, wrapping, and selects it. The
+    /// matches are recomputed from the live document so edits made while the
+    /// bar is open cannot leave the caret jumping to stale offsets.
+    fn step_find(&mut self, forward: bool) {
+        {
+            let Some(find) = &mut self.find else { return };
+            find.matches = find_matches(self.session.document(), &find.query);
+            if find.matches.is_empty() {
+                return;
+            }
+            find.index = if forward {
+                (find.index + 1) % find.matches.len()
+            } else {
+                find.index.checked_sub(1).unwrap_or(find.matches.len() - 1)
+            };
+        }
+        self.jump_to_match();
+    }
+
+    /// Puts the caret on the current match, selects it, and asks the page to
+    /// reveal it next frame.
+    fn jump_to_match(&mut self) {
+        let (block_id, start, end) = match &self.find {
+            Some(find) => match find.matches.get(find.index) {
+                Some(&m) => m,
+                None => return,
+            },
+            None => return,
+        };
+        self.session.set_caret(Cursor {
+            block_id,
+            offset: end,
+        });
+        self.session.select_to(Cursor {
+            block_id,
+            offset: start,
+        });
+        self.reveal_caret = true;
+    }
+
+    /// The find bar: a query field, a match count, and next/previous/close.
+    fn show_find_bar(&mut self, ui: &mut egui::Ui) {
+        if self.find.is_none() {
+            return;
+        }
+        // Snapshot the state into locals so the closure borrows them, not
+        // `self`, and the write-back happens once the panel closes.
+        let (mut query, focus, count) = {
+            let find = self.find.as_ref().expect("find is open");
+            let count = if find.matches.is_empty() {
+                if find.query.is_empty() {
+                    String::new()
+                } else {
+                    "no matches".to_string()
+                }
+            } else {
+                format!("{} of {}", find.index + 1, find.matches.len())
+            };
+            (find.query.clone(), find.focus, count)
+        };
+
+        let mut changed = false;
+        let mut next = false;
+        let mut prev = false;
+        let mut close = false;
+        egui::Panel::top("kame-find").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut query)
+                        .id(find_query_id())
+                        .hint_text("find")
+                        .desired_width(220.0),
+                );
+                changed = field.changed();
+                if focus {
+                    field.request_focus();
+                }
+                if !count.is_empty() {
+                    ui.label(egui::RichText::new(&count).weak());
+                }
+                prev = ui
+                    .small_button("↑")
+                    .on_hover_text("previous (Shift-Enter)")
+                    .clicked();
+                next = ui
+                    .small_button("↓")
+                    .on_hover_text("next (Enter)")
+                    .clicked();
+                close = ui.small_button("×").on_hover_text("close (Esc)").clicked();
+            });
+        });
+
+        if changed {
+            if let Some(find) = &mut self.find {
+                find.query = query;
+                find.focus = false;
+            }
+            self.refresh_find();
+        } else if let Some(find) = &mut self.find {
+            find.focus = false;
+        }
+        if close {
+            self.find = None;
+            return;
+        }
+        if next {
+            self.step_find(true);
+        } else if prev {
+            self.step_find(false);
+        }
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
         // Modes and file commands are window-level, so they are read before the
         // note field's focus check: a chord should work whether the prose or a
         // note has the keyboard.
         self.handle_modes(ctx);
         self.handle_file_commands(ctx);
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && !self.dismiss_dialog() {
-            self.set_open_note(None);
+        // Ctrl-F toggles the find bar, a window-level chord like the mode and
+        // file chords (so it works whether the prose or a note has focus).
+        let find_chord = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::F,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if modifiers.command && !modifiers.shift
+                )
+            })
+        });
+        if find_chord {
+            self.toggle_find();
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            // Escape closes the find bar first, then a dialog, then the note.
+            if self.find.take().is_some() {
+                return;
+            }
+            if !self.dismiss_dialog() {
+                self.set_open_note(None);
+            }
         }
         // A file dialog owns the keyboard while it is up: its label field would
         // otherwise also type into the document behind it.
@@ -1816,6 +2041,18 @@ impl KameApp {
         // note's, not the document's: without this the same character would be
         // inserted into both the note and the prose behind it.
         if ctx.memory(|memory| memory.has_focus(note_body_edit_id())) {
+            return;
+        }
+        // While the find bar's query field has focus, Enter steps through the
+        // matches and the document gets no keystrokes.
+        if self.find.is_some() && ctx.memory(|memory| memory.has_focus(find_query_id())) {
+            let next = ctx.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift);
+            let prev = ctx.input(|input| input.key_pressed(egui::Key::Enter) && input.modifiers.shift);
+            if next {
+                self.step_find(true);
+            } else if prev {
+                self.step_find(false);
+            }
             return;
         }
         let events = ctx.input(|input| input.events.clone());
@@ -2399,6 +2636,20 @@ impl KameApp {
             caret_rect = Some(rect);
         }
 
+        // --- reveal the caret (find navigation) ------------------------------
+        // A find jump may land outside the viewport; the page scrolls to the
+        // caret next frame, exactly as typewriter centring does.
+        if self.reveal_caret {
+            if let Some(rect) = caret_rect {
+                self.pending_scroll = Some(typewriter_scroll_offset(
+                    rect.top() - response.rect.top(),
+                    ui.clip_rect().height(),
+                    content_height,
+                ));
+            }
+            self.reveal_caret = false;
+        }
+
         // --- typewriter centring ---------------------------------------------
         // The offset is computed here, where the caret's page position and the
         // content height are known, and applied by the scroll area next frame.
@@ -2938,6 +3189,9 @@ impl eframe::App for KameApp {
             self.textures.clear();
         }
         let error = error_indicator(self.session.last_error.as_deref()).map(str::to_owned);
+        // The find bar is transient and only exists because the author opened it
+        // (Ctrl-F), so it shows even when the status panel is hidden.
+        self.show_find_bar(ui);
         // Hide-chrome mode drops the whole top panel: it is both the toolbar
         // (annotation buttons) and the status bar, so one toggle clears both.
         if !self.modes.hide_chrome {
@@ -4127,6 +4381,43 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
 
         assert!(session.set_annotation_body(id, ""));
         assert!(session.document().annotations.is_empty());
+    }
+
+    // --- search -----------------------------------------------------------
+
+    #[test]
+    fn find_matches_is_case_insensitive_and_byte_safe() {
+        let mut document = Document::new("find");
+        document.blocks[0].text = "The quick Quick fox".to_string();
+        let second = Block {
+            id: BlockId::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "end —quick".to_string(),
+            spans: vec![],
+        };
+        document.blocks.push(second.clone());
+
+        let matches = find_matches(&document, "quick");
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0], (document.blocks[0].id, 4, 9));
+        assert_eq!(matches[1], (document.blocks[0].id, 10, 15));
+        // "—" is a three-byte codepoint, so "quick" starts at byte 7.
+        assert_eq!(matches[2], (second.id, 7, 12));
+    }
+
+    #[test]
+    fn find_matches_reports_overlaps_and_nothing_for_an_empty_needle() {
+        let mut document = Document::new("find");
+        document.blocks[0].text = "aaa".to_string();
+        let matches = find_matches(&document, "aa");
+        assert_eq!(
+            matches,
+            vec![
+                (document.blocks[0].id, 0, 2),
+                (document.blocks[0].id, 1, 3),
+            ]
+        );
+        assert!(find_matches(&document, "").is_empty());
     }
 
     // --- file, export and snapshot commands --------------------------------

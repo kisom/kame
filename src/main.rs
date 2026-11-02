@@ -786,6 +786,42 @@ impl CloseGuard {
     }
 }
 
+/// Whether closing the window must stop and ask about an unsaved document.
+///
+/// Only the prompt's own answer may let unsaved work go. A close request arriving
+/// while it is open is refused too, and Don't Save has to mark the close it sends
+/// as answered, or that close would simply reopen the prompt.
+#[derive(Default)]
+struct CloseFlow {
+    /// The "save?" prompt is on screen.
+    prompting: bool,
+    /// The author answered the prompt by closing.
+    confirmed: bool,
+}
+
+impl CloseFlow {
+    /// Records a close request and says whether to cancel it. `unsaved` is
+    /// whether the document has work with nowhere to go.
+    fn on_close_request(&mut self, unsaved: bool) -> bool {
+        if self.confirmed || !unsaved {
+            return false;
+        }
+        self.prompting = true;
+        true
+    }
+
+    /// The author chose to keep editing.
+    fn cancel(&mut self) {
+        self.prompting = false;
+    }
+
+    /// The author chose to close: the close request this sends must go through.
+    fn confirm(&mut self) {
+        self.prompting = false;
+        self.confirmed = true;
+    }
+}
+
 // --- kame config ------------------------------------------------------------
 
 /// App-level preferences, stored beside the documents rather than inside one.
@@ -2488,7 +2524,7 @@ struct KameApp {
     /// open. Distinct from the failed-write guard: this asks the author whether
     /// to save an unsaved document, the guard refuses a close that would lose
     /// a write that already failed.
-    close_prompt: bool,
+    close_flow: CloseFlow,
     /// The find bar, when it is open.
     find: Option<Find>,
     /// Set when a find jump moves the caret to a match that may be off-screen;
@@ -2536,7 +2572,7 @@ impl KameApp {
             restore_picker: None,
             notice,
             close: CloseGuard::default(),
-            close_prompt: false,
+            close_flow: CloseFlow::default(),
             find: None,
             reveal_caret: false,
             show_help: false,
@@ -4528,7 +4564,7 @@ impl KameApp {
             Ok(()) => {
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
-                    self.close_prompt = false;
+                    self.close_flow.confirm();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
@@ -4543,7 +4579,7 @@ impl KameApp {
     /// the native save-as browser, Don't Save closes without saving, and Cancel
     /// keeps editing.
     fn show_close_prompt(&mut self, ctx: &egui::Context) {
-        if !self.close_prompt {
+        if !self.close_flow.prompting {
             return;
         }
         let mut save = false;
@@ -4570,11 +4606,11 @@ impl KameApp {
                 });
             });
         if cancel {
-            self.close_prompt = false;
+            self.close_flow.cancel();
             return;
         }
         if discard {
-            self.close_prompt = false;
+            self.close_flow.confirm();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -4849,6 +4885,24 @@ impl KameApp {
 }
 
 impl eframe::App for KameApp {
+    /// An anonymous document with content has not been saved anywhere: a close
+    /// request opens a "save?" prompt instead of closing. The prompt is rendered
+    /// by `show_close_prompt`; a document already on disk, or an empty Untitled,
+    /// closes without asking.
+    ///
+    /// This runs here rather than in `ui` because eframe skips `ui` while the
+    /// window is minimized or occluded, and a close nothing cancels there exits.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        let unsaved =
+            !self.session.save_failed && self.session.is_anonymous() && self.session.has_content();
+        if close_requested && self.close_flow.on_close_request(unsaved) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // A hidden window has to come forward for its prompt to be answered.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_input(ui.ctx());
         // A failed write is not a reason to lose the session: the first close
@@ -4862,20 +4916,6 @@ impl eframe::App for KameApp {
             .close
             .cancel_close(self.session.save_failed, close_requested)
         {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        }
-        // An anonymous document with content has not been saved anywhere: the
-        // first close request opens a "save?" prompt instead of closing. The
-        // prompt is rendered by `show_close_prompt`; a document already on
-        // disk, or an empty Untitled, closes without asking.
-        if close_requested
-            && !self.session.save_failed
-            && self.session.is_anonymous()
-            && self.session.has_content()
-            && !self.close_prompt
-        {
-            self.close_prompt = true;
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
@@ -5300,6 +5340,56 @@ mod tests {
         assert_eq!(typewriter_scroll_offset(1900.0, 400.0, 2000.0), 1600.0);
         // Content shorter than the viewport never scrolls.
         assert_eq!(typewriter_scroll_offset(300.0, 400.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn a_close_request_with_unsaved_work_opens_the_prompt() {
+        let mut flow = CloseFlow::default();
+        assert!(flow.on_close_request(true), "the close must be cancelled");
+        assert!(flow.prompting);
+    }
+
+    #[test]
+    fn a_close_request_with_nothing_at_stake_goes_through() {
+        let mut flow = CloseFlow::default();
+        assert!(!flow.on_close_request(false));
+        assert!(!flow.prompting);
+    }
+
+    #[test]
+    fn dont_save_lets_its_own_close_request_through() {
+        let mut flow = CloseFlow::default();
+        assert!(flow.on_close_request(true));
+        flow.confirm();
+        assert!(
+            !flow.on_close_request(true),
+            "Don't Save was refused by the prompt it answered"
+        );
+        assert!(!flow.prompting, "the prompt came back after Don't Save");
+    }
+
+    #[test]
+    fn cancel_keeps_the_guard_for_the_next_close() {
+        let mut flow = CloseFlow::default();
+        assert!(flow.on_close_request(true));
+        flow.cancel();
+        assert!(!flow.prompting);
+        assert!(
+            flow.on_close_request(true),
+            "after Cancel the next close must ask again"
+        );
+        assert!(flow.prompting);
+    }
+
+    #[test]
+    fn a_second_close_while_the_prompt_is_open_does_not_discard_the_work() {
+        let mut flow = CloseFlow::default();
+        assert!(flow.on_close_request(true));
+        assert!(
+            flow.on_close_request(true),
+            "only the prompt's own answer may discard unsaved work"
+        );
+        assert!(flow.prompting);
     }
 
     #[test]

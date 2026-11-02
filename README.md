@@ -24,17 +24,32 @@ itself is a structured, first-class file, never a pile of markup.
 
 ## Building
 
-Rust (edition 2021), egui + cosmic-text + swash + SQLite.
+Dependencies: a Rust toolchain (edition 2021) and a C compiler. On Linux you
+also need `pkg-config` and the X11/Wayland/Vulkan development libraries — see
+[`flake.nix`](flake.nix) for the exact set. NixOS gets all of these through
+direnv/`nix develop` (the `.envrc` wires up the flake); macOS and Arch install
+them natively.
 
 ```sh
-# On NixOS (or any Nix host):
-nix build .#            # builds and runs the test suite
-nix run .#              # launch the binary
-nix develop             # dev shell with cargo/clippy/rustfmt/rust-analyzer
+make          # debug build
+make test     # run the test suite
+make install  # release build, install to ~/.local/bin/kame
+make clean    # remove build artifacts
+```
 
-# With a bare cargo toolchain:
+Or with cargo directly:
+
+```sh
 cargo build
 cargo test
+```
+
+On NixOS:
+
+```sh
+nix develop   # dev shell with cargo/clippy/rustfmt/rust-analyzer
+nix build .#  # build the package
+nix run .#    # launch the binary
 ```
 
 ## Using

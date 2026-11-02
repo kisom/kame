@@ -244,7 +244,7 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
             close_list(&mut body, &mut open_list);
             body.push_str(&format!(
                 "<img class=\"image\" src=\"{}\" alt=\"\">\n",
-                escape(path)
+                escape_attribute(path)
             ));
             continue;
         }
@@ -344,7 +344,12 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
     ]
     .into_iter()
     .filter(|(_, value)| !value.is_empty())
-    .map(|(name, value)| format!("<meta name=\"{name}\" content=\"{}\">\n", escape(value)))
+    .map(|(name, value)| {
+        format!(
+            "<meta name=\"{name}\" content=\"{}\">\n",
+            escape_attribute(value)
+        )
+    })
     .collect();
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
@@ -625,7 +630,7 @@ impl InlineTag {
             InlineTag::Note(number) => format!("<mark id=\"note{number}\">"),
             InlineTag::Bold => "<strong>".to_string(),
             InlineTag::Italic => "<em>".to_string(),
-            InlineTag::Link { url } => format!("<a href=\"{}\">", escape(url)),
+            InlineTag::Link { url } => format!("<a href=\"{}\">", escape_attribute(url)),
         }
     }
 
@@ -807,6 +812,12 @@ fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+/// [`escape`] for a value inside a quoted attribute, where a quote would end it.
+/// Text content leaves quotes alone, so prose keeps the characters as typed.
+fn escape_attribute(text: &str) -> String {
+    escape(text).replace('"', "&quot;").replace('\'', "&#39;")
 }
 
 /// Snap a note's anchor to char boundaries, then pull it in past whitespace so
@@ -1392,5 +1403,52 @@ mod tests {
         assert!(!html.contains(r#"name="keywords""#), "{html}");
         assert!(!html.contains(r#"name="date""#), "{html}");
         assert!(html.contains("<title>stored</title>"), "{html}");
+    }
+
+    #[test]
+    fn a_quote_in_metadata_cannot_leave_its_attribute() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(BlockKind::Paragraph, "Body.")];
+        let meta = crate::model::Metadata {
+            author: r#"K" onload="x"#.to_string(),
+            tags: vec!["it's".to_string()],
+            ..Default::default()
+        };
+        let html = to_html_with(&doc, &meta);
+        assert!(
+            html.contains(r#"content="K&quot; onload=&quot;x""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"content="it&#39;s""#), "{html}");
+    }
+
+    #[test]
+    fn a_quote_in_a_link_or_image_cannot_leave_its_attribute() {
+        let mut doc = Document::new("t");
+        let mut linked = block(BlockKind::Paragraph, "Body.");
+        linked.spans = vec![crate::model::Span {
+            start: 0,
+            end: 4,
+            style: crate::model::SpanStyle::Link {
+                url: r#"http://x/" onclick="y"#.to_string(),
+            },
+        }];
+        let image = block(
+            BlockKind::Image {
+                path: r#"a" onerror="z.png"#.to_string(),
+            },
+            "",
+        );
+        doc.blocks = vec![linked, image];
+        let html = to_html(&doc);
+        assert!(!html.contains(r#"" onclick=""#), "{html}");
+        assert!(!html.contains(r#"" onerror=""#), "{html}");
+    }
+
+    #[test]
+    fn quotes_in_prose_stay_as_typed() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(BlockKind::Paragraph, r#"She said "hello"."#)];
+        assert!(to_html(&doc).contains(r#"<p>She said "hello".</p>"#));
     }
 }

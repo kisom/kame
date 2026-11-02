@@ -142,7 +142,7 @@ pub fn to_markdown_with(doc: &Document, metadata: &Metadata) -> String {
     ]
     .into_iter()
     .filter(|(_, value)| !value.is_empty())
-    .map(|(key, value)| format!("{key}: {}\n", value.replace('\n', " ")))
+    .map(|(key, value)| format!("{key}: {}\n", header_value(value)))
     .collect();
 
     let repeats_title = doc.blocks.first().is_some_and(|first| {
@@ -166,6 +166,21 @@ pub fn to_markdown_with(doc: &Document, metadata: &Metadata) -> String {
         (false, true) => header,
         (false, false) => format!("{header}\n{body}"),
     }
+}
+
+/// A header value on one line: any line break or control character would let the
+/// value start a header field of its own, or end the header early.
+fn header_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Footnotes in deterministic document order, numbered from 1.
@@ -1003,5 +1018,49 @@ mod tests {
         )];
         doc.blocks = vec![heading, paragraph("Body.")];
         assert!(to_markdown_with(&doc, &metadata()).contains("[^1]: A note."));
+    }
+
+    #[test]
+    fn no_line_break_of_any_kind_can_start_a_header_line() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Body.")];
+        for separator in [
+            "\n", "\r", "\r\n", "\u{85}", "\u{2028}", "\u{2029}", "\u{b}", "\u{c}",
+        ] {
+            let meta = crate::model::Metadata {
+                title: format!("T{separator}Author: forged"),
+                ..Default::default()
+            };
+            let out = to_markdown_with(&doc, &meta);
+            let header = out.split("\n\n").next().unwrap();
+            assert_eq!(
+                header.lines().count(),
+                1,
+                "{separator:?} started a line: {out:?}"
+            );
+            assert!(
+                !header.chars().any(|c| matches!(
+                    c,
+                    '\r' | '\u{85}' | '\u{2028}' | '\u{2029}' | '\u{b}' | '\u{c}'
+                )),
+                "{separator:?} survived: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tag_cannot_start_a_header_line() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Body.")];
+        let meta = crate::model::Metadata {
+            tags: vec!["a\nTitle: forged".to_string()],
+            ..Default::default()
+        };
+        let out = to_markdown_with(&doc, &meta);
+        assert_eq!(
+            out.split("\n\n").next().unwrap().lines().count(),
+            1,
+            "{out:?}"
+        );
     }
 }

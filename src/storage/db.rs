@@ -437,6 +437,16 @@ fn truncate_ops_to_cursor(conn: &Connection, cursor: usize) -> Result<(), DbErro
     Ok(())
 }
 
+impl Drop for Db {
+    fn drop(&mut self) {
+        // Checkpoint and truncate the WAL so a clean exit leaves only the
+        // .kame file. A crash or kill leaves -wal/-shm behind — that is normal
+        // and harmless: SQLite replays the WAL on the next open. Here we shrink
+        // the WAL, and the connection's own close removes both sidecars.
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +473,26 @@ mod tests {
         let mut db = Db::open(&path).unwrap();
         db.save_document(&d).unwrap();
         assert_eq!(db.load_document().unwrap(), d);
+    }
+
+    #[test]
+    fn dropping_the_connection_removes_wal_and_shm_sidecars() {
+        let path = temp_db_path();
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+
+        {
+            let mut db = Db::open(&path).unwrap();
+            db.save_document(&sample_document()).unwrap();
+            // WAL journalling creates both sidecars while the connection is
+            // open.
+            assert!(wal.exists(), "expected {} while open", wal.display());
+        }
+
+        // A clean close checkpoints the WAL and removes both sidecars, leaving
+        // only the database file.
+        assert!(!wal.exists(), "wal survived a clean close: {}", wal.display());
+        assert!(!shm.exists(), "shm survived a clean close: {}", shm.display());
     }
 
     #[test]

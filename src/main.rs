@@ -1687,6 +1687,16 @@ impl Session {
         self.commit(result)
     }
 
+    /// Removes an annotation (a highlight, marginal or footnote) outright,
+    /// returning whether the removal was persisted as one undoable edit.
+    fn remove_annotation(&mut self, id: AnnotationId) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let result = self.editor.remove_annotation(id);
+        self.commit(result)
+    }
+
     /// The anchor for a new annotation of `kind`: marginalia anchor to a whole
     /// block, notes and footnotes to the selection (clamped to its first block,
     /// since an anchor lives in one block) or the word under the caret.
@@ -3797,6 +3807,7 @@ impl KameApp {
         let focus = self.open_note_focus;
         let mut changed = false;
         let mut close = false;
+        let mut remove = false;
         egui::Area::new(Id::unique("kame-note-popover"))
             .order(Order::Foreground)
             .fixed_pos(pos)
@@ -3819,17 +3830,31 @@ impl KameApp {
                     if focus {
                         field.request_focus();
                     }
-                    if ui
-                        .small_button("Close")
-                        .on_hover_text("close (Ctrl/Cmd-Enter)")
-                        .clicked()
-                    {
-                        close = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("Remove")
+                            .on_hover_text("remove this note and its highlight")
+                            .clicked()
+                        {
+                            remove = true;
+                        }
+                        if ui
+                            .small_button("Close")
+                            .on_hover_text("close (Ctrl/Cmd-Enter)")
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
                 });
             });
 
         self.open_note_focus = false;
+        if remove {
+            self.session.remove_annotation(id);
+            self.set_open_note(None);
+            return;
+        }
         // Ctrl/Cmd-Enter closes the popover, like the Close button. The
         // multiline field may have already appended a newline for that key, so
         // trailing newlines are dropped before committing.
@@ -5613,6 +5638,34 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
                 .unwrap()
                 .0,
             4
+        );
+    }
+
+    #[test]
+    fn removing_a_note_clears_its_highlight_and_undo_restores_it() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("The quick brown fox");
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 6,
+        });
+        let id = session
+            .add_annotation(AnnotationKind::Note)
+            .expect("a note to remove");
+
+        assert!(session.remove_annotation(id), "the removal persists");
+        assert!(
+            session.document().annotations.is_empty(),
+            "the highlight is gone"
+        );
+
+        session.undo();
+        assert_eq!(
+            session.document().annotations.len(),
+            1,
+            "undo restores the note and its highlight"
         );
     }
 

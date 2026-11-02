@@ -45,8 +45,8 @@ const APPARATUS_INK: [u8; 3] = [86, 79, 69];
 const CARET_INK: Color32 = Color32::from_rgb(176, 58, 46);
 /// Selection band (translucent, so the prose still reads through it).
 const SELECTION_FILL: Color32 = Color32::from_rgba_premultiplied(58, 78, 112, 62);
-/// A note's anchored range: a faint amber wash.
-const NOTE_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(178, 138, 38, 38);
+/// A note's anchored range: an orange highlight behind the text.
+const NOTE_HIGHLIGHT: Color32 = Color32::from_rgba_unmultiplied_const(255, 170, 60, 70);
 /// A footnote's anchored range and superscript marker.
 const FOOTNOTE_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(54, 96, 132, 34);
 /// Ink for the footnote superscript number.
@@ -2684,6 +2684,35 @@ impl KameApp {
         }
         self.annotation_textures.retain(&live);
 
+        // --- anchored ranges -------------------------------------------------
+        // A wash marks what every annotation is attached to. Drawn *before*
+        // the glyphs so it colours the paper behind the text and the ink stays
+        // dark — a highlight must not dull the words it marks.
+        for annotation in &annotations {
+            // Block-scoped anchors (marginalia) have no body range to wash.
+            let Some((start, end)) = annotation.anchor.byte_range() else {
+                continue;
+            };
+            let Some(index) = blocks
+                .iter()
+                .position(|block| block.id == annotation.anchor.block_id())
+            else {
+                continue;
+            };
+            let color = match annotation.kind {
+                AnnotationKind::Marginal => MARGINAL_HIGHLIGHT,
+                AnnotationKind::Note => NOTE_HIGHLIGHT,
+                AnnotationKind::Footnote => FOOTNOTE_HIGHLIGHT,
+            };
+            for rect in range_rects(layouts[index], start, end) {
+                painter.rect_filled(
+                    rect.translate(Vec2::new(body_left + layouts[index].left_indent, tops[index])),
+                    1.0,
+                    color,
+                );
+            }
+        }
+
         // --- prose -----------------------------------------------------------
         // Paragraph-focus mode veils every block but the caret's: the veil is
         // paper at partial alpha, so dimmed prose fades and the margins stay
@@ -2713,34 +2742,6 @@ impl KameApp {
                 if let Some(veil) = dim_veil(focus, index, caret_index) {
                     painter.rect_filled(rect, 0.0, veil);
                 }
-            }
-        }
-
-        // --- anchored ranges -------------------------------------------------
-        // A faint wash marks what every annotation is attached to. Drawn after
-        // the glyphs so the tint sits over the paper rather than behind it.
-        for annotation in &annotations {
-            // Block-scoped anchors (marginalia) have no body range to wash.
-            let Some((start, end)) = annotation.anchor.byte_range() else {
-                continue;
-            };
-            let Some(index) = blocks
-                .iter()
-                .position(|block| block.id == annotation.anchor.block_id())
-            else {
-                continue;
-            };
-            let color = match annotation.kind {
-                AnnotationKind::Marginal => MARGINAL_HIGHLIGHT,
-                AnnotationKind::Note => NOTE_HIGHLIGHT,
-                AnnotationKind::Footnote => FOOTNOTE_HIGHLIGHT,
-            };
-            for rect in range_rects(layouts[index], start, end) {
-                painter.rect_filled(
-                    rect.translate(Vec2::new(body_left + layouts[index].left_indent, tops[index])),
-                    1.0,
-                    color,
-                );
             }
         }
 

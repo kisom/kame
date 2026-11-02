@@ -11,8 +11,15 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Typography
 
-- [ ] **Word spacing.** Justified text without hyphenation leaves wide gaps. The
-  design spec already lists `hypher` as a deferred dependency.
+- [ ] **Word spacing (low priority).** Justified text without hyphenation leaves
+  wide gaps. cosmic-text picks each break on its own and only widens spaces.
+  Soft hyphens from `hypher` are not enough: on 378 devlog paragraphs at type 18,
+  lines with a space over 2x normal fell from 17.1% to 10.3%, but the widest 1% got
+  worse, up to 13 hyphenated lines ran in a row, the hyphen is invisible, and the
+  inserted characters break the byte-offset invariant. The likely fix is for kame
+  to choose its own breaks across the paragraph, with limits on hyphen runs and
+  stretch. About 24 call sites read cosmic-text's lines directly, so prototype it
+  outside the repo first, then write a spec.
 - [ ] **Footnote superscripts sit tight against the next word** (`source¹and`).
   They render in the word space rather than taking room of their own.
 - [ ] **Annotation washes look like pasted patches**, such as the white box

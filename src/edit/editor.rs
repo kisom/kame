@@ -17,7 +17,8 @@ use uuid::Uuid;
 
 use crate::edit::ops::{anchor_wholly_inside, apply, apply_inverse, invert, normalize, Op};
 use crate::model::{
-    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
+    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, Span,
+    SpanStyle,
 };
 
 /// A caret position: the block it sits in and a **byte** offset into that
@@ -518,6 +519,55 @@ impl Editor {
         Some(self.apply_edit(Op::Batch { ops }))
     }
 
+    /// Applies inline markdown emphasis the caret just closed (see
+    /// [`inline_emphasis`]): strips the wrapping `*`/`_` markers and sets a
+    /// bold or italic span over the wrapped text in one atomic op. Returns the
+    /// applied op and the caret's new offset, or `None` when the caret has not
+    /// just closed an emphasis.
+    pub fn apply_inline_markdown(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
+        let (style, opener_start, closer_start, marker_len) = {
+            let block = self.block(cursor.block_id).ok()?;
+            inline_emphasis(&block.text, cursor.offset)?
+        };
+        // Delete the closing marker, then the opening marker. The wrapped text
+        // shifts left by `marker_len`, so the span covers
+        // `opener_start..closer_start - marker_len` in the final text.
+        let rebase = |span: &Span| {
+            shift_span_on_delete(span, closer_start, closer_start + marker_len).and_then(|span| {
+                shift_span_on_delete(&span, opener_start, opener_start + marker_len)
+            })
+        };
+        let spans: Vec<Span> = self
+            .block(cursor.block_id)
+            .ok()?
+            .spans
+            .iter()
+            .filter_map(rebase)
+            .chain(std::iter::once(Span {
+                start: opener_start,
+                end: closer_start - marker_len,
+                style,
+            }))
+            .collect();
+        let ops = vec![
+            Op::delete_text(
+                &self.doc,
+                cursor.block_id,
+                closer_start,
+                closer_start + marker_len,
+            ),
+            Op::delete_text(
+                &self.doc,
+                cursor.block_id,
+                opener_start,
+                opener_start + marker_len,
+            ),
+            Op::set_spans(&self.doc, cursor.block_id, spans),
+        ];
+        let op = self.apply_edit(Op::Batch { ops });
+        Some((op, closer_start - marker_len))
+    }
+
     /// Anchors a new note of `kind` over `anchor`, returning the op that was
     /// applied. The note's id is fresh, so the returned op can be persisted as
     /// is.
@@ -669,6 +719,104 @@ fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
         return Some((BlockKind::BlockQuote, 2));
     }
     None
+}
+
+/// The inline emphasis a just-typed closing marker completes, if any.
+///
+/// Recognises `*x*` / `_x_` (italic) and `**x**` / `__x__` (bold), where the
+/// opening marker sits at the start of the line or just after whitespace and
+/// the wrapped text is non-empty with no whitespace at its edges. Returns
+/// `(style, opener_start, closer_start, marker_len)`: `opener_start` and
+/// `closer_start` are the byte offsets of the markers, and `marker_len` is the
+/// marker's byte length (1 or 2). `caret` is the offset just past the closing
+/// marker.
+fn inline_emphasis(text: &str, caret: usize) -> Option<(SpanStyle, usize, usize, usize)> {
+    let head = &text[..caret];
+    let marker = head.chars().next_back()?;
+    if marker != '*' && marker != '_' {
+        return None;
+    }
+    // The trailing marker run is 1 or 2; a fence of three or more is left for
+    // someone else to interpret.
+    let mut closer_len = 0;
+    for c in head.chars().rev() {
+        if c == marker {
+            closer_len += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if closer_len != marker.len_utf8() && closer_len != marker.len_utf8() * 2 {
+        return None;
+    }
+    let style = if closer_len == marker.len_utf8() {
+        SpanStyle::Italic
+    } else {
+        SpanStyle::Bold
+    };
+    let closer_start = caret - closer_len;
+    let content_end = closer_start;
+    // The wrapped text cannot end in whitespace or in the marker.
+    if text[..content_end]
+        .chars()
+        .next_back()
+        .map_or(true, |c| c.is_whitespace() || c == marker)
+    {
+        return None;
+    }
+
+    // Scan backward for the opening run of `closer_len` markers, which must sit
+    // at a word boundary: whitespace or the line start to its left, a non-space
+    // non-marker to its right.
+    let mut i = content_end;
+    while i > 0 {
+        let c = text[..i].chars().next_back().unwrap();
+        if c != marker {
+            i -= c.len_utf8();
+            continue;
+        }
+        let mut run_start = i;
+        while run_start > 0 && text[..run_start].chars().next_back() == Some(marker) {
+            run_start -= marker.len_utf8();
+        }
+        if i - run_start == closer_len {
+            let left_ok = run_start == 0
+                || text[..run_start]
+                    .chars()
+                    .next_back()
+                    .map_or(false, |c| c.is_whitespace());
+            let right_ok = text[i..content_end]
+                .chars()
+                .next()
+                .map_or(false, |c| !c.is_whitespace() && c != marker);
+            if left_ok && right_ok {
+                let opener_start = run_start;
+                let content_start = opener_start + closer_len;
+                if content_start < content_end {
+                    return Some((style, opener_start, closer_start, closer_len));
+                }
+            }
+        }
+        i = run_start;
+    }
+    None
+}
+
+/// Rebases a span across a deletion of `[start, end)`: spans before the
+/// deletion are unchanged, spans after it shift left, and a span that straddles
+/// a deletion boundary is dropped (its text is partly gone).
+fn shift_span_on_delete(span: &Span, start: usize, end: usize) -> Option<Span> {
+    if span.end <= start {
+        Some(span.clone())
+    } else if span.start >= end {
+        Some(Span {
+            start: span.start - (end - start),
+            end: span.end - (end - start),
+            style: span.style.clone(),
+        })
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1421,6 +1569,68 @@ mod tests {
         let block = &e.document().blocks[0];
         assert_eq!(block.kind, BlockKind::Paragraph);
         assert_eq!(block.text, "## Section");
+    }
+
+    #[test]
+    fn inline_emphasis_detects_italic_bold_and_underscore() {
+        // Single marker = italic, double = bold, in both `*` and `_` forms.
+        assert_eq!(
+            inline_emphasis("*word*", 6),
+            Some((SpanStyle::Italic, 0, 5, 1))
+        );
+        assert_eq!(
+            inline_emphasis("**word**", 8),
+            Some((SpanStyle::Bold, 0, 6, 2))
+        );
+        assert_eq!(
+            inline_emphasis("_word_", 6),
+            Some((SpanStyle::Italic, 0, 5, 1))
+        );
+        assert_eq!(
+            inline_emphasis("__word__", 8),
+            Some((SpanStyle::Bold, 0, 6, 2))
+        );
+        // Mid-line: the opener sits after whitespace.
+        assert_eq!(
+            inline_emphasis("say *word* now", 10),
+            Some((SpanStyle::Italic, 4, 9, 1))
+        );
+        // Nothing to match: no opener, whitespace inside, or no content.
+        assert_eq!(inline_emphasis("word", 4), None);
+        assert_eq!(inline_emphasis("* word*", 7), None);
+        assert_eq!(inline_emphasis("**", 2), None);
+    }
+
+    #[test]
+    fn apply_inline_markdown_bolds_and_italics_in_one_undo_step() {
+        let doc = doc_with("*word*");
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+
+        let (op, offset) = e
+            .apply_inline_markdown(&Cursor {
+                block_id: id,
+                offset: 6,
+            })
+            .expect("a closing marker to apply");
+        assert_eq!(offset, 4, "caret lands after the emphasised word");
+        assert_eq!(e.document().blocks[0].text, "word");
+        assert_eq!(
+            e.document().blocks[0].spans,
+            vec![Span {
+                start: 0,
+                end: 4,
+                style: SpanStyle::Italic,
+            }]
+        );
+        assert_eq!(e.history(), (1, 0), "one undo step");
+
+        e.undo().expect("the emphasis is one undo step");
+        assert_eq!(e.document().blocks[0].text, "*word*");
+        assert!(e.document().blocks[0].spans.is_empty());
+
+        // The returned op round-trips through its inverse too.
+        let _ = op;
     }
 
     #[test]

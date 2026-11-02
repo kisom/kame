@@ -1307,6 +1307,20 @@ impl Session {
         }
     }
 
+    /// Applies inline emphasis the caret just closed (typed `*x*`, `**x**`,
+    /// `_x_`, `__x__`): the markers are stripped, the wrapped text takes a
+    /// bold/italic span, and the caret lands after the emphasised text.
+    fn apply_inline_markdown(&mut self) {
+        let caret = self.valid_caret();
+        if let Some((op, offset)) = self.editor.apply_inline_markdown(&caret) {
+            self.record(&op);
+            self.caret = Cursor {
+                block_id: caret.block_id,
+                offset,
+            };
+        }
+    }
+
     /// Deletes `selection` and parks the caret at `caret_after`.
     fn delete_range(&mut self, selection: Selection, caret_after: Cursor) -> bool {
         let result = self.editor.delete_selection(&selection);
@@ -2638,6 +2652,7 @@ impl KameApp {
                 Command::Insert(text) => {
                     if self.session.insert(&text) {
                         self.session.apply_markdown_shortcut();
+                        self.session.apply_inline_markdown();
                     }
                 }
                 Command::Paste(text) => {
@@ -3791,6 +3806,7 @@ impl KameApp {
                             ("#  ##  ###", "heading, typed at the start of a line"),
                             ("-  *  1.", "list item, typed at the start of a line"),
                             (">", "block quote, typed at the start of a line"),
+                            ("*x*  **x**", "italic / bold emphasis, typed around a word"),
                             ("Ctrl +  Ctrl -", "larger / smaller type"),
                             ("Ctrl-Shift-D", "dark mode"),
                             ("F11", "fullscreen"),

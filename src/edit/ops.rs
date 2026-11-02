@@ -22,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    shift_anchors, Anchor, Annotation, AnnotationId, Block, BlockId, BlockKind, Document,
+    shift_anchors, Anchor, Annotation, AnnotationId, Block, BlockId, BlockKind, Document, Span,
 };
 
 /// A single invertible mutation of a [`Document`].
@@ -65,6 +65,14 @@ pub enum Op {
         block_id: BlockId,
         old_kind: BlockKind,
         kind: BlockKind,
+    },
+    /// Replaces a block's inline spans. `old_spans` is what the document holds
+    /// now, so [`invert`] restores them exactly. This is the authoring path for
+    /// bold and italic emphasis (typed markdown, and a future format toolbar).
+    SetSpans {
+        block_id: BlockId,
+        old_spans: Vec<Span>,
+        spans: Vec<Span>,
     },
     AddAnnotation {
         annotation: Annotation,
@@ -173,6 +181,20 @@ impl Op {
             kind,
         }
     }
+
+    /// A [`Op::SetSpans`] that records the block's current spans as `old_spans`,
+    /// so undo restores them exactly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the block is unknown.
+    pub fn set_spans(doc: &Document, block_id: BlockId, spans: Vec<Span>) -> Op {
+        Op::SetSpans {
+            block_id,
+            old_spans: block(doc, block_id).spans.clone(),
+            spans,
+        }
+    }
 }
 
 /// The op that undoes `op`.
@@ -223,6 +245,15 @@ pub fn invert(op: &Op) -> Op {
             block_id: *block_id,
             old_kind: kind.clone(),
             kind: old_kind.clone(),
+        },
+        Op::SetSpans {
+            block_id,
+            old_spans,
+            spans,
+        } => Op::SetSpans {
+            block_id: *block_id,
+            old_spans: spans.clone(),
+            spans: old_spans.clone(),
         },
         Op::AddAnnotation { annotation } => Op::RemoveAnnotation {
             annotation: annotation.clone(),
@@ -410,6 +441,18 @@ pub fn apply(doc: &mut Document, op: &Op) {
                 "SetBlockKind payload old_kind does not match the document"
             );
             block.kind = kind.clone();
+        }
+        Op::SetSpans {
+            block_id,
+            old_spans,
+            spans,
+        } => {
+            let block = block_mut(doc, *block_id);
+            assert_eq!(
+                &block.spans, old_spans,
+                "SetSpans payload old_spans does not match the document"
+            );
+            block.spans = spans.clone();
         }
         Op::AddAnnotation { annotation } => doc.annotations.push(annotation.clone()),
         Op::RemoveAnnotation { annotation } => {
@@ -746,7 +789,7 @@ fn rebase_annotations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Anchor, AnnotationKind};
+    use crate::model::{Anchor, AnnotationKind, Span, SpanStyle};
     use uuid::Uuid;
 
     fn doc(text: &str) -> Document {
@@ -818,6 +861,44 @@ mod tests {
             }
         );
         assert_eq!(invert(&undone), op, "invert must be involutive");
+    }
+
+    /// Inline spans are a whole-value replacement: the inverse swaps the two
+    /// span sets, and apply + apply_inverse restore the exact prior spans.
+    #[test]
+    fn set_spans_invert_swaps_old_and_new() {
+        let mut d = doc("bold text");
+        let id = d.blocks[0].id;
+        let bold = vec![Span {
+            start: 0,
+            end: 4,
+            style: SpanStyle::Bold,
+        }];
+        let op = Op::set_spans(&d, id, bold.clone());
+        assert_eq!(
+            op,
+            Op::SetSpans {
+                block_id: id,
+                old_spans: vec![],
+                spans: bold.clone(),
+            }
+        );
+
+        let undone = invert(&op);
+        assert_eq!(
+            undone,
+            Op::SetSpans {
+                block_id: id,
+                old_spans: bold.clone(),
+                spans: vec![],
+            }
+        );
+        assert_eq!(invert(&undone), op, "invert must be involutive");
+
+        apply(&mut d, &op);
+        assert_eq!(d.blocks[0].spans, bold);
+        apply_inverse(&mut d, &op);
+        assert!(d.blocks[0].spans.is_empty());
     }
 
     /// A body edit is a whole-value replacement, so its inverse swaps the two

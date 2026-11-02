@@ -3,7 +3,7 @@
 use std::borrow::Borrow;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
+    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
 };
 
 use crate::model::{Block, BlockId, BlockKind, SpanStyle};
@@ -13,6 +13,10 @@ use crate::model::{Block, BlockId, BlockKind, SpanStyle};
 const BODY_FAMILY: &str = "EB Garamond";
 /// Heading face; loaded by the caller into the `FontSystem`.
 const HEADING_FAMILY: &str = "Crimson Pro";
+/// The fixed colour a URL renders in. Chosen to read on both the light and the
+/// dark palette, so it can be baked into the layout without a palette swap
+/// invalidating the layout cache.
+pub const LINK_COLOR: Color = Color::rgb(59, 130, 246);
 
 /// Metrics and column widths for headless layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -177,8 +181,49 @@ pub fn layout_block(
     }
 }
 
+/// Byte ranges of URLs in `text`, each extended to the next whitespace and
+/// with trailing punctuation (`.,;:!?)]}`) trimmed. Recognises `http://`,
+/// `https://` and `www.` forms, so a pasted or typed link becomes a clickable
+/// range without the author marking it up.
+pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let scheme = ["https://", "http://", "www."]
+            .into_iter()
+            .find(|prefix| rest.starts_with(prefix));
+        let Some(scheme) = scheme else {
+            i += text[i..].chars().next().map_or(0, char::len_utf8);
+            continue;
+        };
+        let start = i;
+        // The link runs to the next whitespace.
+        let mut end = text.len();
+        for (j, c) in text[i + scheme.len()..].char_indices() {
+            if c.is_whitespace() {
+                end = i + scheme.len() + j;
+                break;
+            }
+        }
+        // Trim trailing punctuation that belongs to the sentence, not the URL.
+        while end > start + scheme.len() {
+            let last = text[..end].chars().next_back().unwrap();
+            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+                end -= last.len_utf8();
+            } else {
+                break;
+            }
+        }
+        ranges.push((start, end));
+        i = end;
+    }
+    ranges
+}
+
 /// Split the block text into `(text, attrs)` runs at span boundaries, layering
-/// `block.spans` (Bold → `Weight::BOLD`, Italic → `Style::Italic`) over `base`.
+/// `block.spans` (Bold → `Weight::BOLD`, Italic → `Style::Italic`) over `base`,
+/// and colouring any URL (see [`link_ranges`]) with [`LINK_COLOR`].
 ///
 /// Runs are produced in text order and concatenate to exactly `block.text`, so
 /// cosmic-text's offsets stay aligned with the block's byte offsets. Span
@@ -186,11 +231,12 @@ pub fn layout_block(
 /// panicking on a non-char-boundary slice.
 fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'a>)> {
     let text = block.text.as_str();
-    if text.is_empty() || block.spans.is_empty() {
+    if text.is_empty() {
         return vec![(text, base.clone())];
     }
+    let links = link_ranges(text);
 
-    let mut bounds = Vec::with_capacity(block.spans.len() * 2 + 2);
+    let mut bounds = Vec::with_capacity(block.spans.len() * 2 + links.len() * 2 + 2);
     bounds.push(0);
     bounds.push(text.len());
     for span in &block.spans {
@@ -199,6 +245,12 @@ fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'
             if text.is_char_boundary(bound) {
                 bounds.push(bound);
             }
+        }
+    }
+    for (start, end) in &links {
+        if text.is_char_boundary(*start) && text.is_char_boundary(*end) {
+            bounds.push(*start);
+            bounds.push(*end);
         }
     }
     bounds.sort_unstable();
@@ -221,6 +273,9 @@ fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'
             }
             if covers(SpanStyle::Italic) {
                 attrs = attrs.style(Style::Italic);
+            }
+            if links.iter().any(|(ls, le)| *ls <= start && end <= *le) {
+                attrs = attrs.color(LINK_COLOR);
             }
             (&text[start..end], attrs)
         })
@@ -605,6 +660,24 @@ dance, on a page, of pen, eye and hand.";
         let l = layout_block(&mut fs, &block, &config());
         assert!(l.height > 0.0);
         assert_eq!(l.lines.len(), 1);
+    }
+
+    #[test]
+    fn link_ranges_find_urls_and_trim_punctuation() {
+        assert_eq!(
+            link_ranges("see https://example.com for more"),
+            vec![(4, 23)]
+        );
+        assert_eq!(link_ranges("go to http://a.b/c now"), vec![(6, 18)]);
+        assert_eq!(link_ranges("visit www.example.org today"), vec![(6, 21)]);
+        // A trailing sentence period is not part of the link.
+        assert_eq!(link_ranges("read https://x.y."), vec![(5, 16)]);
+        // Two links in one line.
+        assert_eq!(
+            link_ranges("a https://a.b and https://c.d"),
+            vec![(2, 13), (18, 29)]
+        );
+        assert!(link_ranges("plain prose").is_empty());
     }
 
     #[test]

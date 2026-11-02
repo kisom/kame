@@ -121,6 +121,10 @@ impl GlyphAtlas {
                     continue;
                 }
 
+                // A glyph shaped with an explicit colour (a link) keeps it;
+                // everything else takes the caller's ink.
+                let glyph_color = glyph.color_opt.map_or(color, |c| [c.r(), c.g(), c.b()]);
+
                 let left = phys.x + image.placement.left - origin_x;
                 let top = phys.y - image.placement.top - origin_y;
                 let mask_w = image.placement.width as i32;
@@ -137,7 +141,7 @@ impl GlyphAtlas {
                             continue;
                         }
                         let index = (row * mask_w + col) as usize;
-                        let (src, alpha) = sample(image.content, &image.data, index, color);
+                        let (src, alpha) = sample(image.content, &image.data, index, glyph_color);
                         if alpha == 0 {
                             continue;
                         }

@@ -23,7 +23,7 @@ use egui::{Align2, Color32, FontId, Id, Order, Pos2, Rect, Sense, Vec2};
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::layout::reading_order;
 use crate::layout::{
-    place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
+    link_ranges, place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
     MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
 };
 use crate::model::{
@@ -1865,6 +1865,25 @@ fn hit_test(
     })
 }
 
+/// The URL under `cursor`, when the caret sits inside a link in that block.
+fn url_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
+    let block = blocks.iter().find(|block| block.id == cursor.block_id)?;
+    link_ranges(&block.text)
+        .into_iter()
+        .find(|(start, end)| cursor.offset >= *start && cursor.offset < *end)
+        .map(|(start, end)| block.text[start..end].to_string())
+}
+
+/// Opens `url` in the system browser, best-effort: a link that cannot launch is
+/// never worth an error dialog in the editor.
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let (program, arg) = ("open", url);
+    #[cfg(not(target_os = "macos"))]
+    let (program, arg) = ("xdg-open", url);
+    let _ = std::process::Command::new(program).arg(arg).spawn();
+}
+
 /// Minimum height of a block, so an empty paragraph still has a line to click
 /// and a caret to show.
 fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f32 {
@@ -3435,7 +3454,12 @@ impl KameApp {
                 } else if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, body_left, pos)
                 {
-                    caret_action = Some((cursor, shift));
+                    // A click on a link opens it instead of moving the caret.
+                    if let Some(url) = url_at(blocks, &cursor) {
+                        open_in_browser(&url);
+                    } else {
+                        caret_action = Some((cursor, shift));
+                    }
                 }
             }
         }

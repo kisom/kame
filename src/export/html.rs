@@ -15,6 +15,7 @@
 //! position, then annotation id), never in storage order, so exporting the same
 //! document twice — or after a serde round trip — produces identical bytes.
 
+use crate::layout::link_ranges;
 use crate::model::{AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle};
 use std::collections::{HashMap, HashSet};
 
@@ -563,6 +564,7 @@ enum InlineTag {
     Note(usize),
     Bold,
     Italic,
+    Link { url: String },
 }
 
 impl InlineTag {
@@ -571,6 +573,7 @@ impl InlineTag {
             InlineTag::Note(number) => format!("<mark id=\"note{number}\">"),
             InlineTag::Bold => "<strong>".to_string(),
             InlineTag::Italic => "<em>".to_string(),
+            InlineTag::Link { url } => format!("<a href=\"{}\">", escape(url)),
         }
     }
 
@@ -579,6 +582,7 @@ impl InlineTag {
             InlineTag::Note(_) => "</mark>",
             InlineTag::Bold => "</strong>",
             InlineTag::Italic => "</em>",
+            InlineTag::Link { .. } => "</a>",
         }
     }
 }
@@ -608,12 +612,18 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
             (start < end).then(|| (start, end, span.style.clone()))
         })
         .collect();
+    let links = link_ranges(text);
 
-    let mut boundaries =
-        Vec::with_capacity(spans.len() * 2 + notes.len() * 2 + footnotes.len() + 2);
+    let mut boundaries = Vec::with_capacity(
+        spans.len() * 2 + links.len() * 2 + notes.len() * 2 + footnotes.len() + 2,
+    );
     boundaries.push(0);
     boundaries.push(text.len());
     for (start, end, _) in &spans {
+        boundaries.push(*start);
+        boundaries.push(*end);
+    }
+    for (start, end) in &links {
         boundaries.push(*start);
         boundaries.push(*end);
     }
@@ -652,6 +662,15 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
                 wanted.push(match style {
                     SpanStyle::Bold => InlineTag::Bold,
                     SpanStyle::Italic => InlineTag::Italic,
+                });
+            }
+        }
+        // A segment inside a URL wraps in an anchor, innermost so emphasis can
+        // still apply inside the link text.
+        for (link_start, link_end) in &links {
+            if *link_start <= start && end <= *link_end {
+                wanted.push(InlineTag::Link {
+                    url: text[*link_start..*link_end].to_string(),
                 });
             }
         }
@@ -907,6 +926,16 @@ mod tests {
         );
         let html = to_html(&doc);
         assert!(html.contains("<blockquote>Quoted words</blockquote>"));
+    }
+
+    #[test]
+    fn urls_export_as_anchors() {
+        let doc = document(vec![paragraph("see https://example.com now")], Vec::new());
+        let html = to_html(&doc);
+        assert!(
+            html.contains("<a href=\"https://example.com\">https://example.com</a>"),
+            "a URL becomes a clickable anchor: {html}"
+        );
     }
 
     #[test]

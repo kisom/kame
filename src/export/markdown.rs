@@ -15,7 +15,11 @@ use std::collections::HashMap;
 /// Layout rules:
 /// - headings become `#` runs (level clamped to 1–6),
 /// - ordered list items are numbered per consecutive run, unordered ones use `- `,
-/// - paragraphs are emitted as-is,
+/// - prose is escaped: backslash, asterisk, underscore, backtick and square
+///   brackets in the text are backslash-escaped so they cannot open emphasis,
+///   code or a link, and a paragraph whose first glyph would start block
+///   structure (`#`, `>`, `-`, `+`, `=`, `~`, or `1.`/`1)`) has that glyph
+///   escaped too, so it stays a paragraph,
 /// - blocks are separated by a blank line and the document ends in a newline,
 /// - inline spans become `*italic*` / `**bold**`, nesting innermost-first,
 /// - footnotes get `[^n]` inline at the end of their anchored range and a
@@ -64,7 +68,13 @@ pub fn to_markdown(doc: &Document) -> String {
             }
         };
         let markers = by_block.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
-        parts.push(format!("{prefix}{}", render_block_text(block, markers)));
+        let mut body = render_block_text(block, markers);
+        // A paragraph's own text must not turn into block structure. Headings
+        // and list items already carry a marker, so they are left alone.
+        if block.kind == BlockKind::Paragraph {
+            escape_block_start(&mut body);
+        }
+        parts.push(format!("{prefix}{body}"));
     }
 
     let mut out = String::new();
@@ -78,7 +88,11 @@ pub fn to_markdown(doc: &Document) -> String {
         }
         let lines: Vec<String> = footnotes
             .iter()
-            .map(|(number, annotation)| format!("[^{number}]: {}", annotation.body))
+            .map(|(number, annotation)| {
+                let mut body = String::new();
+                push_escaped(&mut body, &annotation.body);
+                format!("[^{number}]: {body}")
+            })
             .collect();
         out.push_str(&lines.join("\n"));
         out.push('\n');
@@ -216,7 +230,7 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
                 open.push(style.clone());
             }
         }
-        out.push_str(&text[start..end]);
+        push_escaped(&mut out, &text[start..end]);
     }
     while let Some(style) = open.pop() {
         out.push_str(delimiter(&style));
@@ -226,6 +240,49 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
         out.push_str(&format!("[^{number}]"));
     }
     out
+}
+
+/// Markdown punctuation that would start emphasis, code or a link if it were
+/// emitted verbatim. Escaped per character, so cutting the text at a span edge
+/// cannot leave half an escape sequence in one segment.
+const ESCAPED_IN_TEXT: [char; 6] = ['\\', '*', '_', '`', '[', ']'];
+
+/// Appends `text` with the characters in [`ESCAPED_IN_TEXT`] backslash-escaped.
+fn push_escaped(out: &mut String, text: &str) {
+    for c in text.chars() {
+        if ESCAPED_IN_TEXT.contains(&c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+}
+
+/// Escapes the first glyph of a rendered paragraph when CommonMark would read
+/// it as block structure: `#` (heading), `>` (quote), `-`, `+`, `=`, `~` (list
+/// or setext underline), and a digit run followed by `.`/`)` (ordered list).
+///
+/// The escape goes on the punctuation, not on a leading digit: `\1.` is not a
+/// valid CommonMark escape and would print the backslash, while `1\.` is.
+fn escape_block_start(rendered: &mut String) {
+    let Some(first) = rendered.chars().next() else {
+        return;
+    };
+    match first {
+        '#' | '>' | '-' | '+' | '=' | '~' => rendered.insert(0, '\\'),
+        '0'..='9' => {
+            let digits_end = rendered
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rendered.len());
+            let mut rest = rendered[digits_end..].chars();
+            let marker = rest.next();
+            if matches!(marker, Some('.') | Some(')'))
+                && matches!(rest.next(), None | Some(' ') | Some('\t'))
+            {
+                rendered.insert(digits_end, '\\');
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Opening order for the two emphasis styles: bold outside, italic inside, so
@@ -629,5 +686,65 @@ mod tests {
             to_markdown(&document(vec![p], Vec::new())),
             "*abcde**fghijklmno***p\n"
         );
+    }
+
+    /// The Markdown for one paragraph, with nothing else in the document.
+    fn exported(text: &str) -> String {
+        to_markdown(&document(vec![paragraph(text)], Vec::new()))
+    }
+
+    #[test]
+    fn prose_that_looks_like_block_structure_stays_a_paragraph() {
+        // Each of these would silently change the exported structure if the
+        // paragraph's own text were copied through unescaped.
+        for (text, expected) in [
+            ("# not a heading", "\\# not a heading\n"),
+            ("> not a quote", "\\> not a quote\n"),
+            ("- not a list", "\\- not a list\n"),
+            ("+ not a list", "\\+ not a list\n"),
+            ("---", "\\---\n"),
+            ("= setext underline", "\\= setext underline\n"),
+            ("~ setext underline", "\\~ setext underline\n"),
+            ("1. not an ordered item", "1\\. not an ordered item\n"),
+            ("2) not an ordered item", "2\\) not an ordered item\n"),
+        ] {
+            assert_eq!(
+                exported(text),
+                expected,
+                "prose {text:?} must not become block structure"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_punctuation_is_escaped_inside_prose() {
+        assert_eq!(
+            exported("a * b _ c ` d [e] \\ f"),
+            "a \\* b \\_ c \\` d \\[e\\] \\\\ f\n"
+        );
+    }
+
+    #[test]
+    fn escaping_holds_across_a_span_boundary() {
+        // Asterisks on both sides of a bold run: escaping is per segment, so
+        // neither segment can be left with half an escape sequence.
+        let mut p = paragraph("*bold*");
+        p.spans = vec![Span {
+            start: 1,
+            end: 5,
+            style: SpanStyle::Bold,
+        }];
+        assert_eq!(
+            to_markdown(&document(vec![p], Vec::new())),
+            "\\***bold**\\*\n"
+        );
+    }
+
+    #[test]
+    fn footnote_bodies_are_escaped_too() {
+        let body = paragraph("Body");
+        let id = body.id;
+        let doc = document(vec![body], vec![footnote(id, 0, 4, "a *b* [c]")]);
+        assert_eq!(to_markdown(&doc), "Body[^1]\n\n[^1]: a \\*b\\* \\[c\\]\n");
     }
 }

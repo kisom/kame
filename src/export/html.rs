@@ -205,17 +205,17 @@ struct BlockApparatus {
 ///   and consecutive list items of the same kind share one `<ul>`/`<ol>`,
 /// - inline spans become `<em>`/`<strong>`, nesting innermost-first,
 /// - marginalia become `<aside class="marginalia">` immediately after the block
-///   they annotate (inside the `<li>` for list items), in reading order,
+///   they annotate (inside the `<li>` for list items), in reading order; a
+///   margin note whose block is gone or empty is emitted unanchored after the
+///   last block, so its body survives,
 /// - notes wrap their anchored range in `<mark id="noteN">` and add a
 ///   `<details class="note" id="noteN-body">` beneath the block, whose summary
 ///   links back to the mark,
 /// - footnotes leave a `<sup class="footnote-ref"><a href="#fnN">N</a></sup>`
 ///   marker at the end of their anchored range and collect in one
 ///   `<ol class="footnotes">` at the foot, numbered in reading order,
-/// - empty blocks are skipped; a note or footnote that has lost its anchor
-///   loses only its marker — the body is still emitted, unanchored — and a
-///   margin note, which has no marker of its own, is dropped when its block is
-///   gone,
+/// - empty blocks are skipped; a note, footnote or margin note that has lost
+///   its anchor loses only its marker — the body is still emitted, unanchored,
 /// - text is escaped (`&`, `<`, `>`); the output carries no document or
 ///   annotation ids, so it is stable across runs and serde round trips.
 pub fn to_html(doc: &Document) -> String {
@@ -261,6 +261,11 @@ pub fn to_html(doc: &Document) -> String {
     // body is not.
     for note in &collected.unanchored_notes {
         body.push_str(&note_details(note));
+    }
+
+    // Margin notes in the same position, for the same reason.
+    for marginal in &collected.unanchored_marginalia {
+        body.push_str(&marginalia_aside(marginal));
     }
 
     if !collected.footnotes.is_empty() {
@@ -309,12 +314,16 @@ struct FootnoteBody {
 }
 
 /// Everything the annotation list contributes to the page: apparatus grouped by
-/// block, the footnote list in number order, and notes with no block left to
-/// sit after.
+/// block, the footnote list in number order, notes with no block left to sit
+/// after, and marginalia whose block is gone.
 struct Collected {
     blocks: Vec<BlockApparatus>,
     footnotes: Vec<FootnoteBody>,
     unanchored_notes: Vec<NoteMark>,
+    /// Margin-note bodies that lost their block (or whose block is empty), in
+    /// reading order. They are emitted as plain asides after the last block:
+    /// the anchor is gone, the authored text is not.
+    unanchored_marginalia: Vec<String>,
 }
 
 /// One live annotation, placed against the block it renders beside.
@@ -335,13 +344,12 @@ struct Placed<'a> {
 /// annotation id — storage order never shows through, so numbering is stable.
 /// An annotation's body is never thrown away for want of a marker: a note whose
 /// range covers no glyphs loses the highlight but keeps its `<details>` after
-/// the block, and a note or footnote whose block is missing or empty is emitted
-/// unanchored (with its number, without a marker or back-link). A margin note
-/// is the exception — the aside *is* its marker, and it has no place to float
-/// without a block.
+/// the block, and a note, footnote or margin note whose block is missing or
+/// empty is emitted unanchored (a footnote with its number but no marker or
+/// back-link, a note as `<details>`, a margin note as a bare aside).
 ///
 /// Returns the per-block apparatus, the footnote bodies in number order, and
-/// the unanchored notes.
+/// the unanchored notes and marginalia.
 fn collect_apparatus(doc: &Document) -> Collected {
     let block_order: HashMap<BlockId, usize> = doc
         .blocks
@@ -363,20 +371,25 @@ fn collect_apparatus(doc: &Document) -> Collected {
             let index = block_order.get(&annotation.anchor.block_id).copied();
             let text = index.map_or("", |index| doc.blocks[index].text.as_str());
             match annotation.kind {
-                // Nothing to float the margin note beside: there is no block.
-                AnnotationKind::Marginal => {
-                    let index = index?;
-                    if text.is_empty() {
-                        return None;
-                    }
-                    Some(Placed {
+                // A margin note hangs off the block it annotates. If that
+                // block is gone or empty there is nothing to float beside, but
+                // the body still belongs in the export.
+                AnnotationKind::Marginal => match index {
+                    Some(index) if !text.is_empty() => Some(Placed {
                         index: Some(index),
                         attached: true,
                         start: annotation.anchor.start,
                         end: annotation.anchor.end,
                         annotation,
-                    })
-                }
+                    }),
+                    _ => Some(Placed {
+                        index: None,
+                        attached: false,
+                        start: 0,
+                        end: 0,
+                        annotation,
+                    }),
+                },
                 AnnotationKind::Note => match index {
                     Some(index) if !text.is_empty() => {
                         let (start, end) =
@@ -431,6 +444,7 @@ fn collect_apparatus(doc: &Document) -> Collected {
         blocks: vec![BlockApparatus::default(); doc.blocks.len()],
         footnotes: Vec::new(),
         unanchored_notes: Vec::new(),
+        unanchored_marginalia: Vec::new(),
     };
     let mut note_number = 0usize;
     let mut footnote_number = 0usize;
@@ -438,10 +452,16 @@ fn collect_apparatus(doc: &Document) -> Collected {
         let annotation = placed.annotation;
         match annotation.kind {
             AnnotationKind::Marginal => {
-                let index = placed.index.expect("a margin note keeps its block");
-                collected.blocks[index]
-                    .marginalia
-                    .push(annotation.body.clone());
+                if placed.attached {
+                    let index = placed.index.expect("an attached margin note has a block");
+                    collected.blocks[index]
+                        .marginalia
+                        .push(annotation.body.clone());
+                } else {
+                    collected
+                        .unanchored_marginalia
+                        .push(annotation.body.clone());
+                }
             }
             AnnotationKind::Note => {
                 note_number += 1;
@@ -487,15 +507,21 @@ fn collect_apparatus(doc: &Document) -> Collected {
 fn render_apparatus(apparatus: &BlockApparatus) -> String {
     let mut out = String::new();
     for body in &apparatus.marginalia {
-        out.push_str(&format!(
-            "<aside class=\"marginalia\"><p>{}</p></aside>\n",
-            escape(body)
-        ));
+        out.push_str(&marginalia_aside(body));
     }
     for note in &apparatus.notes {
         out.push_str(&note_details(note));
     }
     out
+}
+
+/// The margin note's body. The `<aside>` is where a marginal is read, whether
+/// it kept its block or lost it.
+fn marginalia_aside(body: &str) -> String {
+    format!(
+        "<aside class=\"marginalia\"><p>{}</p></aside>\n",
+        escape(body)
+    )
 }
 
 /// The expandable note body.
@@ -1040,14 +1066,38 @@ mod tests {
             ],
         );
         let html = to_html(&doc);
-        // A margin note is its own marker — no block, nowhere to float it.
-        assert!(!html.contains("orphan"));
-        assert!(!html.contains("<aside"));
+        // A margin note with no block to float beside keeps its body: it is
+        // emitted as an aside after the last block, like an unanchored note.
+        assert!(html.contains("<aside class=\"marginalia\"><p>orphan</p></aside>"));
         // The footnote lost its marker, not its body: it is listed unanchored,
         // with no back-reference to a `<sup>` that was never written.
         assert!(!html.contains("fnref1"));
         assert!(html.contains("<ol class=\"footnotes\">"));
         assert!(html.contains("<li id=\"fn1\">nowhere</li>"));
+    }
+
+    #[test]
+    fn marginalia_on_a_emptied_block_keep_their_body() {
+        // Deleting all the text under a marginal collapses its anchor to 0..0
+        // and leaves an empty block: the aside must survive, after the prose.
+        let emptied = paragraph("");
+        let emptied_id = emptied.id;
+        let doc = document(
+            vec![paragraph("Body"), emptied],
+            vec![annotation(
+                AnnotationKind::Marginal,
+                emptied_id,
+                0,
+                0,
+                "the body survives",
+            )],
+        );
+        let html = to_html(&doc);
+        let prose_end = html.find("<p>Body</p>").expect("the paragraph exports");
+        let aside = html
+            .find("<aside class=\"marginalia\"><p>the body survives</p></aside>")
+            .expect("an unanchored marginal is still exported");
+        assert!(aside > prose_end, "the aside follows the last block");
     }
 
     #[test]

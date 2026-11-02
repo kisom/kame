@@ -316,10 +316,12 @@ impl Editor {
     /// into a new block inserted after it, and returns the op that was applied.
     ///
     /// Notes anchored wholly in the moved text follow it into the new block; a
-    /// note that straddles the split stays with the leading block. The new
-    /// block is a paragraph when a heading is split (so the next line is body
-    /// text) and keeps the source kind otherwise (a list item stays a list
-    /// item).
+    /// note that straddles the split stays with the leading block. This holds
+    /// for zero-width point anchors too (a marginal added at the end of a line
+    /// anchors to a single offset): a point at or after the split follows the
+    /// text it sits on. The new block is a paragraph when a heading is split
+    /// (so the next line is body text) and keeps the source kind otherwise (a
+    /// list item stays a list item).
     ///
     /// Splitting at the end of a block appends an empty block.
     ///
@@ -345,7 +347,7 @@ impl Editor {
             .filter(|annotation| {
                 let anchor = &annotation.anchor;
                 anchor.block_id == cursor.block_id
-                    && anchor.start < anchor.end
+                    && anchor.start <= anchor.end
                     && anchor.start >= cursor.offset
                     && anchor.end <= text.len()
             })
@@ -1192,6 +1194,47 @@ mod tests {
         assert_eq!(e.document().blocks.len(), 2);
         assert_eq!(e.document().blocks[0].text, "end");
         assert_eq!(e.document().blocks[1].text, "");
+    }
+
+    #[test]
+    fn split_moves_point_anchored_marginalia_with_the_text() {
+        // A marginal added at the end of a sentence (caret after the period)
+        // anchors to a single offset (start == end). It must follow the text
+        // through a split rather than collapse onto an empty leading block.
+        let mut doc = doc_with("This is my paragraph");
+        let id = doc.blocks[0].id;
+        doc.annotations.push(note(id, 11, 20)); // range marginal on "paragraph"
+        doc.annotations.push(note(id, 13, 13)); // point marginal at the end
+
+        let mut e = Editor::new(doc);
+        let mut cursor = Cursor { block_id: id, offset: 0 };
+        e.split_paragraph(&cursor).unwrap();
+        cursor = Cursor {
+            block_id: e.document().blocks[1].id,
+            offset: 0,
+        };
+        e.split_paragraph(&cursor).unwrap();
+
+        let final_block = e.document().blocks[2].id;
+        assert_eq!(e.document().annotations.len(), 2, "no marginal is dropped");
+        for a in &e.document().annotations {
+            assert_eq!(
+                a.anchor.block_id, final_block,
+                "every marginal follows the text, none lingers on an empty block"
+            );
+        }
+        assert!(e.document().annotations.iter().any(|a| {
+            a.anchor == Anchor { block_id: final_block, start: 11, end: 20 }
+        }));
+        assert!(e.document().annotations.iter().any(|a| {
+            a.anchor == Anchor { block_id: final_block, start: 13, end: 13 }
+        }));
+
+        e.undo().unwrap();
+        e.undo().unwrap();
+        assert_eq!(e.document().blocks.len(), 1);
+        assert_eq!(e.document().blocks[0].text, "This is my paragraph");
+        assert_eq!(e.document().annotations.len(), 2);
     }
 
     #[test]

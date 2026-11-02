@@ -594,7 +594,7 @@ fn annotations_wholly_inside(
         .filter(|annotation| {
             let anchor = &annotation.anchor;
             anchor.block_id == block_id
-                && anchor.start < anchor.end
+                && anchor.start <= anchor.end
                 && anchor.start >= start
                 && anchor.end <= end
         })
@@ -641,9 +641,13 @@ fn map_deleted_offset(offset: usize, start: usize, end: usize) -> usize {
 /// returns the notes it dropped.
 ///
 /// Three cases, in order:
-/// 1. A non-empty anchor lying wholly inside the deleted range has no text
-///    left, so it is dropped and returned (the caller's op payload carries it,
-///    so undo can put it back).
+/// 1. An anchor lying wholly inside the deleted range — a non-empty span, or a
+///    zero-width point anchor whose position is inside it — has no text left,
+///    so it is dropped and returned (the caller's op payload carries it, so
+///    undo can put it back). A point anchor is treated like a range here so
+///    that a move-shaped edit (a split, which deletes then re-inserts the tail
+///    in a new block) can carry it instead of collapsing it onto the deletion
+///    point, which would leave it anchored to the wrong block.
 /// 2. An anchor that straddles the range has its surviving endpoints remapped
 ///    one at a time: a prefix before `start` stays put, a suffix after `end`
 ///    closes up, and an endpoint inside the range collapses onto `start`.
@@ -666,7 +670,7 @@ fn rebase_annotations(
     doc.annotations.retain(|annotation| {
         let anchor = &annotation.anchor;
         let wholly_inside = anchor.block_id == block_id
-            && anchor.start < anchor.end
+            && anchor.start <= anchor.end
             && anchor.start >= start
             && anchor.end <= end;
         if wholly_inside {
@@ -1135,6 +1139,24 @@ mod tests {
         assert_eq!(d.annotations.len(), 2);
         assert!(d.annotations.contains(&whole));
         assert!(d.annotations.contains(&inner));
+    }
+
+    /// A zero-width (point) anchor inside the deleted range is dropped like a
+    /// range anchor, so a move-shaped edit can carry it, and undo restores it.
+    #[test]
+    fn delete_drops_a_point_anchor_inside_the_range() {
+        let mut d = doc("abcdef");
+        let id = d.blocks[0].id;
+        let point = note(id, 3, 3);
+        d.annotations.push(point.clone());
+
+        let op = Op::delete_text(&d, id, 1, 5); // deletes "bcde"
+        apply(&mut d, &op);
+        assert!(d.annotations.is_empty(), "a point inside the deleted text is dropped");
+
+        apply_inverse(&mut d, &op);
+        assert_eq!(d.blocks[0].text, "abcdef");
+        assert!(d.annotations.contains(&point), "undo restores the point anchor");
     }
 
     #[test]

@@ -604,6 +604,40 @@ impl Editor {
         Some((op, close_bracket - 1))
     }
 
+    /// Sets a link span over `start..end` in `block_id`, replacing any link
+    /// already overlapping that range. An empty `url` removes the link instead.
+    /// Returns the op that was applied.
+    pub fn set_link(
+        &mut self,
+        block_id: BlockId,
+        start: usize,
+        end: usize,
+        url: String,
+    ) -> Result<Op, EditError> {
+        let block = self.block(block_id)?;
+        self.check_offset(block, start)?;
+        self.check_offset(block, end)?;
+        if start >= end {
+            return Err(EditError::OffsetOutOfRange);
+        }
+        let spans: Vec<Span> = block
+            .spans
+            .iter()
+            .filter(|span| {
+                !(matches!(span.style, SpanStyle::Link { .. })
+                    && span.start < end
+                    && start < span.end)
+            })
+            .cloned()
+            .chain((!url.is_empty()).then(|| Span {
+                start,
+                end,
+                style: SpanStyle::Link { url },
+            }))
+            .collect();
+        Ok(self.apply_edit(Op::set_spans(&self.doc, block_id, spans)))
+    }
+
     /// Anchors a new note of `kind` over `anchor`, returning the op that was
     /// applied. The note's id is fresh, so the returned op can be persisted as
     /// is.
@@ -1757,6 +1791,55 @@ mod tests {
         e.undo().expect("the link is one undo step");
         assert_eq!(e.document().blocks[0].text, "[text](http://x.com)");
         assert!(e.document().blocks[0].spans.is_empty());
+    }
+
+    #[test]
+    fn set_link_adds_replaces_and_removes_a_link() {
+        let doc = doc_with("some text here");
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+
+        e.set_link(id, 0, 4, "http://a.com".into()).unwrap();
+        assert_eq!(
+            e.document().blocks[0].spans,
+            vec![Span {
+                start: 0,
+                end: 4,
+                style: SpanStyle::Link {
+                    url: "http://a.com".into(),
+                },
+            }]
+        );
+
+        // Replace the link in place (the C-k editing path).
+        e.set_link(id, 0, 4, "http://b.com".into()).unwrap();
+        assert_eq!(
+            e.document().blocks[0].spans,
+            vec![Span {
+                start: 0,
+                end: 4,
+                style: SpanStyle::Link {
+                    url: "http://b.com".into(),
+                },
+            }]
+        );
+
+        // An empty URL removes the link.
+        e.set_link(id, 0, 4, String::new()).unwrap();
+        assert!(e.document().blocks[0].spans.is_empty());
+
+        // Each change is one undo step.
+        e.undo().unwrap();
+        assert_eq!(
+            e.document().blocks[0].spans,
+            vec![Span {
+                start: 0,
+                end: 4,
+                style: SpanStyle::Link {
+                    url: "http://b.com".into(),
+                },
+            }]
+        );
     }
 
     #[test]

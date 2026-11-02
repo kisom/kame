@@ -400,6 +400,18 @@ struct ImagePrompt {
     focus: bool,
 }
 
+/// The "Add link" URL prompt (C-k): the range being linked and the URL being
+/// typed.
+struct LinkPrompt {
+    block_id: BlockId,
+    start: usize,
+    end: usize,
+    /// The URL being typed, pre-filled with the existing link's URL, if any.
+    url: String,
+    /// Set for the frame the prompt opens on, so the field takes the keyboard.
+    focus: bool,
+}
+
 /// The "Restore Snapshot" picker: the listed snapshots (newest first), which
 /// one is chosen, and which of its two steps is showing. The second step is the
 /// confirmation, because restoring discards whatever is in the document now.
@@ -1483,6 +1495,60 @@ impl Session {
         }
     }
 
+    /// Sets a link span over `start..end`, replacing any link already there; an
+    /// empty `url` removes it.
+    fn set_link(&mut self, block_id: BlockId, start: usize, end: usize, url: String) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let result = self.editor.set_link(block_id, start, end, url);
+        self.commit(result)
+    }
+
+    /// The range C-k should link — the current selection, or the link under the
+    /// caret when nothing is selected — plus that link's current URL, if any,
+    /// so the prompt can pre-fill it for editing.
+    fn link_target(&self) -> Option<(BlockId, usize, usize, Option<String>)> {
+        if let Some((start, end)) = self.ordered_selection() {
+            if start.block_id != end.block_id {
+                return None; // a span lives in one block
+            }
+            let url = self
+                .link_span_at(start.block_id, start.offset, end.offset)
+                .map(|(_, _, url)| url);
+            return Some((start.block_id, start.offset, end.offset, url));
+        }
+        let caret = self.caret;
+        let (start, end, url) = self.link_span_at(caret.block_id, caret.offset, caret.offset)?;
+        Some((caret.block_id, start, end, Some(url)))
+    }
+
+    /// The stored link span covering `lo..hi` (`lo == hi` means "the link
+    /// containing the caret"), returning `(start, end, url)`.
+    fn link_span_at(
+        &self,
+        block_id: BlockId,
+        lo: usize,
+        hi: usize,
+    ) -> Option<(usize, usize, String)> {
+        let block = self
+            .editor
+            .document()
+            .blocks
+            .iter()
+            .find(|block| block.id == block_id)?;
+        block
+            .spans
+            .iter()
+            .filter_map(|span| match &span.style {
+                SpanStyle::Link { url } if span.start <= lo && hi <= span.end => {
+                    Some((span.start, span.end, url.clone()))
+                }
+                _ => None,
+            })
+            .next()
+    }
+
     /// Changes `block_id`'s kind, persisted as one undoable edit.
     ///
     /// This is the authoring path for headings and list items; without it every
@@ -2158,6 +2224,8 @@ struct KameApp {
     open_prompt: Option<OpenPrompt>,
     /// The "Insert image" path prompt, when it is open.
     image_prompt: Option<ImagePrompt>,
+    /// The "Add link" URL prompt (C-k), when it is open.
+    link_prompt: Option<LinkPrompt>,
     /// The "Restore Snapshot" picker, when it is open. At most one of this and
     /// `snapshot_prompt` is up at a time.
     restore_picker: Option<RestorePicker>,
@@ -2209,6 +2277,7 @@ impl KameApp {
             snapshot_prompt: None,
             open_prompt: None,
             image_prompt: None,
+            link_prompt: None,
             restore_picker: None,
             notice: None,
             close: CloseGuard::default(),
@@ -2282,6 +2351,7 @@ impl KameApp {
         self.snapshot_prompt.is_some()
             || self.open_prompt.is_some()
             || self.image_prompt.is_some()
+            || self.link_prompt.is_some()
             || self.restore_picker.is_some()
     }
 
@@ -2292,6 +2362,7 @@ impl KameApp {
         self.snapshot_prompt = None;
         self.open_prompt = None;
         self.image_prompt = None;
+        self.link_prompt = None;
         self.restore_picker = None;
         open
     }
@@ -2590,6 +2661,25 @@ impl KameApp {
                 focus: true,
                 confirming: false,
             });
+        }
+        // Ctrl-K opens the link prompt on the current selection (or the link
+        // under the caret), so a link can be added or edited from the keyboard.
+        let link_chord = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::K,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if modifiers.command && !modifiers.shift
+                )
+            })
+        });
+        if link_chord {
+            self.begin_link();
         }
         // F1 toggles the help dialog (the usage and keybinding reference).
         if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
@@ -3788,6 +3878,8 @@ impl KameApp {
             self.show_open_prompt(ctx, enter);
         } else if self.image_prompt.is_some() {
             self.show_image_prompt(ctx, enter);
+        } else if self.link_prompt.is_some() {
+            self.show_link_prompt(ctx, enter);
         } else if self.restore_picker.is_some() {
             self.show_restore_picker(ctx, enter);
         }
@@ -3838,6 +3930,7 @@ impl KameApp {
                             (">", "block quote, typed at the start of a line"),
                             ("*x*  **x**", "italic / bold emphasis, typed around a word"),
                             ("[text](url)", "a hyperlink, typed around the anchor text"),
+                            ("Ctrl-K", "add or edit a link on the selection"),
                             ("Ctrl +  Ctrl -", "larger / smaller type"),
                             ("Ctrl-Shift-D", "dark mode"),
                             ("F11", "fullscreen"),
@@ -4078,6 +4171,90 @@ impl KameApp {
         self.image_textures
             .insert(path.to_string(), texture.clone());
         Some(texture)
+    }
+
+    /// Opens the link prompt on the current selection, or the link under the
+    /// caret when nothing is selected — the mechanism for both adding a link
+    /// and editing (or removing) one.
+    fn begin_link(&mut self) {
+        let Some((block_id, start, end, current)) = self.session.link_target() else {
+            self.notice = Some("select text to link, or place the caret inside a link".into());
+            return;
+        };
+        self.snapshot_prompt = None;
+        self.open_prompt = None;
+        self.image_prompt = None;
+        self.restore_picker = None;
+        self.link_prompt = Some(LinkPrompt {
+            block_id,
+            start,
+            end,
+            url: current.unwrap_or_default(),
+            focus: true,
+        });
+    }
+
+    /// The "Add link" URL prompt: type the URL, then set it on the target range.
+    /// An empty URL removes the link.
+    fn show_link_prompt(&mut self, ctx: &egui::Context, enter: bool) {
+        let Some(prompt) = &self.link_prompt else {
+            return;
+        };
+        let mut buffer = prompt.url.clone();
+        let focus = prompt.focus;
+        let mut submit = enter && !focus;
+        let mut cancel = false;
+
+        egui::Window::new("Add link")
+            .id(Id::unique("kame-link-prompt"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                ui.label("Link URL:");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut buffer)
+                        .id(Id::unique("kame-link-url"))
+                        .desired_width(360.0)
+                        .hint_text("https://example.com"),
+                );
+                if focus {
+                    field.request_focus();
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Set link").clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if let Some(prompt) = self.link_prompt.as_mut() {
+            prompt.url = buffer;
+            prompt.focus = false;
+        }
+        if cancel {
+            self.link_prompt = None;
+            return;
+        }
+        if !submit {
+            return;
+        }
+        let (block_id, start, end) = self
+            .link_prompt
+            .as_ref()
+            .map(|prompt| (prompt.block_id, prompt.start, prompt.end))
+            .unwrap_or((BlockId::nil(), 0, 0));
+        let url = self
+            .link_prompt
+            .as_ref()
+            .map(|prompt| prompt.url.trim().to_string())
+            .unwrap_or_default();
+        self.link_prompt = None;
+        self.session.set_link(block_id, start, end, url);
     }
 
     /// The "Insert image" path prompt: type an image file path, then embed it
@@ -4761,6 +4938,39 @@ mod tests {
         assert!(session.insert("scratch"), "the blank document is editable");
         assert_eq!(session.document().blocks[0].text, "scratch");
         assert!(!path.exists(), "a blank session never creates the bad path");
+    }
+
+    #[test]
+    fn link_target_prefers_selection_then_caret_link() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("click here");
+        let id = first_block_id(&session);
+
+        // Nothing selected, no link: no target.
+        assert!(session.link_target().is_none());
+
+        // A caret inside a link (no selection) edits that link, pre-filling its URL.
+        session.set_link(id, 0, 5, "http://a.com".into());
+        session.set_caret(Cursor {
+            block_id: id,
+            offset: 2,
+        });
+        assert_eq!(
+            session.link_target(),
+            Some((id, 0, 5, Some("http://a.com".to_string())))
+        );
+
+        // A selection over "here" becomes the target with no pre-fill.
+        session.set_caret(Cursor {
+            block_id: id,
+            offset: 6,
+        });
+        session.select_to(Cursor {
+            block_id: id,
+            offset: 10,
+        });
+        assert_eq!(session.link_target(), Some((id, 6, 10, None)));
     }
 
     #[test]

@@ -510,8 +510,10 @@ fn find_matches(document: &Document, needle: &str) -> Vec<(BlockId, usize, usize
         // Match over the text's own char boundaries so byte offsets stay exact
         // even when a query or text char lowercases to a different length.
         let chars: Vec<(usize, char)> = block.text.char_indices().collect();
-        for i in 0..=chars.len().saturating_sub(needle.len()) {
-            let window = &chars[i..i + needle.len()];
+        // `windows` yields nothing when the block is shorter than the needle,
+        // so a block with fewer chars (an empty block) never panics the way an
+        // open `0..=saturating_sub` range would.
+        for window in chars.windows(needle.len()) {
             if window
                 .iter()
                 .zip(&needle)
@@ -5056,6 +5058,28 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             vec![(document.blocks[0].id, 0, 2), (document.blocks[0].id, 1, 3),]
         );
         assert!(find_matches(&document, "").is_empty());
+    }
+
+    #[test]
+    fn find_matches_skips_blocks_shorter_than_the_needle() {
+        // A fresh document ends on an empty block; searching must not panic on
+        // a block with fewer chars than the query.
+        let mut document = Document::new("find");
+        document.blocks[0].text = "find me".to_string();
+        let empty = Block {
+            id: BlockId::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: String::new(),
+            spans: vec![],
+        };
+        document.blocks.push(empty);
+
+        let matches = find_matches(&document, "find");
+        assert_eq!(matches, vec![(document.blocks[0].id, 0, 4)]);
+        assert!(
+            find_matches(&document, "zz").is_empty(),
+            "no match, no panic"
+        );
     }
 
     // --- file, export and snapshot commands --------------------------------

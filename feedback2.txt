@@ -19,7 +19,7 @@
   which block.
 - [ ] Support for block quotes is also needed. These should be rendered
   as italicized, and indented.
-- [ ] The body should take up 50% of the width; the other 50% should be
+- [x] The body should take up 50% of the width; the other 50% should be
   split equally between the unused left gutter and the right margin. The
   right margin needs enough spacing from the far right edge of the
   window so as to ensure the legibility of the text.

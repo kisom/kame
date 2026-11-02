@@ -373,6 +373,20 @@ pub fn apply(doc: &mut Document, op: &Op) {
                 *offset,
                 text.len() as isize,
             );
+            // Spans (bold/italic/link) move and widen exactly like anchors, so
+            // a link stays on the text it points at as surrounding text shifts.
+            {
+                let block = block_mut(doc, *block_id);
+                for span in block.spans.iter_mut() {
+                    if span.start < *offset && *offset < span.end {
+                        span.end = span
+                            .end
+                            .checked_add(delta)
+                            .expect("span end overflowed usize");
+                    }
+                }
+                shift_spans(block, *offset, delta as isize);
+            }
         }
         Op::DeleteText {
             block_id,
@@ -400,6 +414,7 @@ pub fn apply(doc: &mut Document, op: &Op) {
             }
             let dropped = rebase_annotations(doc, *block_id, *start, *end);
             assert_annotation_payload("DeleteText removed", removed, &dropped);
+            rebase_spans(block_mut(doc, *block_id), *start, *end);
         }
         Op::InsertBlock { index, block } => {
             assert!(
@@ -784,6 +799,51 @@ fn rebase_annotations(
         -((end - start) as isize),
     );
     dropped
+}
+
+/// Shifts every span whose `start` is at or after `edit_start` by `delta` bytes
+/// — the span-level twin of [`shift_anchors`], so bold/italic/link spans move
+/// with their text when text is inserted or deleted around them.
+fn shift_spans(block: &mut Block, edit_start: usize, delta: isize) {
+    if delta == 0 {
+        return;
+    }
+    for span in block.spans.iter_mut() {
+        if span.start < edit_start {
+            continue;
+        }
+        span.start = span.start.checked_add_signed(delta).expect(
+            "span start overflowed usize: edit_start/delta inconsistent with document text",
+        );
+        span.end = span
+            .end
+            .checked_add_signed(delta)
+            .expect("span end overflowed usize: edit_start/delta inconsistent with document text");
+    }
+}
+
+/// Keeps a block's spans consistent with a deletion of `start..end`, mirroring
+/// [`rebase_annotations`]: spans wholly inside the range are dropped, straddling
+/// spans have their endpoints remapped onto the deletion point, and survivors
+/// after the range shift left.
+fn rebase_spans(block: &mut Block, start: usize, end: usize) {
+    if start == end {
+        return;
+    }
+    block
+        .spans
+        .retain(|span| !(span.start >= start && span.end <= end));
+    for span in block.spans.iter_mut() {
+        if span.end <= start || span.start >= end {
+            continue;
+        }
+        span.start = map_deleted_offset(span.start, start, end);
+        span.end = map_deleted_offset(span.end, start, end);
+    }
+    // A straddling span whose surviving text ran out collapses to empty; drop
+    // it rather than keep a zero-width span.
+    block.spans.retain(|span| span.start < span.end);
+    shift_spans(block, end, -((end - start) as isize));
 }
 
 #[cfg(test)]
@@ -1231,6 +1291,80 @@ mod tests {
         assert_eq!(d.blocks[0].text, "abgh");
         assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 2); // collapses onto the edit start
         assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 4); // "gh" closed up
+    }
+
+    fn link_span(start: usize, end: usize) -> Span {
+        Span {
+            start,
+            end,
+            style: SpanStyle::Link {
+                url: "http://x.com".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn inserting_text_before_a_link_shifts_it_right() {
+        let mut d = doc("click here");
+        let id = d.blocks[0].id;
+        d.blocks[0].spans = vec![link_span(0, 5)];
+
+        apply(
+            &mut d,
+            &Op::InsertText {
+                block_id: id,
+                offset: 0,
+                text: "!".into(),
+            },
+        );
+
+        assert_eq!(d.blocks[0].text, "!click here");
+        assert_eq!(d.blocks[0].spans[0], link_span(1, 6));
+    }
+
+    #[test]
+    fn inserting_text_inside_a_link_widens_it() {
+        let mut d = doc("click here");
+        let id = d.blocks[0].id;
+        d.blocks[0].spans = vec![link_span(0, 5)];
+
+        apply(
+            &mut d,
+            &Op::InsertText {
+                block_id: id,
+                offset: 3,
+                text: "x".into(),
+            },
+        );
+
+        assert_eq!(d.blocks[0].text, "clixck here");
+        assert_eq!(d.blocks[0].spans[0], link_span(0, 6));
+    }
+
+    #[test]
+    fn deleting_text_before_a_link_shifts_it_left() {
+        let mut d = doc("a click");
+        let id = d.blocks[0].id;
+        d.blocks[0].spans = vec![link_span(2, 7)];
+
+        let op = Op::delete_text(&d, id, 0, 1);
+        apply(&mut d, &op);
+
+        assert_eq!(d.blocks[0].text, " click");
+        assert_eq!(d.blocks[0].spans[0], link_span(1, 6));
+    }
+
+    #[test]
+    fn deleting_a_wholly_linked_range_removes_the_link() {
+        let mut d = doc("click here");
+        let id = d.blocks[0].id;
+        d.blocks[0].spans = vec![link_span(0, 5)];
+
+        let op = Op::delete_text(&d, id, 0, 5);
+        apply(&mut d, &op);
+
+        assert_eq!(d.blocks[0].text, " here");
+        assert!(d.blocks[0].spans.is_empty(), "the link has no text left");
     }
 
     /// FIX 5: the only path in `rebase_annotations` that actually calls

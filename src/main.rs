@@ -786,6 +786,21 @@ impl CloseGuard {
     }
 }
 
+/// Whether `event` is the macOS quit shortcut. `mac_cmd` is never set elsewhere,
+/// so this binds no quit key on Linux.
+fn is_quit_chord(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key {
+            key: egui::Key::Q,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } if modifiers.mac_cmd
+    )
+}
+
 /// Whether closing the window must stop and ask about an unsaved document.
 ///
 /// Only the prompt's own answer may let unsaved work go. A close request arriving
@@ -936,6 +951,16 @@ fn main() -> eframe::Result {
             .with_inner_size([1100.0, 860.0])
             .with_min_inner_size([560.0, 360.0])
             .with_title("kame"),
+        // Cmd-Q in winit's default menu calls AppKit's `terminate:`, which exits
+        // with no window close request for the unsaved-document prompt to refuse.
+        // With no menu it arrives as a key press instead (see `is_quit_chord`).
+        // This also gives up the menu's Hide items, and Quit from the Dock still
+        // goes straight to `terminate:`.
+        #[cfg(target_os = "macos")]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::macos::EventLoopBuilderExtMacOS;
+            builder.with_default_menu(false);
+        })),
         ..Default::default()
     };
 
@@ -4893,6 +4918,9 @@ impl eframe::App for KameApp {
     /// This runs here rather than in `ui` because eframe skips `ui` while the
     /// window is minimized or occluded, and a close nothing cancels there exits.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|input| input.events.iter().any(is_quit_chord)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let close_requested = ctx.input(|input| input.viewport().close_requested());
         let unsaved =
             !self.session.save_failed && self.session.is_anonymous() && self.session.has_content();
@@ -5340,6 +5368,35 @@ mod tests {
         assert_eq!(typewriter_scroll_offset(1900.0, 400.0, 2000.0), 1600.0);
         // Content shorter than the viewport never scrolls.
         assert_eq!(typewriter_scroll_offset(300.0, 400.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn only_cmd_q_is_the_quit_chord() {
+        let key = |key, pressed, repeat, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers,
+        };
+        let cmd = egui::Modifiers::MAC_CMD;
+        assert!(is_quit_chord(&key(egui::Key::Q, true, false, cmd)));
+        // Ctrl-Q on Linux is not a quit chord; kame binds no quit key there.
+        assert!(!is_quit_chord(&key(
+            egui::Key::Q,
+            true,
+            false,
+            egui::Modifiers::CTRL
+        )));
+        assert!(!is_quit_chord(&key(
+            egui::Key::Q,
+            true,
+            false,
+            egui::Modifiers::NONE
+        )));
+        assert!(!is_quit_chord(&key(egui::Key::W, true, false, cmd)));
+        assert!(!is_quit_chord(&key(egui::Key::Q, false, false, cmd)));
+        assert!(!is_quit_chord(&key(egui::Key::Q, true, true, cmd)));
     }
 
     #[test]

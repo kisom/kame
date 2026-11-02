@@ -24,3 +24,5 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "a
 
 [target.'cfg(target_os = "macos")'.dependencies]
 rfd = { version = "0.15", default-features = false }
+# Already built by eframe; named directly to turn off its default menu.
+winit = { version = "0.30", default-features = false }

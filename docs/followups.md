@@ -8,6 +8,11 @@ Open work, most pressing first. Tick items off or delete them as they land.
   right-aligned path collides with the first row's buttons at about 620 points
   wide.
 
+- [ ] **Quit from the Dock skips the unsaved-document prompt on macOS.** It reaches
+  AppKit's `terminate:` with no window close request. Catching it needs an
+  application delegate. Cmd-Q goes through the prompt, at the cost of the default
+  menu's Hide items, which could come back with a menu of kame's own.
+
 ## Typography
 
 - [ ] **Word spacing.** Justified text without hyphenation leaves wide gaps. The

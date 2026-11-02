@@ -4,15 +4,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Bugs
 
-- [ ] **Marginalia often render garbled on the work Mac.** They look fine on the
-  personal Mac, and body text looks fine on both. Cause unknown. To narrow it
-  down, capture from the work Mac: a screenshot, the commit it was built from,
-  and its display setup (built-in or external, scale, window width). Worth
-  checking first: a narrower margin column than the personal Mac's (very short
-  wrapped lines read as mangled), and whether it predates `1dc3517`. Machine-only
-  differences to rule out: display scale below 2x, which uses the LCD path, and
-  system fonts, since `FontSystem::new()` also loads those beside the embedded
-  faces.
 - [ ] **The status path overprints the toolbar in a narrow window.** The
   right-aligned path collides with the first row's buttons at about 620 points
   wide.

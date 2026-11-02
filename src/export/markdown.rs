@@ -43,6 +43,13 @@ pub fn to_markdown(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut ordered_index = 0usize;
     for block in &doc.blocks {
+        // An image is a block with no text: emit it as a Markdown image before
+        // the empty-text skip drops it.
+        if let BlockKind::Image { path } = &block.kind {
+            ordered_index = 0;
+            parts.push(format!("![]({path})"));
+            continue;
+        }
         // An empty block carries no text and no apparatus: exporting it would
         // only add stray blank lines. Checked before the prefix match so that a
         // just-emptied list item cannot consume an ordered number (or reset the
@@ -70,6 +77,9 @@ pub fn to_markdown(doc: &Document) -> String {
             BlockKind::BlockQuote => {
                 ordered_index = 0;
                 "> ".to_string()
+            }
+            BlockKind::Image { .. } => {
+                unreachable!("images are emitted before the prefix match")
             }
         };
         let markers = by_block.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
@@ -448,6 +458,25 @@ mod tests {
         );
         let md = to_markdown(&doc);
         assert_eq!(md, "Before.\n\n> Quoted words\n\nAfter.\n");
+    }
+
+    #[test]
+    fn images_export_as_markdown_image_syntax() {
+        let doc = document(
+            vec![
+                paragraph("Before."),
+                block(
+                    BlockKind::Image {
+                        path: "/img/a.png".into(),
+                    },
+                    "",
+                ),
+                paragraph("After."),
+            ],
+            Vec::new(),
+        );
+        let md = to_markdown(&doc);
+        assert_eq!(md, "Before.\n\n![](/img/a.png)\n\nAfter.\n");
     }
 
     #[test]

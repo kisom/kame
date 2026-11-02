@@ -6,7 +6,7 @@
   be moved to a right click menu? Also, the formatting should probably
   be done markdown style, as in typing '## This is a section' at the
   start of a line, the '## ' should trigger a formatting change to H2.
-- [ ] As of right now, there doesn't appear to be a way to insert
+- [x] As of right now, there doesn't appear to be a way to insert
   images. Images should be sized to body width. There also isn't any way
   to insert web links.
 - [ ] It's not a hard requirement for V1, but PDF export would also be

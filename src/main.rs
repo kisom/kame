@@ -18,7 +18,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use egui::{Align2, Color32, FontId, Id, Order, Pos2, Rect, Sense, Vec2};
+use egui::{Align2, Color32, FontId, Id, Order, Pos2, Rect, Sense, TextureHandle, Vec2};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::layout::reading_order;
@@ -389,6 +389,14 @@ fn resolve_open_path(typed: &str, base: &Path) -> PathBuf {
     } else {
         path
     }
+}
+
+/// The "Insert image" path prompt: a text field for the image file to embed.
+struct ImagePrompt {
+    /// The path being typed.
+    path: String,
+    /// Set for the frame the prompt opens on, so the field takes the keyboard.
+    focus: bool,
 }
 
 /// The "Restore Snapshot" picker: the listed snapshots (newest first), which
@@ -1419,6 +1427,33 @@ impl Session {
         }
     }
 
+    /// Inserts an image block after the caret and moves the caret into it.
+    fn insert_image(&mut self, path: String) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        if self.selection.is_some() && !self.delete_selected() {
+            return false;
+        }
+        let caret = self.valid_caret();
+        let Some(index) = self.block_index(caret.block_id) else {
+            return false;
+        };
+        let result = self.editor.insert_image_block(&caret, path);
+        if !self.commit(result) {
+            return false;
+        }
+        if let Some(next) = self.editor.document().blocks.get(index + 1) {
+            self.caret = Cursor {
+                block_id: next.id,
+                offset: 0,
+            };
+            true
+        } else {
+            false
+        }
+    }
+
     /// Changes `block_id`'s kind, persisted as one undoable edit.
     ///
     /// This is the authoring path for headings and list items; without it every
@@ -1887,11 +1922,24 @@ fn open_in_browser(url: &str) {
 /// Minimum height of a block, so an empty paragraph still has a line to click
 /// and a caret to show.
 fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f32 {
+    if let BlockKind::Image { path } = &block.kind {
+        return image_height(path, config.body_width);
+    }
     let minimum = match block.kind {
         crate::model::BlockKind::Heading { .. } => config.heading_size * 1.4,
         _ => config.body_line_height,
     };
     layout.height.max(minimum)
+}
+
+/// Display height of an image at `width`, preserving its aspect ratio. A file
+/// that cannot be read (or reports a zero dimension) falls back to a 3:2 box so
+/// a broken path still reserves space instead of collapsing the block.
+fn image_height(path: &str, width: f32) -> f32 {
+    match image::image_dimensions(path) {
+        Ok((w, h)) if w > 0 && h > 0 => width * h as f32 / w as f32,
+        _ => width * 2.0 / 3.0,
+    }
 }
 
 /// Default body for a newly anchored annotation.
@@ -2030,6 +2078,8 @@ struct KameApp {
     textures: TextureCache,
     /// Margin bodies and footnote entries, shaped in their own columns.
     annotation_textures: AnnotationTextureCache,
+    /// Decoded image textures for `BlockKind::Image` blocks, keyed by path.
+    image_textures: HashMap<String, egui::TextureHandle>,
     /// The note whose popover is open, and where its marker was painted.
     open_note: Option<AnnotationId>,
     open_note_pos: Option<Pos2>,
@@ -2063,6 +2113,8 @@ struct KameApp {
     snapshot_prompt: Option<SnapshotPrompt>,
     /// The "Open" path prompt (Ctrl-O), when it is open.
     open_prompt: Option<OpenPrompt>,
+    /// The "Insert image" path prompt, when it is open.
+    image_prompt: Option<ImagePrompt>,
     /// The "Restore Snapshot" picker, when it is open. At most one of this and
     /// `snapshot_prompt` is up at a time.
     restore_picker: Option<RestorePicker>,
@@ -2100,6 +2152,7 @@ impl KameApp {
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
             annotation_textures: AnnotationTextureCache::new(),
+            image_textures: HashMap::new(),
             open_note: None,
             open_note_pos: None,
             open_note_body: String::new(),
@@ -2112,6 +2165,7 @@ impl KameApp {
             pending_scroll: None,
             snapshot_prompt: None,
             open_prompt: None,
+            image_prompt: None,
             restore_picker: None,
             notice: None,
             close: CloseGuard::default(),
@@ -2184,6 +2238,7 @@ impl KameApp {
     fn dialog_open(&self) -> bool {
         self.snapshot_prompt.is_some()
             || self.open_prompt.is_some()
+            || self.image_prompt.is_some()
             || self.restore_picker.is_some()
     }
 
@@ -2193,6 +2248,7 @@ impl KameApp {
         let open = self.dialog_open();
         self.snapshot_prompt = None;
         self.open_prompt = None;
+        self.image_prompt = None;
         self.restore_picker = None;
         open
     }
@@ -2966,6 +3022,23 @@ impl KameApp {
         let focus = self.modes.paragraph_focus;
         let typewriter = self.modes.typewriter;
 
+        // Decode image blocks first, before the layout/texture caches borrow
+        // `self` for the rest of the frame, so the prose loop can draw them
+        // with an immutable borrow.
+        let image_paths: Vec<String> = self
+            .session
+            .document()
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                BlockKind::Image { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        for path in &image_paths {
+            self.image_texture_handle(ui.ctx(), path);
+        }
+
         // Shape only blocks whose content changed since the last frame; an
         // idle repaint shapes nothing, and an edit re-shapes one block.
         let layouts = self
@@ -3156,6 +3229,22 @@ impl KameApp {
         let caret_index = blocks.iter().position(|block| block.id == caret.block_id);
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (index, block) in blocks.iter().enumerate() {
+            if let BlockKind::Image { path } = &block.kind {
+                // An image spans the measure at body width; its height keeps
+                // the source's aspect ratio (already baked into `tops`).
+                if let Some(texture) = self.image_textures.get(path) {
+                    let height = image_height(path, config.body_width);
+                    let rect = Rect::from_min_size(
+                        Pos2::new(body_left, tops[index]),
+                        Vec2::new(config.body_width, height),
+                    );
+                    painter.image(texture.id(), rect, uv, Color32::WHITE);
+                    if let Some(veil) = dim_veil(self.palette.dim_veil, focus, index, caret_index) {
+                        painter.rect_filled(rect, 0.0, veil);
+                    }
+                }
+                continue;
+            }
             let indent = layouts[index].left_indent;
             // A list item's marker sits in the gutter before its text, its
             // right edge held a fixed gap short of the text so numbers align.
@@ -3516,6 +3605,14 @@ impl KameApp {
                     ui.close();
                 }
             }
+            ui.separator();
+            if ui.button("Insert image…").clicked() {
+                self.image_prompt = Some(ImagePrompt {
+                    path: String::new(),
+                    focus: true,
+                });
+                ui.close();
+            }
         });
 
         self.show_note_popover(ui.ctx());
@@ -3644,6 +3741,8 @@ impl KameApp {
             self.show_snapshot_prompt(ctx, enter);
         } else if self.open_prompt.is_some() {
             self.show_open_prompt(ctx, enter);
+        } else if self.image_prompt.is_some() {
+            self.show_image_prompt(ctx, enter);
         } else if self.restore_picker.is_some() {
             self.show_restore_picker(ctx, enter);
         }
@@ -3907,6 +4006,7 @@ impl KameApp {
                 self.typewriter_anchor = None;
                 self.pending_scroll = None;
                 self.reveal_caret = false;
+                self.image_textures.clear();
                 self.notice = Some(format!("opened {}", path.display()));
             }
             Err(err) => {
@@ -3915,6 +4015,88 @@ impl KameApp {
                     Some(format!("could not open {} — {err}", path.display()));
             }
         }
+    }
+
+    /// Returns the decoded GPU texture for the image at `path`, loading and
+    /// caching it on first use. A path that cannot be decoded returns `None`,
+    /// and the block simply draws nothing (its height is still reserved).
+    fn image_texture_handle(&mut self, ctx: &egui::Context, path: &str) -> Option<TextureHandle> {
+        if let Some(texture) = self.image_textures.get(path) {
+            return Some(texture.clone());
+        }
+        let decoded = image::open(path).ok()?.to_rgba8();
+        let size = [decoded.width() as usize, decoded.height() as usize];
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+        let texture = ctx.load_texture(path, color, egui::TextureOptions::LINEAR);
+        self.image_textures
+            .insert(path.to_string(), texture.clone());
+        Some(texture)
+    }
+
+    /// The "Insert image" path prompt: type an image file path, then embed it
+    /// as an image block sized to the body width. A failed path still inserts
+    /// the block (the image simply draws nothing) so the author can fix it.
+    fn show_image_prompt(&mut self, ctx: &egui::Context, enter: bool) {
+        let Some(prompt) = &self.image_prompt else {
+            return;
+        };
+        let mut buffer = prompt.path.clone();
+        let focus = prompt.focus;
+        // A chord and an Enter arriving in the same frame would otherwise
+        // insert a path nobody has finished typing.
+        let mut submit = enter && !focus;
+        let mut cancel = false;
+
+        egui::Window::new("Insert image")
+            .id(Id::unique("kame-image-prompt"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                ui.label("Path of the image file:");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut buffer)
+                        .id(Id::unique("kame-image-path"))
+                        .desired_width(360.0)
+                        .hint_text("~/Pictures/diagram.png"),
+                );
+                if focus {
+                    field.request_focus();
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Insert").clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if let Some(prompt) = self.image_prompt.as_mut() {
+            prompt.path = buffer;
+            prompt.focus = false;
+        }
+        if cancel {
+            self.image_prompt = None;
+            return;
+        }
+        if !submit {
+            return;
+        }
+        let path = self
+            .image_prompt
+            .as_ref()
+            .map(|prompt| prompt.path.trim().to_string())
+            .unwrap_or_default();
+        self.image_prompt = None;
+        if path.is_empty() {
+            return;
+        }
+        let base = self.session.path().to_path_buf();
+        self.session
+            .insert_image(resolve_open_path(&path, &base).display().to_string());
     }
 
     /// The "Restore Snapshot" picker: choose a snapshot, then confirm that the
@@ -4490,6 +4672,22 @@ mod tests {
             resolve_open_path("~/essays/new.kame", base),
             PathBuf::from(home).join("essays/new.kame")
         );
+    }
+
+    #[test]
+    fn image_height_preserves_aspect_ratio_and_falls_back() {
+        // Write a real 200×100 image to test the aspect ratio.
+        let dir = std::env::temp_dir().join(format!("kame-img-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.png");
+        image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        // A 2:1 image at 600px wide is 300px tall.
+        assert_eq!(image_height(path.to_str().unwrap(), 600.0), 300.0);
+        // An unreadable path reserves a 3:2 box instead of collapsing.
+        assert_eq!(image_height("/does/not/exist.png", 600.0), 400.0);
     }
 
     #[test]

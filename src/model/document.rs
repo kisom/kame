@@ -15,6 +15,11 @@ pub enum BlockKind {
     },
     /// An indented, italicized quotation.
     BlockQuote,
+    /// An image, sized to the body width. `path` is where the file lives on
+    /// disk; the block's `text` is empty (the image has no prose).
+    Image {
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

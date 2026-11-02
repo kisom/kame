@@ -55,6 +55,12 @@ main.document {
   margin: 0 auto;
   padding: 5rem 1.5rem 6rem;
 }
+img.image {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1.4em 0;
+}
 h1, h2, h3, h4, h5, h6 {
   font-family: "Crimson Pro", "EB Garamond", Georgia, serif;
   font-weight: 600;
@@ -225,6 +231,16 @@ pub fn to_html(doc: &Document) -> String {
     let mut body = String::new();
     let mut open_list: Option<bool> = None;
     for (index, block) in doc.blocks.iter().enumerate() {
+        // An image is a block with no text: emit it as an `<img>` before the
+        // empty-text skip drops it.
+        if let BlockKind::Image { path } = &block.kind {
+            close_list(&mut body, &mut open_list);
+            body.push_str(&format!(
+                "<img class=\"image\" src=\"{}\" alt=\"\">\n",
+                escape(path)
+            ));
+            continue;
+        }
         // An empty block has no glyphs to carry a marker or to hang apparatus
         // on. Checked before the list bookkeeping, so an emptied item neither
         // splits a list nor consumes an ordered number.
@@ -257,6 +273,9 @@ pub fn to_html(doc: &Document) -> String {
                     open_list = Some(ordered);
                 }
                 body.push_str(&format!("<li>{inner}{after}</li>\n"));
+            }
+            BlockKind::Image { .. } => {
+                unreachable!("images are emitted before the empty-text skip")
             }
         }
     }
@@ -935,6 +954,24 @@ mod tests {
         assert!(
             html.contains("<a href=\"https://example.com\">https://example.com</a>"),
             "a URL becomes a clickable anchor: {html}"
+        );
+    }
+
+    #[test]
+    fn images_export_as_img_tags() {
+        let doc = document(
+            vec![block(
+                BlockKind::Image {
+                    path: "/img/a.png".into(),
+                },
+                "",
+            )],
+            Vec::new(),
+        );
+        let html = to_html(&doc);
+        assert!(
+            html.contains("<img class=\"image\" src=\"/img/a.png\" alt=\"\">"),
+            "an image becomes an <img>: {html}"
         );
     }
 

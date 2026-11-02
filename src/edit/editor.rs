@@ -428,6 +428,23 @@ impl Editor {
         Ok(self.apply_edit(Op::Batch { ops }))
     }
 
+    /// Inserts an image block after the caret's block, returning the op that
+    /// was applied. The image has no prose, so its `text` is empty; the caller
+    /// moves the caret into the new block.
+    pub fn insert_image_block(&mut self, cursor: &Cursor, path: String) -> Result<Op, EditError> {
+        let index = self.block_index(cursor.block_id)?;
+        let block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Image { path },
+            text: String::new(),
+            spans: Vec::new(),
+        };
+        Ok(self.apply_edit(Op::InsertBlock {
+            index: index + 1,
+            block,
+        }))
+    }
+
     /// Merges the block after `cursor`'s block into it, returning the op that
     /// was applied: the next block's text is appended and its notes move with
     /// it.
@@ -1256,6 +1273,35 @@ mod tests {
         e.undo().expect("split to be undoable");
         assert_eq!(e.document().blocks.len(), 1);
         assert_eq!(e.document().blocks[0].text, "one two");
+    }
+
+    #[test]
+    fn insert_image_block_adds_an_image_after_the_caret() {
+        let doc = doc_with("prose");
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+
+        e.insert_image_block(
+            &Cursor {
+                block_id: id,
+                offset: 0,
+            },
+            "/img/a.png".into(),
+        )
+        .expect("insert an image");
+
+        assert_eq!(e.document().blocks.len(), 2);
+        assert_eq!(
+            e.document().blocks[1].kind,
+            BlockKind::Image {
+                path: "/img/a.png".into()
+            }
+        );
+        assert_eq!(e.document().blocks[1].text, "", "an image has no prose");
+        assert_eq!(e.history(), (1, 0), "one undo step");
+
+        e.undo().expect("image insertion to be undoable");
+        assert_eq!(e.document().blocks.len(), 1);
     }
 
     #[test]

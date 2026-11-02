@@ -132,6 +132,15 @@ pub fn layout_block(
             Align::Left,
             Style::Italic,
         ),
+        // An image carries no prose: its text is empty, so this arm shapes an
+        // empty buffer and `block_height` supplies the block's real height.
+        BlockKind::Image { .. } => (
+            BODY_FAMILY,
+            config.body_size,
+            config.body_line_height,
+            Align::Left,
+            Style::Normal,
+        ),
     };
 
     // List items reserve a gutter on the left for their marker, and wrap their

@@ -1,7 +1,8 @@
-use crate::model::document::{Annotation, BlockId};
+use crate::model::document::{Anchor, Annotation, BlockId};
 
-/// Shift every annotation anchored in `block_id` whose `start` is at or after
-/// `edit_start` by `delta` bytes.
+/// Shift every range-scoped anchor in `block_id` whose `start` is at or after
+/// `edit_start` by `delta` bytes. Block-scoped anchors are left untouched:
+/// they point at a whole block, so text edits within it do not move them.
 ///
 /// `edit_start` and `delta` are **byte** offsets/lengths, matching `Anchor`
 /// fields and `String`/`str` indexing. An insertion (`delta > 0`) at or before
@@ -27,14 +28,21 @@ pub fn shift_anchors(
     }
 
     for annotation in annotations.iter_mut() {
-        let anchor = &mut annotation.anchor;
-        if anchor.block_id != block_id || anchor.start < edit_start {
+        let Anchor::Range {
+            block_id: anchor_block_id,
+            start,
+            end,
+        } = &mut annotation.anchor
+        else {
+            continue; // block-scoped anchors do not shift on text edits
+        };
+        if *anchor_block_id != block_id || *start < edit_start {
             continue;
         }
-        anchor.start = anchor.start.checked_add_signed(delta).expect(
+        *start = start.checked_add_signed(delta).expect(
             "anchor start overflowed usize: edit_start/delta inconsistent with document text",
         );
-        anchor.end = anchor.end.checked_add_signed(delta).expect(
+        *end = end.checked_add_signed(delta).expect(
             "anchor end overflowed usize: edit_start/delta inconsistent with document text",
         );
     }
@@ -50,13 +58,22 @@ mod tests {
         Annotation {
             id: Uuid::new_v4(),
             kind: AnnotationKind::Marginal,
-            anchor: Anchor {
-                block_id,
-                start,
-                end,
-            },
+            anchor: Anchor::range(block_id, start, end),
             body: "note".to_string(),
         }
+    }
+
+    #[test]
+    fn block_scoped_anchors_do_not_shift() {
+        let b = Uuid::new_v4();
+        let mut anns = vec![Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Marginal,
+            anchor: Anchor::block(b),
+            body: "marginal".to_string(),
+        }];
+        shift_anchors(&mut anns, b, 0, 4);
+        assert_eq!(anns[0].anchor.byte_range(), None, "a block anchor ignores the edit");
     }
 
     #[test]
@@ -64,8 +81,8 @@ mod tests {
         let b = Uuid::new_v4();
         let mut anns = vec![annotation(b, 10, 12)];
         shift_anchors(&mut anns, b, 5, 4); // insert 4 bytes at offset 5
-        assert_eq!(anns[0].anchor.start, 14);
-        assert_eq!(anns[0].anchor.end, 16);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().0, 14);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().1, 16);
     }
 
     #[test]
@@ -73,8 +90,8 @@ mod tests {
         let b = Uuid::new_v4();
         let mut anns = vec![annotation(b, 10, 12)];
         shift_anchors(&mut anns, b, 20, 4); // edit starts after the anchor
-        assert_eq!(anns[0].anchor.start, 10);
-        assert_eq!(anns[0].anchor.end, 12);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().0, 10);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().1, 12);
     }
 
     #[test]
@@ -82,8 +99,8 @@ mod tests {
         let b = Uuid::new_v4();
         let mut anns = vec![annotation(b, 10, 12)];
         shift_anchors(&mut anns, b, 2, -3); // delete 3 bytes at offset 2
-        assert_eq!(anns[0].anchor.start, 7);
-        assert_eq!(anns[0].anchor.end, 9);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().0, 7);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().1, 9);
     }
 
     #[test]
@@ -92,8 +109,8 @@ mod tests {
         let other = Uuid::new_v4();
         let mut anns = vec![annotation(other, 10, 12)];
         shift_anchors(&mut anns, b, 0, 4);
-        assert_eq!(anns[0].anchor.start, 10);
-        assert_eq!(anns[0].anchor.end, 12);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().0, 10);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().1, 12);
     }
 
     #[test]
@@ -103,7 +120,7 @@ mod tests {
         let inserted = "éé";
         assert_eq!(inserted.len(), 4); // two chars, four bytes
         shift_anchors(&mut anns, b, 0, inserted.len() as isize);
-        assert_eq!(anns[0].anchor.start, 14);
-        assert_eq!(anns[0].anchor.end, 16);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().0, 14);
+        assert_eq!(anns[0].anchor.byte_range().unwrap().1, 16);
     }
 }

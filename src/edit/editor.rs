@@ -338,21 +338,40 @@ impl Editor {
         let text = block.text.clone();
         let kind = split_kind(&block.kind);
 
-        // Exactly the notes the tail delete below will drop: non-empty anchors
-        // lying wholly in the trailing text.
+        // Exactly the range-scoped notes the tail delete below will drop:
+        // anchors lying wholly in the trailing text.
         let tail_notes: Vec<Annotation> = self
             .doc
             .annotations
             .iter()
             .filter(|annotation| {
-                let anchor = &annotation.anchor;
-                anchor.block_id == cursor.block_id
-                    && anchor.start <= anchor.end
-                    && anchor.start >= cursor.offset
-                    && anchor.end <= text.len()
+                let Some((anchor_start, anchor_end)) = annotation.anchor.byte_range() else {
+                    return false; // block-scoped anchors are moved separately below
+                };
+                annotation.anchor.block_id() == cursor.block_id
+                    && anchor_start >= cursor.offset
+                    && anchor_end <= text.len()
             })
             .cloned()
             .collect();
+
+        // Block-scoped anchors (marginalia) follow the half that kept the text:
+        // a split at offset 0 empties the leading block, so they move to the
+        // trailing block; otherwise they already sit on the leading block and
+        // stay put.
+        let block_notes: Vec<Annotation> = if cursor.offset == 0 {
+            self.doc
+                .annotations
+                .iter()
+                .filter(|annotation| {
+                    annotation.anchor.byte_range().is_none()
+                        && annotation.anchor.block_id() == cursor.block_id
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let new_block = Block {
             id: Uuid::new_v4(),
@@ -379,11 +398,16 @@ impl Editor {
         // the originals back from that payload (after the copies are removed).
         for annotation in tail_notes {
             let mut moved = annotation;
-            moved.anchor = Anchor {
-                block_id: new_block.id,
-                start: moved.anchor.start - cursor.offset,
-                end: moved.anchor.end - cursor.offset,
-            };
+            let (start, end) = moved.anchor.byte_range().expect("tail note is range-scoped");
+            moved.anchor = Anchor::range(new_block.id, start - cursor.offset, end - cursor.offset);
+            ops.push(Op::AddAnnotation { annotation: moved });
+        }
+        // Move block-scoped anchors off the emptied leading block onto the
+        // trailing block (remove + re-add keeps the op log invertible).
+        for annotation in block_notes {
+            let mut moved = annotation.clone();
+            moved.anchor = Anchor::block(new_block.id);
+            ops.push(Op::RemoveAnnotation { annotation });
             ops.push(Op::AddAnnotation { annotation: moved });
         }
         Ok(self.apply_edit(Op::Batch { ops }))
@@ -408,7 +432,7 @@ impl Editor {
             .doc
             .annotations
             .iter()
-            .filter(|annotation| annotation.anchor.block_id == next.id)
+            .filter(|annotation| annotation.anchor.block_id() == next.id)
             .cloned()
             .collect();
 
@@ -425,10 +449,11 @@ impl Editor {
         ];
         for annotation in next_notes {
             let mut moved = annotation;
-            moved.anchor = Anchor {
-                block_id: cursor.block_id,
-                start: moved.anchor.start + join,
-                end: moved.anchor.end + join,
+            moved.anchor = match moved.anchor {
+                Anchor::Block { .. } => Anchor::block(cursor.block_id),
+                Anchor::Range { start, end, .. } => {
+                    Anchor::range(cursor.block_id, start + join, end + join)
+                }
             };
             ops.push(Op::AddAnnotation { annotation: moved });
         }
@@ -458,11 +483,13 @@ impl Editor {
         anchor: Anchor,
         body: &str,
     ) -> Result<Op, EditError> {
-        let block = self.block(anchor.block_id)?;
-        self.check_offset(block, anchor.start)?;
-        self.check_offset(block, anchor.end)?;
-        if anchor.start > anchor.end {
-            return Err(EditError::OffsetOutOfRange);
+        let block = self.block(anchor.block_id())?;
+        if let Some((start, end)) = anchor.byte_range() {
+            self.check_offset(block, start)?;
+            self.check_offset(block, end)?;
+            if start > end {
+                return Err(EditError::OffsetOutOfRange);
+            }
         }
         let annotation = Annotation {
             id: Uuid::new_v4(),
@@ -580,11 +607,7 @@ mod tests {
         Annotation {
             id: Uuid::new_v4(),
             kind: AnnotationKind::Marginal,
-            anchor: Anchor {
-                block_id,
-                start,
-                end,
-            },
+            anchor: Anchor::range(block_id, start, end),
             body: "note".to_string(),
         }
     }
@@ -1168,11 +1191,7 @@ mod tests {
         assert_eq!(e.document().annotations.len(), 1);
         assert_eq!(
             e.document().annotations[0].anchor,
-            Anchor {
-                block_id: new_id,
-                start: 1,
-                end: 4,
-            },
+            Anchor::range(new_id, 1, 4),
             "the note follows its text into the new block"
         );
 
@@ -1219,15 +1238,15 @@ mod tests {
         assert_eq!(e.document().annotations.len(), 2, "no marginal is dropped");
         for a in &e.document().annotations {
             assert_eq!(
-                a.anchor.block_id, final_block,
+                a.anchor.block_id(), final_block,
                 "every marginal follows the text, none lingers on an empty block"
             );
         }
         assert!(e.document().annotations.iter().any(|a| {
-            a.anchor == Anchor { block_id: final_block, start: 11, end: 20 }
+            a.anchor == Anchor::range(final_block, 11, 20 )
         }));
         assert!(e.document().annotations.iter().any(|a| {
-            a.anchor == Anchor { block_id: final_block, start: 13, end: 13 }
+            a.anchor == Anchor::range(final_block, 13, 13 )
         }));
 
         e.undo().unwrap();
@@ -1235,6 +1254,47 @@ mod tests {
         assert_eq!(e.document().blocks.len(), 1);
         assert_eq!(e.document().blocks[0].text, "This is my paragraph");
         assert_eq!(e.document().annotations.len(), 2);
+    }
+
+    #[test]
+    fn split_moves_block_scoped_marginalia_with_the_content() {
+        // A marginal anchors to its whole block. Splitting at the very start
+        // empties the leading block, so the marginal follows the content into
+        // the new block; a split in the middle keeps it on the leading block.
+        let mut doc = doc_with("This is my paragraph");
+        let id = doc.blocks[0].id;
+        doc.annotations.push(Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Marginal,
+            anchor: Anchor::block(id),
+            body: "marginal".to_string(),
+        });
+
+        let mut e = Editor::new(doc);
+        // Split at the start: leading block empties, marginal moves to the new block.
+        e.split_paragraph(&Cursor { block_id: id, offset: 0 }).unwrap();
+        let new_block = e.document().blocks[1].id;
+        assert_eq!(e.document().annotations.len(), 1);
+        assert_eq!(
+            e.document().annotations[0].anchor,
+            Anchor::block(new_block),
+            "the marginal follows the content into the new block"
+        );
+
+        // Split in the middle of that block: the marginal stays on the leading half.
+        e.split_paragraph(&Cursor { block_id: new_block, offset: 4 }).unwrap();
+        assert_eq!(e.document().annotations.len(), 1);
+        assert_eq!(
+            e.document().annotations[0].anchor,
+            Anchor::block(new_block),
+            "a mid-block split keeps the marginal on the leading half"
+        );
+
+        e.undo().unwrap();
+        e.undo().unwrap();
+        assert_eq!(e.document().blocks.len(), 1);
+        assert_eq!(e.document().blocks[0].text, "This is my paragraph");
+        assert_eq!(e.document().annotations[0].anchor, Anchor::block(id));
     }
 
     #[test]
@@ -1258,11 +1318,7 @@ mod tests {
         assert_eq!(e.document().annotations.len(), 1);
         assert_eq!(
             e.document().annotations[0].anchor,
-            Anchor {
-                block_id: first,
-                start: 3,
-                end: 6,
-            },
+            Anchor::range(first, 3, 6),
             "the merged block's notes move with its text"
         );
         assert_eq!(e.history(), (1, 0), "a merge is one undo step");
@@ -1323,11 +1379,7 @@ mod tests {
         let doc = doc_with("hello world");
         let id = doc.blocks[0].id;
         let mut e = Editor::new(doc);
-        let anchor = Anchor {
-            block_id: id,
-            start: 6,
-            end: 11,
-        };
+        let anchor = Anchor::range(id, 6, 11);
 
         let op = e
             .add_annotation(AnnotationKind::Note, anchor.clone(), "a note")
@@ -1360,11 +1412,7 @@ mod tests {
         assert_eq!(
             e.add_annotation(
                 AnnotationKind::Note,
-                Anchor {
-                    block_id: id,
-                    start: 2,
-                    end: 1,
-                },
+                Anchor::range(id, 2, 1),
                 "x"
             ),
             Err(EditError::OffsetOutOfRange),
@@ -1373,11 +1421,7 @@ mod tests {
         assert_eq!(
             e.add_annotation(
                 AnnotationKind::Note,
-                Anchor {
-                    block_id: id,
-                    start: 0,
-                    end: 3,
-                },
+                Anchor::range(id, 0, 3),
                 "x"
             ),
             Err(EditError::OffsetOutOfRange)
@@ -1385,11 +1429,7 @@ mod tests {
         assert_eq!(
             e.add_annotation(
                 AnnotationKind::Note,
-                Anchor {
-                    block_id: Uuid::new_v4(),
-                    start: 0,
-                    end: 1,
-                },
+                Anchor::range(Uuid::new_v4(), 0, 1),
                 "x"
             ),
             Err(EditError::BlockNotFound)

@@ -368,7 +368,7 @@ fn collect_apparatus(doc: &Document) -> Collected {
             )
         })
         .filter_map(|annotation| {
-            let index = block_order.get(&annotation.anchor.block_id).copied();
+            let index = block_order.get(&annotation.anchor.block_id()).copied();
             let text = index.map_or("", |index| doc.blocks[index].text.as_str());
             match annotation.kind {
                 // A margin note hangs off the block it annotates. If that
@@ -378,8 +378,8 @@ fn collect_apparatus(doc: &Document) -> Collected {
                     Some(index) if !text.is_empty() => Some(Placed {
                         index: Some(index),
                         attached: true,
-                        start: annotation.anchor.start,
-                        end: annotation.anchor.end,
+                        start: 0,
+                        end: 0,
                         annotation,
                     }),
                     _ => Some(Placed {
@@ -392,8 +392,9 @@ fn collect_apparatus(doc: &Document) -> Collected {
                 },
                 AnnotationKind::Note => match index {
                     Some(index) if !text.is_empty() => {
-                        let (start, end) =
-                            note_range(text, annotation.anchor.start, annotation.anchor.end);
+                        let (anchor_start, anchor_end) =
+                            annotation.anchor.byte_range().unwrap_or((0, 0));
+                        let (start, end) = note_range(text, anchor_start, anchor_end);
                         Some(Placed {
                             index: Some(index),
                             attached: true,
@@ -413,13 +414,17 @@ fn collect_apparatus(doc: &Document) -> Collected {
                     }),
                 },
                 AnnotationKind::Footnote => match index {
-                    Some(index) if !text.is_empty() => Some(Placed {
-                        index: Some(index),
-                        attached: true,
-                        start: snap_down(text, annotation.anchor.start),
-                        end: snap_down(text, annotation.anchor.end),
-                        annotation,
-                    }),
+                    Some(index) if !text.is_empty() => {
+                        let (anchor_start, anchor_end) =
+                            annotation.anchor.byte_range().unwrap_or((0, 0));
+                        Some(Placed {
+                            index: Some(index),
+                            attached: true,
+                            start: snap_down(text, anchor_start),
+                            end: snap_down(text, anchor_end),
+                            annotation,
+                        })
+                    }
                     _ => Some(Placed {
                         index: None,
                         attached: false,
@@ -790,11 +795,7 @@ mod tests {
         Annotation {
             id: Uuid::new_v4(),
             kind,
-            anchor: Anchor {
-                block_id,
-                start,
-                end,
-            },
+            anchor: Anchor::range(block_id, start, end),
             body: body.to_string(),
         }
     }

@@ -33,10 +33,11 @@ pub fn to_markdown(doc: &Document) -> String {
     let footnotes = numbered_footnotes(doc);
     let mut by_block: HashMap<BlockId, Vec<(usize, usize)>> = HashMap::new();
     for (number, annotation) in &footnotes {
+        let end = annotation.anchor.byte_range().map(|(_, e)| e).unwrap_or(0);
         by_block
-            .entry(annotation.anchor.block_id)
+            .entry(annotation.anchor.block_id())
             .or_default()
-            .push((annotation.anchor.end, *number));
+            .push((end, *number));
     }
 
     let mut parts: Vec<String> = Vec::new();
@@ -120,16 +121,12 @@ fn numbered_footnotes(doc: &Document) -> Vec<(usize, &crate::model::Annotation)>
         .iter()
         .filter(|annotation| annotation.kind == AnnotationKind::Footnote)
         .filter_map(|annotation| {
-            let index = *block_order.get(&annotation.anchor.block_id)?;
+            let index = *block_order.get(&annotation.anchor.block_id())?;
             if doc.blocks[index].text.is_empty() {
                 return None;
             }
-            Some((
-                index,
-                annotation.anchor.start,
-                annotation.anchor.end,
-                annotation,
-            ))
+            let (start, end) = annotation.anchor.byte_range().unwrap_or((0, 0));
+            Some((index, start, end, annotation))
         })
         .collect();
     footnotes.sort_by_key(|(index, start, end, annotation)| (*index, *start, *end, annotation.id));
@@ -366,11 +363,7 @@ mod tests {
         Annotation {
             id: Uuid::new_v4(),
             kind,
-            anchor: Anchor {
-                block_id,
-                start,
-                end,
-            },
+            anchor: Anchor::range(block_id, start, end),
             body: body.to_string(),
         }
     }

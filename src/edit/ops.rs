@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{shift_anchors, Annotation, AnnotationId, Block, BlockId, BlockKind, Document};
+use crate::model::{shift_anchors, Anchor, Annotation, AnnotationId, Block, BlockId, BlockKind, Document};
 
 /// A single invertible mutation of a [`Document`].
 ///
@@ -316,14 +316,20 @@ pub fn apply(doc: &mut Document, op: &Op) {
             // An insertion strictly inside a note's range must widen the note,
             // otherwise the note silently drops coverage of the inserted text
             // (`shift_anchors` only moves anchors whose start is at or after the
-            // edit, which would leave such an anchor's end stale). Marginal and
-            // footnote anchors are points (start == end), so this never matches
-            // them.
+            // edit, which would leave such an anchor's end stale). Block-scoped
+            // anchors have no range, so they are skipped here.
             let delta = text.len();
             for annotation in doc.annotations.iter_mut() {
-                let anchor = &mut annotation.anchor;
-                if anchor.block_id == *block_id && anchor.start < *offset && *offset < anchor.end {
-                    anchor.end = anchor.end.checked_add(delta).expect(
+                let Anchor::Range {
+                    block_id: anchor_block_id,
+                    start,
+                    end,
+                } = &mut annotation.anchor
+                else {
+                    continue;
+                };
+                if *anchor_block_id == *block_id && *start < *offset && *offset < *end {
+                    *end = end.checked_add(delta).expect(
                         "anchor end overflowed usize: insert length inconsistent with document text",
                     );
                 }
@@ -384,7 +390,7 @@ pub fn apply(doc: &mut Document, op: &Op) {
             assert_annotation_payload("DeleteBlock", annotations, &dropped);
             doc.blocks.remove(*index);
             doc.annotations
-                .retain(|annotation| annotation.anchor.block_id != block.id);
+                .retain(|annotation| annotation.anchor.block_id() != block.id);
         }
         Op::SetBlockKind {
             block_id,
@@ -577,12 +583,12 @@ fn block_mut<'a>(doc: &'a mut Document, block_id: BlockId) -> &'a mut Block {
 fn annotations_in_block(doc: &Document, block_id: BlockId) -> Vec<Annotation> {
     doc.annotations
         .iter()
-        .filter(|annotation| annotation.anchor.block_id == block_id)
+        .filter(|annotation| annotation.anchor.block_id() == block_id)
         .cloned()
         .collect()
 }
 
-/// Every non-empty note anchored in `block_id` wholly inside `start..end`.
+/// Every range-scoped note anchored in `block_id` wholly inside `start..end`.
 fn annotations_wholly_inside(
     doc: &Document,
     block_id: BlockId,
@@ -592,11 +598,10 @@ fn annotations_wholly_inside(
     doc.annotations
         .iter()
         .filter(|annotation| {
-            let anchor = &annotation.anchor;
-            anchor.block_id == block_id
-                && anchor.start <= anchor.end
-                && anchor.start >= start
-                && anchor.end <= end
+            let Some((anchor_start, anchor_end)) = annotation.anchor.byte_range() else {
+                return false; // block-scoped anchors are removed by block deletion, not text deletion
+            };
+            annotation.anchor.block_id() == block_id && anchor_start >= start && anchor_end <= end
         })
         .cloned()
         .collect()
@@ -668,11 +673,12 @@ fn rebase_annotations(
 
     let mut dropped: Vec<Annotation> = Vec::new();
     doc.annotations.retain(|annotation| {
-        let anchor = &annotation.anchor;
-        let wholly_inside = anchor.block_id == block_id
-            && anchor.start <= anchor.end
-            && anchor.start >= start
-            && anchor.end <= end;
+        let Some((anchor_start, anchor_end)) = annotation.anchor.byte_range() else {
+            return true; // block-scoped anchors survive a text deletion
+        };
+        let wholly_inside = annotation.anchor.block_id() == block_id
+            && anchor_start >= start
+            && anchor_end <= end;
         if wholly_inside {
             dropped.push(annotation.clone());
         }
@@ -680,12 +686,19 @@ fn rebase_annotations(
     });
 
     for annotation in doc.annotations.iter_mut() {
-        let anchor = &mut annotation.anchor;
-        if anchor.block_id != block_id || anchor.end <= start || anchor.start >= end {
+        let Anchor::Range {
+            block_id: anchor_block_id,
+            start: anchor_start,
+            end: anchor_end,
+        } = &mut annotation.anchor
+        else {
+            continue; // block-scoped anchors have no offsets to remap
+        };
+        if *anchor_block_id != block_id || *anchor_end <= start || *anchor_start >= end {
             continue; // no overlap with the deleted range
         }
-        anchor.start = map_deleted_offset(anchor.start, start, end);
-        anchor.end = map_deleted_offset(anchor.end, start, end);
+        *anchor_start = map_deleted_offset(*anchor_start, start, end);
+        *anchor_end = map_deleted_offset(*anchor_end, start, end);
     }
 
     shift_anchors(&mut doc.annotations, block_id, end, -((end - start) as isize));
@@ -708,11 +721,7 @@ mod tests {
         Annotation {
             id: Uuid::new_v4(),
             kind: AnnotationKind::Marginal,
-            anchor: Anchor {
-                block_id,
-                start,
-                end,
-            },
+            anchor: Anchor::range(block_id, start, end),
             body: "note".to_string(),
         }
     }
@@ -911,8 +920,8 @@ mod tests {
         };
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "heéllo");
-        assert_eq!(d.annotations[0].anchor.start, 4);
-        assert_eq!(d.annotations[0].anchor.end, 6);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 4);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 6);
     }
 
     /// An insertion strictly inside a note's range must extend the note's end.
@@ -931,8 +940,8 @@ mod tests {
         };
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "hello wXorld");
-        assert_eq!(d.annotations[0].anchor.start, 6, "start must not move");
-        assert_eq!(d.annotations[0].anchor.end, 12, "end must grow by the insert");
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 6, "start must not move");
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 12, "end must grow by the insert");
         assert_eq!(&d.blocks[0].text[6..12], "wXorld");
     }
 
@@ -948,8 +957,8 @@ mod tests {
             text: "éé".into(), // four bytes
         };
         apply(&mut d, &op);
-        assert_eq!(d.annotations[0].anchor.start, 6);
-        assert_eq!(d.annotations[0].anchor.end, 15);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 6);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 15);
     }
 
     /// Inserting at or before a note's start still shifts both ends (unchanged
@@ -969,8 +978,8 @@ mod tests {
             },
         );
         assert_eq!(d.blocks[0].text, "hello Xworld");
-        assert_eq!(d.annotations[0].anchor.start, 7);
-        assert_eq!(d.annotations[0].anchor.end, 12);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 7);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 12);
 
         apply(
             &mut d,
@@ -980,8 +989,8 @@ mod tests {
                 text: ">> ".into(),
             },
         );
-        assert_eq!(d.annotations[0].anchor.start, 10);
-        assert_eq!(d.annotations[0].anchor.end, 15);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 10);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 15);
     }
 
     /// Inserting after a note's end leaves it untouched.
@@ -997,8 +1006,8 @@ mod tests {
         };
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "hello woXrld");
-        assert_eq!(d.annotations[0].anchor.start, 0);
-        assert_eq!(d.annotations[0].anchor.end, 5);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 0);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 5);
     }
 
     #[test]
@@ -1012,8 +1021,8 @@ mod tests {
         assert_eq!(op_text(&op), " world");
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "hello");
-        assert_eq!(d.annotations[0].anchor.start, 0);
-        assert_eq!(d.annotations[0].anchor.end, 4);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 0);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 4);
 
         apply(&mut d, &invert(&op));
         assert_eq!(d, before);
@@ -1077,8 +1086,8 @@ mod tests {
         let op = Op::delete_text(&d, id, 4, 6);
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "abcdgh");
-        assert_eq!(d.annotations[0].anchor.start, 1); // "b" survives before the edit
-        assert_eq!(d.annotations[0].anchor.end, 6); // "gh" closes the range
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 1); // "b" survives before the edit
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 6); // "gh" closes the range
     }
 
     #[test]
@@ -1090,8 +1099,8 @@ mod tests {
         let op = Op::delete_text(&d, id, 2, 6);
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "abgh");
-        assert_eq!(d.annotations[0].anchor.start, 2); // collapses onto the edit start
-        assert_eq!(d.annotations[0].anchor.end, 4); // "gh" closed up
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 2); // collapses onto the edit start
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 4); // "gh" closed up
     }
 
     /// FIX 5: the only path in `rebase_annotations` that actually calls
@@ -1109,8 +1118,8 @@ mod tests {
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "abcfghij");
         assert_eq!(d.annotations[0], before, "note before the range is untouched");
-        assert_eq!(d.annotations[1].anchor.start, 4, "\"ghi\" closed up by 2");
-        assert_eq!(d.annotations[1].anchor.end, 7);
+        assert_eq!(d.annotations[1].anchor.byte_range().unwrap().0, 4, "\"ghi\" closed up by 2");
+        assert_eq!(d.annotations[1].anchor.byte_range().unwrap().1, 7);
         assert_eq!(&d.blocks[0].text[4..7], "ghi");
 
         apply_inverse(&mut d, &op);
@@ -1159,6 +1168,34 @@ mod tests {
         assert!(d.annotations.contains(&point), "undo restores the point anchor");
     }
 
+    /// A block-scoped anchor (marginalia) survives interior text edits; only
+    /// deleting its whole block removes it.
+    #[test]
+    fn delete_spares_a_block_scoped_anchor() {
+        let mut d = doc("abcdef");
+        let id = d.blocks[0].id;
+        let marginal = Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Marginal,
+            anchor: Anchor::block(id),
+            body: "marginal".to_string(),
+        };
+        d.annotations.push(marginal.clone());
+
+        let op = Op::delete_text(&d, id, 1, 4); // deletes "bcd"
+        apply(&mut d, &op);
+        assert_eq!(d.blocks[0].text, "aef");
+        assert_eq!(
+            d.annotations,
+            vec![marginal.clone()],
+            "the marginal survives an interior delete"
+        );
+
+        let del_block = Op::delete_block(&d, 0);
+        apply(&mut d, &del_block);
+        assert!(d.annotations.is_empty(), "deleting the block removes its marginal");
+    }
+
     #[test]
     fn delete_leaves_other_block_anchors_alone() {
         let mut d = doc("abc");
@@ -1168,8 +1205,8 @@ mod tests {
 
         let op = Op::delete_text(&d, id, 0, 2);
         apply(&mut d, &op);
-        assert_eq!(d.annotations[0].anchor.start, 1);
-        assert_eq!(d.annotations[0].anchor.end, 2);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 1);
+        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 2);
     }
 
     /// A delete whose payload text disagrees with the document is a bug in the
@@ -1443,11 +1480,7 @@ mod tests {
         let moved = Annotation {
             id: original.id,
             kind: original.kind.clone(),
-            anchor: Anchor {
-                block_id: first,
-                start: d.blocks[0].text.len(),
-                end: d.blocks[0].text.len() + second.text.len(),
-            },
+            anchor: Anchor::range(first, d.blocks[0].text.len(), d.blocks[0].text.len() + second.text.len()),
             body: original.body.clone(),
         };
         let batch = Op::Batch {

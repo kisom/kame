@@ -82,13 +82,15 @@ pub fn place_marginalia<L: Borrow<BlockLayout>>(
         .filter_map(|(index, annotation)| {
             let block_index = blocks
                 .iter()
-                .position(|block| block.id == annotation.anchor.block_id)?;
-            let in_block = anchor_to_y(
-                blocks,
-                layouts,
-                annotation.anchor.block_id,
-                annotation.anchor.start,
-            )?;
+                .position(|block| block.id == annotation.anchor.block_id())?;
+            let in_block = match annotation.anchor.byte_range() {
+                // Range-scoped anchors resolve to the line they sit on.
+                Some((start, _)) => {
+                    anchor_to_y(blocks, layouts, annotation.anchor.block_id(), start)?
+                }
+                // Block-scoped anchors (marginalia) sit at the top of their block.
+                None => 0.0,
+            };
             // A caller that passes no tops (or too few) degrades to block space
             // rather than dropping the note.
             let top = block_tops.get(block_index).copied().unwrap_or(0.0);
@@ -181,12 +183,12 @@ pub fn reading_order(annotations: &[Annotation], blocks: &[Block]) -> Vec<Annota
             .unwrap_or(usize::MAX)
     };
     let mut ordered: Vec<Annotation> = annotations.to_vec();
-    ordered.sort_by_key(|annotation| {
-        (
-            block_index(annotation.anchor.block_id),
-            annotation.anchor.start,
-            annotation.anchor.end,
-        )
+    ordered.sort_by(|a, b| {
+        let key = |annotation: &Annotation| {
+            let (start, end) = annotation.anchor.byte_range().unwrap_or((0, 0));
+            (block_index(annotation.anchor.block_id()), start, end)
+        };
+        key(a).cmp(&key(b))
     });
     ordered
 }
@@ -252,11 +254,7 @@ dance, on a page, of pen, eye and hand.";
         Annotation {
             id: Uuid::new_v4(),
             kind,
-            anchor: Anchor {
-                block_id,
-                start,
-                end: start,
-            },
+            anchor: Anchor::range(block_id, start, start),
             body: "a note".to_string(),
         }
     }

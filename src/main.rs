@@ -1171,15 +1171,18 @@ impl Session {
         if self.save_failed {
             return None;
         }
-        let anchor = self.annotation_anchor()?;
-        let snippet = self
-            .editor
-            .document()
-            .blocks
-            .iter()
-            .find(|block| block.id == anchor.block_id)
-            .map(|block| {
-                &block.text[anchor.start.min(block.text.len())..anchor.end.min(block.text.len())]
+        let anchor = self.annotation_anchor(kind)?;
+        let snippet = anchor
+            .byte_range()
+            .and_then(|(start, end)| {
+                self.editor
+                    .document()
+                    .blocks
+                    .iter()
+                    .find(|block| block.id == anchor.block_id())
+                    .map(|block| {
+                        &block.text[start.min(block.text.len())..end.min(block.text.len())]
+                    })
             })
             .unwrap_or("");
         let body = default_annotation_body(&kind, snippet);
@@ -1214,10 +1217,22 @@ impl Session {
         self.commit(result)
     }
 
-    /// The range an annotation anchors to: the selection (clamped to its first
-    /// block, since an anchor lives in one block), or the word under the caret.
-    fn annotation_anchor(&self) -> Option<Anchor> {
+    /// The anchor for a new annotation of `kind`: marginalia anchor to a whole
+    /// block, notes and footnotes to the selection (clamped to its first block,
+    /// since an anchor lives in one block) or the word under the caret.
+    fn annotation_anchor(&self, kind: AnnotationKind) -> Option<Anchor> {
         let document = self.editor.document();
+        let block_id = if let Some((start, _)) = self.ordered_selection() {
+            start.block_id
+        } else {
+            self.caret.block_id
+        };
+        document.blocks.iter().find(|block| block.id == block_id)?;
+
+        if kind == AnnotationKind::Marginal {
+            return Some(Anchor::block(block_id));
+        }
+
         if let Some((start, end)) = self.ordered_selection() {
             let block = document
                 .blocks
@@ -1229,11 +1244,7 @@ impl Session {
                 block.text.len()
             };
             let start_offset = start.offset.min(end);
-            return Some(Anchor {
-                block_id: block.id,
-                start: start_offset,
-                end,
-            });
+            return Some(Anchor::range(block.id, start_offset, end));
         }
 
         let caret = self.caret;
@@ -1242,11 +1253,7 @@ impl Session {
             .iter()
             .find(|block| block.id == caret.block_id)?;
         let (start, end) = word_at(&block.text, caret.offset);
-        Some(Anchor {
-            block_id: block.id,
-            start,
-            end,
-        })
+        Some(Anchor::range(block.id, start, end))
     }
 
     fn move_left(&mut self) {
@@ -1527,14 +1534,15 @@ fn superscript_origin(
     block_top: f32,
     body_width: f32,
 ) -> Option<Pos2> {
-    let end = anchor.end.max(anchor.start);
+    let (anchor_start, anchor_end) = anchor.byte_range()?;
+    let end = anchor_end.max(anchor_start);
     let end_line = layout
         .lines
         .iter()
         .find(|line| end >= line.start && end <= line.end);
     let (line, x) = match end_line {
         Some(line) => (*line, caret_x(layout, end)),
-        None => (caret_line(layout, anchor.start)?, caret_x(layout, anchor.start)),
+        None => (caret_line(layout, anchor_start)?, caret_x(layout, anchor_start)),
     };
     Some(Pos2::new(
         body_left + x.clamp(0.0, body_width),
@@ -2189,9 +2197,13 @@ impl KameApp {
         // A faint wash marks what every annotation is attached to. Drawn after
         // the glyphs so the tint sits over the paper rather than behind it.
         for annotation in &annotations {
+            // Block-scoped anchors (marginalia) have no body range to wash.
+            let Some((start, end)) = annotation.anchor.byte_range() else {
+                continue;
+            };
             let Some(index) = blocks
                 .iter()
-                .position(|block| block.id == annotation.anchor.block_id)
+                .position(|block| block.id == annotation.anchor.block_id())
             else {
                 continue;
             };
@@ -2200,11 +2212,7 @@ impl KameApp {
                 AnnotationKind::Note => NOTE_HIGHLIGHT,
                 AnnotationKind::Footnote => FOOTNOTE_HIGHLIGHT,
             };
-            for rect in range_rects(
-                layouts[index],
-                annotation.anchor.start,
-                annotation.anchor.end,
-            ) {
+            for rect in range_rects(layouts[index], start, end) {
                 painter.rect_filled(
                     rect.translate(Vec2::new(body_left, tops[index])),
                     1.0,
@@ -2393,7 +2401,7 @@ impl KameApp {
             };
             let Some(index) = blocks
                 .iter()
-                .position(|block| block.id == annotation.anchor.block_id)
+                .position(|block| block.id == annotation.anchor.block_id())
             else {
                 continue;
             };
@@ -3649,11 +3657,7 @@ mod tests {
 
         // The mark for "Craft" (0..5) belongs after the "t", at the pen of byte
         // 5 — not at the pen of byte 0, which is inside the word's ink.
-        let anchor = Anchor {
-            block_id: block.id,
-            start: 0,
-            end: 5,
-        };
+        let anchor = Anchor::range(block.id, 0, 5);
         let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width)
             .expect("a footnote on a laid-out block has a superscript position");
         let start_x = caret_x(&layout, 0);
@@ -3692,11 +3696,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let layout = renderer.layout(&wrapped);
         assert!(layout.lines.len() >= 2, "the paragraph wraps");
         let first_line = layout.lines[0];
-        let anchor = Anchor {
-            block_id: wrapped.id,
-            start: first_line.start,
-            end: first_line.end,
-        };
+        let anchor = Anchor::range(wrapped.id, first_line.start, first_line.end);
         let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width)
             .expect("position");
         let last_glyph_x = caret_x(&layout, first_line.end - 1);
@@ -3749,11 +3749,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(annotation.kind, AnnotationKind::Note);
         assert_eq!(
             annotation.anchor,
-            Anchor {
-                block_id,
-                start: 4,
-                end: 9,
-            },
+            Anchor::range(block_id, 4, 9),
             "a caret anchors the word around it"
         );
         assert!(
@@ -3764,11 +3760,11 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
 
         let reopened = open(&path);
         assert_eq!(reopened.document().annotations.len(), 1);
-        assert_eq!(reopened.document().annotations[0].anchor.start, 4);
+        assert_eq!(reopened.document().annotations[0].anchor.byte_range().unwrap().0, 4);
     }
 
     #[test]
-    fn adding_an_annotation_over_a_selection_uses_the_selected_range() {
+    fn marginalia_anchor_to_the_block_and_notes_to_the_selection() {
         let path = temp_db_path();
         let mut session = open(&path);
         session.insert("The quick brown fox");
@@ -3783,10 +3779,11 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             block_id,
             offset: 4,
         });
+
+        // A marginal anchors to the whole block, selection or not.
         let id = session
             .add_annotation(AnnotationKind::Marginal)
             .expect("a marginal over the selection");
-
         let annotation = session
             .document()
             .annotations
@@ -3796,11 +3793,24 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(annotation.kind, AnnotationKind::Marginal);
         assert_eq!(
             annotation.anchor,
-            Anchor {
-                block_id,
-                start: 4,
-                end: 15,
-            },
+            Anchor::block(block_id),
+            "marginalia anchor to the whole block, not the selection"
+        );
+
+        // A note anchors to the selected range, in document order.
+        let id = session
+            .add_annotation(AnnotationKind::Note)
+            .expect("a note over the selection");
+        let annotation = session
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .expect("the new note");
+        assert_eq!(annotation.kind, AnnotationKind::Note);
+        assert_eq!(
+            annotation.anchor,
+            Anchor::range(block_id, 4, 15),
             "the selected bytes become the anchor, never reversed"
         );
     }
@@ -3875,11 +3885,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             .expect("the footnote survives the edit");
         assert_eq!(
             annotation.anchor,
-            Anchor {
-                block_id,
-                start: 9,
-                end: 14,
-            },
+            Anchor::range(block_id, 9, 14),
             "the anchor moved with its word, keeping the same range"
         );
     }

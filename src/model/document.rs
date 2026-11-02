@@ -32,18 +32,56 @@ pub struct Block {
     pub spans: Vec<Span>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnnotationKind {
     Marginal,
     Note,
     Footnote,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Anchor {
-    pub block_id: BlockId,
-    pub start: usize,
-    pub end: usize,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum Anchor {
+    /// Anchored to a whole block — used by marginalia, which sit alongside a
+    /// paragraph rather than a specific passage. Survives edits within the
+    /// block; only deleting the block itself removes it.
+    Block { block_id: BlockId },
+    /// Anchored to a byte range within a block — used by notes (a highlighted
+    /// passage) and footnotes (a numbered marker at a position).
+    Range {
+        block_id: BlockId,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl Anchor {
+    pub fn block(block_id: BlockId) -> Anchor {
+        Anchor::Block { block_id }
+    }
+
+    pub fn range(block_id: BlockId, start: usize, end: usize) -> Anchor {
+        Anchor::Range {
+            block_id,
+            start,
+            end,
+        }
+    }
+
+    /// The block this anchor belongs to, whether block- or range-scoped.
+    pub fn block_id(&self) -> BlockId {
+        match self {
+            Anchor::Block { block_id } | Anchor::Range { block_id, .. } => *block_id,
+        }
+    }
+
+    /// The byte range for range-scoped anchors, `None` for block-scoped ones.
+    pub fn byte_range(&self) -> Option<(usize, usize)> {
+        match self {
+            Anchor::Range { start, end, .. } => Some((*start, *end)),
+            Anchor::Block { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,16 +151,20 @@ mod tests {
                     spans: Vec::new(),
                 },
             ],
-            annotations: vec![Annotation {
-                id: Uuid::new_v4(),
-                kind: AnnotationKind::Marginal,
-                anchor: Anchor {
-                    block_id: Uuid::new_v4(),
-                    start: 0,
-                    end: 3,
+            annotations: vec![
+                Annotation {
+                    id: Uuid::new_v4(),
+                    kind: AnnotationKind::Marginal,
+                    anchor: Anchor::block(Uuid::new_v4()),
+                    body: "note".to_string(),
                 },
-                body: "note".to_string(),
-            }],
+                Annotation {
+                    id: Uuid::new_v4(),
+                    kind: AnnotationKind::Note,
+                    anchor: Anchor::range(Uuid::new_v4(), 0, 3),
+                    body: "range note".to_string(),
+                },
+            ],
         };
         let json = serde_json::to_string(&d).unwrap();
         let d2: Document = serde_json::from_str(&json).unwrap();

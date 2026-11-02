@@ -3,7 +3,7 @@
 **Kyle's Marginalia Editor** — a WYSIWYG editor for writing ideas and thinking.
 
 You type into the typeset page; kame renders your prose with real typography
-(Crimson Pro headings, Source Serif 4 body) and lets you write alongside it in
+(Crimson Pro headings, EB Garamond body) and lets you write alongside it in
 the margin. Markdown and HTML are generated only on export — the document
 itself is a structured, first-class file, never a pile of markup.
 

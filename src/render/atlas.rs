@@ -218,9 +218,9 @@ mod tests {
 
     fn load_fonts(fs: &mut FontSystem) {
         for file in [
-            "SourceSerif4-Regular.ttf",
-            "SourceSerif4-Bold.ttf",
-            "SourceSerif4-Italic.ttf",
+            "EBGaramond-Regular.otf",
+            "EBGaramond-Bold.otf",
+            "EBGaramond-Italic.otf",
             "CrimsonPro-Regular.ttf",
         ] {
             fs.db_mut()

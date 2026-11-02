@@ -7,7 +7,7 @@
 //! `<mark>` over the highlighted range with an expandable `<details>` beneath
 //! it, and footnotes become superscript links into a numbered footnote list at
 //! the foot of the document. The embedded stylesheet carries the house
-//! typography — Crimson Pro for headings, Source Serif 4 for body text,
+//! typography — Crimson Pro for headings, EB Garamond for body text,
 //! justified prose, old-style figures.
 //!
 //! Like the Markdown exporter, output depends only on the document contents:
@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 /// The embedded stylesheet.
 ///
-/// The fonts are named, not embedded: Crimson Pro and Source Serif 4 are the
+/// The fonts are named, not embedded: Crimson Pro and EB Garamond are the
 /// fonts the editor ships (`fonts/`), so an exported file picks them up
 /// wherever they are installed and falls back to a serif otherwise.
 const STYLE: &str = r#"
@@ -40,7 +40,7 @@ body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
-  font-family: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+  font-family: "EB Garamond", "Iowan Old Style", Georgia, serif;
   font-size: 1.2rem;
   line-height: 1.62;
   font-variant-numeric: oldstyle-nums;
@@ -62,7 +62,7 @@ img.image {
   margin: 1.4em 0;
 }
 h1, h2, h3, h4, h5, h6 {
-  font-family: "Crimson Pro", "Source Serif 4", Georgia, serif;
+  font-family: "Crimson Pro", "EB Garamond", Georgia, serif;
   font-weight: 600;
   line-height: 1.15;
   text-align: left;
@@ -1112,7 +1112,7 @@ mod tests {
         let html = to_html(&Document::new("Title"));
         assert!(html.contains("<style>"));
         assert!(html.contains("Crimson Pro"));
-        assert!(html.contains("Source Serif 4"));
+        assert!(html.contains("EB Garamond"));
         assert!(html.contains("text-align: justify"));
         assert!(html.contains("font-variant-numeric: oldstyle-nums"));
     }

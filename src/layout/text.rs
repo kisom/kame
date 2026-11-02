@@ -23,21 +23,40 @@ pub struct LayoutConfig {
     pub heading_size: f32,
     pub margin_width: f32,
     pub margin_size: f32,
-    /// Horizontal indent reserved for a list item's marker (bullet or number).
     pub list_indent: f32,
+}
+
+/// The body size every other font-derived size is a ratio of.
+pub const DEFAULT_BODY_SIZE: f32 = 16.0;
+/// Page geometry at the default size.
+const DEFAULT_BODY_WIDTH: f32 = 640.0;
+const DEFAULT_MARGIN_WIDTH: f32 = 180.0;
+/// Ratios of `body_size`, kept in one place so a single font-size choice scales
+/// the whole type system (body leading, headings, margin apparatus, list gutter).
+const LINE_HEIGHT_RATIO: f32 = 1.5;
+const HEADING_RATIO: f32 = 1.75;
+const MARGIN_RATIO: f32 = 0.75;
+const LIST_INDENT_RATIO: f32 = 1.75;
+
+impl LayoutConfig {
+    /// A config whose font-derived sizes are ratios of `body_size`, at the
+    /// default page geometry.
+    pub fn with_body_size(body_size: f32) -> LayoutConfig {
+        LayoutConfig {
+            body_width: DEFAULT_BODY_WIDTH,
+            body_size,
+            body_line_height: body_size * LINE_HEIGHT_RATIO,
+            heading_size: body_size * HEADING_RATIO,
+            margin_width: DEFAULT_MARGIN_WIDTH,
+            margin_size: body_size * MARGIN_RATIO,
+            list_indent: body_size * LIST_INDENT_RATIO,
+        }
+    }
 }
 
 impl Default for LayoutConfig {
     fn default() -> Self {
-        LayoutConfig {
-            body_width: 640.0,
-            body_size: 16.0,
-            body_line_height: 24.0,
-            heading_size: 28.0,
-            margin_width: 180.0,
-            margin_size: 12.0,
-            list_indent: 28.0,
-        }
+        LayoutConfig::with_body_size(DEFAULT_BODY_SIZE)
     }
 }
 
@@ -595,5 +614,19 @@ dance, on a page, of pen, eye and hand.";
             config.list_indent
         );
         assert_eq!(layout_block(&mut fs, &paragraph, &config).left_indent, 0.0);
+    }
+
+    #[test]
+    fn with_body_size_scales_every_font_derived_size() {
+        let config = LayoutConfig::with_body_size(20.0);
+        assert_eq!(config.body_size, 20.0);
+        assert_eq!(config.body_line_height, 30.0); // 1.5×
+        assert_eq!(config.heading_size, 35.0); // 1.75×
+        assert_eq!(config.margin_size, 15.0); // 0.75×
+        assert_eq!(config.list_indent, 35.0); // 1.75×
+        // Page geometry is independent of the type size.
+        assert_eq!(config.body_width, 640.0);
+        assert_eq!(config.margin_width, 180.0);
+        assert_eq!(LayoutConfig::default().body_size, DEFAULT_BODY_SIZE);
     }
 }

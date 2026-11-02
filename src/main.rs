@@ -24,7 +24,7 @@ use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::layout::reading_order;
 use crate::layout::{
     place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
-    MarginalPlacement, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
+    MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
 };
 use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
@@ -61,6 +61,11 @@ const NOTE_MARK: Color32 = Color32::from_rgb(140, 104, 40);
 const LIST_MARKER_INK: Color32 = Color32::from_rgb(32, 29, 25);
 /// Gap between a list marker's right edge and its item's text.
 const LIST_MARKER_GAP: f32 = 6.0;
+/// Font-size step for the Ctrl + / Ctrl - chords, and the clamp bounds (body
+/// size in px). Everything else scales off the body size.
+const FONT_SIZE_STEP: f32 = 1.0;
+const FONT_SIZE_MIN: f32 = 10.0;
+const FONT_SIZE_MAX: f32 = 32.0;
 /// Space above the first block and below the last.
 const PAGE_PADDING: f32 = 36.0;
 /// Vertical space between blocks.
@@ -1690,6 +1695,10 @@ struct KameApp {
     open_note_focus: bool,
     /// Distraction-free view toggles (never persisted).
     modes: Modes,
+    /// The body font size, in px. Every other size (leading, headings, margin
+    /// apparatus, list gutter) is a ratio of this, so one number scales the
+    /// whole page. A view preference, not document state.
+    body_size: f32,
     /// The caret position typewriter mode last centred. A new position scrolls
     /// the page so the caret returns to the middle; an unchanged one leaves the
     /// reader free to scroll away.
@@ -1729,6 +1738,7 @@ impl KameApp {
             open_note_body: String::new(),
             open_note_focus: false,
             modes: Modes::default(),
+            body_size: DEFAULT_BODY_SIZE,
             typewriter_anchor: None,
             pending_scroll: None,
             snapshot_prompt: None,
@@ -1879,6 +1889,11 @@ impl KameApp {
     fn set_block_kind(&mut self, kind: BlockKind) {
         let caret = self.session.valid_caret();
         self.session.set_block_kind(caret.block_id, kind);
+    }
+
+    /// Steps the body font size, from which every other size is derived.
+    fn adjust_font_size(&mut self, step: f32) {
+        self.body_size = (self.body_size + step).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
     }
 
     /// Opens or closes the find bar.
@@ -2040,6 +2055,45 @@ impl KameApp {
         });
         if find_chord {
             self.toggle_find();
+        }
+        // Ctrl + / Ctrl - / Ctrl 0 step the body font size (every other size is
+        // a ratio of it). `+` is Shift+= on most layouts, so both are accepted.
+        let (font_inc, font_dec, font_reset) = ctx.input(|input| {
+            let mut inc = false;
+            let mut dec = false;
+            let mut reset = false;
+            for event in &input.events {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                if !modifiers.command {
+                    continue;
+                }
+                if *key == egui::Key::Plus || (*key == egui::Key::Equals && modifiers.shift) {
+                    inc = true;
+                }
+                if *key == egui::Key::Minus {
+                    dec = true;
+                }
+                if *key == egui::Key::Num0 && !modifiers.shift {
+                    reset = true;
+                }
+            }
+            (inc, dec, reset)
+        });
+        if font_reset {
+            self.body_size = DEFAULT_BODY_SIZE;
+        } else if font_inc {
+            self.adjust_font_size(FONT_SIZE_STEP);
+        } else if font_dec {
+            self.adjust_font_size(-FONT_SIZE_STEP);
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             // Escape closes the find bar first, then a dialog, then the note.
@@ -2301,6 +2355,9 @@ impl KameApp {
         let html_path = export_path(self.session.path(), "html")
             .display()
             .to_string();
+        // The type-size buttons below collect their action here, applied after
+        // the panel closes so the size is read (for display) and written once.
+        let mut font_step: Option<f32> = None;
 
         egui::Panel::top("kame-status").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -2319,6 +2376,22 @@ impl KameApp {
                     if words == 1 { "" } else { "s" }
                 ));
                 ui.label(format!("undo {undo} · redo {redo}"));
+                ui.separator();
+                ui.label(format!("type {:.0}", self.body_size));
+                if ui
+                    .small_button("−")
+                    .on_hover_text("smaller (Ctrl -)")
+                    .clicked()
+                {
+                    font_step = Some(-FONT_SIZE_STEP);
+                }
+                if ui
+                    .small_button("+")
+                    .on_hover_text("larger (Ctrl +)")
+                    .clicked()
+                {
+                    font_step = Some(FONT_SIZE_STEP);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.monospace(path);
                 });
@@ -2474,6 +2547,9 @@ impl KameApp {
                 ui.colored_label(ERROR_INK, error);
             }
         });
+        if let Some(step) = font_step {
+            self.adjust_font_size(step);
+        }
     }
 
     fn draw_surface(&mut self, ui: &mut egui::Ui) {
@@ -3256,7 +3332,7 @@ impl eframe::App for KameApp {
         // scroll bar's presence would otherwise feed back into the wrap width
         // and make the page oscillate at the threshold. The panel width does not
         // depend on it.
-        let base = LayoutConfig::default();
+        let base = LayoutConfig::with_body_size(self.body_size);
         let available = (ui.available_width() - SCROLLBAR_ALLOWANCE).max(1.0);
         let (body_width, margin_width) = page_measure(
             base.body_width,

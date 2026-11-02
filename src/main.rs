@@ -184,7 +184,7 @@ type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Modes {
     fullscreen: bool,
-    /// Hide the top panel: toolbar, status line and help text.
+    /// Hide the status row and its menu.
     hide_chrome: bool,
     /// Collapse the margin gutter so the measure re-centres on the window.
     hide_margin: bool,
@@ -786,28 +786,108 @@ impl CloseGuard {
     }
 }
 
-/// Shortens `path` to at most `max_chars` characters by dropping its start, since
-/// the file name at the end is the part that identifies it. The cut lands on a
-/// directory boundary when the rest still fits.
-fn elide_path(path: &str, max_chars: usize) -> String {
-    let count = path.chars().count();
-    if count <= max_chars {
-        return path.to_string();
+/// The status row's badge for each active mode, as `(abbreviation, full name)`.
+/// Hide-chrome has none: while it is on, the row itself is gone.
+fn mode_badges(modes: &Modes) -> Vec<(&'static str, &'static str)> {
+    [
+        (ModeCommand::Fullscreen, "FS", "fullscreen"),
+        (ModeCommand::HideMargin, "M", "margin hidden"),
+        (ModeCommand::ParagraphFocus, "F", "paragraph focus"),
+        (ModeCommand::Typewriter, "T", "typewriter"),
+    ]
+    .into_iter()
+    .filter(|(mode, _, _)| modes.is_on(*mode))
+    .map(|(_, short, name)| (short, name))
+    .collect()
+}
+
+/// The status row's word count, with thousands separated.
+fn word_count_label(words: usize) -> String {
+    let digits = words.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
     }
-    if max_chars == 0 {
-        return String::new();
+    let noun = if words == 1 { "word" } else { "words" };
+    format!("{grouped} {noun}")
+}
+
+/// A shortcut as the menu shows it. Chords are written with `Ctrl`, which is Cmd
+/// on macOS (see `Modifiers::command`).
+fn shortcut_label(chord: &str, mac: bool) -> String {
+    if mac {
+        chord.replace("Ctrl", "Cmd")
+    } else {
+        chord.to_string()
     }
-    let keep = max_chars - 1;
-    let start = path
-        .char_indices()
-        .nth(count - keep)
-        .map_or(path.len(), |(index, _)| index);
-    let tail = &path[start..];
-    let tail = match tail.find('/') {
-        Some(slash) if slash + 1 < tail.len() => &tail[slash..],
-        _ => tail,
-    };
-    format!("…{tail}")
+}
+
+/// Clears a notice on the next edit, so it does not sit under the status row.
+///
+/// A notice set in the same frame as a history change (restoring a snapshot) is
+/// not cleared by it: the change is what the notice is reporting.
+#[derive(Default)]
+struct NoticeTracker {
+    /// The notice last seen, and the history it was seen with.
+    seen: Option<String>,
+    history: (usize, usize),
+}
+
+impl NoticeTracker {
+    fn update(&mut self, notice: &mut Option<String>, history: (usize, usize)) {
+        if *notice != self.seen {
+            self.seen = notice.clone();
+        } else if history != self.history {
+            *notice = None;
+            self.seen = None;
+        }
+        self.history = history;
+    }
+}
+
+/// Something chosen from the status row's menu, applied once the panel closes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MenuAction {
+    Open,
+    Save,
+    ImportMarkdown,
+    File(FileCommand),
+    Annotate(AnnotationKind),
+    TypeSize(f32),
+    ToggleDark,
+    Mode(ModeCommand),
+    Help,
+}
+
+/// A menu entry showing its shortcut, if it has one. Clicking closes the menu.
+fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: Option<&str>, selected: bool) -> bool {
+    menu_entry(ui, label, shortcut, selected).clicked()
+}
+
+/// [`menu_item`], returning the response so a caller can add a hover.
+fn menu_entry(
+    ui: &mut egui::Ui,
+    label: &str,
+    shortcut: Option<&str>,
+    selected: bool,
+) -> egui::Response {
+    let mut button = egui::Button::new(label).selected(selected);
+    if let Some(shortcut) = shortcut {
+        button = button.shortcut_text(shortcut_label(shortcut, cfg!(target_os = "macos")));
+    }
+    let response = ui.add(button);
+    if response.clicked() {
+        ui.close();
+    }
+    response
+}
+
+/// A menu group's heading.
+fn menu_heading(ui: &mut egui::Ui, label: &str) {
+    ui.label(egui::RichText::new(label).small().weak());
 }
 
 /// Whether `event` is the macOS quit shortcut. `mac_cmd` is never set elsewhere,
@@ -2566,6 +2646,7 @@ struct KameApp {
     /// What the last file command did, shown in the status panel until the
     /// next one. Failures are reported through `Session::last_error` instead.
     notice: Option<String>,
+    notice_tracker: NoticeTracker,
     /// Keeps a failed write from being discarded by a stray close, while still
     /// letting the author quit on a second request.
     close: CloseGuard,
@@ -2620,6 +2701,7 @@ impl KameApp {
             link_prompt: None,
             restore_picker: None,
             notice,
+            notice_tracker: NoticeTracker::default(),
             close: CloseGuard::default(),
             close_flow: CloseFlow::default(),
             find: None,
@@ -2665,26 +2747,36 @@ impl KameApp {
         // the key went down, so a chord is never mistaken for the bare letter.
         let toggles = ctx.input(|input| mode_commands_for_events(&input.events));
         for mode in toggles {
-            let on = self.modes.toggle(mode);
-            // Most modes are painted from the flag alone; fullscreen is the one
-            // that has to ask the window, in both directions.
-            if let Some(command) = viewport_effect(mode, on) {
-                ctx.send_viewport_cmd(command);
-            }
-            // Entering typewriter mode recentres at once, even if the caret
-            // has not moved since the last keystroke.
-            if mode == ModeCommand::Typewriter && on {
-                self.typewriter_anchor = None;
-            }
+            self.apply_mode(ctx, mode);
         }
         if ctx.input(|input| dark_toggle_for_events(&input.events)) {
-            self.toggle_dark();
-            ctx.set_visuals(if self.dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            });
+            self.apply_dark_toggle(ctx);
         }
+    }
+
+    /// Flips a view mode, from its chord or the menu.
+    fn apply_mode(&mut self, ctx: &egui::Context, mode: ModeCommand) {
+        let on = self.modes.toggle(mode);
+        // Most modes are painted from the flag alone; fullscreen is the one
+        // that has to ask the window, in both directions.
+        if let Some(command) = viewport_effect(mode, on) {
+            ctx.send_viewport_cmd(command);
+        }
+        // Entering typewriter mode recentres at once, even if the caret
+        // has not moved since the last keystroke.
+        if mode == ModeCommand::Typewriter && on {
+            self.typewriter_anchor = None;
+        }
+    }
+
+    /// Flips dark mode and repaints the widgets to match.
+    fn apply_dark_toggle(&mut self, ctx: &egui::Context) {
+        self.toggle_dark();
+        ctx.set_visuals(if self.dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
     }
 
     /// Whether a file dialog is up. While one is, it owns the keyboard.
@@ -2995,13 +3087,7 @@ impl KameApp {
             })
         });
         if open_chord {
-            self.snapshot_prompt = None;
-            self.restore_picker = None;
-            self.open_prompt = Some(OpenPrompt {
-                path: String::new(),
-                focus: true,
-                confirming: false,
-            });
+            self.begin_open();
         }
         // Ctrl-K opens the link prompt on the current selection (or the link
         // under the caret), so a link can be added or edited from the keyboard.
@@ -3359,144 +3445,121 @@ impl KameApp {
             .session
             .path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Untitled".to_string());
+            .unwrap_or_else(|| "not saved to a file yet".to_string());
+        let not_saved = self.session.is_anonymous() && self.session.has_content();
         let error = self.session.last_error.clone();
         let notice = self.notice.clone();
-        // Where the two exports would land, spelled out on the buttons so the
-        // author knows the file name before clicking.
+        // Where the two exports would land, named on hover so the author knows
+        // the file name before clicking.
         let export_base = self.session.export_base();
         let markdown_path = export_path(&export_base, "md").display().to_string();
         let html_path = export_path(&export_base, "html").display().to_string();
-        // The type-size buttons below collect their action here, applied after
-        // the panel closes so the size is read (for display) and written once.
-        let mut font_step: Option<f32> = None;
-        let mut toggle_dark = false;
+        // Applied after the panel closes: some of these block on a native dialog
+        // or replace the session the panel is reading.
+        let mut action: Option<MenuAction> = None;
 
         egui::Panel::top("kame-status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.strong(title);
-                ui.separator();
-                ui.label(format!(
-                    "{blocks} block{}",
-                    if blocks == 1 { "" } else { "s" }
-                ));
-                ui.label(format!(
-                    "{annotations} annotation{}",
-                    if annotations == 1 { "" } else { "s" }
-                ));
-                ui.label(format!("{words} word{}", if words == 1 { "" } else { "s" }));
-                ui.label(format!("undo {undo} · redo {redo}"));
-                ui.separator();
-                ui.label(format!("type {:.0}", self.body_size));
-                if ui
-                    .small_button("−")
-                    .on_hover_text("smaller (Ctrl -)")
-                    .clicked()
-                {
-                    font_step = Some(-FONT_SIZE_STEP);
-                }
-                if ui
-                    .small_button("+")
-                    .on_hover_text("larger (Ctrl +)")
-                    .clicked()
-                {
-                    font_step = Some(FONT_SIZE_STEP);
-                }
-                let dark_label = if self.dark { "☾" } else { "☀" };
-                if ui
-                    .small_button(dark_label)
-                    .on_hover_text("toggle dark mode (Ctrl+Shift+D)")
-                    .clicked()
-                {
-                    toggle_dark = true;
-                }
-                // Sized to the room left in the row, or it would print over the
-                // controls in a narrow window. Hovering shows the whole path.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let font = egui::TextStyle::Monospace.resolve(ui.style());
-                    let char_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M'));
-                    let max_chars = (ui.available_width() / char_width.max(1.0)) as usize;
-                    ui.monospace(elide_path(&path, max_chars))
-                        .on_hover_text(path.as_str());
-                });
-            });
-            ui.horizontal(|ui| {
-                for (label, kind) in [
-                    ("+ Note", AnnotationKind::Note),
-                    ("+ Marginal", AnnotationKind::Marginal),
-                    ("+ Footnote", AnnotationKind::Footnote),
-                ] {
-                    if ui.small_button(label).clicked() {
-                        if let Some(id) = self.session.add_annotation(kind) {
-                            self.set_open_note(Some(id));
-                            self.open_note_pos = None;
+                    ui.menu_button("⋯", |ui| {
+                        ui.set_min_width(260.0);
+                        menu_heading(ui, "File");
+                        if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
+                            action = Some(MenuAction::Open);
                         }
+                        if menu_item(ui, "Save", Some("Ctrl-S"), false) {
+                            action = Some(MenuAction::Save);
+                        }
+                        if menu_item(ui, "Import Markdown…", None, false) {
+                            action = Some(MenuAction::ImportMarkdown);
+                        }
+                        if menu_entry(ui, "Export Markdown", Some("Ctrl-Shift-E"), false)
+                            .on_hover_text(format!("write {markdown_path}"))
+                            .clicked()
+                        {
+                            action = Some(MenuAction::File(FileCommand::ExportMarkdown));
+                        }
+                        if menu_entry(ui, "Export HTML", Some("Ctrl-Shift-B"), false)
+                            .on_hover_text(format!("write {html_path}"))
+                            .clicked()
+                        {
+                            action = Some(MenuAction::File(FileCommand::ExportHtml));
+                        }
+                        ui.separator();
+                        menu_heading(ui, "Snapshots");
+                        if menu_item(ui, "Snapshot Now…", Some("Ctrl-Shift-S"), false) {
+                            action = Some(MenuAction::File(FileCommand::SnapshotNow));
+                        }
+                        if menu_item(ui, "Restore Snapshot…", Some("Ctrl-Shift-R"), false) {
+                            action = Some(MenuAction::File(FileCommand::RestoreSnapshot));
+                        }
+                        ui.separator();
+                        menu_heading(ui, "Annotate");
+                        for (label, kind, shortcut) in [
+                            ("Note", AnnotationKind::Note, Some("Ctrl-Shift-N")),
+                            ("Marginal", AnnotationKind::Marginal, None),
+                            ("Footnote", AnnotationKind::Footnote, Some("Ctrl-Shift-F")),
+                        ] {
+                            if menu_item(ui, label, shortcut, false) {
+                                action = Some(MenuAction::Annotate(kind));
+                            }
+                        }
+                        ui.separator();
+                        menu_heading(ui, "View");
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Type size {:.0}", self.body_size));
+                            // These stay open, so the size can be walked to taste.
+                            if ui.small_button("−").on_hover_text("smaller").clicked() {
+                                action = Some(MenuAction::TypeSize(-FONT_SIZE_STEP));
+                            }
+                            if ui.small_button("+").on_hover_text("larger").clicked() {
+                                action = Some(MenuAction::TypeSize(FONT_SIZE_STEP));
+                            }
+                        });
+                        if menu_item(ui, "Dark mode", Some("Ctrl-Shift-D"), self.dark) {
+                            action = Some(MenuAction::ToggleDark);
+                        }
+                        for (label, mode, shortcut) in [
+                            ("Fullscreen", ModeCommand::Fullscreen, "F11"),
+                            ("Hide chrome", ModeCommand::HideChrome, "Ctrl-Shift-H"),
+                            ("Hide margin", ModeCommand::HideMargin, "Ctrl-Shift-M"),
+                            ("Paragraph focus", ModeCommand::ParagraphFocus, "Ctrl-Shift-P"),
+                            ("Typewriter", ModeCommand::Typewriter, "Ctrl-Shift-T"),
+                        ] {
+                            if menu_item(ui, label, Some(shortcut), self.modes.is_on(mode)) {
+                                action = Some(MenuAction::Mode(mode));
+                            }
+                        }
+                        ui.separator();
+                        if menu_item(ui, "Help", Some("F1"), false) {
+                            action = Some(MenuAction::Help);
+                        }
+                        ui.separator();
+                        let plural = |n: usize| if n == 1 { "" } else { "s" };
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{blocks} block{} · {annotations} annotation{} · undo {undo} · redo {redo}",
+                                plural(blocks),
+                                plural(annotations),
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
+                    ui.label(egui::RichText::new(word_count_label(words)).weak());
+                    // Laid out right to left, so reversed to read in the usual order.
+                    for (short, name) in mode_badges(&self.modes).into_iter().rev() {
+                        ui.label(egui::RichText::new(short).small().strong())
+                            .on_hover_text(name);
                     }
-                }
-                // Usage lives in a help dialog (F1); this button points at it.
-                ui.separator();
-                if ui.small_button("?").on_hover_text("help (F1)").clicked() {
-                    self.show_help = true;
-                }
-                // The active modes are named here so a hidden-chrome state is
-                // discoverable again the moment the panel comes back.
-                ui.separator();
-                ui.label(egui::RichText::new("modes:").small().weak());
-                let mut any = false;
-                for (label, mode) in [
-                    ("fullscreen", ModeCommand::Fullscreen),
-                    ("no chrome", ModeCommand::HideChrome),
-                    ("no margin", ModeCommand::HideMargin),
-                    ("focus", ModeCommand::ParagraphFocus),
-                    ("typewriter", ModeCommand::Typewriter),
-                ] {
-                    if self.modes.is_on(mode) {
-                        any = true;
-                        ui.label(egui::RichText::new(label).small().strong());
+                    if not_saved {
+                        ui.label(egui::RichText::new("not saved yet").small().weak());
                     }
-                }
-                if !any {
-                    ui.label(egui::RichText::new("none").small().weak());
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("File:");
-                if ui
-                    .small_button("Import Markdown")
-                    .on_hover_text("open a Markdown file as a new, unsaved document")
-                    .clicked()
-                {
-                    self.import_markdown();
-                }
-                if ui
-                    .small_button("Export Markdown")
-                    .on_hover_text(format!("write {markdown_path} · Ctrl-Shift-E"))
-                    .clicked()
-                {
-                    self.run_file_command(FileCommand::ExportMarkdown);
-                }
-                if ui
-                    .small_button("Export HTML")
-                    .on_hover_text(format!("write {html_path} · Ctrl-Shift-B"))
-                    .clicked()
-                {
-                    self.run_file_command(FileCommand::ExportHtml);
-                }
-                ui.separator();
-                if ui
-                    .small_button("Snapshot Now")
-                    .on_hover_text("capture the text as it stands · Ctrl-Shift-S")
-                    .clicked()
-                {
-                    self.run_file_command(FileCommand::SnapshotNow);
-                }
-                if ui
-                    .small_button("Restore Snapshot")
-                    .on_hover_text("replace the text with a stored snapshot · Ctrl-Shift-R")
-                    .clicked()
-                {
-                    self.run_file_command(FileCommand::RestoreSnapshot);
-                }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate())
+                            .on_hover_text(path.as_str());
+                    });
+                });
             });
             // Its own row, wrapping: an import's report can be long, and it must
             // be readable at any window width rather than clip off the row's end.
@@ -3519,16 +3582,28 @@ impl KameApp {
                 );
             }
         });
-        if let Some(step) = font_step {
-            self.adjust_font_size(step);
+        if let Some(action) = action {
+            self.run_menu_action(ui.ctx(), action);
         }
-        if toggle_dark {
-            self.toggle_dark();
-            ui.ctx().set_visuals(if self.dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            });
+    }
+
+    /// Carries out a menu choice through the same path its shortcut uses.
+    fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
+        match action {
+            MenuAction::Open => self.begin_open(),
+            MenuAction::Save => self.save_action(ctx, false),
+            MenuAction::ImportMarkdown => self.import_markdown(),
+            MenuAction::File(command) => self.run_file_command(command),
+            MenuAction::Annotate(kind) => {
+                if let Some(id) = self.session.add_annotation(kind) {
+                    self.set_open_note(Some(id));
+                    self.open_note_pos = None;
+                }
+            }
+            MenuAction::TypeSize(step) => self.adjust_font_size(step),
+            MenuAction::ToggleDark => self.apply_dark_toggle(ctx),
+            MenuAction::Mode(mode) => self.apply_mode(ctx, mode),
+            MenuAction::Help => self.show_help = true,
         }
     }
 
@@ -4526,7 +4601,19 @@ impl KameApp {
         self.open_document(path);
     }
 
-    /// The Import Markdown button: asks for a file, then opens it the way the
+    /// Opens the path prompt, clearing any other file dialog so it is the one
+    /// thing on screen.
+    fn begin_open(&mut self) {
+        self.snapshot_prompt = None;
+        self.restore_picker = None;
+        self.open_prompt = Some(OpenPrompt {
+            path: String::new(),
+            focus: true,
+            confirming: false,
+        });
+    }
+
+    /// The Import Markdown menu item: asks for a file, then opens it the way the
     /// Open prompt does, holding at the same confirmation if work would be lost.
     fn import_markdown(&mut self) {
         let Some(path) = pick_markdown_path() else {
@@ -4999,8 +5086,9 @@ impl eframe::App for KameApp {
         // The find bar is transient and only exists because the author opened it
         // (Ctrl-F), so it shows even when the status panel is hidden.
         self.show_find_bar(ui);
-        // Hide-chrome mode drops the whole top panel: it is both the toolbar
-        // (annotation buttons) and the status bar, so one toggle clears both.
+        let history = self.session.history();
+        self.notice_tracker.update(&mut self.notice, history);
+        // Hide-chrome mode drops the whole status row, menu included.
         if !self.modes.hide_chrome {
             self.show_status(ui);
         }
@@ -5401,33 +5489,98 @@ mod tests {
     }
 
     #[test]
-    fn a_path_that_fits_is_left_alone() {
-        assert_eq!(elide_path("/a/b.kame", 9), "/a/b.kame");
-        assert_eq!(elide_path("Untitled", 40), "Untitled");
-    }
-
-    #[test]
-    fn a_long_path_keeps_its_end_and_starts_on_a_directory() {
+    fn only_active_modes_get_a_badge() {
+        let mut modes = Modes::default();
+        assert!(mode_badges(&modes).is_empty(), "no modes, no clutter");
+        modes.toggle(ModeCommand::ParagraphFocus);
+        modes.toggle(ModeCommand::Typewriter);
         assert_eq!(
-            elide_path("/Users/kyle/data/writing/essay.kame", 20),
-            "…/writing/essay.kame"
+            mode_badges(&modes),
+            vec![("F", "paragraph focus"), ("T", "typewriter")]
         );
     }
 
     #[test]
-    fn a_file_name_that_barely_fits_keeps_as_much_as_it_can() {
-        assert_eq!(elide_path("/Users/kyle/essay.kame", 8), "…ay.kame");
+    fn every_visible_mode_has_its_own_badge() {
+        let mut modes = Modes::default();
+        modes.toggle(ModeCommand::Fullscreen);
+        modes.toggle(ModeCommand::HideMargin);
+        modes.toggle(ModeCommand::ParagraphFocus);
+        modes.toggle(ModeCommand::Typewriter);
+        let short: Vec<&str> = mode_badges(&modes)
+            .iter()
+            .map(|(short, _)| *short)
+            .collect();
+        assert_eq!(short, vec!["FS", "M", "F", "T"]);
     }
 
     #[test]
-    fn eliding_counts_characters_not_bytes() {
-        assert_eq!(elide_path("/données/été/café.kame", 11), "…/café.kame");
+    fn hide_chrome_has_no_badge_because_the_row_is_gone() {
+        let mut modes = Modes::default();
+        modes.toggle(ModeCommand::HideChrome);
+        assert!(mode_badges(&modes).is_empty());
     }
 
     #[test]
-    fn no_room_means_no_path() {
-        assert_eq!(elide_path("/a/b.kame", 0), "");
-        assert_eq!(elide_path("/a/b.kame", 1), "…");
+    fn word_counts_read_naturally() {
+        assert_eq!(word_count_label(0), "0 words");
+        assert_eq!(word_count_label(1), "1 word");
+        assert_eq!(word_count_label(999), "999 words");
+        assert_eq!(word_count_label(1255), "1,255 words");
+        assert_eq!(word_count_label(1234567), "1,234,567 words");
+    }
+
+    #[test]
+    fn shortcuts_name_the_platforms_modifier() {
+        assert_eq!(shortcut_label("Ctrl-Shift-E", false), "Ctrl-Shift-E");
+        assert_eq!(shortcut_label("Ctrl-Shift-E", true), "Cmd-Shift-E");
+        assert_eq!(shortcut_label("F11", true), "F11");
+    }
+
+    #[test]
+    fn a_notice_stays_until_the_next_edit() {
+        let mut tracker = NoticeTracker::default();
+        let mut notice = Some("exported".to_string());
+        tracker.update(&mut notice, (3, 0));
+        tracker.update(&mut notice, (3, 0));
+        assert_eq!(notice.as_deref(), Some("exported"), "idle frames keep it");
+        tracker.update(&mut notice, (4, 0));
+        assert_eq!(notice, None, "an edit clears it");
+    }
+
+    #[test]
+    fn an_undo_also_clears_a_notice() {
+        let mut tracker = NoticeTracker::default();
+        let mut notice = Some("exported".to_string());
+        tracker.update(&mut notice, (3, 0));
+        tracker.update(&mut notice, (2, 1));
+        assert_eq!(notice, None);
+    }
+
+    /// Restoring a snapshot changes the history in the same frame that it sets
+    /// its notice, and an edit must not be read into that.
+    #[test]
+    fn a_notice_set_with_a_history_change_survives_it() {
+        let mut tracker = NoticeTracker::default();
+        let mut notice = None;
+        tracker.update(&mut notice, (9, 0));
+        notice = Some("restored snapshot #2".to_string());
+        tracker.update(&mut notice, (0, 0));
+        assert_eq!(notice.as_deref(), Some("restored snapshot #2"));
+        tracker.update(&mut notice, (0, 0));
+        assert_eq!(notice.as_deref(), Some("restored snapshot #2"));
+        tracker.update(&mut notice, (1, 0));
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn a_new_notice_replaces_the_old_without_being_cleared() {
+        let mut tracker = NoticeTracker::default();
+        let mut notice = Some("first".to_string());
+        tracker.update(&mut notice, (3, 0));
+        notice = Some("second".to_string());
+        tracker.update(&mut notice, (3, 0));
+        assert_eq!(notice.as_deref(), Some("second"));
     }
 
     #[test]

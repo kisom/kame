@@ -24,8 +24,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
   They render in the word space rather than taking room of their own.
 - [ ] **Annotation washes look like pasted patches**, such as the white box
   around an anchored word.
-- [ ] **Toolbar weight.** Three rows compete with the page, and the monospace path
-  clashes with the Garamond.
 - [ ] **Finer spacing.** Space around headings and quotes, and hanging punctuation
   in the margins.
 - [ ] **Antialiasing check.** On a Mac, drag the window to a display with a

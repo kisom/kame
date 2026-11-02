@@ -75,7 +75,11 @@ kame <notes.md>         # import Markdown as a new, unsaved document
 ```
 
 `make install` also drops a `kame.desktop` launcher (with an icon) into
-`~/.local/share/applications`, so kame can be started from the desktop. Saving
+`~/.local/share/applications` and registers `.kame` files, so kame can be started
+from the desktop or by opening a document. The flake's package does the same. A
+`.kame` file is a SQLite database, so on a desktop without its own file-type
+handling, such as Hyprland, `xdg-open` also needs the `mimetype` command
+(`perl-file-mimeinfo` on Arch) to recognise it rather than treating it as SQLite. Saving
 (`Ctrl-S`) on a document with no file opens the system save-as browser; closing
 a window with unsaved anonymous text asks before it is lost.
 

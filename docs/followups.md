@@ -9,6 +9,16 @@ Open work, most pressing first. Tick items off or delete them as they land.
   application delegate. Cmd-Q goes through the prompt, at the cost of the default
   menu's Hide items, which could come back with a menu of kame's own.
 
+- [ ] **Double-clicking a `.kame` file on macOS.** `Info.plist` declares no document
+  types, and Finder sends the file by Apple event rather than as an argument, so
+  kame needs code to receive it.
+
+## Features
+
+- [ ] **Document metadata and an editing dialog.** Title, author, date and so on,
+  stored in the document. Would replace `display_title`'s use of the file name for
+  documents started as Untitled, and keep the import front matter now left out.
+
 ## Typography
 
 - [ ] **Word spacing (low priority).** Justified text without hyphenation leaves

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <!-- A .kame file is a SQLite database, so content sniffing alone says
+       application/vnd.sqlite3. Declaring this as a subclass lets the glob win
+       without any conflict between the two. -->
+  <mime-type type="application/x-kame">
+    <comment>kame document</comment>
+    <sub-class-of type="application/vnd.sqlite3"/>
+    <glob pattern="*.kame"/>
+  </mime-type>
+</mime-info>

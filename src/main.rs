@@ -1418,6 +1418,21 @@ impl Session {
         self.save_failed || (self.is_anonymous() && self.has_content())
     }
 
+    /// The name to show for this document. A document keeps the title it was
+    /// created with, so one started as Untitled and later saved takes the name
+    /// of its file; a real title, such as an import's, outranks the file name.
+    fn display_title(&self) -> String {
+        let title = self.document().title.as_str();
+        let stem = self
+            .path()
+            .and_then(Path::file_stem)
+            .and_then(|stem| stem.to_str());
+        match stem {
+            Some(stem) if title.is_empty() || title == "Untitled" => stem.to_string(),
+            _ => title.to_string(),
+        }
+    }
+
     /// What the first save suggests calling the file: the source's name for an
     /// import, whatever title its front matter gave the document.
     fn suggested_file_name(&self) -> String {
@@ -3542,7 +3557,7 @@ impl KameApp {
     }
 
     fn show_status(&mut self, ui: &mut egui::Ui) {
-        let title = self.session.document().title.clone();
+        let title = self.session.display_title();
         let blocks = self.session.document().blocks.len();
         let words: usize = self
             .session
@@ -5918,6 +5933,53 @@ mod tests {
             (mark - word_end).abs() < 1.0,
             "{mark} vs the word's end {word_end}"
         );
+    }
+
+    /// A document keeps the title it was created with, so one started as Untitled
+    /// and saved under a name would otherwise be Untitled for good.
+    #[test]
+    fn a_saved_untitled_document_is_named_by_its_file() {
+        let path = temp_db_path().with_file_name("Document.kame");
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        assert_eq!(session.display_title(), "Untitled");
+        session.save_as(&path).unwrap();
+        assert_eq!(session.display_title(), "Document");
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(
+            reopened.document().title,
+            "Untitled",
+            "the stored title is untouched"
+        );
+        assert_eq!(reopened.display_title(), "Document");
+    }
+
+    #[test]
+    fn a_real_title_outranks_the_file_name() {
+        let dir = std::env::temp_dir().join(format!("kame-title-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("notes.md");
+        std::fs::write(&source, "Title: A Real Title\n\nWords.\n").unwrap();
+        let (mut session, _) = Session::open_any(&source).unwrap();
+        assert_eq!(session.display_title(), "A Real Title");
+        session.save_as(&dir.join("notes.kame")).unwrap();
+        assert_eq!(session.display_title(), "A Real Title");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What double-clicking a file depends on, kept in step across the packaging.
+    #[test]
+    fn the_desktop_entry_and_mime_type_agree() {
+        let desktop = include_str!("../packaging/kame.desktop");
+        let mime = include_str!("../packaging/kame.xml");
+        assert!(
+            desktop.contains("MimeType=application/x-kame;"),
+            "{desktop}"
+        );
+        assert!(desktop.contains("Exec=@PREFIX@/kame %f"), "{desktop}");
+        assert!(mime.contains(r#"type="application/x-kame""#), "{mime}");
+        assert!(mime.contains(r#"pattern="*.kame""#), "{mime}");
     }
 
     #[test]

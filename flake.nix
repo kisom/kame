@@ -39,6 +39,14 @@
           postFixup = ''
             wrapProgram $out/bin/kame --prefix LD_LIBRARY_PATH : ${libPath}
           '';
+          # The desktop entry and file type; NixOS refreshes its databases when
+          # the package is in `environment.systemPackages` or a profile.
+          postInstall = ''
+            mkdir -p $out/share/applications
+            sed "s|@PREFIX@|$out/bin|g" packaging/kame.desktop > $out/share/applications/kame.desktop
+            install -Dm644 packaging/kame.png $out/share/icons/hicolor/256x256/apps/kame.png
+            install -Dm644 packaging/kame.xml $out/share/mime/packages/kame.xml
+          '';
           meta.mainProgram = "kame";
         };
 

@@ -2,7 +2,8 @@
 Type=Application
 Name=kame
 Comment=Marginalia editor for writing and thinking
-Exec=@PREFIX@/kame
+Exec=@PREFIX@/kame %f
+MimeType=application/x-kame;
 Icon=kame
 Terminal=false
 Categories=Office;TextEditor;WordProcessor;

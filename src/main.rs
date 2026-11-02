@@ -4502,6 +4502,39 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(session.document().annotations.is_empty());
     }
 
+    /// Backspacing the space before a footnote re-anchors the footnote instead
+    /// of dropping it: a caret on whitespace anchors a point, and that point
+    /// sits on the delete's end boundary.
+    #[test]
+    fn backspacing_before_a_point_anchored_footnote_reanchors_it() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("a  b");
+        let block_id = first_block_id(&session);
+        // Caret in the second space: `word_at` returns a point anchor there.
+        session.set_caret(Cursor { block_id, offset: 2 });
+        let id = session
+            .add_annotation(AnnotationKind::Footnote)
+            .expect("a footnote on the whitespace");
+        assert_eq!(
+            session.document().annotations[0].anchor.byte_range(),
+            Some((2, 2)),
+            "a caret on whitespace anchors a point"
+        );
+
+        // Backspace deletes the first space [1, 2); the point at 2 is the
+        // delete's end boundary and must close up to 1, not drop.
+        assert!(session.backspace());
+        assert_eq!(session.document().blocks[0].text, "a b");
+        assert_eq!(session.document().annotations.len(), 1, "the footnote survives");
+        assert_eq!(
+            session.document().annotations[0].anchor.byte_range(),
+            Some((1, 1)),
+            "the point anchor closes up by one"
+        );
+        assert_eq!(session.document().annotations[0].id, id);
+    }
+
     // --- search -----------------------------------------------------------
 
     #[test]

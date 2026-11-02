@@ -588,6 +588,28 @@ fn annotations_in_block(doc: &Document, block_id: BlockId) -> Vec<Annotation> {
         .collect()
 }
 
+/// Whether an anchor spanning `anchor_start..anchor_end` is dropped by deleting
+/// `start..end`.
+///
+/// A non-empty range is dropped when its whole span lies inside the deletion.
+/// A zero-width (point) anchor is dropped when its position is a deleted byte,
+/// i.e. inside the half-open range `[start, end)`: a point at `start` is the
+/// first byte deleted, but a point at `end` is the first byte that *survives*
+/// and shifts left — so deleting the space before a footnote re-anchors it
+/// rather than dropping it.
+pub(crate) fn anchor_wholly_inside(
+    anchor_start: usize,
+    anchor_end: usize,
+    start: usize,
+    end: usize,
+) -> bool {
+    if anchor_start == anchor_end {
+        anchor_start >= start && anchor_start < end
+    } else {
+        anchor_start >= start && anchor_end <= end
+    }
+}
+
 /// Every range-scoped note anchored in `block_id` wholly inside `start..end`.
 fn annotations_wholly_inside(
     doc: &Document,
@@ -601,7 +623,8 @@ fn annotations_wholly_inside(
             let Some((anchor_start, anchor_end)) = annotation.anchor.byte_range() else {
                 return false; // block-scoped anchors are removed by block deletion, not text deletion
             };
-            annotation.anchor.block_id() == block_id && anchor_start >= start && anchor_end <= end
+            annotation.anchor.block_id() == block_id
+                && anchor_wholly_inside(anchor_start, anchor_end, start, end)
         })
         .cloned()
         .collect()
@@ -677,8 +700,7 @@ fn rebase_annotations(
             return true; // block-scoped anchors survive a text deletion
         };
         let wholly_inside = annotation.anchor.block_id() == block_id
-            && anchor_start >= start
-            && anchor_end <= end;
+            && anchor_wholly_inside(anchor_start, anchor_end, start, end);
         if wholly_inside {
             dropped.push(annotation.clone());
         }
@@ -1166,6 +1188,31 @@ mod tests {
         apply_inverse(&mut d, &op);
         assert_eq!(d.blocks[0].text, "abcdef");
         assert!(d.annotations.contains(&point), "undo restores the point anchor");
+    }
+
+    /// A point anchor sitting *on* the deletion boundary survives and shifts
+    /// with the text: deleting the space before a footnote re-anchors the
+    /// footnote, not dropping it.
+    #[test]
+    fn delete_reanchors_a_point_anchor_at_the_ranges_end() {
+        let mut d = doc("ab c");
+        let id = d.blocks[0].id;
+        let point = note(id, 3, 3); // at the start of "c", after the space
+        d.annotations.push(point.clone());
+
+        let op = Op::delete_text(&d, id, 2, 3); // delete the space
+        apply(&mut d, &op);
+        assert_eq!(d.blocks[0].text, "abc");
+        assert_eq!(d.annotations.len(), 1, "the footnote survives the space delete");
+        assert_eq!(
+            d.annotations[0].anchor.byte_range(),
+            Some((2, 2)),
+            "the point anchor closes up by one"
+        );
+
+        apply_inverse(&mut d, &op);
+        assert_eq!(d.blocks[0].text, "ab c");
+        assert!(d.annotations.contains(&point), "undo restores the exact anchor");
     }
 
     /// A block-scoped anchor (marginalia) survives interior text edits; only

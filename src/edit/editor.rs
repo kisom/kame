@@ -15,7 +15,7 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::edit::ops::{apply, apply_inverse, invert, normalize, Op};
+use crate::edit::ops::{anchor_wholly_inside, apply, apply_inverse, invert, normalize, Op};
 use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
 };
@@ -339,7 +339,9 @@ impl Editor {
         let kind = split_kind(&block.kind);
 
         // Exactly the range-scoped notes the tail delete below will drop:
-        // anchors lying wholly in the trailing text.
+        // anchors lying wholly in the trailing text. The predicate must match
+        // `anchor_wholly_inside` so a boundary point is not both left on the
+        // leading block and re-added to the new one.
         let tail_notes: Vec<Annotation> = self
             .doc
             .annotations
@@ -349,8 +351,7 @@ impl Editor {
                     return false; // block-scoped anchors are moved separately below
                 };
                 annotation.anchor.block_id() == cursor.block_id
-                    && anchor_start >= cursor.offset
-                    && anchor_end <= text.len()
+                    && anchor_wholly_inside(anchor_start, anchor_end, cursor.offset, text.len())
             })
             .cloned()
             .collect();
@@ -1268,6 +1269,39 @@ mod tests {
         assert_eq!(e.document().blocks.len(), 1);
         assert_eq!(e.document().blocks[0].text, "This is my paragraph");
         assert_eq!(e.document().annotations.len(), 2);
+    }
+
+    /// Deleting the character before a zero-width (point) anchor re-anchors it
+    /// instead of dropping it, and undo/redo stay consistent.
+    #[test]
+    fn deleting_before_a_point_anchor_reanchors_it_across_undo_and_redo() {
+        let mut doc = doc_with("ab c");
+        let id = doc.blocks[0].id;
+        let point = note(id, 3, 3); // at the start of "c", after the space
+        doc.annotations.push(point.clone());
+
+        let mut e = Editor::new(doc);
+        // Backspace the space [2, 3) before the point at 3.
+        let sel = Selection {
+            start: Cursor { block_id: id, offset: 3 },
+            end: Cursor { block_id: id, offset: 2 },
+        };
+        e.delete_selection(&sel).unwrap();
+        assert_eq!(e.document().blocks[0].text, "abc");
+        assert_eq!(e.document().annotations.len(), 1, "the point survives");
+        assert_eq!(
+            e.document().annotations[0].anchor.byte_range(),
+            Some((2, 2)),
+            "the point closes up by one"
+        );
+
+        e.undo().unwrap();
+        assert_eq!(e.document().blocks[0].text, "ab c");
+        assert!(e.document().annotations.contains(&point));
+
+        e.redo().unwrap();
+        assert_eq!(e.document().blocks[0].text, "abc");
+        assert_eq!(e.document().annotations[0].anchor.byte_range(), Some((2, 2)));
     }
 
     #[test]

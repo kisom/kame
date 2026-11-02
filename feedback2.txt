@@ -35,6 +35,6 @@
   expect users will not be invoking kame from the terminal in the
   future. Error messages should be printed via the GUI, not via the CLI,
   and the text must be selectable.
-- [ ] C-o should allow the user to open a new document, replacing the
+- [x] C-o should allow the user to open a new document, replacing the
   current one. This also means prompting to save if needed.
 

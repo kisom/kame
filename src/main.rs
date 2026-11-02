@@ -356,6 +356,41 @@ struct SnapshotPrompt {
     focus: bool,
 }
 
+/// The "Open" path prompt (Ctrl-O): a text field for the `.kame` path to open.
+struct OpenPrompt {
+    /// The path being typed.
+    path: String,
+    /// Set for the frame the prompt opens on, so the field takes the keyboard.
+    focus: bool,
+    /// True once the path is entered but the author must still confirm
+    /// discarding unsaved changes (a failed save), so the prompt offers
+    /// "open anyway" instead of opening straight away.
+    confirming: bool,
+}
+
+/// Resolves a path typed into the Open prompt. A leading `~` expands to the
+/// home directory, and a relative path resolves against the current document's
+/// directory, so `foo.kame` opens beside the document already on screen.
+fn resolve_open_path(typed: &str, base: &Path) -> PathBuf {
+    let trimmed = typed.trim();
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let path = if let Some(rest) = trimmed.strip_prefix("~/") {
+        home.map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(trimmed))
+    } else if trimmed == "~" {
+        home.unwrap_or_else(|| PathBuf::from(trimmed))
+    } else {
+        PathBuf::from(trimmed)
+    };
+    if path.is_absolute() {
+        path
+    } else if let Some(dir) = base.parent() {
+        dir.join(path)
+    } else {
+        path
+    }
+}
+
 /// The "Restore Snapshot" picker: the listed snapshots (newest first), which
 /// one is chosen, and which of its two steps is showing. The second step is the
 /// confirmation, because restoring discards whatever is in the document now.
@@ -2007,6 +2042,8 @@ struct KameApp {
     pending_scroll: Option<f32>,
     /// The "Snapshot Now" label prompt, when it is open.
     snapshot_prompt: Option<SnapshotPrompt>,
+    /// The "Open" path prompt (Ctrl-O), when it is open.
+    open_prompt: Option<OpenPrompt>,
     /// The "Restore Snapshot" picker, when it is open. At most one of this and
     /// `snapshot_prompt` is up at a time.
     restore_picker: Option<RestorePicker>,
@@ -2055,6 +2092,7 @@ impl KameApp {
             typewriter_anchor: None,
             pending_scroll: None,
             snapshot_prompt: None,
+            open_prompt: None,
             restore_picker: None,
             notice: None,
             close: CloseGuard::default(),
@@ -2125,7 +2163,9 @@ impl KameApp {
 
     /// Whether a file dialog is up. While one is, it owns the keyboard.
     fn dialog_open(&self) -> bool {
-        self.snapshot_prompt.is_some() || self.restore_picker.is_some()
+        self.snapshot_prompt.is_some()
+            || self.open_prompt.is_some()
+            || self.restore_picker.is_some()
     }
 
     /// Closes whichever file dialog is open. Returns whether one was closed, so
@@ -2133,6 +2173,7 @@ impl KameApp {
     fn dismiss_dialog(&mut self) -> bool {
         let open = self.dialog_open();
         self.snapshot_prompt = None;
+        self.open_prompt = None;
         self.restore_picker = None;
         open
     }
@@ -2404,6 +2445,33 @@ impl KameApp {
         });
         if find_chord {
             self.toggle_find();
+        }
+        // Ctrl-O opens the path prompt, replacing the current document. It is a
+        // window-level chord like find, so it works whether prose or a note has
+        // focus, and it clears any other file dialog so the prompt is the one
+        // thing on screen.
+        let open_chord = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::O,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if modifiers.command && !modifiers.shift
+                )
+            })
+        });
+        if open_chord {
+            self.snapshot_prompt = None;
+            self.restore_picker = None;
+            self.open_prompt = Some(OpenPrompt {
+                path: String::new(),
+                focus: true,
+                confirming: false,
+            });
         }
         // F1 toggles the help dialog (the usage and keybinding reference).
         if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
@@ -3550,6 +3618,8 @@ impl KameApp {
         });
         if self.snapshot_prompt.is_some() {
             self.show_snapshot_prompt(ctx, enter);
+        } else if self.open_prompt.is_some() {
+            self.show_open_prompt(ctx, enter);
         } else if self.restore_picker.is_some() {
             self.show_restore_picker(ctx, enter);
         }
@@ -3609,6 +3679,7 @@ impl KameApp {
                             ("Ctrl-Shift-B", "export HTML"),
                             ("Ctrl-Shift-S", "snapshot now"),
                             ("Ctrl-Shift-R", "restore a snapshot"),
+                            ("Ctrl-O", "open a document, replacing this one"),
                         ] {
                             ui.monospace(keys);
                             ui.label(what);
@@ -3689,6 +3760,137 @@ impl KameApp {
                 format!("snapshot #{id} \"{label}\" taken")
             }
         });
+    }
+
+    /// The "Open" path prompt (Ctrl-O): type a `.kame` path, then open it in
+    /// place of the current document. A failed save first asks for a discard
+    /// confirmation, because opening a new document drops those edits.
+    fn show_open_prompt(&mut self, ctx: &egui::Context, enter: bool) {
+        let Some(prompt) = &self.open_prompt else {
+            return;
+        };
+        let mut buffer = prompt.path.clone();
+        let focus = prompt.focus;
+        let confirming = prompt.confirming;
+        let unsaved = self.session.save_failed;
+        // A chord and an Enter arriving in the same frame would otherwise open
+        // a path nobody has finished typing.
+        let mut submit = enter && !focus;
+        let mut cancel = false;
+        let mut open = false;
+
+        egui::Window::new("Open")
+            .id(Id::unique("kame-open-prompt"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                if confirming {
+                    ui.label("The current document has unsaved changes that could not be saved.");
+                    ui.label("Open a new document and discard them?");
+                } else {
+                    ui.label("Path of the document to open:");
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut buffer)
+                            .id(Id::unique("kame-open-path"))
+                            .desired_width(360.0)
+                            .hint_text("~/data/writing/essay.kame"),
+                    );
+                    if focus {
+                        field.request_focus();
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if confirming { "Open anyway" } else { "Open" })
+                        .clicked()
+                    {
+                        if confirming {
+                            open = true;
+                        } else {
+                            submit = true;
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if let Some(prompt) = self.open_prompt.as_mut() {
+            prompt.path = buffer;
+            prompt.focus = false;
+        }
+        if cancel {
+            self.open_prompt = None;
+            return;
+        }
+        if open {
+            // The author confirmed discarding; fall through to opening the
+            // path they already entered.
+            let path = self
+                .open_prompt
+                .as_ref()
+                .map(|prompt| prompt.path.trim().to_string())
+                .unwrap_or_default();
+            self.open_prompt = None;
+            self.open_document(path);
+            return;
+        }
+        if !submit {
+            return;
+        }
+        if unsaved && !confirming {
+            // Hold the path and ask before discarding the failed edits.
+            if let Some(prompt) = self.open_prompt.as_mut() {
+                prompt.confirming = true;
+            }
+            return;
+        }
+        let path = self
+            .open_prompt
+            .as_ref()
+            .map(|prompt| prompt.path.trim().to_string())
+            .unwrap_or_default();
+        self.open_prompt = None;
+        self.open_document(path);
+    }
+
+    /// Replaces the current session with the document at `path`, resetting the
+    /// view state that pointed into the old document (open note, find bar,
+    /// typewriter anchor, caches). A failed open keeps the current document and
+    /// surfaces the reason through `Session::last_error`.
+    fn open_document(&mut self, typed: String) {
+        if typed.is_empty() {
+            self.notice = None;
+            self.session.last_error = Some("no path given".to_string());
+            return;
+        }
+        let base = self.session.path().to_path_buf();
+        let path = resolve_open_path(&typed, &base);
+        match Session::open(&path) {
+            Ok(session) => {
+                self.session = session;
+                self.layouts = LayoutCache::new();
+                self.textures = TextureCache::new();
+                self.annotation_textures = AnnotationTextureCache::new();
+                self.open_note = None;
+                self.open_note_pos = None;
+                self.open_note_body = String::new();
+                self.open_note_focus = false;
+                self.find = None;
+                self.typewriter_anchor = None;
+                self.pending_scroll = None;
+                self.reveal_caret = false;
+                self.notice = Some(format!("opened {}", path.display()));
+            }
+            Err(err) => {
+                self.notice = None;
+                self.session.last_error =
+                    Some(format!("could not open {} — {err}", path.display()));
+            }
+        }
     }
 
     /// The "Restore Snapshot" picker: choose a snapshot, then confirm that the
@@ -4239,6 +4441,31 @@ mod tests {
         assert_eq!(typewriter_scroll_offset(1900.0, 400.0, 2000.0), 1600.0);
         // Content shorter than the viewport never scrolls.
         assert_eq!(typewriter_scroll_offset(300.0, 400.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn open_paths_resolve_home_and_relative_to_the_document() {
+        let base = Path::new("/home/kyle/data/writing/essay.kame");
+        // An absolute path passes through untouched.
+        assert_eq!(
+            resolve_open_path("/tmp/other.kame", base),
+            PathBuf::from("/tmp/other.kame")
+        );
+        // A relative path resolves beside the current document.
+        assert_eq!(
+            resolve_open_path("next.kame", base),
+            PathBuf::from("/home/kyle/data/writing/next.kame")
+        );
+        assert_eq!(
+            resolve_open_path("notes/next.kame", base),
+            PathBuf::from("/home/kyle/data/writing/notes/next.kame")
+        );
+        // `~` expands to the home directory regardless of the base.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kyle".into());
+        assert_eq!(
+            resolve_open_path("~/essays/new.kame", base),
+            PathBuf::from(home).join("essays/new.kame")
+        );
     }
 
     #[test]

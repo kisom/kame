@@ -8,7 +8,7 @@ CARGO ?= cargo
 BIN := kame
 PREFIX ?= $(HOME)/.local/bin
 
-.PHONY: all build release test clean install
+.PHONY: all build release test clean install mac-app
 
 all: build
 
@@ -42,3 +42,6 @@ install: ## Install the binary and a desktop shortcut
 	@sed 's|@PREFIX@|$(PREFIX)|g' packaging/kame.desktop > $(HOME)/.local/share/applications/kame.desktop
 	@install -m 644 packaging/kame.png $(HOME)/.local/share/icons/hicolor/256x256/apps/kame.png
 	@printf 'installed $(PREFIX)/$(BIN), desktop shortcut, and icon\n'
+
+mac-app: ## Build a macOS .app bundle (run on a Mac)
+	./packaging/macos/build-app.sh

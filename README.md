@@ -52,6 +52,18 @@ nix build .#  # build the package
 nix run .#    # launch the binary
 ```
 
+On macOS, build an `.app` bundle:
+
+```sh
+make mac-app   # builds target/kame.app (ad-hoc signed, for local use)
+```
+
+`packaging/macos/build-app.sh` assembles the bundle — the release binary, an
+`Info.plist`, and an `kame.icns` icon generated from `packaging/kame.png` —
+and ad-hoc signs it. Launch it with `open kame.app` (a bare `target/release/kame`
+binary runs, but has no menu bar and won't take keyboard focus). Shipping the
+app to others needs a Developer ID certificate and `notarytool` notarization.
+
 ## Using
 
 ```sh

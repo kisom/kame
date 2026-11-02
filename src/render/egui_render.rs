@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 use cosmic_text::FontSystem;
 use egui::{
     ColorImage, Context, Event, FontData, FontFamily, Key, Modifiers, Pos2, Rect, TextureHandle,
-    TextureOptions,
+    TextureOptions, Vec2,
 };
 use image::RgbaImage;
 
@@ -86,22 +86,41 @@ const RASTERIZES_PER_CACHE_CLEAR: u32 = 512;
 /// [`GlyphAtlas::rasterize`].
 ///
 /// The image is cropped to the glyph ink, so it must be drawn at
-/// `block_origin + (left, top)` — never at the block origin itself.
+/// `block_origin + (left, top)` — never at the block origin itself. The image
+/// and its offset are in physical pixels, rasterized at `scale` pixels per point.
 pub struct BlockTexture {
     pub texture: TextureHandle,
     pub left: i32,
     pub top: i32,
+    pub scale: f32,
 }
 
 impl BlockTexture {
-    /// Screen-space quad for a block whose layout origin (the top-left of its
-    /// layout box, Y down) is `origin`.
+    /// Screen-space quad, in points, for a block whose layout origin (the
+    /// top-left of its layout box, Y down) is `origin`.
     pub fn rect(&self, origin: Pos2) -> Rect {
-        Rect::from_min_size(
-            Pos2::new(origin.x + self.left as f32, origin.y + self.top as f32),
-            self.texture.size_vec2(),
+        pixel_aligned_quad(
+            origin,
+            (self.left, self.top),
+            self.texture.size(),
+            self.scale,
         )
     }
+}
+
+/// The quad, in points, that draws a `size`-pixel texture exactly 1:1 with the
+/// screen at `scale` pixels per point, whose ink starts `(left, top)` pixels from
+/// the layout `origin`.
+///
+/// The origin is snapped to a whole physical pixel. Scroll offsets and the
+/// centred page put it anywhere, and at a fractional position a nearest-sampled
+/// quad drops or doubles rows and columns even at the right size.
+fn pixel_aligned_quad(origin: Pos2, (left, top): (i32, i32), size: [usize; 2], scale: f32) -> Rect {
+    let snap = |at: f32, offset: i32| ((at * scale).round() + offset as f32) / scale;
+    Rect::from_min_size(
+        Pos2::new(snap(origin.x, left), snap(origin.y, top)),
+        Vec2::new(size[0] as f32 / scale, size[1] as f32 / scale),
+    )
 }
 
 /// Per-block texture cache, rebuilt only when a block's content changes.
@@ -131,14 +150,18 @@ impl TextureCache {
         }
     }
 
-    /// Rasterizes and uploads every block whose content changed, and drops
-    /// textures of blocks no longer present.
+    /// Rasterizes and uploads every block whose content or display scale
+    /// changed, and drops textures of blocks no longer present.
     ///
     /// `blocks` and `layouts` are parallel, as produced by
     /// [`GlyphRenderer::layout`]. Uploads use
     /// [`ColorImage::from_rgba_unmultiplied`] because the rasterizer emits
-    /// straight (unpremultiplied) alpha, and [`TextureOptions::NEAREST`] so
-    /// glyph edges stay crisp at 1:1 scale.
+    /// straight (unpremultiplied) alpha, and [`TextureOptions::NEAREST`] because
+    /// [`BlockTexture::rect`] maps each texel onto exactly one screen pixel.
+    ///
+    /// The scale is part of what makes a texture current: a window's first frame
+    /// runs before the compositor reports its scale, and a window can move
+    /// between monitors.
     pub fn sync(
         &mut self,
         ctx: &Context,
@@ -149,20 +172,21 @@ impl TextureCache {
         background: [u8; 3],
         highlights: &HashMap<BlockId, Vec<(usize, usize, [u8; 3])>>,
     ) {
+        let scale = ctx.pixels_per_point();
         let mut live = HashSet::with_capacity(blocks.len());
         for (block, layout) in blocks.iter().zip(layouts.iter().copied()) {
             live.insert(block.id);
             let block_highlights = highlights.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
             let fingerprint = block_fingerprint(block, block_highlights);
-            let up_to_date = self
-                .entries
-                .get(&block.id)
-                .is_some_and(|cached| cached.fingerprint == fingerprint);
+            let up_to_date = self.entries.get(&block.id).is_some_and(|cached| {
+                cached.fingerprint == fingerprint && cached.block.scale == scale
+            });
             if up_to_date {
                 continue;
             }
 
-            let (image, left, top) = renderer.rasterize(layout, ink, background, block_highlights);
+            let (image, left, top) =
+                renderer.rasterize(layout, ink, background, block_highlights, scale);
             let size = [image.width() as usize, image.height() as usize];
             let color_image = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
             let texture = ctx.load_texture(
@@ -174,7 +198,12 @@ impl TextureCache {
                 block.id,
                 CachedTexture {
                     fingerprint,
-                    block: BlockTexture { texture, left, top },
+                    block: BlockTexture {
+                        texture,
+                        left,
+                        top,
+                        scale,
+                    },
                 },
             );
         }
@@ -319,7 +348,8 @@ impl AnnotationTextureCache {
             self.entries.remove(&annotation_id);
             return;
         }
-        let fingerprint = annotation_fingerprint(text, width, size);
+        let scale = ctx.pixels_per_point();
+        let fingerprint = annotation_fingerprint(text, width, size, scale);
         let up_to_date = self
             .entries
             .get(&annotation_id)
@@ -336,7 +366,7 @@ impl AnnotationTextureCache {
         };
         let layout = renderer.layout_in_column(&block, width, size);
         let body_height = layout.height;
-        let (image, left, top) = renderer.rasterize(&layout, color, background, &[]);
+        let (image, left, top) = renderer.rasterize(&layout, color, background, &[], scale);
         let size_px = [image.width() as usize, image.height() as usize];
         if size_px[0] == 0 || size_px[1] == 0 {
             self.entries.remove(&annotation_id);
@@ -352,7 +382,12 @@ impl AnnotationTextureCache {
             annotation_id,
             AnnotationEntry {
                 fingerprint,
-                block: BlockTexture { texture, left, top },
+                block: BlockTexture {
+                    texture,
+                    left,
+                    top,
+                    scale,
+                },
                 height: body_height,
             },
         );
@@ -385,12 +420,14 @@ impl AnnotationTextureCache {
     }
 }
 
-/// Content hash for annotation text plus the metrics it was shaped at.
-fn annotation_fingerprint(text: &str, width: f32, size: f32) -> u64 {
+/// Content hash for annotation text plus the metrics it was shaped at and the
+/// display scale it was rasterized for.
+fn annotation_fingerprint(text: &str, width: f32, size: f32, scale: f32) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     width.to_bits().hash(&mut hasher);
     size.to_bits().hash(&mut hasher);
+    scale.to_bits().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -498,23 +535,31 @@ impl GlyphRenderer {
     }
 
     /// Paints `layout` into an ink-cropped RGBA image and returns it with its
-    /// block-relative `(left, top)` offset. `ink` is the text colour, `background`
-    /// the paper it is baked against for subpixel antialiasing, and `highlights`
-    /// the note washes whose ranges get a different background.
+    /// block-relative `(left, top)` offset, in physical pixels. `ink` is the text
+    /// colour, `background` the paper it is baked against for subpixel
+    /// antialiasing, `highlights` the note washes whose ranges get a different
+    /// background, and `scale` the display's physical pixels per point.
     pub fn rasterize(
         &mut self,
         layout: &BlockLayout,
         ink: [u8; 3],
         background: [u8; 3],
         highlights: &[(usize, usize, [u8; 3])],
+        scale: f32,
     ) -> (RgbaImage, i32, i32) {
         self.rasterizes_since_clear += 1;
         if self.rasterizes_since_clear >= RASTERIZES_PER_CACHE_CLEAR {
             self.atlas.clear_cache();
             self.rasterizes_since_clear = 0;
         }
-        self.atlas
-            .rasterize(&mut self.font_system, layout, ink, background, highlights)
+        self.atlas.rasterize(
+            &mut self.font_system,
+            layout,
+            ink,
+            background,
+            highlights,
+            scale,
+        )
     }
 }
 
@@ -1038,6 +1083,123 @@ mod tests {
         assert_eq!(rect.min.x, 100.0 + texture.left as f32);
         assert_eq!(rect.min.y, 50.0 + texture.top as f32);
         assert_eq!(rect.width(), width as f32);
+    }
+
+    /// Runs one egui pass with the display at `scale`, as a real frame would.
+    fn set_scale(ctx: &Context, scale: f32) {
+        ctx.set_pixels_per_point(scale);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        // No backend applies these uploads in a headless test.
+        output.textures_delta.clear();
+        assert_eq!(ctx.pixels_per_point(), scale);
+    }
+
+    #[test]
+    fn a_quad_maps_every_texel_onto_one_physical_pixel() {
+        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 3.0] {
+            for origin in [
+                Pos2::new(100.0, 50.0),
+                Pos2::new(137.3, 211.7),
+                Pos2::new(0.33, 0.66),
+            ] {
+                let rect = pixel_aligned_quad(origin, (3, -11), [401, 57], scale);
+                let on_grid = |points: f32| {
+                    let pixels = points * scale;
+                    (pixels - pixels.round()).abs() < 1e-3
+                };
+                assert!(
+                    on_grid(rect.min.x) && on_grid(rect.min.y),
+                    "quad at {:?} is off the pixel grid at scale {scale}",
+                    rect.min
+                );
+                assert!((rect.width() * scale - 401.0).abs() < 1e-3);
+                assert!((rect.height() * scale - 57.0).abs() < 1e-3);
+                // Snapping moves the page by under one physical pixel.
+                let unsnapped_x = origin.x + 3.0 / scale;
+                assert!((rect.min.x - unsnapped_x).abs() <= 0.5 / scale + 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_display_scale_replaces_block_textures() {
+        // A window's first frame runs at 1.0, before the compositor reports its
+        // scale; a texture kept from that frame would be enlarged for good.
+        let ctx = Context::default();
+        let mut renderer = GlyphRenderer::new(config());
+        let blocks = vec![paragraph("Hello")];
+        let layouts: Vec<BlockLayout> = blocks.iter().map(|b| renderer.layout(b)).collect();
+        let layout_refs: Vec<&BlockLayout> = layouts.iter().collect();
+        let mut cache = TextureCache::new();
+        let sync = |cache: &mut TextureCache, renderer: &mut GlyphRenderer| {
+            cache.sync(
+                &ctx,
+                renderer,
+                &blocks,
+                &layout_refs,
+                [10, 10, 10],
+                [255, 255, 255],
+                &HashMap::new(),
+            )
+        };
+
+        sync(&mut cache, &mut renderer);
+        let first = cache.get(blocks[0].id).expect("first frame texture");
+        let first_size = first.texture.size();
+        let first_id = first.texture.id();
+
+        set_scale(&ctx, 1.5);
+        sync(&mut cache, &mut renderer);
+        let scaled = cache.get(blocks[0].id).expect("scaled texture");
+        assert_ne!(scaled.texture.id(), first_id, "kept the 1x texture");
+        assert!(
+            scaled.texture.size()[0] > first_size[0],
+            "the physical texture should be larger than the 1x one"
+        );
+        assert_eq!(scaled.scale, 1.5);
+        let origin = Pos2::new(100.0, 50.0);
+        let quad = scaled.rect(origin);
+        assert!((quad.width() * 1.5 - scaled.texture.size()[0] as f32).abs() < 1e-3);
+
+        // An unchanged scale is still a cache hit.
+        let stable_id = scaled.texture.id();
+        sync(&mut cache, &mut renderer);
+        assert_eq!(cache.get(blocks[0].id).unwrap().texture.id(), stable_id);
+    }
+
+    #[test]
+    fn a_new_display_scale_replaces_annotation_textures() {
+        let ctx = Context::default();
+        let mut renderer = GlyphRenderer::new(config());
+        let id = Uuid::new_v4();
+        let mut cache = AnnotationTextureCache::new();
+        let sync = |cache: &mut AnnotationTextureCache, renderer: &mut GlyphRenderer| {
+            cache.sync(
+                &ctx,
+                renderer,
+                id,
+                "A margin note",
+                120.0,
+                12.0,
+                [0, 0, 0],
+                [255, 255, 255],
+            )
+        };
+
+        sync(&mut cache, &mut renderer);
+        let first_size = cache.get(id).expect("first texture").texture.size();
+        let first_height = cache.body_height(id).expect("first height");
+
+        set_scale(&ctx, 2.0);
+        sync(&mut cache, &mut renderer);
+        let scaled = cache.get(id).expect("scaled texture");
+        assert!(
+            scaled.texture.size()[0] > first_size[0],
+            "the annotation kept its 1x texture"
+        );
+        assert_eq!(scaled.scale, 2.0);
+        // Page geometry stays logical: the stack does not move with the display.
+        assert_eq!(cache.body_height(id), Some(first_height));
     }
 
     #[test]

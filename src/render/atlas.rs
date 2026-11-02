@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use crate::layout::BlockLayout;
-use cosmic_text::{CacheKey, CacheKeyFlags, FontSystem, SwashContent, SwashImage};
+use cosmic_text::{
+    CacheKey, CacheKeyFlags, FontSystem, LayoutGlyph, PhysicalGlyph, SwashContent, SwashImage,
+};
 use image::RgbaImage;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform, Vector};
@@ -66,9 +68,14 @@ impl GlyphAtlas {
     /// no drawable glyphs (empty text, or spaces only) yields a 1×1 transparent
     /// image at offset `(0, 0)` so callers can always upload a texture.
     ///
-    /// Glyph positions come from `glyph.physical((0.0, run.line_y), 1.0)` — the
-    /// run's baseline must be added to each glyph, otherwise every visual line
-    /// is painted on top of the first.
+    /// `scale` is the display's physical pixels per layout unit. The layout stays
+    /// in logical units, but the glyphs are rasterized at physical size, so the
+    /// image and the returned offset are in physical pixels and the image must
+    /// be drawn 1:1 with the screen (see `BlockTexture::rect`). A mask made at
+    /// any other size has to be resampled: nearest-sampled at 1.5, every third
+    /// row and column doubles and the stems come out uneven.
+    ///
+    /// Glyph positions come from [`place_glyph`].
     pub fn rasterize(
         &mut self,
         fs: &mut FontSystem,
@@ -76,8 +83,9 @@ impl GlyphAtlas {
         ink: [u8; 3],
         background: [u8; 3],
         highlights: &[(usize, usize, [u8; 3])],
+        scale: f32,
     ) -> (RgbaImage, i32, i32) {
-        let Some((min_x, min_y, max_x, max_y)) = self.ink_bounds(fs, layout) else {
+        let Some((min_x, min_y, max_x, max_y)) = self.ink_bounds(fs, layout, scale) else {
             return (RgbaImage::new(1, 1), 0, 0);
         };
 
@@ -92,23 +100,25 @@ impl GlyphAtlas {
             ink,
             background,
             highlights,
+            scale,
         );
 
         (canvas, min_x, min_y)
     }
 
-    /// Bounding box of every rasterized glyph mask, in block-relative pixels:
-    /// `(min_x, min_y, max_x, max_y)` with the maxima exclusive. `None` when the
-    /// layout draws nothing.
+    /// Bounding box of every rasterized glyph mask, in block-relative physical
+    /// pixels: `(min_x, min_y, max_x, max_y)` with the maxima exclusive. `None`
+    /// when the layout draws nothing.
     fn ink_bounds(
         &mut self,
         fs: &mut FontSystem,
         layout: &BlockLayout,
+        scale: f32,
     ) -> Option<(i32, i32, i32, i32)> {
         let mut bounds: Option<(i32, i32, i32, i32)> = None;
         for run in layout.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
-                let phys = glyph.physical((0.0, run.line_y), 1.0);
+                let phys = place_glyph(glyph, run.line_y, scale);
                 let Some(image) = self.get_image(fs, phys.cache_key) else {
                     continue;
                 };
@@ -146,6 +156,7 @@ impl GlyphAtlas {
         ink: [u8; 3],
         background: [u8; 3],
         highlights: &[(usize, usize, [u8; 3])],
+        scale: f32,
     ) {
         let canvas_w = canvas.width() as i32;
         let canvas_h = canvas.height() as i32;
@@ -153,7 +164,7 @@ impl GlyphAtlas {
         for run in layout.buffer.layout_runs() {
             // `glyph.y` is line-relative: the run's baseline is the anchor.
             for glyph in run.glyphs.iter() {
-                let phys = glyph.physical((0.0, run.line_y), 1.0);
+                let phys = place_glyph(glyph, run.line_y, scale);
                 let Some(image) = self.get_image(fs, phys.cache_key) else {
                     continue;
                 };
@@ -205,6 +216,18 @@ impl GlyphAtlas {
             }
         }
     }
+}
+
+/// Where a glyph lands, and which mask it needs, at `scale` physical pixels per
+/// layout unit.
+///
+/// The run's baseline must be added to each glyph, otherwise every visual line
+/// is painted on top of the first. `physical` adds its offset after scaling, so
+/// the baseline is converted here, and rounded onto a whole device pixel: a
+/// fractional baseline would pick a different vertical subpixel mask per line,
+/// giving lines of one paragraph visibly different x-heights.
+fn place_glyph(glyph: &LayoutGlyph, line_y: f32, scale: f32) -> PhysicalGlyph {
+    glyph.physical((0.0, (line_y * scale).round()), scale)
 }
 
 /// Colour and coverage of the mask pixel at `index`.
@@ -402,7 +425,7 @@ mod tests {
         let mut atlas = GlyphAtlas::new();
         let color = [17, 17, 17];
         let background = [255, 255, 255];
-        let (image, _, _) = atlas.rasterize(&mut fs, &layout, color, background, &[]);
+        let (image, _, _) = atlas.rasterize(&mut fs, &layout, color, background, &[], 1.0);
 
         assert!(image.width() > 0, "canvas has no width");
         assert!(image.height() > 0, "canvas has no height");
@@ -439,7 +462,8 @@ mod tests {
         let block = paragraph("Hello");
         let layout = layout_block(&mut fs, &block, &config());
         let mut atlas = GlyphAtlas::new();
-        let (image, left, top) = atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[]);
+        let (image, left, top) =
+            atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[], 1.0);
 
         let canvas_right = left + image.width() as i32;
         let canvas_bottom = top + image.height() as i32;
@@ -451,7 +475,7 @@ mod tests {
         let mut glyphs = 0;
         for run in layout.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
-                let phys = glyph.physical((0.0, run.line_y), 1.0);
+                let phys = place_glyph(glyph, run.line_y, 1.0);
                 let Some(mask) = atlas.get_image(&mut fs, phys.cache_key) else {
                     continue;
                 };
@@ -546,7 +570,8 @@ dance, on a page, of pen, eye and hand.";
         assert!(layout.lines.len() >= 3, "expected a multi-line block");
 
         let mut atlas = GlyphAtlas::new();
-        let (image, _, top) = atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[]);
+        let (image, _, top) =
+            atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[], 1.0);
 
         for line in &layout.lines {
             let band_top = (line.y - top as f32).round().max(0.0) as u32;
@@ -568,13 +593,113 @@ dance, on a page, of pen, eye and hand.";
     }
 
     #[test]
+    fn rasterize_draws_at_the_physical_size_of_the_display() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let layout = layout_block(&mut fs, &paragraph("Hello"), &config());
+        let mut atlas = GlyphAtlas::new();
+        let (one, left_one, top_one) =
+            atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[], 1.0);
+        let (two, left_two, top_two) =
+            atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[], 2.0);
+
+        let close = |scaled: i32, base: i32| (scaled - base * 2).abs() <= 3;
+        assert!(
+            close(two.width() as i32, one.width() as i32)
+                && close(two.height() as i32, one.height() as i32),
+            "a 2x canvas should be twice the size: {}x{} vs {}x{}",
+            two.width(),
+            two.height(),
+            one.width(),
+            one.height()
+        );
+        assert!(
+            close(left_two, left_one) && close(top_two, top_one),
+            "the ink offset is physical, so it doubles too: ({left_two}, {top_two}) vs \
+             ({left_one}, {top_one})"
+        );
+    }
+
+    /// A glyph at 16 units on a 1.5x display is the same mask as one set at 24
+    /// units on a 1x display: real rasterization at the device size, rather
+    /// than an enlargement of the 16-unit mask. Nearest-enlarging is what made
+    /// every third row and column double on a fractionally scaled display.
+    #[test]
+    fn rasterize_at_a_fractional_scale_matches_setting_the_type_at_that_size() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let scaled_layout = layout_block(&mut fs, &paragraph("H"), &config());
+        let (scaled, _, _) = atlas.rasterize(
+            &mut fs,
+            &scaled_layout,
+            [0, 0, 0],
+            [255, 255, 255],
+            &[],
+            1.5,
+        );
+
+        let large = LayoutConfig {
+            body_size: 24.0,
+            body_line_height: 36.0,
+            ..config()
+        };
+        let native_layout = layout_block(&mut fs, &paragraph("H"), &large);
+        let (native, _, _) = atlas.rasterize(
+            &mut fs,
+            &native_layout,
+            [0, 0, 0],
+            [255, 255, 255],
+            &[],
+            1.0,
+        );
+
+        assert_eq!(
+            (scaled.width(), scaled.height()),
+            (native.width(), native.height())
+        );
+        assert_eq!(scaled.as_raw(), native.as_raw());
+    }
+
+    #[test]
+    fn every_line_of_a_block_sits_on_a_whole_device_pixel_baseline() {
+        let text = "Typography is the craft of endowing human language with a durable \
+visual form, and thus with an independent existence. Its heartwood is calligraphy: the \
+dance, on a page, of pen, eye and hand.";
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        // 1.5 turns the 25-unit leading into a fractional 37.5 pixels, so the
+        // baselines of alternate lines would otherwise fall between pixels.
+        let layout = layout_block(
+            &mut fs,
+            &paragraph(text),
+            &LayoutConfig {
+                body_line_height: 25.0,
+                ..config()
+            },
+        );
+        assert!(layout.lines.len() >= 3, "expected a multi-line block");
+
+        for run in layout.buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let phys = place_glyph(glyph, run.line_y, 1.5);
+                assert_eq!(
+                    phys.cache_key.y_bin,
+                    cosmic_text::SubpixelBin::Zero,
+                    "a fractional baseline picks a vertical subpixel mask"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rasterize_empty_block_is_blank() {
         let mut fs = FontSystem::new();
         load_fonts(&mut fs);
         let block = paragraph("");
         let layout = layout_block(&mut fs, &block, &config());
         let mut atlas = GlyphAtlas::new();
-        let (image, _, _) = atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[]);
+        let (image, _, _) = atlas.rasterize(&mut fs, &layout, [0, 0, 0], [255, 255, 255], &[], 1.0);
         assert_eq!(ink_pixels(&image), 0, "empty block painted ink");
     }
 
@@ -587,11 +712,11 @@ dance, on a page, of pen, eye and hand.";
 
         let first = paragraph("Hello");
         let l1 = layout_block(&mut fs, &first, &config);
-        let (a, _, _) = atlas.rasterize(&mut fs, &l1, [0, 0, 0], [255, 255, 255], &[]);
+        let (a, _, _) = atlas.rasterize(&mut fs, &l1, [0, 0, 0], [255, 255, 255], &[], 1.0);
 
         let second = paragraph("World");
         let l2 = layout_block(&mut fs, &second, &config);
-        let (b, _, _) = atlas.rasterize(&mut fs, &l2, [0, 0, 0], [255, 255, 255], &[]);
+        let (b, _, _) = atlas.rasterize(&mut fs, &l2, [0, 0, 0], [255, 255, 255], &[], 1.0);
 
         assert!(ink_pixels(&a) > 0 && ink_pixels(&b) > 0);
         assert_ne!(

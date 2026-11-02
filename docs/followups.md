@@ -30,9 +30,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Markdown import
 
-- [ ] **Click through the discard prompt.** The Import Markdown button and file
-  picker work on a Mac. The prompt that `Ctrl-O` and the button show before
-  replacing an unsaved document has tests but has not been tried by hand.
 - [ ] **Site-root images leave blank gaps.** `/files/images/...` cannot be found
   from the file alone, and kame reserves blank space for an image it cannot load.
   Options: ask for a site root at import, or collapse the space.

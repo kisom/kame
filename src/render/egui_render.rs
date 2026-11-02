@@ -77,9 +77,9 @@ pub fn install_fonts(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
-/// How many block rasterizations may run before the swash mask cache is
-/// dropped. `SwashCache` never evicts on its own, so without this the cache
-/// grows for the lifetime of the process.
+/// How many block rasterizations may run before the glyph image cache is
+/// dropped. The atlas's `HashMap` never evicts on its own, so without this the
+/// cache grows for the lifetime of the process.
 const RASTERIZES_PER_CACHE_CLEAR: u32 = 512;
 
 /// A block's uploaded glyph texture plus the ink offset returned by

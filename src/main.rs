@@ -2977,6 +2977,27 @@ impl KameApp {
             let origin = margin_origin(body_left, placement);
             match annotation.kind {
                 AnnotationKind::Marginal => {
+                    // A leader ties the note to its block: a thin line runs
+                    // from the measure's right edge at the anchor, then drops
+                    // to the note's stacked position, so a long note that
+                    // pushes the next one down still shows which block each
+                    // belongs to.
+                    let anchor_y = placement.anchor_y;
+                    let margin_x = origin.x - 7.0; // align with the rule below
+                    let body_right = body_left + config.body_width;
+                    if placement.y > anchor_y + 0.5 {
+                        painter.line_segment(
+                            [
+                                Pos2::new(margin_x, anchor_y),
+                                Pos2::new(margin_x, placement.y),
+                            ],
+                            egui::Stroke::new(1.0, RULE_INK),
+                        );
+                    }
+                    painter.line_segment(
+                        [Pos2::new(body_right, anchor_y), Pos2::new(margin_x, anchor_y)],
+                        egui::Stroke::new(1.0, RULE_INK),
+                    );
                     // A thin rule opens the margin block, the way a printed
                     // marginal note is set off from the measure.
                     painter.rect_filled(
@@ -4339,6 +4360,7 @@ mod tests {
             annotation_id: uuid::Uuid::new_v4(),
             x: 652.0,
             y: 324.0,
+            anchor_y: 324.0,
         };
         assert_eq!(margin_origin(200.0, &marginal), Pos2::new(852.0, 324.0));
 

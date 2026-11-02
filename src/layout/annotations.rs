@@ -26,6 +26,10 @@ pub struct MarginalPlacement {
     pub annotation_id: AnnotationId,
     pub x: f32,
     pub y: f32,
+    /// The page Y the annotation is anchored to, before stacking pushed it
+    /// down. A leader line runs from the measure to this anchor, so a note
+    /// crowded below its block still shows which block it belongs to.
+    pub anchor_y: f32,
 }
 
 /// A footnote entry number and its Y at the foot of the page.
@@ -137,6 +141,7 @@ pub fn place_marginalia<L: Borrow<BlockLayout>>(
             annotation_id: id,
             x,
             y,
+            anchor_y,
         });
     }
     placements
@@ -293,6 +298,10 @@ dance, on a page, of pen, eye and hand.";
             placed[0].y, layouts[0].lines[1].y,
             "marginalia must sit on its anchor line"
         );
+        assert_eq!(
+            placed[0].anchor_y, layouts[0].lines[1].y,
+            "the un-stacked anchor Y is recorded for the leader line"
+        );
         assert!(
             placed[0].x >= config.body_width,
             "marginalia belong in the margin, right of the text measure"
@@ -338,6 +347,10 @@ dance, on a page, of pen, eye and hand.";
             b.y - a.y
         );
         assert_eq!(a.x, b.x, "marginalia share one column");
+        assert_eq!(
+            b.anchor_y, layouts[0].lines[1].y,
+            "a pushed-down note keeps its anchor for the leader line"
+        );
     }
 
     #[test]

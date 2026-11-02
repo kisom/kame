@@ -395,19 +395,16 @@ fn resolve_open_path(typed: &str, base: &Path) -> PathBuf {
 /// The native "save as" file browser, or `None` when the author cancels it.
 ///
 /// `rfd` is built with the XDG desktop portal backend (not GTK), so it asks the
-/// compositor's file chooser over D-Bus and works on a Wayland desktop without
-/// kame linking GTK. The portal's dialog is modal, so blocking the frame thread
-/// on it is correct.
+/// compositor's file chooser — the GTK one on this desktop — over D-Bus. That
+/// is a full file browser: directories, navigation and a file-name field, the
+/// same dialog a GTK application shows. The synchronous API blocks the frame
+/// thread while the (modal) dialog is up, which is correct for a save prompt.
 fn pick_save_path() -> Option<PathBuf> {
-    async_std::task::block_on(async {
-        rfd::AsyncFileDialog::new()
-            .set_title("Save kame document")
-            .add_filter("kame document", &["kame"])
-            .set_file_name("Untitled.kame")
-            .save_file()
-            .await
-    })
-    .map(|handle| handle.path().to_path_buf())
+    rfd::FileDialog::new()
+        .set_title("Save kame document")
+        .add_filter("kame document", &["kame"])
+        .set_file_name("Untitled.kame")
+        .save_file()
 }
 
 /// The "Insert image" path prompt: a text field for the image file to embed.

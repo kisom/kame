@@ -19,6 +19,8 @@ itself is a structured, first-class file, never a pile of markup.
 - **Distraction-free modes** — fullscreen, hide chrome, hide margin, paragraph
   focus, typewriter.
 - **Export** — deterministic Markdown and full-fidelity HTML.
+- **Markdown import** — open a `.md` file as a new document; the status line
+  says what was simplified.
 - **Headings and lists** — `Ctrl-Shift-1/2/3` for H1/H2/H3, `Ctrl-Shift-3` for
   a list, `Ctrl-Shift-0` for body text.
 
@@ -69,6 +71,7 @@ app to others needs a Developer ID certificate and `notarytool` notarization.
 ```sh
 kame                    # an anonymous document; the first save asks for a file
 kame <document.kame>    # open (or create) a document
+kame <notes.md>         # import Markdown as a new, unsaved document
 ```
 
 `make install` also drops a `kame.desktop` launcher (with an icon) into

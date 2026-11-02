@@ -8,6 +8,7 @@
 
 mod edit;
 mod export;
+mod import;
 mod layout;
 mod model;
 mod render;
@@ -21,6 +22,7 @@ use eframe::egui;
 use egui::{Align2, Color32, FontId, Id, Order, Pos2, Rect, Sense, TextureHandle, Vec2};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
+use crate::import::markdown::{from_markdown, Imported};
 use crate::layout::reading_order;
 use crate::layout::{
     link_ranges, place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
@@ -435,6 +437,38 @@ fn resolve_open_path(typed: &str, base: &Path) -> PathBuf {
     }
 }
 
+/// Whether `path` names a Markdown file to import rather than a `.kame` document.
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        })
+}
+
+/// How many of `document`'s images point at a local file that is not there. A
+/// remote image is not counted, since whether it exists is unknowable here.
+fn missing_images(document: &Document) -> usize {
+    document
+        .blocks
+        .iter()
+        .filter(|block| match &block.kind {
+            BlockKind::Image { path } => !path.contains("://") && !Path::new(path).exists(),
+            _ => false,
+        })
+        .count()
+}
+
+/// The native file browser for a Markdown file to import, or `None` when the
+/// author cancels it. Blocks the frame like [`pick_save_path`], which is correct
+/// for a modal dialog.
+fn pick_markdown_path() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Import Markdown")
+        .add_filter("Markdown", &["md", "markdown"])
+        .pick_file()
+}
+
 /// The native "save as" file browser, or `None` when the author cancels it.
 ///
 /// `rfd` is built with the XDG desktop portal backend (not GTK), so it asks the
@@ -826,11 +860,14 @@ fn save_config(config: &KameConfig) {
 fn main() -> eframe::Result {
     // No argument means an anonymous document: the author starts typing at once
     // and the first save prompts for a file. With an argument, open that file.
-    let session = match std::env::args_os().nth(1).map(PathBuf::from) {
-        None => Session::anonymous().unwrap_or_else(|err| {
-            eprintln!("kame: {err}");
-            std::process::exit(1);
-        }),
+    let (session, notice) = match std::env::args_os().nth(1).map(PathBuf::from) {
+        None => (
+            Session::anonymous().unwrap_or_else(|err| {
+                eprintln!("kame: {err}");
+                std::process::exit(1);
+            }),
+            None,
+        ),
         Some(path) => {
             // Open the document before the window exists, so a failure is
             // reported as "your file is the problem" rather than an opaque
@@ -838,14 +875,15 @@ fn main() -> eframe::Result {
             // still shows the author an editable (in-memory) document and the
             // reason in the status panel, since a desktop launch has no
             // terminal to print to.
-            match Session::open(&path) {
-                Ok(session) => session,
+            match Session::open_any(&path) {
+                Ok(opened) => opened,
                 Err(err) => {
                     let message = format!("could not open {} — {err}", path.display());
-                    Session::blank(&path, message).unwrap_or_else(|err| {
+                    let session = Session::blank(&path, message).unwrap_or_else(|err| {
                         eprintln!("kame: {err}");
                         std::process::exit(1);
-                    })
+                    });
+                    (session, None)
                 }
             }
         }
@@ -868,7 +906,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "kame",
         native_options,
-        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session, body_size, dark)))),
+        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session, notice, body_size, dark)))),
     )
 }
 
@@ -1075,6 +1113,74 @@ impl Session {
         })
     }
 
+    /// Opens whatever `path` names: Markdown is imported, anything else is a
+    /// `.kame` document. An import also returns a line for the author saying
+    /// what happened to it.
+    fn open_any(path: &Path) -> AppResult<(Session, Option<String>)> {
+        if is_markdown_path(path) {
+            let (session, note) = Session::import(path)?;
+            Ok((session, Some(note)))
+        } else {
+            Ok((Session::open(path)?, None))
+        }
+    }
+
+    /// A new anonymous document holding the Markdown file at `path`, which is
+    /// only read. The first save asks where the `.kame` file goes.
+    fn import(path: &Path) -> AppResult<(Session, String)> {
+        let source = std::fs::read_to_string(path)?;
+        // Made absolute because an anonymous document has no directory of its
+        // own for a relative image path to resolve against.
+        let path = std::path::absolute(path)?;
+        let base_dir = path.parent().unwrap_or(Path::new(""));
+        let title = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Untitled");
+        let Imported { document, report } = from_markdown(&source, base_dir, title);
+
+        let mut note = format!(
+            "imported {} — not saved yet",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        if let Some(summary) = report.summary() {
+            note.push_str(&format!("; {summary}"));
+        }
+        let missing = missing_images(&document);
+        if missing > 0 {
+            let noun = if missing == 1 { "image" } else { "images" };
+            note.push_str(&format!("; {missing} {noun} not found"));
+        }
+
+        let db = Db::open_in_memory()?;
+        let editor = Editor::new(document);
+        let caret = editor
+            .document()
+            .blocks
+            .first()
+            .map(|block| Cursor {
+                block_id: block.id,
+                offset: 0,
+            })
+            .ok_or("document has no blocks")?;
+        let session = Session {
+            editor,
+            db,
+            caret,
+            selection: None,
+            last_error: None,
+            save_failed: false,
+            path: None,
+        };
+        Ok((session, note))
+    }
+
+    /// Whether replacing this document would throw away work: edits a failed
+    /// save left only in memory, or an anonymous document with no file at all.
+    fn would_lose_work(&self) -> bool {
+        self.save_failed || (self.is_anonymous() && self.has_content())
+    }
+
     fn document(&self) -> &Document {
         self.editor.document()
     }
@@ -1095,7 +1201,9 @@ impl Session {
     /// apparatus. An empty Untitled document can close without a prompt.
     fn has_content(&self) -> bool {
         let doc = self.editor.document();
-        doc.blocks.iter().any(|block| !block.text.trim().is_empty()) || !doc.annotations.is_empty()
+        doc.blocks.iter().any(|block| {
+            !block.text.trim().is_empty() || matches!(block.kind, BlockKind::Image { .. })
+        }) || !doc.annotations.is_empty()
     }
 
     fn history(&self) -> (usize, usize) {
@@ -2394,6 +2502,7 @@ impl KameApp {
     fn new(
         cc: &eframe::CreationContext<'_>,
         session: Session,
+        notice: Option<String>,
         body_size: f32,
         dark: bool,
     ) -> KameApp {
@@ -2425,7 +2534,7 @@ impl KameApp {
             image_prompt: None,
             link_prompt: None,
             restore_picker: None,
-            notice: None,
+            notice,
             close: CloseGuard::default(),
             close_prompt: false,
             find: None,
@@ -3262,6 +3371,13 @@ impl KameApp {
             ui.horizontal(|ui| {
                 ui.label("File:");
                 if ui
+                    .small_button("Import Markdown")
+                    .on_hover_text("open a Markdown file as a new, unsaved document")
+                    .clicked()
+                {
+                    self.import_markdown();
+                }
+                if ui
                     .small_button("Export Markdown")
                     .on_hover_text(format!("write {markdown_path} · Ctrl-Shift-E"))
                     .clicked()
@@ -3290,15 +3406,19 @@ impl KameApp {
                 {
                     self.run_file_command(FileCommand::RestoreSnapshot);
                 }
-                if let Some(notice) = &notice {
-                    ui.separator();
-                    ui.label(
+            });
+            // Its own row, wrapping: an import's report can be long, and it must
+            // be readable at any window width rather than clip off the row's end.
+            if let Some(notice) = &notice {
+                ui.add(
+                    egui::Label::new(
                         egui::RichText::new(notice)
                             .small()
                             .color(self.palette.notice_ink),
-                    );
-                }
-            });
+                    )
+                    .wrap(),
+                );
+            }
             if let Some(error) = error {
                 // Selectable, so an author can copy a path or reason out of a
                 // desktop launch where there is no terminal to scroll.
@@ -4230,7 +4350,7 @@ impl KameApp {
         let mut buffer = prompt.path.clone();
         let focus = prompt.focus;
         let confirming = prompt.confirming;
-        let unsaved = self.session.save_failed;
+        let unsaved = self.session.would_lose_work();
         // A chord and an Enter arriving in the same frame would otherwise open
         // a path nobody has finished typing.
         let mut submit = enter && !focus;
@@ -4245,7 +4365,7 @@ impl KameApp {
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 if confirming {
-                    ui.label("The current document has unsaved changes that could not be saved.");
+                    ui.label("The current document has unsaved changes.");
                     ui.label("Open a new document and discard them?");
                 } else {
                     ui.label("Path of the document to open:");
@@ -4315,6 +4435,24 @@ impl KameApp {
         self.open_document(path);
     }
 
+    /// The Import Markdown button: asks for a file, then opens it the way the
+    /// Open prompt does, holding at the same confirmation if work would be lost.
+    fn import_markdown(&mut self) {
+        let Some(path) = pick_markdown_path() else {
+            return;
+        };
+        let path = path.display().to_string();
+        if self.session.would_lose_work() {
+            self.open_prompt = Some(OpenPrompt {
+                path,
+                focus: false,
+                confirming: true,
+            });
+        } else {
+            self.open_document(path);
+        }
+    }
+
     /// Replaces the current session with the document at `path`, resetting the
     /// view state that pointed into the old document (open note, find bar,
     /// typewriter anchor, caches). A failed open keeps the current document and
@@ -4331,8 +4469,8 @@ impl KameApp {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let path = resolve_open_path(&typed, &base);
-        match Session::open(&path) {
-            Ok(session) => {
+        match Session::open_any(&path) {
+            Ok((session, note)) => {
                 self.session = session;
                 self.layouts = LayoutCache::new();
                 self.textures = TextureCache::new();
@@ -4346,7 +4484,7 @@ impl KameApp {
                 self.pending_scroll = None;
                 self.reveal_caret = false;
                 self.image_textures.clear();
-                self.notice = Some(format!("opened {}", path.display()));
+                self.notice = Some(note.unwrap_or_else(|| format!("opened {}", path.display())));
             }
             Err(err) => {
                 self.notice = None;
@@ -5162,6 +5300,88 @@ mod tests {
         assert_eq!(typewriter_scroll_offset(1900.0, 400.0, 2000.0), 1600.0);
         // Content shorter than the viewport never scrolls.
         assert_eq!(typewriter_scroll_offset(300.0, 400.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn markdown_paths_are_recognised_by_extension() {
+        for path in ["a.md", "a.markdown", "a.MD", "/x/y.Markdown"] {
+            assert!(is_markdown_path(Path::new(path)), "{path}");
+        }
+        for path in ["a.kame", "md", "a.md.kame", "a"] {
+            assert!(!is_markdown_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn opening_markdown_imports_it_as_an_unsaved_document() {
+        let dir = std::env::temp_dir().join(format!("kame-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.md");
+        let source = "# Hello\n\nBody with `code`.\n\n![](missing.png)\n";
+        std::fs::write(&path, source).unwrap();
+
+        let (session, note) = Session::open_any(&path).unwrap();
+
+        assert!(session.is_anonymous(), "the first save must ask for a file");
+        assert_eq!(session.document().title, "notes");
+        assert_eq!(session.document().blocks[0].text, "Hello");
+        assert_eq!(
+            session.history(),
+            (0, 0),
+            "an import starts with no history"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        let note = note.expect("the import is announced");
+        assert!(note.contains("notes.md"), "{note}");
+        assert!(note.contains("1 inline code"), "{note}");
+        assert!(note.contains("1 image not found"), "{note}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn opening_a_missing_markdown_file_fails_without_creating_it() {
+        let path = std::env::temp_dir().join(format!("kame-missing-{}.md", uuid::Uuid::new_v4()));
+        assert!(Session::open_any(&path).is_err());
+        assert!(
+            !path.exists(),
+            "a failed import must not leave a file behind"
+        );
+    }
+
+    #[test]
+    fn opening_a_kame_path_still_opens_a_document() {
+        let path = std::env::temp_dir().join(format!("kame-any-{}.kame", uuid::Uuid::new_v4()));
+        let (session, note) = Session::open_any(&path).unwrap();
+        assert!(!session.is_anonymous());
+        assert!(note.is_none());
+        drop(session);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn replacing_a_document_warns_about_work_with_nowhere_to_go() {
+        let empty = Session::anonymous().unwrap();
+        assert!(
+            !empty.would_lose_work(),
+            "an empty document has nothing to lose"
+        );
+
+        let dir = std::env::temp_dir().join(format!("kame-lose-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prose = dir.join("prose.md");
+        std::fs::write(&prose, "Unsaved words.\n").unwrap();
+        let (imported, _) = Session::open_any(&prose).unwrap();
+        assert!(imported.would_lose_work(), "an import has no file yet");
+
+        let image = dir.join("image.md");
+        std::fs::write(&image, "![](a.png)\n").unwrap();
+        let (only_image, _) = Session::open_any(&image).unwrap();
+        assert!(only_image.would_lose_work(), "an image is content too");
+
+        let saved = dir.join("saved.kame");
+        let (on_disk, _) = Session::open_any(&saved).unwrap();
+        assert!(!on_disk.would_lose_work(), "saved work is safe on disk");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

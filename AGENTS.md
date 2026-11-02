@@ -37,6 +37,7 @@ Headings = Crimson Pro; body = EB Garamond. Fonts are `include_bytes!`-embedded 
 - `src/layout/` — cosmic-text block shaping, anchor→Y mapping, marginalia placement
 - `src/render/` — swash glyph-atlas rasterization + egui texture upload
 - `src/export/` — `to_markdown`, `to_html` (deterministic)
+- `src/import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
 - `src/main.rs` — egui shell (`Session`, `KameApp`, keybindings, distraction-free modes)
 
 Only `main.rs` knows about both egui and the DB; the layering is one-way. Keybindings are documented in `docs/keybindings.md`.

@@ -157,7 +157,8 @@ kame/
   tests/
 ```
 
-Dependencies: eframe/egui, cosmic-text, swash, rusqlite (bundled), serde + serde_json, uuid.
+Dependencies: eframe/egui, cosmic-text, swash, rusqlite (bundled), serde + serde_json, uuid,
+pulldown-cmark (Markdown import only).
 Deferred: hypher (hyphenation), a markdown/HTML writer library if hand-rolling proves wanting.
 
 ## 15. Deferred / open items

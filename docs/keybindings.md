@@ -70,6 +70,15 @@ Dark mode (`Ctrl-Shift-D`) is separate from these: a persisted preference
 
 ## Files, exports and snapshots
 
+Opening a `.md` or `.markdown` file imports it: with Ctrl-O, the Import Markdown
+button, or `kame notes.md`. The file is only read, and the result is a new
+document with no file, so the first save asks where to put it. Front matter
+names the document and becomes its opening heading. Code, tables and raw HTML
+become plain text, nested lists flatten, and rules and image descriptions are
+dropped; the status line reports what was simplified and any images it could
+not find. Replacing a document that has no file, or whose last save failed,
+asks first.
+
 The exports write beside the document you opened: `<stem>.md` and `<stem>.html`
 in the same directory as the `.kame` file (in the working directory when the
 path has no directory part). They read the document as it stands, so nothing

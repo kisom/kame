@@ -612,10 +612,12 @@ impl Session {
             self.last_error = Some("restore failed — the snapshot holds no blocks".to_string());
             return false;
         };
-        // Head and cursor first: the restored text must never be stored under
-        // the cursor of the history it replaces, or a reopen would offer that
-        // history's ops for undo against a document they never touched.
-        if let Err(err) = self.db.save_state(&document, 0) {
+        // One transaction writes the restored head, cursor 0 and an empty op
+        // log. Splitting these would let a crash or I/O error land the restored
+        // text beside the pre-restore log; on reopen `Editor::with_cursor`
+        // would then put those stale ops on the redo stack and Ctrl-Shift-Z
+        // would replay them against a document they never touched.
+        if let Err(err) = self.db.restore_state(&document) {
             self.mark_save_failed(err);
             return false;
         }
@@ -624,13 +626,6 @@ impl Session {
         self.selection = None;
         self.save_failed = false;
         self.last_error = None;
-        // The old ops describe a document that no longer exists. Dropping them
-        // makes the next edit a clean start; if the delete itself fails the
-        // restore still stands, and `record_edit` truncates to the cursor
-        // before appending, so the stale tail cannot be replayed.
-        if let Err(err) = self.db.truncate_ops_after(0) {
-            self.last_error = Some(format!("restore: old history could not be cleared — {err}"));
-        }
         true
     }
 

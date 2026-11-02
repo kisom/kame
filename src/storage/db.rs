@@ -301,6 +301,29 @@ impl Db {
         Ok(())
     }
 
+    /// Replaces the head document with `doc`, resets the cursor to `0` and
+    /// drops the whole op log — all in one transaction.
+    ///
+    /// The write path for restoring a snapshot. Undo/redo need the log to
+    /// survive, but a restore replaces the text the log describes, so the log
+    /// is discarded with the cursor reset instead of truncated to it: a
+    /// stale op must never be left for a reopen to offer as redo against a
+    /// document it never touched. Doing all three writes together means a
+    /// crash or I/O error can never split the restored text from an intact
+    /// pre-restore log.
+    pub fn restore_state(&mut self, doc: &Document) -> Result<(), DbError> {
+        let json = serde_json::to_string(doc)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO documents (id, json) VALUES (1, ?1)",
+            params![json],
+        )?;
+        tx.execute("DELETE FROM ops", [])?;
+        write_cursor(&tx, 0)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Stores a complete copy of `doc` as a point-in-time snapshot and returns
     /// its id.
     ///
@@ -753,6 +776,78 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].1, replacement);
         assert_eq!(db.cursor().unwrap(), 1);
+    }
+
+    /// `restore_state` must land head, cursor and an empty log together, so a
+    /// reopen can never pair the restored text with the pre-restore history.
+    #[test]
+    fn restore_state_replaces_head_resets_cursor_and_clears_the_log() {
+        let path = temp_db_path();
+        let restored = sample_document();
+        let mut edited = restored.clone();
+        edited.title = "Edited after the snapshot".to_string();
+        edited.blocks[0].text = "text that must disappear".to_string();
+
+        {
+            let mut db = Db::open(&path).unwrap();
+            db.save_document(&restored).unwrap();
+            let id = db.create_snapshot(&restored, Some("kept")).unwrap();
+            for offset in 0..3 {
+                db.record_edit(&edited, &insert_op(offset)).unwrap();
+            }
+            assert_eq!(db.cursor().unwrap(), 3);
+
+            // The caller reads the snapshot back, then writes the restore.
+            let doc = db.restore_snapshot(id).unwrap();
+            db.restore_state(&doc).unwrap();
+
+            assert_eq!(db.load_document().unwrap(), restored);
+            assert_eq!(db.cursor().unwrap(), 0);
+            assert!(
+                db.load_ops().unwrap().is_empty(),
+                "the log describing the replaced text is gone"
+            );
+            assert_eq!(db.list_snapshots().unwrap().len(), 1, "snapshots survive");
+        }
+
+        // A reopen sees the same three facts: nothing for `Editor` to put on
+        // the redo stack, and a cursor that matches the empty log.
+        let mut db = Db::open(&path).unwrap();
+        assert_eq!(db.load_document().unwrap(), restored);
+        assert_eq!(db.cursor().unwrap(), 0);
+        assert!(db.load_ops().unwrap().is_empty());
+        // New edits start a clean log at cursor 1.
+        db.record_edit(&restored, &insert_op(0)).unwrap();
+        assert_eq!(db.cursor().unwrap(), 1);
+        assert_eq!(db.load_ops().unwrap().len(), 1);
+    }
+
+    /// A failed `restore_state` must leave the pre-restore head, cursor and log
+    /// untouched — never a restored document beside a stale history.
+    #[test]
+    fn failed_restore_state_changes_nothing() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let original = sample_document();
+        let mut edited = original.clone();
+        edited.title = "Edited".to_string();
+        db.record_edit(&edited, &insert_op(0)).unwrap();
+
+        db.conn.pragma_update(None, "query_only", true).unwrap();
+        assert!(
+            db.restore_state(&original).is_err(),
+            "the write must fail while read-only"
+        );
+        db.conn.pragma_update(None, "query_only", false).unwrap();
+
+        assert_eq!(db.load_document().unwrap(), edited);
+        assert_eq!(db.cursor().unwrap(), 1);
+        assert_eq!(db.load_ops().unwrap().len(), 1);
+        // The aborted transaction must not be left dangling.
+        db.restore_state(&original).unwrap();
+        assert_eq!(db.load_document().unwrap(), original);
+        assert_eq!(db.cursor().unwrap(), 0);
+        assert!(db.load_ops().unwrap().is_empty());
     }
 
     /// A snapshot is a point-in-time copy: restoring it yields the document

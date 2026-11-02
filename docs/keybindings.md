@@ -59,7 +59,7 @@ typewriter. Hovering one names it.
 | Key | Mode | Effect |
 | --- | --- | --- |
 | F11 | fullscreen | toggles the window fullscreen |
-| Ctrl-Shift-H | hide chrome | hides the status row and its menu |
+| Ctrl-Shift-H | hide chrome | hides the menu bar and the status row |
 | Ctrl-Shift-M | hide margin | collapses the margin gutter; marginal notes and note markers are not drawn (their anchored ranges stay marked, footnotes stay at the foot) |
 | Ctrl-Shift-P | paragraph focus | dims every block but the one holding the caret |
 | Ctrl-Shift-T | typewriter | keeps the caret's line at the vertical centre of the window; the page re-centres when the caret moves and can still be scrolled while idle |
@@ -71,8 +71,8 @@ Dark mode (`Ctrl-Shift-D`) is separate from these: a persisted preference
 
 ## Files, exports and snapshots
 
-Opening a `.md` or `.markdown` file imports it: with Ctrl-O, Import Markdown in
-the `⋯` menu, or `kame notes.md`. The file is only read, and the result is a new
+Opening a `.md` or `.markdown` file imports it: with Ctrl-O, File > Import
+Markdown, or `kame notes.md`. The file is only read, and the result is a new
 document with no file, so the first save asks where to put it. Front matter
 names the document and becomes its opening heading. Code, tables and raw HTML
 become plain text, nested lists flatten, and rules and image descriptions are
@@ -108,12 +108,14 @@ Both dialogs take Enter as their primary action and Escape as cancel. Nothing
 auto-repeats: one press is one command, and a held Enter cannot step through
 the restore confirmation.
 
-## The status row
+## The menu bar and status row
 
-One row sits above the page: the document's title (hover for its path), `not
-saved yet` if it has no file, any mode badges, the word count, and the `⋯` menu.
-The menu holds every file, snapshot, annotation and view command with its
-shortcut, plus the document's block, annotation and undo counts.
+The menu bar holds every command with its shortcut: File (open, save, import,
+export, snapshots, and the document's counts), Annotate, View (type size, dark
+mode and the view modes) and Help.
+
+The status row below it shows the document's title (hover for its path), `not
+saved yet` if it has no file, any mode badges, and the word count.
 
 A notice stays under the row until the next edit or undo. An error stays until
 it is resolved.

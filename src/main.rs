@@ -184,7 +184,7 @@ type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Modes {
     fullscreen: bool,
-    /// Hide the status row and its menu.
+    /// Hide the menu bar and the status row.
     hide_chrome: bool,
     /// Collapse the margin gutter so the measure re-centres on the window.
     hide_margin: bool,
@@ -848,7 +848,7 @@ impl NoticeTracker {
     }
 }
 
-/// Something chosen from the status row's menu, applied once the panel closes.
+/// Something chosen from the menu bar, applied once the panel closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
     Open,
@@ -883,11 +883,6 @@ fn menu_entry(
         ui.close();
     }
     response
-}
-
-/// A menu group's heading.
-fn menu_heading(ui: &mut egui::Ui, label: &str) {
-    ui.label(egui::RichText::new(label).small().weak());
 }
 
 /// Whether `event` is the macOS quit shortcut. `mac_cmd` is never set elsewhere,
@@ -3459,93 +3454,99 @@ impl KameApp {
         let mut action: Option<MenuAction> = None;
 
         egui::Panel::top("kame-status").show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    ui.set_min_width(260.0);
+                    if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
+                        action = Some(MenuAction::Open);
+                    }
+                    if menu_item(ui, "Save", Some("Ctrl-S"), false) {
+                        action = Some(MenuAction::Save);
+                    }
+                    ui.separator();
+                    if menu_item(ui, "Import Markdown…", None, false) {
+                        action = Some(MenuAction::ImportMarkdown);
+                    }
+                    if menu_entry(ui, "Export Markdown", Some("Ctrl-Shift-E"), false)
+                        .on_hover_text(format!("write {markdown_path}"))
+                        .clicked()
+                    {
+                        action = Some(MenuAction::File(FileCommand::ExportMarkdown));
+                    }
+                    if menu_entry(ui, "Export HTML", Some("Ctrl-Shift-B"), false)
+                        .on_hover_text(format!("write {html_path}"))
+                        .clicked()
+                    {
+                        action = Some(MenuAction::File(FileCommand::ExportHtml));
+                    }
+                    ui.separator();
+                    if menu_item(ui, "Snapshot Now…", Some("Ctrl-Shift-S"), false) {
+                        action = Some(MenuAction::File(FileCommand::SnapshotNow));
+                    }
+                    if menu_item(ui, "Restore Snapshot…", Some("Ctrl-Shift-R"), false) {
+                        action = Some(MenuAction::File(FileCommand::RestoreSnapshot));
+                    }
+                    ui.separator();
+                    let plural = |n: usize| if n == 1 { "" } else { "s" };
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{blocks} block{} · {annotations} annotation{} · undo {undo} · redo {redo}",
+                            plural(blocks),
+                            plural(annotations),
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                });
+                ui.menu_button("Annotate", |ui| {
+                    ui.set_min_width(200.0);
+                    for (label, kind, shortcut) in [
+                        ("Note", AnnotationKind::Note, Some("Ctrl-Shift-N")),
+                        ("Marginal", AnnotationKind::Marginal, None),
+                        ("Footnote", AnnotationKind::Footnote, Some("Ctrl-Shift-F")),
+                    ] {
+                        if menu_item(ui, label, shortcut, false) {
+                            action = Some(MenuAction::Annotate(kind));
+                        }
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    ui.set_min_width(240.0);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Type size {:.0}", self.body_size));
+                        // These stay open, so the size can be walked to taste.
+                        if ui.small_button("−").on_hover_text("smaller").clicked() {
+                            action = Some(MenuAction::TypeSize(-FONT_SIZE_STEP));
+                        }
+                        if ui.small_button("+").on_hover_text("larger").clicked() {
+                            action = Some(MenuAction::TypeSize(FONT_SIZE_STEP));
+                        }
+                    });
+                    if menu_item(ui, "Dark mode", Some("Ctrl-Shift-D"), self.dark) {
+                        action = Some(MenuAction::ToggleDark);
+                    }
+                    ui.separator();
+                    for (label, mode, shortcut) in [
+                        ("Fullscreen", ModeCommand::Fullscreen, "F11"),
+                        ("Hide chrome", ModeCommand::HideChrome, "Ctrl-Shift-H"),
+                        ("Hide margin", ModeCommand::HideMargin, "Ctrl-Shift-M"),
+                        ("Paragraph focus", ModeCommand::ParagraphFocus, "Ctrl-Shift-P"),
+                        ("Typewriter", ModeCommand::Typewriter, "Ctrl-Shift-T"),
+                    ] {
+                        if menu_item(ui, label, Some(shortcut), self.modes.is_on(mode)) {
+                            action = Some(MenuAction::Mode(mode));
+                        }
+                    }
+                });
+                ui.menu_button("Help", |ui| {
+                    ui.set_min_width(160.0);
+                    if menu_item(ui, "Help", Some("F1"), false) {
+                        action = Some(MenuAction::Help);
+                    }
+                });
+            });
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button("⋯", |ui| {
-                        ui.set_min_width(260.0);
-                        menu_heading(ui, "File");
-                        if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
-                            action = Some(MenuAction::Open);
-                        }
-                        if menu_item(ui, "Save", Some("Ctrl-S"), false) {
-                            action = Some(MenuAction::Save);
-                        }
-                        if menu_item(ui, "Import Markdown…", None, false) {
-                            action = Some(MenuAction::ImportMarkdown);
-                        }
-                        if menu_entry(ui, "Export Markdown", Some("Ctrl-Shift-E"), false)
-                            .on_hover_text(format!("write {markdown_path}"))
-                            .clicked()
-                        {
-                            action = Some(MenuAction::File(FileCommand::ExportMarkdown));
-                        }
-                        if menu_entry(ui, "Export HTML", Some("Ctrl-Shift-B"), false)
-                            .on_hover_text(format!("write {html_path}"))
-                            .clicked()
-                        {
-                            action = Some(MenuAction::File(FileCommand::ExportHtml));
-                        }
-                        ui.separator();
-                        menu_heading(ui, "Snapshots");
-                        if menu_item(ui, "Snapshot Now…", Some("Ctrl-Shift-S"), false) {
-                            action = Some(MenuAction::File(FileCommand::SnapshotNow));
-                        }
-                        if menu_item(ui, "Restore Snapshot…", Some("Ctrl-Shift-R"), false) {
-                            action = Some(MenuAction::File(FileCommand::RestoreSnapshot));
-                        }
-                        ui.separator();
-                        menu_heading(ui, "Annotate");
-                        for (label, kind, shortcut) in [
-                            ("Note", AnnotationKind::Note, Some("Ctrl-Shift-N")),
-                            ("Marginal", AnnotationKind::Marginal, None),
-                            ("Footnote", AnnotationKind::Footnote, Some("Ctrl-Shift-F")),
-                        ] {
-                            if menu_item(ui, label, shortcut, false) {
-                                action = Some(MenuAction::Annotate(kind));
-                            }
-                        }
-                        ui.separator();
-                        menu_heading(ui, "View");
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Type size {:.0}", self.body_size));
-                            // These stay open, so the size can be walked to taste.
-                            if ui.small_button("−").on_hover_text("smaller").clicked() {
-                                action = Some(MenuAction::TypeSize(-FONT_SIZE_STEP));
-                            }
-                            if ui.small_button("+").on_hover_text("larger").clicked() {
-                                action = Some(MenuAction::TypeSize(FONT_SIZE_STEP));
-                            }
-                        });
-                        if menu_item(ui, "Dark mode", Some("Ctrl-Shift-D"), self.dark) {
-                            action = Some(MenuAction::ToggleDark);
-                        }
-                        for (label, mode, shortcut) in [
-                            ("Fullscreen", ModeCommand::Fullscreen, "F11"),
-                            ("Hide chrome", ModeCommand::HideChrome, "Ctrl-Shift-H"),
-                            ("Hide margin", ModeCommand::HideMargin, "Ctrl-Shift-M"),
-                            ("Paragraph focus", ModeCommand::ParagraphFocus, "Ctrl-Shift-P"),
-                            ("Typewriter", ModeCommand::Typewriter, "Ctrl-Shift-T"),
-                        ] {
-                            if menu_item(ui, label, Some(shortcut), self.modes.is_on(mode)) {
-                                action = Some(MenuAction::Mode(mode));
-                            }
-                        }
-                        ui.separator();
-                        if menu_item(ui, "Help", Some("F1"), false) {
-                            action = Some(MenuAction::Help);
-                        }
-                        ui.separator();
-                        let plural = |n: usize| if n == 1 { "" } else { "s" };
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{blocks} block{} · {annotations} annotation{} · undo {undo} · redo {redo}",
-                                plural(blocks),
-                                plural(annotations),
-                            ))
-                            .small()
-                            .weak(),
-                        );
-                    });
                     ui.label(egui::RichText::new(word_count_label(words)).weak());
                     // Laid out right to left, so reversed to read in the usual order.
                     for (short, name) in mode_badges(&self.modes).into_iter().rev() {
@@ -4613,7 +4614,7 @@ impl KameApp {
         });
     }
 
-    /// The Import Markdown menu item: asks for a file, then opens it the way the
+    /// File > Import Markdown: asks for a file, then opens it the way the
     /// Open prompt does, holding at the same confirmation if work would be lost.
     fn import_markdown(&mut self) {
         let Some(path) = pick_markdown_path() else {
@@ -5088,7 +5089,7 @@ impl eframe::App for KameApp {
         self.show_find_bar(ui);
         let history = self.session.history();
         self.notice_tracker.update(&mut self.notice, history);
-        // Hide-chrome mode drops the whole status row, menu included.
+        // Hide-chrome mode drops the menu bar and the status row together.
         if !self.modes.hide_chrome {
             self.show_status(ui);
         }

@@ -516,6 +516,17 @@ fn main() -> eframe::Result {
         std::process::exit(2);
     };
 
+    // Open the document before the window exists, so a failure is reported as
+    // "your file is the problem" rather than an opaque app-creation error that
+    // reads as "kame is broken".
+    let session = match Session::open(&path) {
+        Ok(session) => session,
+        Err(err) => {
+            eprintln!("kame: {err}");
+            std::process::exit(1);
+        }
+    };
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 860.0])
@@ -527,7 +538,28 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "kame",
         native_options,
-        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, path)?))),
+        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session)))),
+    )
+}
+
+/// Maps a failure to open a document into an error a user can act on: it
+/// blames the file (corrupt, foreign, or from a newer build) instead of
+/// leaking a serde/sqlite detail that reads as "kame is broken".
+fn open_error(path: &Path, err: DbError) -> std::io::Error {
+    let reason = match err {
+        DbError::Json(_) => {
+            "the document is corrupt or was written by a different version of kame".to_string()
+        }
+        DbError::SchemaTooNew { found, supported } => format!(
+            "the document was written by a newer version of kame \
+             (schema {found}; this build supports {supported})"
+        ),
+        DbError::Sqlite(_) => "the file is not a valid kame document".to_string(),
+        other => other.to_string(),
+    };
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("cannot open {}: {reason}", path.display()),
     )
 }
 
@@ -567,7 +599,7 @@ impl Session {
     /// non-fatal warning, and the durable state is reset to match that empty
     /// history.
     fn open(path: &Path) -> AppResult<Session> {
-        let mut db = Db::open(path)?;
+        let mut db = Db::open(path).map_err(|err| open_error(path, err))?;
         let mut warning = None;
         // Set when the degrade path could not reset the database, which leaves
         // it unable to write rather than merely historyless.
@@ -613,7 +645,7 @@ impl Session {
                 db.save_document(&document)?;
                 Editor::new(document)
             }
-            Err(err) => return Err(Box::new(err)),
+            Err(err) => return Err(Box::new(open_error(path, err))),
         };
 
         let caret = editor
@@ -1213,7 +1245,17 @@ impl Session {
         if self.save_failed {
             return false;
         }
-        let result = self.editor.set_annotation_body(id, body);
+        // An emptied marginalia note is removed rather than kept as an empty
+        // margin entry.
+        let is_empty_marginal = body.trim().is_empty()
+            && self.editor.document().annotations.iter().any(|annotation| {
+                annotation.id == id && annotation.kind == AnnotationKind::Marginal
+            });
+        let result = if is_empty_marginal {
+            self.editor.remove_annotation(id)
+        } else {
+            self.editor.set_annotation_body(id, body)
+        };
         self.commit(result)
     }
 
@@ -1593,10 +1635,9 @@ struct KameApp {
 }
 
 impl KameApp {
-    fn new(cc: &eframe::CreationContext<'_>, path: PathBuf) -> AppResult<KameApp> {
-        let session = Session::open(&path)?;
+    fn new(cc: &eframe::CreationContext<'_>, session: Session) -> KameApp {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
-        Ok(KameApp {
+        KameApp {
             session,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
             layouts: LayoutCache::new(),
@@ -1613,7 +1654,7 @@ impl KameApp {
             restore_picker: None,
             notice: None,
             close: CloseGuard::default(),
-        })
+        }
     }
 
     /// Opens `id`'s popover (or closes it with `None`), seeding the editable
@@ -1817,6 +1858,7 @@ impl KameApp {
                 Command::MoveDown => self.move_vertically(true),
                 Command::MoveLineStart => self.move_to_line_edge(false),
                 Command::MoveLineEnd => self.move_to_line_edge(true),
+                Command::SelectAll => self.select_all(),
                 Command::SetBlockKind(kind) => {
                     let caret = self.session.valid_caret();
                     self.session.set_block_kind(caret.block_id, kind);
@@ -1825,9 +1867,9 @@ impl KameApp {
         }
     }
 
-    /// Up/Down move by visual line inside the current block, keeping the
-    /// caret's horizontal position. Crossing into another block is left to
-    /// Left/Right in v1.
+    /// Up/Down move by visual line, keeping the caret's horizontal position.
+    /// At the first or last line of a block they cross into the adjacent block
+    /// (first line down, last line up), so paragraphs are not dead ends.
     fn move_vertically(&mut self, down: bool) {
         let caret = self.session.valid_caret();
         let Some(index) = self.session.block_index(caret.block_id) else {
@@ -1845,6 +1887,8 @@ impl KameApp {
         else {
             return;
         };
+        let x = caret_x(&layout, caret.offset);
+
         let target = if down {
             layout.lines.get(line_index + 1)
         } else {
@@ -1852,15 +1896,86 @@ impl KameApp {
                 .checked_sub(1)
                 .and_then(|previous| layout.lines.get(previous))
         };
-        let Some(target) = target else {
+        if let Some(target) = target {
+            let offset = offset_at(&layout, x, target.y + 1.0, block.text.len());
+            self.session.set_caret(Cursor {
+                block_id: block.id,
+                offset,
+            });
+            return;
+        }
+
+        // At the block's edge: cross into the adjacent block at the same column.
+        let adjacent = if down {
+            self.session.document().blocks.get(index + 1).cloned()
+        } else {
+            index
+                .checked_sub(1)
+                .and_then(|i| self.session.document().blocks.get(i).cloned())
+        };
+        let Some(adjacent) = adjacent else {
             return;
         };
-        let x = caret_x(&layout, caret.offset);
-        let offset = offset_at(&layout, x, target.y + 1.0, block.text.len());
+        let adj_layout = self.renderer.layout(&adjacent);
+        let line = if down {
+            adj_layout.lines.first()
+        } else {
+            adj_layout.lines.last()
+        };
+        let offset = match line {
+            Some(line) => offset_at(&adj_layout, x, line.y + 1.0, adjacent.text.len()),
+            None => 0,
+        };
         self.session.set_caret(Cursor {
-            block_id: block.id,
+            block_id: adjacent.id,
             offset,
         });
+    }
+
+    /// C-a selects the caret's whole block; pressing it again while the block
+    /// is already selected widens to the whole document.
+    fn select_all(&mut self) {
+        let caret = self.session.valid_caret();
+        let Some(index) = self.session.block_index(caret.block_id) else {
+            return;
+        };
+        let (block_id, block_len, first, last) = {
+            let document = self.session.document();
+            let block = &document.blocks[index];
+            (
+                block.id,
+                block.text.len(),
+                document
+                    .blocks
+                    .first()
+                    .map(|b| Cursor { block_id: b.id, offset: 0 }),
+                document
+                    .blocks
+                    .last()
+                    .map(|b| Cursor { block_id: b.id, offset: b.text.len() }),
+            )
+        };
+        let block_selected = matches!(
+            self.session.ordered_selection(),
+            Some((start, end))
+                if start.block_id == block_id
+                    && start.offset == 0
+                    && end.block_id == block_id
+                    && end.offset == block_len
+        );
+        let (anchor, moving) = if block_selected {
+            let (Some(first), Some(last)) = (first, last) else {
+                return;
+            };
+            (last, first)
+        } else {
+            (
+                Cursor { block_id, offset: block_len },
+                Cursor { block_id, offset: 0 },
+            )
+        };
+        self.session.set_caret(anchor);
+        self.session.select_to(moving);
     }
 
     fn move_to_line_edge(&mut self, end: bool) {
@@ -1883,6 +1998,13 @@ impl KameApp {
     fn show_status(&mut self, ui: &mut egui::Ui) {
         let title = self.session.document().title.clone();
         let blocks = self.session.document().blocks.len();
+        let words: usize = self
+            .session
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.text.split_whitespace().count())
+            .sum();
         let annotations = self.session.document().annotations.len();
         let (undo, redo) = self.session.history();
         let path = self.session.path().display().to_string();
@@ -1906,6 +2028,10 @@ impl KameApp {
                 ui.label(format!(
                     "{annotations} annotation{}",
                     if annotations == 1 { "" } else { "s" }
+                ));
+                ui.label(format!(
+                    "{words} word{}",
+                    if words == 1 { "" } else { "s" }
                 ));
                 ui.label(format!("undo {undo} · redo {redo}"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3963,9 +4089,29 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
 
     /// The popover commits keystroke by keystroke, so an empty body is a real
     /// state (the author cleared the note) rather than a reference to the
-    /// default, and it has to round trip as such.
+    /// default, and it has to round trip as such. A note with no body is a
+    /// plain highlight, so it survives.
     #[test]
-    fn clearing_a_body_persists_as_an_empty_body() {
+    fn clearing_a_note_body_persists_as_an_empty_body() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("word");
+        let id = session
+            .add_annotation(AnnotationKind::Note)
+            .expect("a note on 'word'");
+
+        assert!(session.set_annotation_body(id, ""));
+        assert_eq!(session.document().annotations[0].body, "");
+        drop(session);
+
+        let reopened = open(&path);
+        assert_eq!(reopened.document().annotations[0].body, "");
+    }
+
+    /// Clearing a marginal's body removes it: an empty margin entry has
+    /// nothing to say, so it goes away instead of lingering.
+    #[test]
+    fn clearing_a_marginal_body_removes_the_marginal() {
         let path = temp_db_path();
         let mut session = open(&path);
         session.insert("word");
@@ -3974,11 +4120,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             .expect("a marginal on 'word'");
 
         assert!(session.set_annotation_body(id, ""));
-        assert_eq!(session.document().annotations[0].body, "");
-        drop(session);
-
-        let reopened = open(&path);
-        assert_eq!(reopened.document().annotations[0].body, "");
+        assert!(session.document().annotations.is_empty());
     }
 
     // --- file, export and snapshot commands --------------------------------

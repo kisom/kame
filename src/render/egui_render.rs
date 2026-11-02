@@ -628,6 +628,9 @@ pub enum Command {
     MoveDown,
     MoveLineStart,
     MoveLineEnd,
+    /// Select the caret's whole block (or the whole document when the block is
+    /// already selected).
+    SelectAll,
     /// Change the caret block's kind (heading level, paragraph, list item).
     SetBlockKind(BlockKind),
 }
@@ -711,6 +714,7 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::ArrowDown if !command => Some(Command::MoveDown),
         Key::Home if !command => Some(Command::MoveLineStart),
         Key::End if !command => Some(Command::MoveLineEnd),
+        Key::A if command => Some(Command::SelectAll),
         _ => None,
     }
 }

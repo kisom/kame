@@ -450,7 +450,7 @@ impl Editor {
         for annotation in next_notes {
             let mut moved = annotation;
             moved.anchor = match moved.anchor {
-                Anchor::Block { .. } => Anchor::block(cursor.block_id),
+                Anchor::Block(_) => Anchor::block(cursor.block_id),
                 Anchor::Range { start, end, .. } => {
                     Anchor::range(cursor.block_id, start + join, end + join)
                 }
@@ -528,6 +528,20 @@ impl Editor {
             new_body: new_body.to_string(),
         };
         Ok(self.apply_edit(op))
+    }
+
+    /// Removes the annotation `annotation_id`, returning the op that was
+    /// applied. The removed annotation travels in the op, so undo restores it.
+    /// An unknown id is [`EditError::AnnotationNotFound`].
+    pub fn remove_annotation(&mut self, annotation_id: AnnotationId) -> Result<Op, EditError> {
+        let annotation = self
+            .doc
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == annotation_id)
+            .cloned()
+            .ok_or(EditError::AnnotationNotFound)?;
+        Ok(self.apply_edit(Op::RemoveAnnotation { annotation }))
     }
 
     // --- caret helpers -----------------------------------------------------

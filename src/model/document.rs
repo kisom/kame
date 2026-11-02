@@ -40,12 +40,13 @@ pub enum AnnotationKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum Anchor {
-    /// Anchored to a whole block — used by marginalia, which sit alongside a
-    /// paragraph rather than a specific passage. Survives edits within the
-    /// block; only deleting the block itself removes it.
-    Block { block_id: BlockId },
+    /// Anchored to a whole block — used by marginalia. Serializes as the bare
+    /// block id (a string), which keeps it distinguishable from a range anchor
+    /// and lets older files (which wrote range anchors as
+    /// `{block_id, start, end}`) still deserialize as ranges.
+    Block(BlockId),
     /// Anchored to a byte range within a block — used by notes (a highlighted
     /// passage) and footnotes (a numbered marker at a position).
     Range {
@@ -57,7 +58,7 @@ pub enum Anchor {
 
 impl Anchor {
     pub fn block(block_id: BlockId) -> Anchor {
-        Anchor::Block { block_id }
+        Anchor::Block(block_id)
     }
 
     pub fn range(block_id: BlockId, start: usize, end: usize) -> Anchor {
@@ -71,7 +72,7 @@ impl Anchor {
     /// The block this anchor belongs to, whether block- or range-scoped.
     pub fn block_id(&self) -> BlockId {
         match self {
-            Anchor::Block { block_id } | Anchor::Range { block_id, .. } => *block_id,
+            Anchor::Block(block_id) | Anchor::Range { block_id, .. } => *block_id,
         }
     }
 
@@ -79,7 +80,7 @@ impl Anchor {
     pub fn byte_range(&self) -> Option<(usize, usize)> {
         match self {
             Anchor::Range { start, end, .. } => Some((*start, *end)),
-            Anchor::Block { .. } => None,
+            Anchor::Block(_) => None,
         }
     }
 }
@@ -169,5 +170,24 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let d2: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(d, d2);
+    }
+
+    /// Files written before block-anchored marginalia stored every anchor as
+    /// `{block_id, start, end}` with no `scope` field. Those must still read
+    /// as range anchors, and the newer block anchor reads as a bare id string.
+    #[test]
+    fn anchor_reads_legacy_range_and_new_block_forms() {
+        let id = Uuid::new_v4();
+
+        // Legacy range form (a plain struct, no discriminant).
+        let legacy = format!(r#"{{"block_id":"{id}","start":1,"end":4}}"#);
+        let anchor: Anchor = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(anchor, Anchor::range(id, 1, 4));
+
+        // New block form serializes as the bare id string and reads back.
+        let block_json = serde_json::to_string(&Anchor::block(id)).unwrap();
+        assert_eq!(block_json, format!(r#""{id}""#));
+        let round: Anchor = serde_json::from_str(&block_json).unwrap();
+        assert_eq!(round, Anchor::block(id));
     }
 }

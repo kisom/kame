@@ -11,7 +11,9 @@ macOS (`Modifiers::command`).
 | Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y | undo / redo / redo |
 | Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
 | Ctrl-Shift-0 | return the caret's block to body text |
-| Arrows, Home, End | move the caret (within the current block in v1) |
+| Ctrl-Shift-N / Ctrl-Shift-F | add a note (a highlight) / a footnote at the selection or the word under the caret |
+| Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |
+| Ctrl-A | select the caret's whole block (again for the whole document) |
 | drag, shift-click | select |
 | Escape | close the note popover |
 

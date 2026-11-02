@@ -13,7 +13,7 @@ use egui::{ColorImage, Context, Event, Key, Modifiers, Pos2, Rect, TextureHandle
 use image::RgbaImage;
 
 use crate::layout::{layout_block, BlockLayout, LayoutConfig};
-use crate::model::{AnnotationId, Block, BlockId, BlockKind};
+use crate::model::{AnnotationId, AnnotationKind, Block, BlockId, BlockKind};
 use crate::render::GlyphAtlas;
 
 /// Every face the layout can ask for, compiled into the binary.
@@ -633,6 +633,9 @@ pub enum Command {
     SelectAll,
     /// Change the caret block's kind (heading level, paragraph, list item).
     SetBlockKind(BlockKind),
+    /// Add an annotation at the selection or the word under the caret. A note
+    /// starts as a bare highlight (empty body) and its comment is added later.
+    AddAnnotation(AnnotationKind),
 }
 
 /// Maps one egui event to an editor command, or `None` for events the surface
@@ -706,6 +709,14 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
             block_kind_for_key(key).map(Command::SetBlockKind)
         }
         Key::Enter => Some(Command::SplitParagraph),
+        // Ctrl-Shift-N / Ctrl-Shift-F add a note (a highlight) or a footnote at
+        // the selection.
+        Key::N if command && modifiers.shift => {
+            Some(Command::AddAnnotation(AnnotationKind::Note))
+        }
+        Key::F if command && modifiers.shift => {
+            Some(Command::AddAnnotation(AnnotationKind::Footnote))
+        }
         Key::Backspace => Some(Command::Backspace),
         Key::Delete => Some(Command::Delete),
         Key::ArrowLeft if !command => Some(Command::MoveLeft),
@@ -722,7 +733,7 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::BlockKind;
+    use crate::model::{AnnotationKind, BlockKind};
     use cosmic_text::fontdb;
     use cosmic_text::{Family, Style, Weight};
     use uuid::Uuid;
@@ -1210,6 +1221,14 @@ visual form, and thus with an independent existence.";
             ..ctrl
         };
         assert_eq!(command_for_key(Key::Z, ctrl_shift), Some(Command::Redo));
+        assert_eq!(
+            command_for_key(Key::N, ctrl_shift),
+            Some(Command::AddAnnotation(AnnotationKind::Note))
+        );
+        assert_eq!(
+            command_for_key(Key::F, ctrl_shift),
+            Some(Command::AddAnnotation(AnnotationKind::Footnote))
+        );
 
         // Key releases and unbound keys do nothing.
         assert_eq!(

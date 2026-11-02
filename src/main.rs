@@ -1487,22 +1487,22 @@ fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f
 
 /// Default body for a newly anchored annotation.
 ///
-/// A new note has to say something the moment it exists — the margin note is
-/// painted, not hidden behind the popover — so the default quotes the anchored
-/// words. The body is then the author's to rewrite in the popover (see
-/// `KameApp::show_note_popover`), which is why this is only a starting point.
+/// A note starts empty — it is a bare highlight, and its comment is the
+/// author's to add in the popover. Marginalia and footnotes quote the anchored
+/// words as a starting point (they are painted in place rather than hidden
+/// behind a popover).
 fn default_annotation_body(kind: &AnnotationKind, snippet: &str) -> String {
     let snippet = shorten(snippet.trim(), 48);
     if snippet.is_empty() {
         return match kind {
             AnnotationKind::Marginal => "New marginal note.".to_string(),
-            AnnotationKind::Note => "New note.".to_string(),
+            AnnotationKind::Note => String::new(),
             AnnotationKind::Footnote => "New footnote.".to_string(),
         };
     }
     match kind {
         AnnotationKind::Marginal => format!("Marginal note on “{snippet}”"),
-        AnnotationKind::Note => format!("Note on “{snippet}”"),
+        AnnotationKind::Note => String::new(),
         AnnotationKind::Footnote => format!("Footnote on “{snippet}”"),
     }
 }
@@ -1862,6 +1862,12 @@ impl KameApp {
                 Command::SetBlockKind(kind) => {
                     let caret = self.session.valid_caret();
                     self.session.set_block_kind(caret.block_id, kind);
+                }
+                Command::AddAnnotation(kind) => {
+                    if let Some(id) = self.session.add_annotation(kind) {
+                        self.set_open_note(Some(id));
+                        self.open_note_pos = None;
+                    }
                 }
             }
         }
@@ -3878,9 +3884,9 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             Anchor::range(block_id, 4, 9),
             "a caret anchors the word around it"
         );
-        assert!(
-            annotation.body.contains("quick"),
-            "the default body quotes the anchored words"
+        assert_eq!(
+            annotation.body, "",
+            "a new note starts as a bare highlight"
         );
         drop(session);
 
@@ -4056,7 +4062,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             .add_annotation(AnnotationKind::Note)
             .expect("a note on 'quick'");
         let generated = session.document().annotations[0].body.clone();
-        assert!(!generated.is_empty(), "a new note starts with prose");
+        assert_eq!(generated, "", "a new note starts as a bare highlight");
 
         assert!(
             session.set_annotation_body(id, "Show that the fox is not asleep."),

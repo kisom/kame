@@ -23,6 +23,8 @@ pub struct LayoutConfig {
     pub heading_size: f32,
     pub margin_width: f32,
     pub margin_size: f32,
+    /// Horizontal indent reserved for a list item's marker (bullet or number).
+    pub list_indent: f32,
 }
 
 impl Default for LayoutConfig {
@@ -34,6 +36,7 @@ impl Default for LayoutConfig {
             heading_size: 28.0,
             margin_width: 180.0,
             margin_size: 12.0,
+            list_indent: 28.0,
         }
     }
 }
@@ -55,6 +58,9 @@ pub struct BlockLayout {
     pub buffer: Buffer,
     pub lines: Vec<LayoutLine>,
     pub height: f32,
+    /// How far the text is indented from the block's left edge, to leave room
+    /// for a list marker. Zero for paragraphs and headings.
+    pub left_indent: f32,
 }
 
 /// Lay out one block, shaping it with cosmic-text at the configured column
@@ -92,8 +98,17 @@ pub fn layout_block(
         ),
     };
 
+    // List items reserve a gutter on the left for their marker, and wrap their
+    // text in the remaining column so continuation lines hang under the text
+    // rather than under the marker.
+    let left_indent = match block.kind {
+        BlockKind::ListItem { .. } => config.list_indent,
+        _ => 0.0,
+    };
+    let width = (config.body_width - left_indent).max(1.0);
+
     let mut buffer = Buffer::new(font_system, Metrics::new(size, line_height));
-    buffer.set_size(Some(config.body_width), None);
+    buffer.set_size(Some(width), None);
     let attrs = Attrs::new()
         .family(Family::Name(family))
         .weight(Weight::NORMAL)
@@ -124,6 +139,7 @@ pub fn layout_block(
         buffer,
         lines,
         height,
+        left_indent,
     }
 }
 
@@ -279,6 +295,7 @@ dance, on a page, of pen, eye and hand.";
             heading_size: 28.0,
             margin_width: 120.0,
             margin_size: 12.0,
+            list_indent: 28.0,
         }
     }
 
@@ -554,5 +571,29 @@ dance, on a page, of pen, eye and hand.";
         let l = layout_block(&mut fs, &block, &config());
         assert!(l.height > 0.0);
         assert_eq!(l.lines.len(), 1);
+    }
+
+    #[test]
+    fn list_items_indent_but_paragraphs_do_not() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = config();
+        let list = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::ListItem { ordered: false },
+            text: "item".to_string(),
+            spans: Vec::new(),
+        };
+        let paragraph = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "para".to_string(),
+            spans: Vec::new(),
+        };
+        assert_eq!(
+            layout_block(&mut fs, &list, &config).left_indent,
+            config.list_indent
+        );
+        assert_eq!(layout_block(&mut fs, &paragraph, &config).left_indent, 0.0);
     }
 }

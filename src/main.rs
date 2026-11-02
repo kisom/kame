@@ -57,6 +57,10 @@ const MARGINAL_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(96, 96, 96,
 const RULE_INK: Color32 = Color32::from_rgb(150, 141, 126);
 /// Margin marker for a Note.
 const NOTE_MARK: Color32 = Color32::from_rgb(140, 104, 40);
+/// Ink for a list item's marker (bullet or number).
+const LIST_MARKER_INK: Color32 = Color32::from_rgb(32, 29, 25);
+/// Gap between a list marker's right edge and its item's text.
+const LIST_MARKER_GAP: f32 = 6.0;
 /// Space above the first block and below the last.
 const PAGE_PADDING: f32 = 36.0;
 /// Vertical space between blocks.
@@ -1521,7 +1525,7 @@ fn hit_test(
     }
     let (index, _) = nearest?;
     let block = &blocks[index];
-    let x = (pos.x - body_left).max(0.0);
+    let x = (pos.x - body_left - layouts[index].left_indent).max(0.0);
     let y = (pos.y - tops[index]).clamp(0.0, heights[index]);
     let offset = offset_at(layouts[index], x, y, block.text.len());
     Some(Cursor {
@@ -1659,7 +1663,7 @@ fn superscript_origin(
         None => (caret_line(layout, anchor_start)?, caret_x(layout, anchor_start)),
     };
     Some(Pos2::new(
-        body_left + x.clamp(0.0, body_width),
+        body_left + layout.left_indent + x.clamp(0.0, body_width),
         block_top + line.y + line.height * 0.1,
     ))
 }
@@ -2495,6 +2499,27 @@ impl KameApp {
         let blocks = &document.blocks;
         let caret = self.session.caret;
 
+        // List markers: a bullet for unordered items, a 1-based number for a
+        // run of ordered items. The counter restarts when a run is interrupted.
+        let mut ordered = 0usize;
+        let list_markers: Vec<Option<String>> = blocks
+            .iter()
+            .map(|block| match block.kind {
+                BlockKind::ListItem { ordered: true } => {
+                    ordered += 1;
+                    Some(format!("{ordered}."))
+                }
+                BlockKind::ListItem { ordered: false } => {
+                    ordered = 0;
+                    Some("•".to_string())
+                }
+                _ => {
+                    ordered = 0;
+                    None
+                }
+            })
+            .collect();
+
         // Footnote numbering is reading order, not creation order: the stored
         // annotation vector records when a note was made, which is unrelated
         // to where it sits in the prose.
@@ -2590,8 +2615,23 @@ impl KameApp {
         let caret_index = blocks.iter().position(|block| block.id == caret.block_id);
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (index, block) in blocks.iter().enumerate() {
+            let indent = layouts[index].left_indent;
+            // A list item's marker sits in the gutter before its text, its
+            // right edge held a fixed gap short of the text so numbers align.
+            if let Some(marker) = &list_markers[index] {
+                painter.text(
+                    Pos2::new(
+                        body_left + indent - LIST_MARKER_GAP,
+                        tops[index] + config.body_line_height * 0.5,
+                    ),
+                    Align2::RIGHT_CENTER,
+                    marker,
+                    FontId::proportional(config.body_size),
+                    LIST_MARKER_INK,
+                );
+            }
             if let Some(texture) = self.textures.get(block.id) {
-                let origin = Pos2::new(body_left, tops[index]);
+                let origin = Pos2::new(body_left + indent, tops[index]);
                 let rect = texture.rect(origin);
                 painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
                 if let Some(veil) = dim_veil(focus, index, caret_index) {
@@ -2621,7 +2661,7 @@ impl KameApp {
             };
             for rect in range_rects(layouts[index], start, end) {
                 painter.rect_filled(
-                    rect.translate(Vec2::new(body_left, tops[index])),
+                    rect.translate(Vec2::new(body_left + layouts[index].left_indent, tops[index])),
                     1.0,
                     color,
                 );
@@ -2649,7 +2689,10 @@ impl KameApp {
                     }
                     for rect in range_rects(layouts[index], lo, hi) {
                         painter.rect_filled(
-                            rect.translate(Vec2::new(body_left, tops[index])),
+                            rect.translate(Vec2::new(
+                                body_left + layouts[index].left_indent,
+                                tops[index],
+                            )),
                             0.0,
                             SELECTION_FILL,
                         );
@@ -2667,7 +2710,7 @@ impl KameApp {
             let x = caret_x(layouts[index], caret.offset);
             let top = tops[index] + line_y;
             let rect = Rect::from_min_size(
-                Pos2::new(body_left + x, top),
+                Pos2::new(body_left + layouts[index].left_indent + x, top),
                 Vec2::new(1.5, line_height),
             );
             painter.rect_filled(rect, 0.0, CARET_INK);

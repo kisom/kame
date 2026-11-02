@@ -233,6 +233,7 @@ dance, on a page, of pen, eye and hand.";
             heading_size: 28.0,
             margin_width: 120.0,
             margin_size: 12.0,
+            list_indent: 28.0,
         }
     }
 

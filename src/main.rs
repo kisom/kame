@@ -786,6 +786,30 @@ impl CloseGuard {
     }
 }
 
+/// Shortens `path` to at most `max_chars` characters by dropping its start, since
+/// the file name at the end is the part that identifies it. The cut lands on a
+/// directory boundary when the rest still fits.
+fn elide_path(path: &str, max_chars: usize) -> String {
+    let count = path.chars().count();
+    if count <= max_chars {
+        return path.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let keep = max_chars - 1;
+    let start = path
+        .char_indices()
+        .nth(count - keep)
+        .map_or(path.len(), |(index, _)| index);
+    let tail = &path[start..];
+    let tail = match tail.find('/') {
+        Some(slash) if slash + 1 < tail.len() => &tail[slash..],
+        _ => tail,
+    };
+    format!("…{tail}")
+}
+
 /// Whether `event` is the macOS quit shortcut. `mac_cmd` is never set elsewhere,
 /// so this binds no quit key on Linux.
 fn is_quit_chord(event: &egui::Event) -> bool {
@@ -3386,8 +3410,14 @@ impl KameApp {
                 {
                     toggle_dark = true;
                 }
+                // Sized to the room left in the row, or it would print over the
+                // controls in a narrow window. Hovering shows the whole path.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.monospace(path);
+                    let font = egui::TextStyle::Monospace.resolve(ui.style());
+                    let char_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M'));
+                    let max_chars = (ui.available_width() / char_width.max(1.0)) as usize;
+                    ui.monospace(elide_path(&path, max_chars))
+                        .on_hover_text(path.as_str());
                 });
             });
             ui.horizontal(|ui| {
@@ -5368,6 +5398,36 @@ mod tests {
         assert_eq!(typewriter_scroll_offset(1900.0, 400.0, 2000.0), 1600.0);
         // Content shorter than the viewport never scrolls.
         assert_eq!(typewriter_scroll_offset(300.0, 400.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn a_path_that_fits_is_left_alone() {
+        assert_eq!(elide_path("/a/b.kame", 9), "/a/b.kame");
+        assert_eq!(elide_path("Untitled", 40), "Untitled");
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_end_and_starts_on_a_directory() {
+        assert_eq!(
+            elide_path("/Users/kyle/data/writing/essay.kame", 20),
+            "…/writing/essay.kame"
+        );
+    }
+
+    #[test]
+    fn a_file_name_that_barely_fits_keeps_as_much_as_it_can() {
+        assert_eq!(elide_path("/Users/kyle/essay.kame", 8), "…ay.kame");
+    }
+
+    #[test]
+    fn eliding_counts_characters_not_bytes() {
+        assert_eq!(elide_path("/données/été/café.kame", 11), "…/café.kame");
+    }
+
+    #[test]
+    fn no_room_means_no_path() {
+        assert_eq!(elide_path("/a/b.kame", 0), "");
+        assert_eq!(elide_path("/a/b.kame", 1), "…");
     }
 
     #[test]

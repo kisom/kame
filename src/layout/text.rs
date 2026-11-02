@@ -10,7 +10,7 @@ use crate::model::{Block, BlockId, BlockKind, SpanStyle};
 
 /// Body face (paragraphs, list items); loaded by the caller into the
 /// `FontSystem`.
-const BODY_FAMILY: &str = "EB Garamond";
+const BODY_FAMILY: &str = "Source Serif 4";
 /// Heading face; loaded by the caller into the `FontSystem`.
 const HEADING_FAMILY: &str = "Crimson Pro";
 /// The fixed colour a URL renders in. Chosen to read on both the light and the
@@ -374,9 +374,9 @@ dance, on a page, of pen, eye and hand.";
 
     fn load_fonts(fs: &mut FontSystem) {
         for file in [
-            "EBGaramond-Regular.otf",
-            "EBGaramond-Bold.otf",
-            "EBGaramond-Italic.otf",
+            "SourceSerif4-Regular.ttf",
+            "SourceSerif4-Bold.ttf",
+            "SourceSerif4-Italic.ttf",
             "CrimsonPro-Regular.ttf",
         ] {
             fs.db_mut()
@@ -537,18 +537,18 @@ dance, on a page, of pen, eye and hand.";
     }
 
     #[test]
-    fn body_text_shapes_with_eb_garamond() {
+    fn body_text_shapes_with_source_serif() {
         let mut fs = FontSystem::new();
         load_fonts(&mut fs);
         let face = fs
             .db()
             .query(&cosmic_text::fontdb::Query {
-                families: &[Family::Name("EB Garamond")],
+                families: &[Family::Name("Source Serif 4")],
                 ..Default::default()
             })
-            .expect("EB Garamond is registered after loading the font files");
+            .expect("Source Serif 4 is registered after loading the font files");
 
-        let block = paragraph("Garamond");
+        let block = paragraph("Source");
         let l = layout_block(&mut fs, &block, &config());
         let run = l.buffer.layout_runs().next().expect("one shaped run");
         assert!(!run.glyphs.is_empty());
@@ -563,8 +563,11 @@ dance, on a page, of pen, eye and hand.";
         let mut fs = FontSystem::new();
         load_fonts(&mut fs);
         let crimson = face(&fs, "Crimson Pro", Weight::NORMAL, Style::Normal);
-        let garamond = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
-        assert_ne!(crimson, garamond, "headings and body must not share a face");
+        let body_face = face(&fs, "Source Serif 4", Weight::NORMAL, Style::Normal);
+        assert_ne!(
+            crimson, body_face,
+            "headings and body must not share a face"
+        );
 
         let block = Block {
             id: Uuid::new_v4(),
@@ -580,23 +583,23 @@ dance, on a page, of pen, eye and hand.";
             "heading glyphs did not resolve to the Crimson Pro face"
         );
         assert!(
-            run.glyphs.iter().all(|glyph| glyph.font_id != garamond),
-            "heading glyphs fell back to EB Garamond"
+            run.glyphs.iter().all(|glyph| glyph.font_id != body_face),
+            "heading glyphs fell back to Source Serif 4"
         );
 
-        // Body text keeps the EB Garamond face.
-        let body = paragraph("Garamond");
+        // Body text keeps the Source Serif 4 face.
+        let body = paragraph("Source");
         let l = layout_block(&mut fs, &body, &config());
         let run = l.buffer.layout_runs().next().expect("one shaped run");
-        assert!(run.glyphs.iter().all(|glyph| glyph.font_id == garamond));
+        assert!(run.glyphs.iter().all(|glyph| glyph.font_id == body_face));
     }
 
     #[test]
     fn bold_span_shapes_with_bold_weight() {
         let mut fs = FontSystem::new();
         load_fonts(&mut fs);
-        let bold_face = face(&fs, "EB Garamond", Weight::BOLD, Style::Normal);
-        let regular_face = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
+        let bold_face = face(&fs, "Source Serif 4", Weight::BOLD, Style::Normal);
+        let regular_face = face(&fs, "Source Serif 4", Weight::NORMAL, Style::Normal);
 
         let mut block = paragraph("plain bold plain");
         block.spans = vec![Span {
@@ -636,8 +639,8 @@ dance, on a page, of pen, eye and hand.";
     fn italic_span_shapes_with_italic_face() {
         let mut fs = FontSystem::new();
         load_fonts(&mut fs);
-        let italic_face = face(&fs, "EB Garamond", Weight::NORMAL, Style::Italic);
-        let regular_face = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
+        let italic_face = face(&fs, "Source Serif 4", Weight::NORMAL, Style::Italic);
+        let regular_face = face(&fs, "Source Serif 4", Weight::NORMAL, Style::Normal);
 
         let mut block = paragraph("plain italic plain");
         block.spans = vec![Span {

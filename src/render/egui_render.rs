@@ -22,15 +22,15 @@ use crate::render::GlyphAtlas;
 /// Every face the layout can ask for, compiled into the binary.
 ///
 /// Loading these into the runtime [`FontSystem`] is not optional: headings
-/// resolve `Crimson Pro` and body text `EB Garamond`, and a missing heading
+/// resolve `Crimson Pro` and body text `Source Serif 4`, and a missing heading
 /// face silently falls back to the body family. Embedding the files (rather
 /// than reading `fonts/` at startup) keeps a binary copied elsewhere working
 /// while still sourcing exactly the files in `fonts/`.
 const FONTS: &[&[u8]] = &[
-    include_bytes!("../../fonts/EBGaramond-Regular.otf"),
-    include_bytes!("../../fonts/EBGaramond-Bold.otf"),
-    include_bytes!("../../fonts/EBGaramond-Italic.otf"),
-    include_bytes!("../../fonts/EBGaramond-SemiBold.otf"),
+    include_bytes!("../../fonts/SourceSerif4-Regular.ttf"),
+    include_bytes!("../../fonts/SourceSerif4-Bold.ttf"),
+    include_bytes!("../../fonts/SourceSerif4-Italic.ttf"),
+    include_bytes!("../../fonts/SourceSerif4-SemiBold.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Regular.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Bold.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Italic.ttf"),
@@ -38,9 +38,9 @@ const FONTS: &[&[u8]] = &[
 
 /// Loads the bundled faces into egui so the immediate-mode text — list markers,
 /// footnote superscripts, and the UI chrome — renders in the same families as
-/// the cosmic-text page. The proportional family is re-pointed at EB Garamond,
-/// so `FontId::proportional` picks it up everywhere without call-site changes;
-/// egui's own faces stay as fallbacks for glyphs the serif lacks.
+/// the cosmic-text page. The proportional family is re-pointed at Source Serif
+/// 4, so `FontId::proportional` picks it up everywhere without call-site
+/// changes; egui's own faces stay as fallbacks for glyphs the serif lacks.
 pub fn install_fonts(ctx: &Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut face = |name: &str, bytes: &'static [u8]| {
@@ -50,16 +50,16 @@ pub fn install_fonts(ctx: &Context) {
         );
     };
     face(
-        "EB Garamond",
-        include_bytes!("../../fonts/EBGaramond-Regular.otf"),
+        "Source Serif 4",
+        include_bytes!("../../fonts/SourceSerif4-Regular.ttf"),
     );
     face(
-        "EB Garamond Bold",
-        include_bytes!("../../fonts/EBGaramond-Bold.otf"),
+        "Source Serif 4 Bold",
+        include_bytes!("../../fonts/SourceSerif4-Bold.ttf"),
     );
     face(
-        "EB Garamond Italic",
-        include_bytes!("../../fonts/EBGaramond-Italic.otf"),
+        "Source Serif 4 Italic",
+        include_bytes!("../../fonts/SourceSerif4-Italic.ttf"),
     );
     face(
         "Crimson Pro",
@@ -73,7 +73,7 @@ pub fn install_fonts(ctx: &Context) {
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .insert(0, "EB Garamond".to_owned());
+        .insert(0, "Source Serif 4".to_owned());
     ctx.set_fonts(fonts);
 }
 
@@ -932,10 +932,10 @@ mod tests {
     fn runtime_font_system_registers_every_face() {
         let renderer = GlyphRenderer::new(config());
         for (family, weight, style) in [
-            ("EB Garamond", Weight::NORMAL, Style::Normal),
-            ("EB Garamond", Weight::BOLD, Style::Normal),
-            ("EB Garamond", Weight::NORMAL, Style::Italic),
-            ("EB Garamond", Weight::SEMIBOLD, Style::Normal),
+            ("Source Serif 4", Weight::NORMAL, Style::Normal),
+            ("Source Serif 4", Weight::BOLD, Style::Normal),
+            ("Source Serif 4", Weight::NORMAL, Style::Italic),
+            ("Source Serif 4", Weight::SEMIBOLD, Style::Normal),
             ("Crimson Pro", Weight::NORMAL, Style::Normal),
             ("Crimson Pro", Weight::BOLD, Style::Normal),
             ("Crimson Pro", Weight::NORMAL, Style::Italic),
@@ -943,21 +943,21 @@ mod tests {
             face(&renderer, family, weight, style);
         }
         assert_ne!(
-            face(&renderer, "EB Garamond", Weight::NORMAL, Style::Normal),
+            face(&renderer, "Source Serif 4", Weight::NORMAL, Style::Normal),
             face(&renderer, "Crimson Pro", Weight::NORMAL, Style::Normal),
             "body and heading must not share a face"
         );
     }
 
-    /// egui's font backend (ab_glyph) must parse the bundled faces — the OTF
-    /// CFF outlines included — or `install_fonts` panics at startup and the UI
+    /// egui's font backend (ab_glyph) must parse the bundled faces — the TTF
+    /// outlines included — or `install_fonts` panics at startup and the UI
     /// falls back to a stock face. This pins the parse at the source.
     #[test]
     fn bundled_faces_parse_for_egui() {
         let faces: &[&'static [u8]] = &[
-            include_bytes!("../../fonts/EBGaramond-Regular.otf"),
-            include_bytes!("../../fonts/EBGaramond-Bold.otf"),
-            include_bytes!("../../fonts/EBGaramond-Italic.otf"),
+            include_bytes!("../../fonts/SourceSerif4-Regular.ttf"),
+            include_bytes!("../../fonts/SourceSerif4-Bold.ttf"),
+            include_bytes!("../../fonts/SourceSerif4-Italic.ttf"),
             include_bytes!("../../fonts/CrimsonPro-Regular.ttf"),
             include_bytes!("../../fonts/CrimsonPro-Bold.ttf"),
         ];
@@ -973,7 +973,7 @@ mod tests {
     fn runtime_headings_shape_with_crimson_pro() {
         let mut renderer = GlyphRenderer::new(config());
         let crimson = face(&renderer, "Crimson Pro", Weight::NORMAL, Style::Normal);
-        let garamond = face(&renderer, "EB Garamond", Weight::NORMAL, Style::Normal);
+        let body_face = face(&renderer, "Source Serif 4", Weight::NORMAL, Style::Normal);
         let block = heading("On the Shape of Letters");
         let layout = renderer.layout(&block);
         let run = layout.buffer.layout_runs().next().expect("one shaped run");
@@ -983,8 +983,8 @@ mod tests {
             "heading glyphs did not use the Crimson Pro face"
         );
         assert!(
-            run.glyphs.iter().all(|glyph| glyph.font_id != garamond),
-            "heading glyphs fell back to EB Garamond"
+            run.glyphs.iter().all(|glyph| glyph.font_id != body_face),
+            "heading glyphs fell back to Source Serif 4"
         );
     }
 

@@ -392,6 +392,24 @@ fn resolve_open_path(typed: &str, base: &Path) -> PathBuf {
     }
 }
 
+/// The native "save as" file browser, or `None` when the author cancels it.
+///
+/// `rfd` is built with the XDG desktop portal backend (not GTK), so it asks the
+/// compositor's file chooser over D-Bus and works on a Wayland desktop without
+/// kame linking GTK. The portal's dialog is modal, so blocking the frame thread
+/// on it is correct.
+fn pick_save_path() -> Option<PathBuf> {
+    async_std::task::block_on(async {
+        rfd::AsyncFileDialog::new()
+            .set_title("Save kame document")
+            .add_filter("kame document", &["kame"])
+            .set_file_name("Untitled.kame")
+            .save_file()
+            .await
+    })
+    .map(|handle| handle.path().to_path_buf())
+}
+
 /// The "Insert image" path prompt: a text field for the image file to embed.
 struct ImagePrompt {
     /// The path being typed.
@@ -766,24 +784,30 @@ fn save_config(config: &KameConfig) {
 }
 
 fn main() -> eframe::Result {
-    let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) else {
-        eprintln!("usage: kame <file.kame>");
-        std::process::exit(2);
-    };
-
-    // Open the document before the window exists, so a failure is reported as
-    // "your file is the problem" rather than an opaque app-creation error that
-    // reads as "kame is broken". A failed open still shows the author an
-    // editable (in-memory) document and the reason in the status panel, since a
-    // desktop launch has no terminal to print to.
-    let session = match Session::open(&path) {
-        Ok(session) => session,
-        Err(err) => {
-            let message = format!("could not open {} — {err}", path.display());
-            Session::blank(&path, message).unwrap_or_else(|err| {
-                eprintln!("kame: {err}");
-                std::process::exit(1);
-            })
+    // No argument means an anonymous document: the author starts typing at once
+    // and the first save prompts for a file. With an argument, open that file.
+    let session = match std::env::args_os().nth(1).map(PathBuf::from) {
+        None => Session::anonymous().unwrap_or_else(|err| {
+            eprintln!("kame: {err}");
+            std::process::exit(1);
+        }),
+        Some(path) => {
+            // Open the document before the window exists, so a failure is
+            // reported as "your file is the problem" rather than an opaque
+            // app-creation error that reads as "kame is broken". A failed open
+            // still shows the author an editable (in-memory) document and the
+            // reason in the status panel, since a desktop launch has no
+            // terminal to print to.
+            match Session::open(&path) {
+                Ok(session) => session,
+                Err(err) => {
+                    let message = format!("could not open {} — {err}", path.display());
+                    Session::blank(&path, message).unwrap_or_else(|err| {
+                        eprintln!("kame: {err}");
+                        std::process::exit(1);
+                    })
+                }
+            }
         }
     };
 
@@ -860,9 +884,10 @@ struct Session {
     /// Set when a write failed. Further mutations are refused until a write
     /// succeeds, so the in-memory undo cursor cannot drift from the DB cursor.
     save_failed: bool,
-    /// The file this session was opened from. Exports land beside it, and the
-    /// snapshots it prompts for live in the database it names.
-    path: PathBuf,
+    /// The file this session is persisted to, or `None` for an anonymous
+    /// (in-memory) document that has not been saved yet. Exports land beside
+    /// it, and the snapshots it prompts for live in the database it names.
+    path: Option<PathBuf>,
 }
 
 impl Session {
@@ -949,7 +974,7 @@ impl Session {
             selection: None,
             last_error,
             save_failed,
-            path: path.to_path_buf(),
+            path: Some(path.to_path_buf()),
         })
     }
 
@@ -980,7 +1005,33 @@ impl Session {
             selection: None,
             last_error: Some(error),
             save_failed: false,
-            path: path.to_path_buf(),
+            path: None,
+        })
+    }
+
+    /// A fresh anonymous document for a launch with no file argument: an
+    /// in-memory database with no path, so the author starts typing at once and
+    /// the first save prompts for a file (see [`Session::save_as`]).
+    fn anonymous() -> AppResult<Session> {
+        let db = Db::open_in_memory()?;
+        let editor = Editor::new(Document::new("Untitled"));
+        let caret = editor
+            .document()
+            .blocks
+            .first()
+            .map(|block| Cursor {
+                block_id: block.id,
+                offset: 0,
+            })
+            .ok_or("document has no blocks")?;
+        Ok(Session {
+            editor,
+            db,
+            caret,
+            selection: None,
+            last_error: None,
+            save_failed: false,
+            path: None,
         })
     }
 
@@ -988,9 +1039,23 @@ impl Session {
         self.editor.document()
     }
 
-    /// The `.kame` file this session was opened from.
-    fn path(&self) -> &Path {
-        &self.path
+    /// The `.kame` file this session is persisted to, or `None` for an
+    /// anonymous (unsaved) document.
+    fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Whether this document has no file yet (launched with no argument, or a
+    /// failed open) — the signal that saving must ask for a path first.
+    fn is_anonymous(&self) -> bool {
+        self.path.is_none()
+    }
+
+    /// Whether an anonymous document has anything worth saving: any prose or
+    /// apparatus. An empty Untitled document can close without a prompt.
+    fn has_content(&self) -> bool {
+        let doc = self.editor.document();
+        doc.blocks.iter().any(|block| !block.text.trim().is_empty()) || !doc.annotations.is_empty()
     }
 
     fn history(&self) -> (usize, usize) {
@@ -999,6 +1064,14 @@ impl Session {
 
     // --- files, exports and snapshots --------------------------------------
 
+    /// The path exports should land beside: the saved file's directory, or the
+    /// current directory (as `document.*`) for an anonymous document.
+    fn export_base(&self) -> PathBuf {
+        self.path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("document.kame"))
+    }
+
     /// Writes the document as Markdown beside the `.kame` file and returns the
     /// path written.
     ///
@@ -1006,7 +1079,7 @@ impl Session {
     /// `save_failed`: the document itself is still stored, so the author can
     /// keep writing and take the export again.
     fn export_markdown(&mut self) -> Option<PathBuf> {
-        let path = export_path(&self.path, "md");
+        let path = export_path(&self.export_base(), "md");
         let markdown = crate::export::to_markdown(self.editor.document());
         self.write_export(&path, &markdown)
     }
@@ -1014,9 +1087,27 @@ impl Session {
     /// Writes the document as a standalone HTML page beside the `.kame` file
     /// and returns the path written.
     fn export_html(&mut self) -> Option<PathBuf> {
-        let path = export_path(&self.path, "html");
+        let path = export_path(&self.export_base(), "html");
         let html = crate::export::to_html(self.editor.document());
         self.write_export(&path, &html)
+    }
+
+    /// Persists an anonymous document to `path` for the first time, carrying
+    /// the full edit history with it, and switches the session to that file so
+    /// subsequent edits land on disk.
+    fn save_as(&mut self, path: &Path) -> AppResult<()> {
+        let doc = self.editor.document().clone();
+        let cursor = self.editor.cursor();
+        let ops = self.db.load_ops()?;
+        let mut db = Db::open(path)?;
+        for (_, op) in ops {
+            db.append_op(&op)?;
+        }
+        db.save_state(&doc, cursor)?;
+        self.db = db;
+        self.path = Some(path.to_path_buf());
+        self.clear_save_error();
+        Ok(())
     }
 
     /// The one write path for both exports.
@@ -2245,6 +2336,11 @@ struct KameApp {
     /// Keeps a failed write from being discarded by a stray close, while still
     /// letting the author quit on a second request.
     close: CloseGuard,
+    /// The "save this anonymous document before closing?" prompt, when it is
+    /// open. Distinct from the failed-write guard: this asks the author whether
+    /// to save an unsaved document, the guard refuses a close that would lose
+    /// a write that already failed.
+    close_prompt: bool,
     /// The find bar, when it is open.
     find: Option<Find>,
     /// Set when a find jump moves the caret to a match that may be off-screen;
@@ -2291,6 +2387,7 @@ impl KameApp {
             restore_picker: None,
             notice: None,
             close: CloseGuard::default(),
+            close_prompt: false,
             find: None,
             reveal_caret: false,
             show_help: false,
@@ -2691,6 +2788,25 @@ impl KameApp {
         if link_chord {
             self.begin_link();
         }
+        // Ctrl-S saves. A document already on disk is saved continuously, so
+        // this is a no-op there; an anonymous document prompts for a file first.
+        let save_chord = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::S,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if modifiers.command && !modifiers.shift
+                )
+            })
+        });
+        if save_chord {
+            self.save_action(ctx, false);
+        }
         // F1 toggles the help dialog (the usage and keybinding reference).
         if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
             self.show_help = !self.show_help;
@@ -3005,15 +3121,18 @@ impl KameApp {
             .sum();
         let annotations = self.session.document().annotations.len();
         let (undo, redo) = self.session.history();
-        let path = self.session.path().display().to_string();
+        let path = self
+            .session
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "Untitled".to_string());
         let error = self.session.last_error.clone();
         let notice = self.notice.clone();
         // Where the two exports would land, spelled out on the buttons so the
         // author knows the file name before clicking.
-        let markdown_path = export_path(self.session.path(), "md").display().to_string();
-        let html_path = export_path(self.session.path(), "html")
-            .display()
-            .to_string();
+        let export_base = self.session.export_base();
+        let markdown_path = export_path(&export_base, "md").display().to_string();
+        let html_path = export_path(&export_base, "html").display().to_string();
         // The type-size buttons below collect their action here, applied after
         // the panel closes so the size is read (for display) and written once.
         let mut font_step: Option<f32> = None;
@@ -3965,6 +4084,7 @@ impl KameApp {
                             ),
                             ("Ctrl-Shift-E", "export Markdown"),
                             ("Ctrl-Shift-B", "export HTML"),
+                            ("Ctrl-S", "save (prompts for a file if unsaved)"),
                             ("Ctrl-Shift-S", "snapshot now"),
                             ("Ctrl-Shift-R", "restore a snapshot"),
                             ("Ctrl-O", "open a document, replacing this one"),
@@ -4155,7 +4275,11 @@ impl KameApp {
             self.session.last_error = Some("no path given".to_string());
             return;
         }
-        let base = self.session.path().to_path_buf();
+        let base = self
+            .session
+            .path()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         let path = resolve_open_path(&typed, &base);
         match Session::open(&path) {
             Ok(session) => {
@@ -4196,6 +4320,79 @@ impl KameApp {
         self.image_textures
             .insert(path.to_string(), texture.clone());
         Some(texture)
+    }
+
+    /// The Save action (Ctrl-S, or "Save…" in the close prompt). A document
+    /// already on disk is saved continuously, so it is a no-op; an anonymous
+    /// document opens the native save-as browser and, on success, is persisted
+    /// to the chosen file. `close_after` closes the window once the save lands.
+    fn save_action(&mut self, ctx: &egui::Context, close_after: bool) {
+        if !self.session.is_anonymous() {
+            self.notice = Some("saved".to_string());
+            return;
+        }
+        let Some(path) = pick_save_path() else {
+            // The author cancelled the save; the close prompt stays open so
+            // they can still discard or cancel explicitly.
+            return;
+        };
+        match self.session.save_as(&path) {
+            Ok(()) => {
+                self.notice = Some(format!("saved {}", path.display()));
+                if close_after {
+                    self.close_prompt = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Err(err) => {
+                self.session.last_error =
+                    Some(format!("could not save {} — {err}", path.display()));
+            }
+        }
+    }
+
+    /// The "save this anonymous document before closing?" prompt: Save… opens
+    /// the native save-as browser, Don't Save closes without saving, and Cancel
+    /// keeps editing.
+    fn show_close_prompt(&mut self, ctx: &egui::Context) {
+        if !self.close_prompt {
+            return;
+        }
+        let mut save = false;
+        let mut discard = false;
+        let mut cancel = false;
+        egui::Window::new("Unsaved document")
+            .id(Id::unique("kame-close-prompt"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                ui.label("This document has not been saved to a file.");
+                ui.horizontal(|ui| {
+                    if ui.button("Save…").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        discard = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            self.close_prompt = false;
+            return;
+        }
+        if discard {
+            self.close_prompt = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if save {
+            self.save_action(ctx, true);
+        }
     }
 
     /// Opens the link prompt on the current selection, or the link under the
@@ -4343,7 +4540,11 @@ impl KameApp {
         if path.is_empty() {
             return;
         }
-        let base = self.session.path().to_path_buf();
+        let base = self
+            .session
+            .path()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         self.session
             .insert_image(resolve_open_path(&path, &base).display().to_string());
     }
@@ -4476,6 +4677,21 @@ impl eframe::App for KameApp {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        // An anonymous document with content has not been saved anywhere: the
+        // first close request opens a "save?" prompt instead of closing. The
+        // prompt is rendered by `show_close_prompt`; a document already on
+        // disk, or an empty Untitled, closes without asking.
+        if close_requested
+            && !self.session.save_failed
+            && self.session.is_anonymous()
+            && self.session.has_content()
+            && !self.close_prompt
+        {
+            self.close_prompt = true;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        self.show_close_prompt(ui.ctx());
         // The measure follows the window *before* the scroll area is built: the
         // scroll bar's presence would otherwise feed back into the wrap width
         // and make the page oscillate at the threshold. The panel width does not
@@ -4963,6 +5179,47 @@ mod tests {
         assert!(session.insert("scratch"), "the blank document is editable");
         assert_eq!(session.document().blocks[0].text, "scratch");
         assert!(!path.exists(), "a blank session never creates the bad path");
+    }
+
+    #[test]
+    fn an_anonymous_session_starts_untitled_with_no_path() {
+        let mut session = Session::anonymous().unwrap();
+        assert!(session.path().is_none());
+        assert!(session.is_anonymous());
+        assert_eq!(session.document().title, "Untitled");
+        assert!(
+            !session.has_content(),
+            "a fresh Untitled has nothing to save"
+        );
+
+        assert!(
+            session.insert("scratch"),
+            "the anonymous document is editable"
+        );
+        assert_eq!(session.document().blocks[0].text, "scratch");
+        assert!(session.has_content(), "prose is worth saving");
+    }
+
+    #[test]
+    fn save_as_persists_the_document_and_its_history() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Hello");
+        session.insert(" world");
+        assert_eq!(session.history(), (2, 0));
+
+        let path = temp_db_path();
+        assert!(!path.exists());
+        session.save_as(&path).unwrap();
+
+        assert_eq!(session.path(), Some(path.as_path()));
+        assert!(!session.is_anonymous(), "the document now has a file");
+        assert!(path.exists(), "save-as wrote the file");
+
+        // The file round-trips: same text, and the undo history travelled too.
+        drop(session);
+        let reopened = open(&path);
+        assert_eq!(reopened.document().blocks[0].text, "Hello world");
+        assert_eq!(reopened.history(), (2, 0));
     }
 
     #[test]

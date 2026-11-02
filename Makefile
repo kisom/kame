@@ -28,7 +28,7 @@ clean: ## Remove build artifacts
 # at runtime, so a bare cargo build can't find them outside `nix develop`.
 # `nix build .#` wraps the binary with the right LD_LIBRARY_PATH; install that.
 # Elsewhere the libs are in standard paths and a plain release build suffices.
-install: ## Install a working binary into ~/.local/bin
+install: ## Install the binary and a desktop shortcut
 	@if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then \
 		nix build .#; \
 		mkdir -p $(PREFIX); \
@@ -38,3 +38,7 @@ install: ## Install a working binary into ~/.local/bin
 		mkdir -p $(PREFIX); \
 		install -m 755 target/release/$(BIN) $(PREFIX)/$(BIN); \
 	fi
+	@mkdir -p $(HOME)/.local/share/applications $(HOME)/.local/share/icons/hicolor/256x256/apps
+	@sed 's|@PREFIX@|$(PREFIX)|g' packaging/kame.desktop > $(HOME)/.local/share/applications/kame.desktop
+	@install -m 644 packaging/kame.png $(HOME)/.local/share/icons/hicolor/256x256/apps/kame.png
+	@printf 'installed $(PREFIX)/$(BIN), desktop shortcut, and icon\n'

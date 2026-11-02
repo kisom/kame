@@ -230,7 +230,6 @@ impl Db {
     /// Sequence numbers are strictly increasing; they are what
     /// [`Db::truncate_ops_after`] cuts at. A failed insert leaves the log
     /// unchanged (single-statement transaction).
-    #[cfg(test)]
     pub fn append_op(&mut self, op: &Op) -> Result<i64, DbError> {
         let json = serde_json::to_string(op)?;
         self.conn

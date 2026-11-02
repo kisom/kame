@@ -69,6 +69,7 @@ the text, and it is deliberately **not** an undo step:
 
 | Key | Action | Effect |
 | --- | --- | --- |
+| Ctrl-S | save | a document already on disk is saved continuously, so this is a no-op; an anonymous document opens the system save-as browser |
 | Ctrl-Shift-E | export Markdown | writes `<stem>.md` beside the `.kame` file |
 | Ctrl-Shift-B | export HTML | writes `<stem>.html`, a standalone page |
 | Ctrl-Shift-S | snapshot now | prompts for an optional label, then stores the document |

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=kame
+Comment=Marginalia editor for writing and thinking
+Exec=@PREFIX@/kame
+Icon=kame
+Terminal=false
+Categories=Office;TextEditor;WordProcessor;
+StartupWMClass=kame

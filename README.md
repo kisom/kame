@@ -3,7 +3,7 @@
 **Kyle's Marginalia Editor** — a WYSIWYG editor for writing ideas and thinking.
 
 You type into the typeset page; kame renders your prose with real typography
-(Crimson Pro headings, EB Garamond body) and lets you write alongside it in
+(Crimson Pro headings, Source Serif 4 body) and lets you write alongside it in
 the margin. Markdown and HTML are generated only on export — the document
 itself is a structured, first-class file, never a pile of markup.
 
@@ -33,7 +33,7 @@ them natively.
 ```sh
 make          # debug build
 make test     # run the test suite
-make install  # release build, install to ~/.local/bin/kame
+make install  # release build, install binary + a desktop shortcut
 make clean    # remove build artifacts
 ```
 
@@ -55,8 +55,14 @@ nix run .#    # launch the binary
 ## Using
 
 ```sh
+kame                    # an anonymous document; the first save asks for a file
 kame <document.kame>    # open (or create) a document
 ```
+
+`make install` also drops a `kame.desktop` launcher (with an icon) into
+`~/.local/share/applications`, so kame can be started from the desktop. Saving
+(`Ctrl-S`) on a document with no file opens the system save-as browser; closing
+a window with unsaved anonymous text asks before it is lost.
 
 Key bindings are listed in [docs/keybindings.md](docs/keybindings.md).
 

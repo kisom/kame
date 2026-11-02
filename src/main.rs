@@ -30,8 +30,9 @@ use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
 };
 use crate::render::egui_render::{
-    caret_line, caret_x, command_for_event, next_boundary, offset_at, prev_boundary, range_rects,
-    word_at, AnnotationTextureCache, Command, GlyphRenderer, LayoutCache, TextureCache,
+    caret_line, caret_x, command_for_event, install_fonts, next_boundary, offset_at, prev_boundary,
+    range_rects, word_at, AnnotationTextureCache, Command, GlyphRenderer, LayoutCache,
+    TextureCache,
 };
 use crate::storage::{Db, DbError, SnapshotMeta};
 
@@ -348,57 +349,69 @@ impl RestorePicker {
 /// wrap every line to three words.
 const MIN_MEASURE: f32 = 320.0;
 
-/// The measure and gutter a window of `available_width` can actually show.
+/// Fractions of the window the page takes. The body holds the middle half, an
+/// unused quarter gutter sits to its left, and the right quarter is the margin
+/// — inset by [`MARGIN_EDGE`] so marginalia never crowd the window's edge.
+const BODY_FRACTION: f32 = 0.5;
+const GUTTER_FRACTION: f32 = 0.25;
+const MARGIN_FRACTION: f32 = 0.25;
+const MARGIN_EDGE: f32 = 0.05;
+
+/// True when the window is wide enough to hold the designed page — a half-width
+/// body beside its gutter and margin — without the measure falling below
+/// [`MIN_MEASURE`].
+fn page_fits(available_width: f32) -> bool {
+    available_width * BODY_FRACTION >= MIN_MEASURE
+}
+
+/// The measure and margin column a window of `available_width` shows.
 ///
-/// The page is `body + 2 * margin` wide and nothing scrolls horizontally, so a
-/// window narrower than that would put the right end of every line out of
-/// reach. The measure therefore follows the window: it shrinks first, and once
-/// it would fall below [`MIN_MEASURE`] the margin column is dropped instead and
-/// the prose takes the whole width.
-fn page_measure(
-    body_width: f32,
-    margin_width: f32,
-    hide_margin: bool,
-    available_width: f32,
-) -> (f32, f32) {
-    let gutter = if hide_margin { 0.0 } else { margin_width };
-    let available = available_width.max(1.0);
-    if available - 2.0 * gutter >= MIN_MEASURE {
-        (
-            body_width.min(available - 2.0 * gutter).max(MIN_MEASURE),
-            gutter,
-        )
+/// The page is `gutter + body + margin`, nothing scrolls horizontally, and a
+/// window narrower than twice [`MIN_MEASURE`] cannot fit the design, so there
+/// the margin collapses and the prose fills the window.
+fn page_measure(hide_margin: bool, available_width: f32) -> (f32, f32) {
+    let width = available_width.max(1.0);
+    if page_fits(width) {
+        let body = width * BODY_FRACTION;
+        let margin = if hide_margin {
+            0.0
+        } else {
+            width * (MARGIN_FRACTION - MARGIN_EDGE)
+        };
+        (body, margin)
     } else {
-        (body_width.min(available).max(MIN_MEASURE), 0.0)
+        (width.max(MIN_MEASURE), 0.0)
     }
 }
 
 /// Page geometry for one frame, all as offsets from the painter's top-left.
 ///
 /// `config` is the measured config for this frame: `page_measure` has already
-/// shrunk the measure (and collapsed the gutter) to what the window can show,
-/// so this only centres the page.
+/// chosen the measure and margin column, so this only positions the body — a
+/// fixed quarter-gutter from the left when the page fits, flush against the
+/// edge when it has collapsed to fill a narrow window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PageGeometry {
-    /// Width of the page: the measure plus both margins (or just the measure
-    /// when the margin column is hidden or collapsed).
-    page_width: f32,
     /// Distance from the painter's left edge to the body text.
     body_left: f32,
-    /// Width of the margin gutter on each side of the measure.
+    /// Width of the margin column right of the measure.
     margin_width: f32,
 }
 
-/// Centres the page in `available_width`. A zero gutter means the margin
-/// apparatus has nowhere to sit, so callers skip it.
+/// Positions the body in `available_width`: [`GUTTER_FRACTION`] of the way in
+/// from the left. The margin column (`config.margin_width` wide) runs from the
+/// body's right edge toward the window's, leaving [`MARGIN_EDGE`] clear at the
+/// far edge for the marginals to breathe.
 fn page_geometry(config: LayoutConfig, available_width: f32) -> PageGeometry {
-    let margin_width = config.margin_width;
-    let page_width = config.body_width + 2.0 * margin_width;
-    let page_left = ((available_width - page_width) * 0.5).max(0.0);
+    let width = available_width.max(1.0);
+    let body_left = if page_fits(width) {
+        width * GUTTER_FRACTION
+    } else {
+        0.0
+    };
     PageGeometry {
-        page_width,
-        body_left: page_left + margin_width,
-        margin_width,
+        body_left,
+        margin_width: config.margin_width,
     }
 }
 
@@ -500,7 +513,11 @@ fn draw_error_indicator(ui: &mut egui::Ui, error: &str, retry: bool) -> bool {
             Pos2::new(rect.right(), rect.top() + ERROR_STRIP_HEIGHT),
         );
         painter.rect_filled(strip, 0.0, ERROR_INK);
-        painter.circle_filled(Pos2::new(rect.right() - 12.0, rect.top() + 12.0), 4.0, ERROR_INK);
+        painter.circle_filled(
+            Pos2::new(rect.right() - 12.0, rect.top() + 12.0),
+            4.0,
+            ERROR_INK,
+        );
     }
     // The painted strip is a hairline; the click target reaches down into the
     // page's top padding, above the first line of prose, so it can be hit.
@@ -560,6 +577,74 @@ impl CloseGuard {
     }
 }
 
+// --- kame config ------------------------------------------------------------
+
+/// App-level preferences, stored beside the documents rather than inside one.
+///
+/// The type size is a kame setting: it belongs to the editor, not to any
+/// single document, so it is read once at launch and written back whenever it
+/// changes. Documents never carry it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KameConfig {
+    #[serde(default = "default_body_size")]
+    body_size: f32,
+}
+
+fn default_body_size() -> f32 {
+    DEFAULT_BODY_SIZE
+}
+
+impl Default for KameConfig {
+    fn default() -> Self {
+        KameConfig {
+            body_size: DEFAULT_BODY_SIZE,
+        }
+    }
+}
+
+/// The directory kame keeps its config in: `$XDG_CONFIG_HOME/kame` (or
+/// `~/.config/kame`) on Unix, `~/Library/Application Support/kame` on macOS.
+fn config_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let base = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
+        PathBuf::from(xdg)
+    } else {
+        home.join(".config")
+    };
+    Some(base.join("kame"))
+}
+
+fn config_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("config.json"))
+}
+
+/// Reads the app config, falling back to defaults when the file is absent or
+/// unreadable. A stored value is clamped to the legal range, never trusted.
+fn load_config() -> KameConfig {
+    let mut config = config_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|json| serde_json::from_str::<KameConfig>(&json).ok())
+        .unwrap_or_default();
+    config.body_size = config.body_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+    config
+}
+
+/// Writes the app config, best-effort: a preference that fails to persist is
+/// not worth blocking the editor over.
+fn save_config(config: &KameConfig) {
+    let Some(path) = config_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
 fn main() -> eframe::Result {
     let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) else {
         eprintln!("usage: kame <file.kame>");
@@ -577,6 +662,10 @@ fn main() -> eframe::Result {
         }
     };
 
+    // The type size is a kame preference, read once here and applied to every
+    // document the app opens.
+    let body_size = load_config().body_size;
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 860.0])
@@ -588,7 +677,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "kame",
         native_options,
-        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session)))),
+        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session, body_size)))),
     )
 }
 
@@ -712,10 +801,7 @@ impl Session {
         // diverge from the DB: open it read-only, so the first edit cannot
         // shift the log under the cursor.
         let (last_error, save_failed) = match reset_error {
-            Some(err) => (
-                Some(format!("save failed — editing disabled: {err}")),
-                true,
-            ),
+            Some(err) => (Some(format!("save failed — editing disabled: {err}")), true),
             None => (warning, false),
         };
         Ok(Session {
@@ -1665,7 +1751,10 @@ fn superscript_origin(
         .find(|line| end >= line.start && end <= line.end);
     let (line, x) = match end_line {
         Some(line) => (*line, caret_x(layout, end)),
-        None => (caret_line(layout, anchor_start)?, caret_x(layout, anchor_start)),
+        None => (
+            caret_line(layout, anchor_start)?,
+            caret_x(layout, anchor_start),
+        ),
     };
     Some(Pos2::new(
         body_left + layout.left_indent + x.clamp(0.0, body_width),
@@ -1697,7 +1786,8 @@ struct KameApp {
     modes: Modes,
     /// The body font size, in px. Every other size (leading, headings, margin
     /// apparatus, list gutter) is a ratio of this, so one number scales the
-    /// whole page. A view preference, not document state.
+    /// whole page. A kame setting — persisted to the app config, never to the
+    /// document.
     body_size: f32,
     /// The caret position typewriter mode last centred. A new position scrolls
     /// the page so the caret returns to the middle; an unchanged one leaves the
@@ -1725,8 +1815,9 @@ struct KameApp {
 }
 
 impl KameApp {
-    fn new(cc: &eframe::CreationContext<'_>, session: Session) -> KameApp {
+    fn new(cc: &eframe::CreationContext<'_>, session: Session, body_size: f32) -> KameApp {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+        install_fonts(&cc.egui_ctx);
         KameApp {
             session,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
@@ -1738,7 +1829,7 @@ impl KameApp {
             open_note_body: String::new(),
             open_note_focus: false,
             modes: Modes::default(),
-            body_size: DEFAULT_BODY_SIZE,
+            body_size,
             typewriter_anchor: None,
             pending_scroll: None,
             snapshot_prompt: None,
@@ -1891,9 +1982,19 @@ impl KameApp {
         self.session.set_block_kind(caret.block_id, kind);
     }
 
+    /// Sets the body font size, clamping to the legal range and persisting it
+    /// as a kame setting so the choice survives a restart.
+    fn set_body_size(&mut self, size: f32) {
+        let size = size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        if size != self.body_size {
+            self.body_size = size;
+            save_config(&KameConfig { body_size: size });
+        }
+    }
+
     /// Steps the body font size, from which every other size is derived.
     fn adjust_font_size(&mut self, step: f32) {
-        self.body_size = (self.body_size + step).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        self.set_body_size(self.body_size + step);
     }
 
     /// Opens or closes the find bar.
@@ -2003,10 +2104,7 @@ impl KameApp {
                     .small_button("↑")
                     .on_hover_text("previous (Shift-Enter)")
                     .clicked();
-                next = ui
-                    .small_button("↓")
-                    .on_hover_text("next (Enter)")
-                    .clicked();
+                next = ui.small_button("↓").on_hover_text("next (Enter)").clicked();
                 close = ui.small_button("×").on_hover_text("close (Esc)").clicked();
             });
         });
@@ -2089,7 +2187,7 @@ impl KameApp {
             (inc, dec, reset)
         });
         if font_reset {
-            self.body_size = DEFAULT_BODY_SIZE;
+            self.set_body_size(DEFAULT_BODY_SIZE);
         } else if font_inc {
             self.adjust_font_size(FONT_SIZE_STEP);
         } else if font_dec {
@@ -2118,8 +2216,10 @@ impl KameApp {
         // While the find bar's query field has focus, Enter steps through the
         // matches and the document gets no keystrokes.
         if self.find.is_some() && ctx.memory(|memory| memory.has_focus(find_query_id())) {
-            let next = ctx.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift);
-            let prev = ctx.input(|input| input.key_pressed(egui::Key::Enter) && input.modifiers.shift);
+            let next =
+                ctx.input(|input| input.key_pressed(egui::Key::Enter) && !input.modifiers.shift);
+            let prev =
+                ctx.input(|input| input.key_pressed(egui::Key::Enter) && input.modifiers.shift);
             if next {
                 self.step_find(true);
             } else if prev {
@@ -2281,14 +2381,14 @@ impl KameApp {
             (
                 block.id,
                 block.text.len(),
-                document
-                    .blocks
-                    .first()
-                    .map(|b| Cursor { block_id: b.id, offset: 0 }),
-                document
-                    .blocks
-                    .last()
-                    .map(|b| Cursor { block_id: b.id, offset: b.text.len() }),
+                document.blocks.first().map(|b| Cursor {
+                    block_id: b.id,
+                    offset: 0,
+                }),
+                document.blocks.last().map(|b| Cursor {
+                    block_id: b.id,
+                    offset: b.text.len(),
+                }),
             )
         };
         let block_selected = matches!(
@@ -2306,8 +2406,14 @@ impl KameApp {
             (last, first)
         } else {
             (
-                Cursor { block_id, offset: block_len },
-                Cursor { block_id, offset: 0 },
+                Cursor {
+                    block_id,
+                    offset: block_len,
+                },
+                Cursor {
+                    block_id,
+                    offset: 0,
+                },
             )
         };
         self.session.set_caret(anchor);
@@ -2371,10 +2477,7 @@ impl KameApp {
                     "{annotations} annotation{}",
                     if annotations == 1 { "" } else { "s" }
                 ));
-                ui.label(format!(
-                    "{words} word{}",
-                    if words == 1 { "" } else { "s" }
-                ));
+                ui.label(format!("{words} word{}", if words == 1 { "" } else { "s" }));
                 ui.label(format!("undo {undo} · redo {redo}"));
                 ui.separator();
                 ui.label(format!("type {:.0}", self.body_size));
@@ -2706,7 +2809,10 @@ impl KameApp {
             };
             for rect in range_rects(layouts[index], start, end) {
                 painter.rect_filled(
-                    rect.translate(Vec2::new(body_left + layouts[index].left_indent, tops[index])),
+                    rect.translate(Vec2::new(
+                        body_left + layouts[index].left_indent,
+                        tops[index],
+                    )),
                     1.0,
                     color,
                 );
@@ -3101,8 +3207,7 @@ impl KameApp {
         // Ctrl/Cmd-Enter closes the popover, like the Close button. The
         // multiline field may have already appended a newline for that key, so
         // trailing newlines are dropped before committing.
-        let command_enter =
-            ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+        let command_enter = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
         if command_enter {
             while buffer.ends_with('\n') {
                 buffer.pop();
@@ -3350,12 +3455,7 @@ impl eframe::App for KameApp {
         // depend on it.
         let base = LayoutConfig::with_body_size(self.body_size);
         let available = (ui.available_width() - SCROLLBAR_ALLOWANCE).max(1.0);
-        let (body_width, margin_width) = page_measure(
-            base.body_width,
-            base.margin_width,
-            self.modes.hide_margin,
-            available,
-        );
+        let (body_width, margin_width) = page_measure(self.modes.hide_margin, available);
         let config = LayoutConfig {
             body_width,
             margin_width,
@@ -3635,58 +3735,73 @@ mod tests {
     }
 
     #[test]
-    fn hiding_the_margin_collapses_the_gutter_and_keeps_the_measure_in_place() {
-        let config = LayoutConfig::default();
-        let shown = page_geometry(config, 1400.0);
-        // Hiding the margin is a collapsed gutter in the measured config.
-        let no_gutter = LayoutConfig {
-            margin_width: 0.0,
-            ..config
+    fn hiding_the_margin_drops_the_column_but_keeps_the_body_put() {
+        let width = 1400.0;
+        let config = LayoutConfig {
+            body_width: width * BODY_FRACTION,
+            margin_width: width * (MARGIN_FRACTION - MARGIN_EDGE),
+            ..LayoutConfig::default()
         };
-        let hidden = page_geometry(no_gutter, 1400.0);
-
-        assert_eq!(
-            shown.page_width,
-            config.body_width + 2.0 * config.margin_width
+        let shown = page_geometry(config, width);
+        let hidden = page_geometry(
+            LayoutConfig {
+                margin_width: 0.0,
+                ..config
+            },
+            width,
         );
+
+        assert_eq!(shown.body_left, width * GUTTER_FRACTION);
         assert_eq!(shown.margin_width, config.margin_width);
-        assert_eq!(hidden.page_width, config.body_width);
         assert_eq!(hidden.margin_width, 0.0);
-        // Collapsing the gutter re-centres the page but leaves the prose at
-        // the same column, so hiding the margin does not move the text.
+        // Hiding the margin only empties the right column; the body does not
+        // move, so the author's place does not jump.
         assert_eq!(shown.body_left, hidden.body_left);
     }
 
     #[test]
-    fn the_measure_follows_the_window_instead_of_clipping() {
-        // A wide window keeps the designed measure and its gutters.
-        assert_eq!(page_measure(640.0, 180.0, false, 1400.0), (640.0, 180.0));
-        // Exactly fitting is still the full measure.
-        assert_eq!(page_measure(640.0, 180.0, false, 1000.0), (640.0, 180.0));
-        // Narrower: the measure shrinks, the gutters stay.
-        assert_eq!(page_measure(640.0, 180.0, false, 900.0), (540.0, 180.0));
-        assert_eq!(page_measure(640.0, 180.0, false, 700.0), (340.0, 180.0));
-        // Too narrow for a readable measure beside two gutters: the margin
-        // column collapses and the prose takes the window.
-        assert_eq!(page_measure(640.0, 180.0, false, 600.0), (600.0, 0.0));
+    fn the_page_is_proportional_and_narrow_windows_collapse_the_margin() {
+        // Body is half the window (exact); the margin is the right quarter
+        // less the 5% edge padding.
+        let (body, margin) = page_measure(false, 1000.0);
+        assert_eq!(body, 500.0);
+        assert!((margin - 200.0).abs() < 0.01, "margin {margin}");
+        let (wide_body, wide_margin) = page_measure(false, 1400.0);
+        assert_eq!(wide_body, 700.0);
+        assert!((wide_margin - 280.0).abs() < 0.01, "margin {wide_margin}");
 
-        // Whatever the window, the page is never wider than it — that is the
-        // clipping this replaces.
-        for width in [560.0f32, 700.0, 900.0, 1000.0, 1400.0] {
-            let (body, gutter) = page_measure(640.0, 180.0, false, width);
-            assert!(
-                body + 2.0 * gutter <= width + 0.01,
-                "page {} exceeds window {width}",
-                body + 2.0 * gutter
-            );
-            assert!(body >= MIN_MEASURE);
-        }
+        // Hiding the margin keeps the half-width measure but drops the column.
+        assert_eq!(page_measure(true, 1000.0), (500.0, 0.0));
 
-        // Hiding the margin sets the prose full width.
-        assert_eq!(page_measure(640.0, 180.0, true, 800.0), (640.0, 0.0));
-        let narrow = page_measure(640.0, 180.0, false, 400.0);
-        assert_eq!(narrow, (400.0, 0.0), "below the minimum the prose fills");
-        assert_eq!(page_geometry(LayoutConfig { body_width: narrow.0, margin_width: narrow.1, ..LayoutConfig::default() }, 400.0).body_left, 0.0);
+        // Below twice the minimum measure the page cannot fit its gutter and
+        // margin, so the prose fills the window and the body is flush left.
+        assert_eq!(page_measure(false, 560.0), (560.0, 0.0));
+        assert_eq!(
+            page_geometry(
+                LayoutConfig {
+                    body_width: 560.0,
+                    margin_width: 0.0,
+                    ..LayoutConfig::default()
+                },
+                560.0,
+            )
+            .body_left,
+            0.0
+        );
+    }
+
+    #[test]
+    fn kame_config_round_trips_and_defaults_the_body_size() {
+        let json = serde_json::to_string(&KameConfig { body_size: 21.0 }).unwrap();
+        assert_eq!(
+            serde_json::from_str::<KameConfig>(&json).unwrap().body_size,
+            21.0
+        );
+        // A config written by an older build (no body_size) still parses.
+        assert_eq!(
+            serde_json::from_str::<KameConfig>("{}").unwrap().body_size,
+            DEFAULT_BODY_SIZE
+        );
     }
 
     #[test]
@@ -4076,10 +4191,7 @@ mod tests {
         let block_id = first_block_id(&session);
         assert_eq!(session.document().blocks[0].kind, BlockKind::Paragraph);
 
-        assert!(session.set_block_kind(
-            block_id,
-            BlockKind::Heading { level: 1 }
-        ));
+        assert!(session.set_block_kind(block_id, BlockKind::Heading { level: 1 }));
         assert_eq!(
             session.document().blocks[0].kind,
             BlockKind::Heading { level: 1 }
@@ -4182,7 +4294,8 @@ mod tests {
         );
         assert!(reopened.redo(), "the author's own undone edit is redoable");
         assert_eq!(
-            reopened.document().blocks[0].text, "kept!",
+            reopened.document().blocks[0].text,
+            "kept!",
             "redo re-applies the typed edit exactly once, never the pre-degrade op"
         );
         assert!(!reopened.redo(), "nothing else is on the redo stack");
@@ -4199,7 +4312,10 @@ mod tests {
         assert!(session.insert("draft"));
 
         session.last_error = Some("export failed — no such directory".into());
-        assert!(!session.save_failed, "the export failure is not a save failure");
+        assert!(
+            !session.save_failed,
+            "the export failure is not a save failure"
+        );
         assert!(session.retry_or_dismiss(), "a click clears the message");
         assert!(session.last_error.is_none(), "the strip goes away");
         assert!(!session.save_failed);
@@ -4259,7 +4375,10 @@ mod tests {
             .expect("a footnote on a laid-out block has a superscript position");
         let start_x = caret_x(&layout, 0);
         let end_x = caret_x(&layout, 5);
-        assert!(end_x > start_x, "the anchor covers more than its first glyph");
+        assert!(
+            end_x > start_x,
+            "the anchor covers more than its first glyph"
+        );
         assert!(
             (origin.x - (body_left + end_x)).abs() < 0.01,
             "the number sits at the range end, got {} wanted {}",
@@ -4349,15 +4468,19 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             Anchor::range(block_id, 4, 9),
             "a caret anchors the word around it"
         );
-        assert_eq!(
-            annotation.body, "",
-            "a new note starts as a bare highlight"
-        );
+        assert_eq!(annotation.body, "", "a new note starts as a bare highlight");
         drop(session);
 
         let reopened = open(&path);
         assert_eq!(reopened.document().annotations.len(), 1);
-        assert_eq!(reopened.document().annotations[0].anchor.byte_range().unwrap().0, 4);
+        assert_eq!(
+            reopened.document().annotations[0]
+                .anchor
+                .byte_range()
+                .unwrap()
+                .0,
+            4
+        );
     }
 
     #[test]
@@ -4604,7 +4727,10 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         session.insert("a  b");
         let block_id = first_block_id(&session);
         // Caret in the second space: `word_at` returns a point anchor there.
-        session.set_caret(Cursor { block_id, offset: 2 });
+        session.set_caret(Cursor {
+            block_id,
+            offset: 2,
+        });
         let id = session
             .add_annotation(AnnotationKind::Footnote)
             .expect("a footnote on the whitespace");
@@ -4618,7 +4744,11 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         // delete's end boundary and must close up to 1, not drop.
         assert!(session.backspace());
         assert_eq!(session.document().blocks[0].text, "a b");
-        assert_eq!(session.document().annotations.len(), 1, "the footnote survives");
+        assert_eq!(
+            session.document().annotations.len(),
+            1,
+            "the footnote survives"
+        );
         assert_eq!(
             session.document().annotations[0].anchor.byte_range(),
             Some((1, 1)),
@@ -4656,10 +4786,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let matches = find_matches(&document, "aa");
         assert_eq!(
             matches,
-            vec![
-                (document.blocks[0].id, 0, 2),
-                (document.blocks[0].id, 1, 3),
-            ]
+            vec![(document.blocks[0].id, 0, 2), (document.blocks[0].id, 1, 3),]
         );
         assert!(find_matches(&document, "").is_empty());
     }

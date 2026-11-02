@@ -73,7 +73,11 @@ mod tests {
             body: "marginal".to_string(),
         }];
         shift_anchors(&mut anns, b, 0, 4);
-        assert_eq!(anns[0].anchor.byte_range(), None, "a block anchor ignores the edit");
+        assert_eq!(
+            anns[0].anchor.byte_range(),
+            None,
+            "a block anchor ignores the edit"
+        );
     }
 
     #[test]

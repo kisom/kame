@@ -9,7 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use cosmic_text::FontSystem;
-use egui::{ColorImage, Context, Event, Key, Modifiers, Pos2, Rect, TextureHandle, TextureOptions};
+use egui::{
+    ColorImage, Context, Event, FontData, FontFamily, Key, Modifiers, Pos2, Rect, TextureHandle,
+    TextureOptions,
+};
 use image::RgbaImage;
 
 use crate::layout::{layout_block, BlockLayout, LayoutConfig};
@@ -32,6 +35,47 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../fonts/CrimsonPro-Bold.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Italic.ttf"),
 ];
+
+/// Loads the bundled faces into egui so the immediate-mode text — list markers,
+/// footnote superscripts, and the UI chrome — renders in the same families as
+/// the cosmic-text page. The proportional family is re-pointed at EB Garamond,
+/// so `FontId::proportional` picks it up everywhere without call-site changes;
+/// egui's own faces stay as fallbacks for glyphs the serif lacks.
+pub fn install_fonts(ctx: &Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let mut face = |name: &str, bytes: &'static [u8]| {
+        fonts.font_data.insert(
+            name.to_owned(),
+            std::sync::Arc::new(FontData::from_static(bytes)),
+        );
+    };
+    face(
+        "EB Garamond",
+        include_bytes!("../../fonts/EBGaramond-Regular.otf"),
+    );
+    face(
+        "EB Garamond Bold",
+        include_bytes!("../../fonts/EBGaramond-Bold.otf"),
+    );
+    face(
+        "EB Garamond Italic",
+        include_bytes!("../../fonts/EBGaramond-Italic.otf"),
+    );
+    face(
+        "Crimson Pro",
+        include_bytes!("../../fonts/CrimsonPro-Regular.ttf"),
+    );
+    face(
+        "Crimson Pro Bold",
+        include_bytes!("../../fonts/CrimsonPro-Bold.ttf"),
+    );
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "EB Garamond".to_owned());
+    ctx.set_fonts(fonts);
+}
 
 /// How many block rasterizations may run before the swash mask cache is
 /// dropped. `SwashCache` never evicts on its own, so without this the cache
@@ -317,9 +361,7 @@ impl AnnotationTextureCache {
     /// Shaped height of the annotation body, in layout pixels. Callers use it
     /// to stack margin notes by the space they actually occupy.
     pub fn body_height(&self, annotation_id: AnnotationId) -> Option<f32> {
-        self.entries
-            .get(&annotation_id)
-            .map(|cached| cached.height)
+        self.entries.get(&annotation_id).map(|cached| cached.height)
     }
 
     /// Drops textures for annotations that left the document.
@@ -719,9 +761,7 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::Enter => Some(Command::SplitParagraph),
         // Ctrl-Shift-N / Ctrl-Shift-F add a note (a highlight) or a footnote at
         // the selection.
-        Key::N if command && modifiers.shift => {
-            Some(Command::AddAnnotation(AnnotationKind::Note))
-        }
+        Key::N if command && modifiers.shift => Some(Command::AddAnnotation(AnnotationKind::Note)),
         Key::F if command && modifiers.shift => {
             Some(Command::AddAnnotation(AnnotationKind::Footnote))
         }
@@ -814,6 +854,24 @@ mod tests {
             face(&renderer, "Crimson Pro", Weight::NORMAL, Style::Normal),
             "body and heading must not share a face"
         );
+    }
+
+    /// egui's font backend (ab_glyph) must parse the bundled faces — the OTF
+    /// CFF outlines included — or `install_fonts` panics at startup and the UI
+    /// falls back to a stock face. This pins the parse at the source.
+    #[test]
+    fn bundled_faces_parse_for_egui() {
+        let faces: &[&'static [u8]] = &[
+            include_bytes!("../../fonts/EBGaramond-Regular.otf"),
+            include_bytes!("../../fonts/EBGaramond-Bold.otf"),
+            include_bytes!("../../fonts/EBGaramond-Italic.otf"),
+            include_bytes!("../../fonts/CrimsonPro-Regular.ttf"),
+            include_bytes!("../../fonts/CrimsonPro-Bold.ttf"),
+        ];
+        for &bytes in faces {
+            // `from_static` unwraps the parse; a bad face fails here.
+            let _ = FontData::from_static(bytes);
+        }
     }
 
     /// The runtime renderer must shape a heading with Crimson Pro, not fall
@@ -1147,7 +1205,10 @@ visual form, and thus with an independent existence.";
         cache.sync(&ctx, &mut renderer, short, "a note", 120.0, 12.0, [0, 0, 0]);
         let short_height = cache.body_height(short).expect("height");
         assert!(short_height < height);
-        assert!(cache.body_height(Uuid::new_v4()).is_none(), "unknown ids have no height");
+        assert!(
+            cache.body_height(Uuid::new_v4()).is_none(),
+            "unknown ids have no height"
+        );
     }
 
     #[test]
@@ -1236,7 +1297,10 @@ visual form, and thus with an independent existence.";
             command_for_key(Key::ArrowRight, shift),
             Some(Command::SelectRight)
         );
-        assert_eq!(command_for_key(Key::ArrowUp, shift), Some(Command::SelectUp));
+        assert_eq!(
+            command_for_key(Key::ArrowUp, shift),
+            Some(Command::SelectUp)
+        );
         assert_eq!(
             command_for_key(Key::ArrowDown, shift),
             Some(Command::SelectDown)

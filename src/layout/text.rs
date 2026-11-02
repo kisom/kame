@@ -624,7 +624,7 @@ dance, on a page, of pen, eye and hand.";
         assert_eq!(config.heading_size, 35.0); // 1.75×
         assert_eq!(config.margin_size, 15.0); // 0.75×
         assert_eq!(config.list_indent, 35.0); // 1.75×
-        // Page geometry is independent of the type size.
+                                              // Page geometry is independent of the type size.
         assert_eq!(config.body_width, 640.0);
         assert_eq!(config.margin_width, 180.0);
         assert_eq!(LayoutConfig::default().body_size, DEFAULT_BODY_SIZE);

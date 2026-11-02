@@ -224,7 +224,9 @@ impl Db {
 
     /// Reads the whole op log in application order: `(seq, op)`, oldest first.
     pub fn load_ops(&self) -> Result<Vec<(i64, Op)>, DbError> {
-        let mut stmt = self.conn.prepare("SELECT seq, json FROM ops ORDER BY seq")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT seq, json FROM ops ORDER BY seq")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -491,8 +493,16 @@ mod tests {
 
         // A clean close checkpoints the WAL and removes both sidecars, leaving
         // only the database file.
-        assert!(!wal.exists(), "wal survived a clean close: {}", wal.display());
-        assert!(!shm.exists(), "shm survived a clean close: {}", shm.display());
+        assert!(
+            !wal.exists(),
+            "wal survived a clean close: {}",
+            wal.display()
+        );
+        assert!(
+            !shm.exists(),
+            "shm survived a clean close: {}",
+            shm.display()
+        );
     }
 
     #[test]
@@ -575,10 +585,7 @@ mod tests {
     fn load_without_document_errors() {
         let path = temp_db_path();
         let db = Db::open(&path).unwrap();
-        assert!(matches!(
-            db.load_document(),
-            Err(DbError::NoDocument)
-        ));
+        assert!(matches!(db.load_document(), Err(DbError::NoDocument)));
     }
 
     /// A genuine failure (here: the table is gone) must not be reported as
@@ -647,7 +654,10 @@ mod tests {
         };
         let seq1 = db.append_op(&first).unwrap();
         let seq2 = db.append_op(&second).unwrap();
-        assert!(seq1 < seq2, "sequence numbers must increase: {seq1}, {seq2}");
+        assert!(
+            seq1 < seq2,
+            "sequence numbers must increase: {seq1}, {seq2}"
+        );
 
         let log = db.load_ops().unwrap();
         assert_eq!(log, vec![(seq1, first), (seq2, second)]);

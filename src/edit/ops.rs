@@ -21,7 +21,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{shift_anchors, Anchor, Annotation, AnnotationId, Block, BlockId, BlockKind, Document};
+use crate::model::{
+    shift_anchors, Anchor, Annotation, AnnotationId, Block, BlockId, BlockKind, Document,
+};
 
 /// A single invertible mutation of a [`Document`].
 ///
@@ -334,7 +336,12 @@ pub fn apply(doc: &mut Document, op: &Op) {
                     );
                 }
             }
-            shift_anchors(&mut doc.annotations, *block_id, *offset, text.len() as isize);
+            shift_anchors(
+                &mut doc.annotations,
+                *block_id,
+                *offset,
+                text.len() as isize,
+            );
         }
         Op::DeleteText {
             block_id,
@@ -406,7 +413,8 @@ pub fn apply(doc: &mut Document, op: &Op) {
         }
         Op::AddAnnotation { annotation } => doc.annotations.push(annotation.clone()),
         Op::RemoveAnnotation { annotation } => {
-            doc.annotations.retain(|existing| existing.id != annotation.id);
+            doc.annotations
+                .retain(|existing| existing.id != annotation.id);
         }
         Op::SetAnnotationBody {
             annotation_id,
@@ -425,7 +433,10 @@ pub fn apply(doc: &mut Document, op: &Op) {
             annotation.body = new_body.clone();
         }
         Op::SetTitle { old, new } => {
-            assert_eq!(&doc.title, old, "SetTitle payload does not match the document");
+            assert_eq!(
+                &doc.title, old,
+                "SetTitle payload does not match the document"
+            );
             doc.title = new.clone();
         }
         // Stage-and-commit: the members are applied to a clone and the clone is
@@ -723,7 +734,12 @@ fn rebase_annotations(
         *anchor_end = map_deleted_offset(*anchor_end, start, end);
     }
 
-    shift_anchors(&mut doc.annotations, block_id, end, -((end - start) as isize));
+    shift_anchors(
+        &mut doc.annotations,
+        block_id,
+        end,
+        -((end - start) as isize),
+    );
     dropped
 }
 
@@ -962,8 +978,16 @@ mod tests {
         };
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "hello wXorld");
-        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().0, 6, "start must not move");
-        assert_eq!(d.annotations[0].anchor.byte_range().unwrap().1, 12, "end must grow by the insert");
+        assert_eq!(
+            d.annotations[0].anchor.byte_range().unwrap().0,
+            6,
+            "start must not move"
+        );
+        assert_eq!(
+            d.annotations[0].anchor.byte_range().unwrap().1,
+            12,
+            "end must grow by the insert"
+        );
         assert_eq!(&d.blocks[0].text[6..12], "wXorld");
     }
 
@@ -1093,7 +1117,10 @@ mod tests {
         assert_eq!(d.annotations.len(), 2);
         assert!(d.annotations.contains(&survivor));
         assert!(d.annotations.contains(&inside));
-        assert_eq!(d.annotations.iter().find(|a| a.id == inside.id), Some(&inside));
+        assert_eq!(
+            d.annotations.iter().find(|a| a.id == inside.id),
+            Some(&inside)
+        );
     }
 
     /// A delete that straddles a note's range must not silently corrupt the
@@ -1139,8 +1166,15 @@ mod tests {
         let op = Op::delete_text(&d, id, 3, 5); // deletes "de"
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "abcfghij");
-        assert_eq!(d.annotations[0], before, "note before the range is untouched");
-        assert_eq!(d.annotations[1].anchor.byte_range().unwrap().0, 4, "\"ghi\" closed up by 2");
+        assert_eq!(
+            d.annotations[0], before,
+            "note before the range is untouched"
+        );
+        assert_eq!(
+            d.annotations[1].anchor.byte_range().unwrap().0,
+            4,
+            "\"ghi\" closed up by 2"
+        );
         assert_eq!(d.annotations[1].anchor.byte_range().unwrap().1, 7);
         assert_eq!(&d.blocks[0].text[4..7], "ghi");
 
@@ -1183,11 +1217,17 @@ mod tests {
 
         let op = Op::delete_text(&d, id, 1, 5); // deletes "bcde"
         apply(&mut d, &op);
-        assert!(d.annotations.is_empty(), "a point inside the deleted text is dropped");
+        assert!(
+            d.annotations.is_empty(),
+            "a point inside the deleted text is dropped"
+        );
 
         apply_inverse(&mut d, &op);
         assert_eq!(d.blocks[0].text, "abcdef");
-        assert!(d.annotations.contains(&point), "undo restores the point anchor");
+        assert!(
+            d.annotations.contains(&point),
+            "undo restores the point anchor"
+        );
     }
 
     /// A point anchor sitting *on* the deletion boundary survives and shifts
@@ -1203,7 +1243,11 @@ mod tests {
         let op = Op::delete_text(&d, id, 2, 3); // delete the space
         apply(&mut d, &op);
         assert_eq!(d.blocks[0].text, "abc");
-        assert_eq!(d.annotations.len(), 1, "the footnote survives the space delete");
+        assert_eq!(
+            d.annotations.len(),
+            1,
+            "the footnote survives the space delete"
+        );
         assert_eq!(
             d.annotations[0].anchor.byte_range(),
             Some((2, 2)),
@@ -1212,7 +1256,10 @@ mod tests {
 
         apply_inverse(&mut d, &op);
         assert_eq!(d.blocks[0].text, "ab c");
-        assert!(d.annotations.contains(&point), "undo restores the exact anchor");
+        assert!(
+            d.annotations.contains(&point),
+            "undo restores the exact anchor"
+        );
     }
 
     /// A block-scoped anchor (marginalia) survives interior text edits; only
@@ -1240,7 +1287,10 @@ mod tests {
 
         let del_block = Op::delete_block(&d, 0);
         apply(&mut d, &del_block);
-        assert!(d.annotations.is_empty(), "deleting the block removes its marginal");
+        assert!(
+            d.annotations.is_empty(),
+            "deleting the block removes its marginal"
+        );
     }
 
     #[test]
@@ -1331,11 +1381,14 @@ mod tests {
         d.annotations.push(elsewhere.clone());
 
         let op = Op::delete_block(&d, 1);
-        assert_eq!(op, Op::DeleteBlock {
-            index: 1,
-            block: second.clone(),
-            annotations: vec![attached.clone()],
-        });
+        assert_eq!(
+            op,
+            Op::DeleteBlock {
+                index: 1,
+                block: second.clone(),
+                annotations: vec![attached.clone()],
+            }
+        );
         apply(&mut d, &op);
         assert_eq!(d.blocks.len(), 1);
         assert_eq!(d.annotations, vec![elsewhere.clone()]);
@@ -1513,7 +1566,11 @@ mod tests {
         ];
         for op in ops {
             let json = serde_json::to_string(&op).unwrap();
-            assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), op, "json: {json}");
+            assert_eq!(
+                serde_json::from_str::<Op>(&json).unwrap(),
+                op,
+                "json: {json}"
+            );
         }
     }
 
@@ -1527,7 +1584,11 @@ mod tests {
         let moved = Annotation {
             id: original.id,
             kind: original.kind.clone(),
-            anchor: Anchor::range(first, d.blocks[0].text.len(), d.blocks[0].text.len() + second.text.len()),
+            anchor: Anchor::range(
+                first,
+                d.blocks[0].text.len(),
+                d.blocks[0].text.len() + second.text.len(),
+            ),
             body: original.body.clone(),
         };
         let batch = Op::Batch {

@@ -400,7 +400,10 @@ impl Editor {
         // the originals back from that payload (after the copies are removed).
         for annotation in tail_notes {
             let mut moved = annotation;
-            let (start, end) = moved.anchor.byte_range().expect("tail note is range-scoped");
+            let (start, end) = moved
+                .anchor
+                .byte_range()
+                .expect("tail note is range-scoped");
             moved.anchor = Anchor::range(new_block.id, start - cursor.offset, end - cursor.offset);
             ops.push(Op::AddAnnotation { annotation: moved });
         }
@@ -772,7 +775,11 @@ mod tests {
         assert_eq!(e.document().blocks.len(), 2);
         assert_eq!(e.document().blocks[1], second);
         assert_eq!(e.document().annotations, vec![annotation.clone()]);
-        assert_eq!(e.document(), &before, "undo restores the exact prior document");
+        assert_eq!(
+            e.document(),
+            &before,
+            "undo restores the exact prior document"
+        );
 
         e.redo().expect("delete to be redoable");
         assert_eq!(e.document().blocks.len(), 1);
@@ -936,7 +943,12 @@ mod tests {
         let db = Db::open(&path).unwrap();
         let head = db.load_document().unwrap();
         assert_eq!(head, in_session_after_undo);
-        let log: Vec<Op> = db.load_ops().unwrap().into_iter().map(|(_, op)| op).collect();
+        let log: Vec<Op> = db
+            .load_ops()
+            .unwrap()
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect();
         assert_eq!(log.len(), 2, "the undone op stays in the log, as redo");
         assert_eq!(edited.blocks[0].text, ">> hello world");
 
@@ -1005,7 +1017,12 @@ mod tests {
         drop(db);
         let db = Db::open(&path).unwrap();
         assert_eq!(db.cursor().unwrap(), 0);
-        let log: Vec<Op> = db.load_ops().unwrap().into_iter().map(|(_, op)| op).collect();
+        let log: Vec<Op> = db
+            .load_ops()
+            .unwrap()
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect();
         let mut reopened =
             Editor::with_cursor(db.load_document().unwrap(), log, db.cursor().unwrap());
         assert_eq!(
@@ -1242,7 +1259,10 @@ mod tests {
         doc.annotations.push(note(id, 13, 13)); // point marginal at the end
 
         let mut e = Editor::new(doc);
-        let mut cursor = Cursor { block_id: id, offset: 0 };
+        let mut cursor = Cursor {
+            block_id: id,
+            offset: 0,
+        };
         e.split_paragraph(&cursor).unwrap();
         cursor = Cursor {
             block_id: e.document().blocks[1].id,
@@ -1254,16 +1274,21 @@ mod tests {
         assert_eq!(e.document().annotations.len(), 2, "no marginal is dropped");
         for a in &e.document().annotations {
             assert_eq!(
-                a.anchor.block_id(), final_block,
+                a.anchor.block_id(),
+                final_block,
                 "every marginal follows the text, none lingers on an empty block"
             );
         }
-        assert!(e.document().annotations.iter().any(|a| {
-            a.anchor == Anchor::range(final_block, 11, 20 )
-        }));
-        assert!(e.document().annotations.iter().any(|a| {
-            a.anchor == Anchor::range(final_block, 13, 13 )
-        }));
+        assert!(e
+            .document()
+            .annotations
+            .iter()
+            .any(|a| { a.anchor == Anchor::range(final_block, 11, 20) }));
+        assert!(e
+            .document()
+            .annotations
+            .iter()
+            .any(|a| { a.anchor == Anchor::range(final_block, 13, 13) }));
 
         e.undo().unwrap();
         e.undo().unwrap();
@@ -1284,8 +1309,14 @@ mod tests {
         let mut e = Editor::new(doc);
         // Backspace the space [2, 3) before the point at 3.
         let sel = Selection {
-            start: Cursor { block_id: id, offset: 3 },
-            end: Cursor { block_id: id, offset: 2 },
+            start: Cursor {
+                block_id: id,
+                offset: 3,
+            },
+            end: Cursor {
+                block_id: id,
+                offset: 2,
+            },
         };
         e.delete_selection(&sel).unwrap();
         assert_eq!(e.document().blocks[0].text, "abc");
@@ -1302,7 +1333,10 @@ mod tests {
 
         e.redo().unwrap();
         assert_eq!(e.document().blocks[0].text, "abc");
-        assert_eq!(e.document().annotations[0].anchor.byte_range(), Some((2, 2)));
+        assert_eq!(
+            e.document().annotations[0].anchor.byte_range(),
+            Some((2, 2))
+        );
     }
 
     #[test]
@@ -1321,7 +1355,11 @@ mod tests {
 
         let mut e = Editor::new(doc);
         // Split at the start: leading block empties, marginal moves to the new block.
-        e.split_paragraph(&Cursor { block_id: id, offset: 0 }).unwrap();
+        e.split_paragraph(&Cursor {
+            block_id: id,
+            offset: 0,
+        })
+        .unwrap();
         let new_block = e.document().blocks[1].id;
         assert_eq!(e.document().annotations.len(), 1);
         assert_eq!(
@@ -1331,7 +1369,11 @@ mod tests {
         );
 
         // Split in the middle of that block: the marginal stays on the leading half.
-        e.split_paragraph(&Cursor { block_id: new_block, offset: 4 }).unwrap();
+        e.split_paragraph(&Cursor {
+            block_id: new_block,
+            offset: 4,
+        })
+        .unwrap();
         assert_eq!(e.document().annotations.len(), 1);
         assert_eq!(
             e.document().annotations[0].anchor,
@@ -1459,20 +1501,12 @@ mod tests {
         let mut e = Editor::new(doc);
 
         assert_eq!(
-            e.add_annotation(
-                AnnotationKind::Note,
-                Anchor::range(id, 2, 1),
-                "x"
-            ),
+            e.add_annotation(AnnotationKind::Note, Anchor::range(id, 2, 1), "x"),
             Err(EditError::OffsetOutOfRange),
             "a reversed range is not an anchor"
         );
         assert_eq!(
-            e.add_annotation(
-                AnnotationKind::Note,
-                Anchor::range(id, 0, 3),
-                "x"
-            ),
+            e.add_annotation(AnnotationKind::Note, Anchor::range(id, 0, 3), "x"),
             Err(EditError::OffsetOutOfRange)
         );
         assert_eq!(

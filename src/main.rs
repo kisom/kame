@@ -717,12 +717,17 @@ fn main() -> eframe::Result {
 
     // Open the document before the window exists, so a failure is reported as
     // "your file is the problem" rather than an opaque app-creation error that
-    // reads as "kame is broken".
+    // reads as "kame is broken". A failed open still shows the author an
+    // editable (in-memory) document and the reason in the status panel, since a
+    // desktop launch has no terminal to print to.
     let session = match Session::open(&path) {
         Ok(session) => session,
         Err(err) => {
-            eprintln!("kame: {err}");
-            std::process::exit(1);
+            let message = format!("could not open {} — {err}", path.display());
+            Session::blank(&path, message).unwrap_or_else(|err| {
+                eprintln!("kame: {err}");
+                std::process::exit(1);
+            })
         }
     };
 
@@ -888,6 +893,37 @@ impl Session {
             selection: None,
             last_error,
             save_failed,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// A session for a document that could not be opened: a fresh, in-memory
+    /// document so the author still has somewhere to type, with `error` shown
+    /// in the status panel. The failed file is never touched, so a locked or
+    /// corrupt document cannot be overwritten by a stray save.
+    fn blank(path: &Path, error: String) -> AppResult<Session> {
+        let db = Db::open_in_memory()?;
+        let title = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Untitled");
+        let editor = Editor::new(Document::new(title));
+        let caret = editor
+            .document()
+            .blocks
+            .first()
+            .map(|block| Cursor {
+                block_id: block.id,
+                offset: 0,
+            })
+            .ok_or("document has no blocks")?;
+        Ok(Session {
+            editor,
+            db,
+            caret,
+            selection: None,
+            last_error: Some(error),
+            save_failed: false,
             path: path.to_path_buf(),
         })
     }
@@ -2816,35 +2852,13 @@ impl KameApp {
                     );
                 }
             });
-            ui.label(
-                egui::RichText::new(
-                    "Type to write · Enter new paragraph · Backspace/Delete · \
-                     Ctrl-Z undo · Ctrl-Shift-Z redo · Ctrl-Shift-1/2/3 heading · \
-                     Ctrl-Shift-0 body · drag to select · \
-                     click to place the caret · click a margin marker to read its note",
-                )
-                .small()
-                .weak(),
-            );
-            ui.label(
-                egui::RichText::new(
-                    "Modes: F11 fullscreen · Ctrl-Shift-H hide chrome · \
-                     Ctrl-Shift-M hide margin · Ctrl-Shift-P paragraph focus · \
-                     Ctrl-Shift-T typewriter",
-                )
-                .small()
-                .weak(),
-            );
-            ui.label(
-                egui::RichText::new(
-                    "File: Ctrl-Shift-E export Markdown · Ctrl-Shift-B export HTML · \
-                     Ctrl-Shift-S snapshot now · Ctrl-Shift-R restore snapshot",
-                )
-                .small()
-                .weak(),
-            );
             if let Some(error) = error {
-                ui.colored_label(self.palette.error_ink, error);
+                // Selectable, so an author can copy a path or reason out of a
+                // desktop launch where there is no terminal to scroll.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(error).color(self.palette.error_ink))
+                        .selectable(true),
+                );
             }
         });
         if let Some(step) = font_step {
@@ -3563,6 +3577,16 @@ impl KameApp {
                         for (keys, what) in [
                             ("F1", "this help"),
                             (
+                                "type / click / drag",
+                                "type to write · click to place the caret · drag to select",
+                            ),
+                            ("Backspace / Delete", "delete a character, or the selection"),
+                            ("Ctrl-Z / Ctrl-Shift-Z", "undo / redo"),
+                            (
+                                "Ctrl-Left / Right",
+                                "move by word · add Shift to select words",
+                            ),
+                            (
                                 "Enter",
                                 "split a block; on an empty list item, end the list",
                             ),
@@ -3573,6 +3597,7 @@ impl KameApp {
                             ("Ctrl-Shift-0", "back to body text"),
                             ("#  ##  ###", "heading, typed at the start of a line"),
                             ("-  *  1.", "list item, typed at the start of a line"),
+                            (">", "block quote, typed at the start of a line"),
                             ("Ctrl +  Ctrl -", "larger / smaller type"),
                             ("Ctrl-Shift-D", "dark mode"),
                             ("F11", "fullscreen"),
@@ -4225,6 +4250,21 @@ mod tests {
         assert_eq!(session.document().title, "doc");
         assert_eq!(session.caret.offset, 0);
         assert!(path.exists(), "opening creates the .kame file");
+    }
+
+    #[test]
+    fn a_blank_session_surfaces_the_error_and_stays_editable() {
+        let path = temp_db_path();
+        let mut session = Session::blank(&path, "could not open — corrupt".into()).unwrap();
+        assert_eq!(
+            session.last_error.as_deref(),
+            Some("could not open — corrupt"),
+            "the reason is shown in the GUI, not just the console"
+        );
+        assert_eq!(session.document().blocks.len(), 1);
+        assert!(session.insert("scratch"), "the blank document is editable");
+        assert_eq!(session.document().blocks[0].text, "scratch");
+        assert!(!path.exists(), "a blank session never creates the bad path");
     }
 
     #[test]

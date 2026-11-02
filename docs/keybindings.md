@@ -12,12 +12,27 @@ macOS (`Modifiers::command`).
 | Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
 | Ctrl-Shift-0 | return the caret's block to body text |
 | Ctrl-Shift-N / Ctrl-Shift-F | add a note (a highlight) / a footnote at the selection or the word under the caret |
+| Ctrl-K | add or edit a hyperlink on the selection (an empty URL removes it) |
 | Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |
+| Ctrl-Left / Ctrl-Right | move the caret a whole word at a time |
+| Ctrl-Shift-Left / Ctrl-Shift-Right | extend the selection a whole word at a time |
 | Ctrl-A | select the caret's whole block (again for the whole document) |
 | Ctrl-F | find — open the find bar |
 | Ctrl + / Ctrl - / Ctrl-0 | increase / decrease / reset the type size |
 | drag, shift-click, Shift-arrows | select / extend the selection |
 | Escape | close the find bar, a dialog, or the note popover |
+| F1 | toggle the help dialog |
+
+## Typed markdown
+
+Formatting is also applied as you type, at the start of a line or around a
+word — each one is a single undo step:
+
+- `# `, `## `, `### ` at the start of a line → a heading
+- `- `, `* `, or `1. ` at the start of a line → a list item
+- `> ` at the start of a line → a block quote
+- `*x*` / `**x**` around a word → italic / bold
+- `[text](url)` → a hyperlink on `text`
 
 ## Search
 
@@ -50,6 +65,9 @@ status panel while the chrome is visible.
 
 Held keys do not auto-repeat a toggle: one press is one flip.
 
+Dark mode (`Ctrl-Shift-D`) is separate from these: a persisted preference
+(saved to the config and surviving a restart), not a transient view mode.
+
 ## Files, exports and snapshots
 
 The exports write beside the document you opened: `<stem>.md` and `<stem>.html`
@@ -69,6 +87,7 @@ the text, and it is deliberately **not** an undo step:
 
 | Key | Action | Effect |
 | --- | --- | --- |
+| Ctrl-O | open | prompt for a path, replacing the current document |
 | Ctrl-S | save | a document already on disk is saved continuously, so this is a no-op; an anonymous document opens the system save-as browser |
 | Ctrl-Shift-E | export Markdown | writes `<stem>.md` beside the `.kame` file |
 | Ctrl-Shift-B | export HTML | writes `<stem>.html`, a standalone page |
@@ -79,8 +98,9 @@ Both dialogs take Enter as their primary action and Escape as cancel. Nothing
 auto-repeats: one press is one command, and a held Enter cannot step through
 the restore confirmation.
 
-The same four commands are the toolbar's `File:` row, whose buttons carry the
-export path they would write in their tooltip.
+The toolbar's `File:` row has buttons for Export Markdown, Export HTML, Snapshot
+Now and Restore Snapshot (their tooltips name the path they write); open
+(`Ctrl-O`) and save (`Ctrl-S`) are keyboard-only.
 
 ## Build
 

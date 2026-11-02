@@ -1260,8 +1260,11 @@ mod tests {
         let id = doc.blocks[0].id;
         let mut e = Editor::new(doc);
 
-        e.split_paragraph(&Cursor { block_id: id, offset: 0 })
-            .expect("split an empty list item");
+        e.split_paragraph(&Cursor {
+            block_id: id,
+            offset: 0,
+        })
+        .expect("split an empty list item");
 
         // No new block: the empty bullet becomes a body paragraph.
         assert_eq!(e.document().blocks.len(), 1);

@@ -36,30 +36,76 @@ use crate::render::egui_render::{
 };
 use crate::storage::{Db, DbError, SnapshotMeta};
 
-/// Paper-coloured canvas behind the page.
-const BACKGROUND: Color32 = Color32::from_rgb(247, 243, 235);
-/// Warm near-black ink used for rasterized glyphs.
-const BODY_INK: [u8; 3] = [32, 29, 25];
-/// Lighter ink for the apparatus in the margin and at the foot.
-const APPARATUS_INK: [u8; 3] = [86, 79, 69];
-/// Caret colour: a muted vermilion that reads against both faces.
-const CARET_INK: Color32 = Color32::from_rgb(176, 58, 46);
-/// Selection band (translucent, so the prose still reads through it).
-const SELECTION_FILL: Color32 = Color32::from_rgba_premultiplied(58, 78, 112, 62);
-/// A note's anchored range: an orange highlight behind the text.
-const NOTE_HIGHLIGHT: Color32 = Color32::from_rgba_unmultiplied_const(255, 170, 60, 70);
-/// A footnote's anchored range and superscript marker.
-const FOOTNOTE_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(54, 96, 132, 34);
-/// Ink for the footnote superscript number.
-const FOOTNOTE_MARK: Color32 = Color32::from_rgb(54, 96, 132);
-/// A marginal note's anchored range.
-const MARGINAL_HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(96, 96, 96, 26);
-/// Hairline rule above the footnotes.
-const RULE_INK: Color32 = Color32::from_rgb(150, 141, 126);
-/// Margin marker for a Note.
-const NOTE_MARK: Color32 = Color32::from_rgb(140, 104, 40);
-/// Ink for a list item's marker (bullet or number).
-const LIST_MARKER_INK: Color32 = Color32::from_rgb(32, 29, 25);
+/// Theme colours. One palette is chosen at launch (or on the dark-mode
+/// toggle), and every surface reads from it — the rasterized text inks and the
+/// painted chrome must always agree.
+#[derive(Clone, Copy)]
+struct Palette {
+    background: Color32,
+    body_ink: [u8; 3],
+    apparatus_ink: [u8; 3],
+    caret_ink: Color32,
+    selection_fill: Color32,
+    note_highlight: Color32,
+    footnote_highlight: Color32,
+    footnote_mark: Color32,
+    marginal_highlight: Color32,
+    rule_ink: Color32,
+    note_mark: Color32,
+    list_marker_ink: Color32,
+    dim_veil: Color32,
+    error_ink: Color32,
+    notice_ink: Color32,
+}
+
+impl Palette {
+    /// Warm paper and near-black ink.
+    const LIGHT: Palette = Palette {
+        background: Color32::from_rgb(247, 243, 235),
+        body_ink: [32, 29, 25],
+        apparatus_ink: [86, 79, 69],
+        caret_ink: Color32::from_rgb(176, 58, 46),
+        selection_fill: Color32::from_rgba_premultiplied(58, 78, 112, 62),
+        note_highlight: Color32::from_rgba_unmultiplied_const(255, 170, 60, 70),
+        footnote_highlight: Color32::from_rgba_premultiplied(54, 96, 132, 34),
+        footnote_mark: Color32::from_rgb(54, 96, 132),
+        marginal_highlight: Color32::from_rgba_premultiplied(96, 96, 96, 26),
+        rule_ink: Color32::from_rgb(150, 141, 126),
+        note_mark: Color32::from_rgb(140, 104, 40),
+        list_marker_ink: Color32::from_rgb(32, 29, 25),
+        dim_veil: Color32::from_rgba_unmultiplied_const(247, 243, 235, 168),
+        error_ink: Color32::from_rgb(168, 32, 32),
+        notice_ink: Color32::from_rgb(46, 96, 60),
+    };
+
+    /// Dark paper with warm light ink.
+    const DARK: Palette = Palette {
+        background: Color32::from_rgb(30, 28, 25),
+        body_ink: [222, 216, 205],
+        apparatus_ink: [168, 160, 148],
+        caret_ink: Color32::from_rgb(226, 92, 70),
+        selection_fill: Color32::from_rgba_premultiplied(92, 112, 150, 66),
+        note_highlight: Color32::from_rgba_unmultiplied_const(196, 128, 40, 80),
+        footnote_highlight: Color32::from_rgba_premultiplied(92, 132, 168, 42),
+        footnote_mark: Color32::from_rgb(120, 160, 190),
+        marginal_highlight: Color32::from_rgba_premultiplied(120, 120, 120, 30),
+        rule_ink: Color32::from_rgb(110, 104, 96),
+        note_mark: Color32::from_rgb(188, 148, 68),
+        list_marker_ink: Color32::from_rgb(222, 216, 205),
+        dim_veil: Color32::from_rgba_unmultiplied_const(30, 28, 25, 168),
+        error_ink: Color32::from_rgb(226, 92, 92),
+        notice_ink: Color32::from_rgb(120, 180, 130),
+    };
+
+    /// The palette for a light or dark surface.
+    fn for_mode(dark: bool) -> Palette {
+        if dark {
+            Palette::DARK
+        } else {
+            Palette::LIGHT
+        }
+    }
+}
 /// Gap between a list marker's right edge and its item's text.
 const LIST_MARKER_GAP: f32 = 6.0;
 /// Font-size step for the Ctrl + / Ctrl - chords, and the clamp bounds (body
@@ -79,14 +125,6 @@ const BLOCK_GAP: f32 = 14.0;
 const SCROLLBAR_ALLOWANCE: f32 = 16.0;
 /// Annotation text is set a little smaller than the prose.
 const ANNOTATION_SCALE: f32 = 0.82;
-/// Veil painted over the blocks that are not being written in paragraph-focus
-/// mode. It is a wash toward the page colour, not a darker tint, so dimmed
-/// prose fades into the paper instead of turning grey.
-const DIM_VEIL: Color32 = Color32::from_rgba_unmultiplied_const(247, 243, 235, 168);
-/// Ink for a failed write, in the status line and in the always-on indicator.
-const ERROR_INK: Color32 = Color32::from_rgb(168, 32, 32);
-/// Ink for the confirmation of a file command (an export path, a snapshot id).
-const NOTICE_INK: Color32 = Color32::from_rgb(46, 96, 60);
 /// Height of the failure strip drawn across the top of the central panel.
 const ERROR_STRIP_HEIGHT: f32 = 3.0;
 
@@ -185,6 +223,22 @@ fn mode_commands_for_events(events: &[egui::Event]) -> Vec<ModeCommand> {
             _ => None,
         })
         .collect()
+}
+
+/// True when the dark-mode chord (Ctrl/Cmd+Shift+D) went down this frame. Dark
+/// mode is a persisted preference, not a transient view mode, so it has its own
+/// chord rather than living in the [`Modes`] set.
+fn dark_toggle_for_events(events: &[egui::Event]) -> bool {
+    events.iter().any(|event| match event {
+        egui::Event::Key {
+            key: egui::Key::D,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } => modifiers.command && modifiers.shift,
+        _ => false,
+    })
 }
 
 // --- file, export and snapshot commands ------------------------------------
@@ -417,9 +471,14 @@ fn page_geometry(config: LayoutConfig, available_width: f32) -> PageGeometry {
 
 /// The veil for block `index` in paragraph-focus mode, or `None` when the block
 /// is the one being written in (or the mode is off, or no caret block resolved).
-fn dim_veil(enabled: bool, index: usize, caret_index: Option<usize>) -> Option<Color32> {
+fn dim_veil(
+    veil: Color32,
+    enabled: bool,
+    index: usize,
+    caret_index: Option<usize>,
+) -> Option<Color32> {
     let caret_index = caret_index?;
-    (enabled && index != caret_index).then_some(DIM_VEIL)
+    (enabled && index != caret_index).then_some(veil)
 }
 
 /// Scroll offset that puts `caret_top` (page-local) at the vertical centre of a
@@ -504,7 +563,7 @@ fn error_indicator(last_error: Option<&str>) -> Option<&str> {
 /// `retry` marks that failed-write class. Every other message (a degraded open,
 /// a failed export) has no pending write to retry, so its strip dismisses the
 /// message instead of offering a write that would do nothing.
-fn draw_error_indicator(ui: &mut egui::Ui, error: &str, retry: bool) -> bool {
+fn draw_error_indicator(ui: &mut egui::Ui, error: &str, retry: bool, error_ink: Color32) -> bool {
     let rect = ui.max_rect();
     {
         let painter = ui.painter();
@@ -512,11 +571,11 @@ fn draw_error_indicator(ui: &mut egui::Ui, error: &str, retry: bool) -> bool {
             Pos2::new(rect.left(), rect.top()),
             Pos2::new(rect.right(), rect.top() + ERROR_STRIP_HEIGHT),
         );
-        painter.rect_filled(strip, 0.0, ERROR_INK);
+        painter.rect_filled(strip, 0.0, error_ink);
         painter.circle_filled(
             Pos2::new(rect.right() - 12.0, rect.top() + 12.0),
             4.0,
-            ERROR_INK,
+            error_ink,
         );
     }
     // The painted strip is a hairline; the click target reaches down into the
@@ -581,13 +640,15 @@ impl CloseGuard {
 
 /// App-level preferences, stored beside the documents rather than inside one.
 ///
-/// The type size is a kame setting: it belongs to the editor, not to any
-/// single document, so it is read once at launch and written back whenever it
-/// changes. Documents never carry it.
+/// The type size and dark mode are kame settings: they belong to the editor,
+/// not to any single document, so they are read once at launch and written
+/// back whenever they change. Documents never carry them.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct KameConfig {
     #[serde(default = "default_body_size")]
     body_size: f32,
+    #[serde(default)]
+    dark: bool,
 }
 
 fn default_body_size() -> f32 {
@@ -598,6 +659,7 @@ impl Default for KameConfig {
     fn default() -> Self {
         KameConfig {
             body_size: DEFAULT_BODY_SIZE,
+            dark: false,
         }
     }
 }
@@ -662,9 +724,11 @@ fn main() -> eframe::Result {
         }
     };
 
-    // The type size is a kame preference, read once here and applied to every
-    // document the app opens.
-    let body_size = load_config().body_size;
+    // The type size and theme are kame preferences, read once here and applied
+    // to every document the app opens.
+    let config = load_config();
+    let body_size = config.body_size;
+    let dark = config.dark;
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -677,7 +741,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "kame",
         native_options,
-        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session, body_size)))),
+        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session, body_size, dark)))),
     )
 }
 
@@ -1789,6 +1853,10 @@ struct KameApp {
     /// whole page. A kame setting — persisted to the app config, never to the
     /// document.
     body_size: f32,
+    /// Dark mode, persisted as a kame setting.
+    dark: bool,
+    /// The theme colours derived from `dark`.
+    palette: Palette,
     /// The caret position typewriter mode last centred. A new position scrolls
     /// the page so the caret returns to the middle; an unchanged one leaves the
     /// reader free to scroll away.
@@ -1815,8 +1883,17 @@ struct KameApp {
 }
 
 impl KameApp {
-    fn new(cc: &eframe::CreationContext<'_>, session: Session, body_size: f32) -> KameApp {
-        cc.egui_ctx.set_visuals(egui::Visuals::light());
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        session: Session,
+        body_size: f32,
+        dark: bool,
+    ) -> KameApp {
+        cc.egui_ctx.set_visuals(if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
         install_fonts(&cc.egui_ctx);
         KameApp {
             session,
@@ -1830,6 +1907,8 @@ impl KameApp {
             open_note_focus: false,
             modes: Modes::default(),
             body_size,
+            dark,
+            palette: Palette::for_mode(dark),
             typewriter_anchor: None,
             pending_scroll: None,
             snapshot_prompt: None,
@@ -1889,6 +1968,14 @@ impl KameApp {
             if mode == ModeCommand::Typewriter && on {
                 self.typewriter_anchor = None;
             }
+        }
+        if ctx.input(|input| dark_toggle_for_events(&input.events)) {
+            self.toggle_dark();
+            ctx.set_visuals(if self.dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
         }
     }
 
@@ -1988,8 +2075,28 @@ impl KameApp {
         let size = size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
         if size != self.body_size {
             self.body_size = size;
-            save_config(&KameConfig { body_size: size });
+            self.persist();
         }
+    }
+
+    /// Toggles dark mode, re-theming the page and the chrome together.
+    fn toggle_dark(&mut self) {
+        self.dark = !self.dark;
+        self.palette = Palette::for_mode(self.dark);
+        // Rasterized glyphs were inked with the old palette; drop them so the
+        // next frame re-rasterizes in the new ink.
+        self.layouts.clear();
+        self.textures.clear();
+        self.annotation_textures.clear();
+        self.persist();
+    }
+
+    /// Writes the current preferences to the app config, best-effort.
+    fn persist(&self) {
+        save_config(&KameConfig {
+            body_size: self.body_size,
+            dark: self.dark,
+        });
     }
 
     /// Steps the body font size, from which every other size is derived.
@@ -2464,6 +2571,7 @@ impl KameApp {
         // The type-size buttons below collect their action here, applied after
         // the panel closes so the size is read (for display) and written once.
         let mut font_step: Option<f32> = None;
+        let mut toggle_dark = false;
 
         egui::Panel::top("kame-status").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -2494,6 +2602,14 @@ impl KameApp {
                     .clicked()
                 {
                     font_step = Some(FONT_SIZE_STEP);
+                }
+                let dark_label = if self.dark { "☾" } else { "☀" };
+                if ui
+                    .small_button(dark_label)
+                    .on_hover_text("toggle dark mode (Ctrl+Shift+D)")
+                    .clicked()
+                {
+                    toggle_dark = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.monospace(path);
@@ -2616,7 +2732,11 @@ impl KameApp {
                 }
                 if let Some(notice) = &notice {
                     ui.separator();
-                    ui.label(egui::RichText::new(notice).small().color(NOTICE_INK));
+                    ui.label(
+                        egui::RichText::new(notice)
+                            .small()
+                            .color(self.palette.notice_ink),
+                    );
                 }
             });
             ui.label(
@@ -2647,11 +2767,19 @@ impl KameApp {
                 .weak(),
             );
             if let Some(error) = error {
-                ui.colored_label(ERROR_INK, error);
+                ui.colored_label(self.palette.error_ink, error);
             }
         });
         if let Some(step) = font_step {
             self.adjust_font_size(step);
+        }
+        if toggle_dark {
+            self.toggle_dark();
+            ui.ctx().set_visuals(if self.dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
         }
     }
 
@@ -2671,7 +2799,7 @@ impl KameApp {
             &mut self.renderer,
             &self.session.document().blocks,
             &layouts,
-            BODY_INK,
+            self.palette.body_ink,
         );
 
         let document = self.session.document();
@@ -2764,7 +2892,7 @@ impl KameApp {
                     &annotation.body,
                     margin_column,
                     annotation_size,
-                    APPARATUS_INK,
+                    self.palette.apparatus_ink,
                 ),
                 AnnotationKind::Footnote => {
                     let number = footnote_number.get(&annotation.id).copied().unwrap_or(1);
@@ -2776,7 +2904,7 @@ impl KameApp {
                         &entry,
                         config.body_width,
                         annotation_size,
-                        APPARATUS_INK,
+                        self.palette.apparatus_ink,
                     );
                 }
                 // A Note keeps its body behind the margin marker, so it has no
@@ -2803,9 +2931,9 @@ impl KameApp {
                 continue;
             };
             let color = match annotation.kind {
-                AnnotationKind::Marginal => MARGINAL_HIGHLIGHT,
-                AnnotationKind::Note => NOTE_HIGHLIGHT,
-                AnnotationKind::Footnote => FOOTNOTE_HIGHLIGHT,
+                AnnotationKind::Marginal => self.palette.marginal_highlight,
+                AnnotationKind::Note => self.palette.note_highlight,
+                AnnotationKind::Footnote => self.palette.footnote_highlight,
             };
             for rect in range_rects(layouts[index], start, end) {
                 painter.rect_filled(
@@ -2838,14 +2966,14 @@ impl KameApp {
                     Align2::RIGHT_CENTER,
                     marker,
                     FontId::proportional(config.body_size),
-                    LIST_MARKER_INK,
+                    self.palette.list_marker_ink,
                 );
             }
             if let Some(texture) = self.textures.get(block.id) {
                 let origin = Pos2::new(body_left + indent, tops[index]);
                 let rect = texture.rect(origin);
                 painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
-                if let Some(veil) = dim_veil(focus, index, caret_index) {
+                if let Some(veil) = dim_veil(self.palette.dim_veil, focus, index, caret_index) {
                     painter.rect_filled(rect, 0.0, veil);
                 }
             }
@@ -2877,7 +3005,7 @@ impl KameApp {
                                 tops[index],
                             )),
                             0.0,
-                            SELECTION_FILL,
+                            self.palette.selection_fill,
                         );
                     }
                 }
@@ -2896,7 +3024,7 @@ impl KameApp {
                 Pos2::new(body_left + layouts[index].left_indent + x, top),
                 Vec2::new(1.5, line_height),
             );
-            painter.rect_filled(rect, 0.0, CARET_INK);
+            painter.rect_filled(rect, 0.0, self.palette.caret_ink);
             caret_rect = Some(rect);
         }
 
@@ -2991,12 +3119,15 @@ impl KameApp {
                                 Pos2::new(margin_x, anchor_y),
                                 Pos2::new(margin_x, placement.y),
                             ],
-                            egui::Stroke::new(1.0, RULE_INK),
+                            egui::Stroke::new(1.0, self.palette.rule_ink),
                         );
                     }
                     painter.line_segment(
-                        [Pos2::new(body_right, anchor_y), Pos2::new(margin_x, anchor_y)],
-                        egui::Stroke::new(1.0, RULE_INK),
+                        [
+                            Pos2::new(body_right, anchor_y),
+                            Pos2::new(margin_x, anchor_y),
+                        ],
+                        egui::Stroke::new(1.0, self.palette.rule_ink),
                     );
                     // A thin rule opens the margin block, the way a printed
                     // marginal note is set off from the measure.
@@ -3006,7 +3137,7 @@ impl KameApp {
                             Vec2::new(1.0, 12.0),
                         ),
                         0.0,
-                        RULE_INK,
+                        self.palette.rule_ink,
                     );
                     if let Some(texture) = self.annotation_textures.get(annotation.id) {
                         let rect = texture.rect(origin);
@@ -3024,12 +3155,12 @@ impl KameApp {
                     // rather than a filled dot, so "something written" reads at
                     // a glance and the marker stays a click target either way.
                     if !annotation.body.trim().is_empty() {
-                        painter.circle_filled(center, 3.5, NOTE_MARK);
+                        painter.circle_filled(center, 3.5, self.palette.note_mark);
                     }
                     painter.circle_stroke(
                         center,
                         if open { 7.5 } else { 6.0 },
-                        egui::Stroke::new(1.0, NOTE_MARK.gamma_multiply(0.65)),
+                        egui::Stroke::new(1.0, self.palette.note_mark.gamma_multiply(0.65)),
                     );
                     markers.push((
                         annotation.id,
@@ -3052,7 +3183,7 @@ impl KameApp {
                     Pos2::new(body_left + config.body_width * 0.34, rule_y + 1.0),
                 ),
                 0.0,
-                RULE_INK,
+                self.palette.rule_ink,
             );
         }
         for placement in &footnotes {
@@ -3092,7 +3223,7 @@ impl KameApp {
                 Align2::LEFT_TOP,
                 placement.number.to_string(),
                 FontId::proportional(config.body_size * 0.62),
-                FOOTNOTE_MARK,
+                self.palette.footnote_mark,
             );
         }
 
@@ -3503,7 +3634,7 @@ impl eframe::App for KameApp {
             scroll = scroll.vertical_scroll_offset(offset);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(BACKGROUND))
+            .frame(egui::Frame::NONE.fill(self.palette.background))
             .show(ui, |ui| {
                 scroll.show(ui, |ui| self.draw_surface(ui));
                 // The save-failure signal belongs to the page, not the chrome:
@@ -3513,7 +3644,7 @@ impl eframe::App for KameApp {
                     // (a degraded open, a failed export) is dismissed, so it
                     // cannot sit there offering a write that does nothing.
                     let retry = self.session.save_failed;
-                    if draw_error_indicator(ui, error, retry) {
+                    if draw_error_indicator(ui, error, retry, self.palette.error_ink) {
                         self.session.retry_or_dismiss();
                     }
                 }
@@ -3656,6 +3787,42 @@ mod tests {
             mode_commands_for_events(&events),
             vec![ModeCommand::ParagraphFocus]
         );
+    }
+
+    #[test]
+    fn dark_toggle_chord_and_palette_selection() {
+        let chord = egui::Modifiers {
+            command: true,
+            shift: true,
+            ..Default::default()
+        };
+        let key = |pressed: bool, repeat: bool, modifiers: egui::Modifiers| egui::Event::Key {
+            key: egui::Key::D,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers,
+        };
+        assert!(dark_toggle_for_events(&[key(true, false, chord)]));
+        assert!(
+            !dark_toggle_for_events(&[key(true, true, chord)]),
+            "a held key must not flap the toggle"
+        );
+        assert!(
+            !dark_toggle_for_events(&[key(true, false, egui::Modifiers::NONE)]),
+            "the chord is required"
+        );
+
+        // Light and dark are distinct palettes; each selects its own paper.
+        assert_ne!(
+            Palette::for_mode(false).background,
+            Palette::for_mode(true).background
+        );
+        assert_eq!(
+            Palette::for_mode(false).background,
+            Palette::LIGHT.background
+        );
+        assert_eq!(Palette::for_mode(true).background, Palette::DARK.background);
     }
 
     /// FIX 2: the mode→window dispatch is pure, so both directions of every
@@ -3813,30 +3980,35 @@ mod tests {
 
     #[test]
     fn kame_config_round_trips_and_defaults_the_body_size() {
-        let json = serde_json::to_string(&KameConfig { body_size: 21.0 }).unwrap();
-        assert_eq!(
-            serde_json::from_str::<KameConfig>(&json).unwrap().body_size,
-            21.0
-        );
-        // A config written by an older build (no body_size) still parses.
-        assert_eq!(
-            serde_json::from_str::<KameConfig>("{}").unwrap().body_size,
-            DEFAULT_BODY_SIZE
-        );
+        let config = KameConfig {
+            body_size: 21.0,
+            dark: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let read = serde_json::from_str::<KameConfig>(&json).unwrap();
+        assert_eq!(read.body_size, 21.0);
+        assert!(read.dark);
+
+        // A config written by an older build (no body_size, no dark) still
+        // parses and defaults to light, body-size 16.
+        let old = serde_json::from_str::<KameConfig>("{}").unwrap();
+        assert_eq!(old.body_size, DEFAULT_BODY_SIZE);
+        assert!(!old.dark);
     }
 
     #[test]
     fn paragraph_focus_veils_every_block_but_the_carets() {
-        assert_eq!(dim_veil(false, 0, Some(1)), None, "mode off");
-        assert_eq!(dim_veil(true, 1, Some(1)), None, "the caret's block");
+        let veil = Palette::LIGHT.dim_veil;
+        assert_eq!(dim_veil(veil, false, 0, Some(1)), None, "mode off");
+        assert_eq!(dim_veil(veil, true, 1, Some(1)), None, "the caret's block");
         assert_eq!(
-            dim_veil(true, 0, Some(1)),
-            Some(DIM_VEIL),
+            dim_veil(veil, true, 0, Some(1)),
+            Some(veil),
             "every other block"
         );
         // Without a resolved caret block nothing is dimmed, rather than the
         // whole page going faint.
-        assert_eq!(dim_veil(true, 0, None), None);
+        assert_eq!(dim_veil(veil, true, 0, None), None);
     }
 
     #[test]

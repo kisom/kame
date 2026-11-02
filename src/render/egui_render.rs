@@ -369,6 +369,12 @@ impl AnnotationTextureCache {
         self.entries.retain(|id, _| live.contains(id));
     }
 
+    /// Drops every cached texture, so the next `sync` re-rasterizes against
+    /// the current palette.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()

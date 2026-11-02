@@ -2918,12 +2918,53 @@ impl KameApp {
             + heights.iter().sum::<f32>()
             + BLOCK_GAP * blocks.len().saturating_sub(1) as f32;
 
-        // Footnote Y values are page-local (body_bottom is measured from the
-        // painter's top), so the painter origin is added when drawing.
-        let footnotes = place_footnotes(&annotations, body_bottom);
+        // Footnote entries decide how tall the page must be, and a wrapped
+        // entry must push the next one past all of its lines. Shape them before
+        // the page is sized (they span the measure, so they need no geometry)
+        // and stack by their rendered height. The Y values are page-local
+        // (body_bottom is measured from the painter's top), so the painter
+        // origin is added when drawing.
+        let annotation_size = config.body_size * ANNOTATION_SCALE;
+        let footnote_number: HashMap<AnnotationId, usize> = annotations
+            .iter()
+            .filter(|annotation| annotation.kind == AnnotationKind::Footnote)
+            .enumerate()
+            .map(|(index, annotation)| (annotation.id, index + 1))
+            .collect();
+        for annotation in &annotations {
+            if annotation.kind == AnnotationKind::Footnote {
+                let number = footnote_number.get(&annotation.id).copied().unwrap_or(1);
+                let entry = format!("{number}. {}", annotation.body);
+                self.annotation_textures.sync(
+                    ui.ctx(),
+                    &mut self.renderer,
+                    annotation.id,
+                    &entry,
+                    config.body_width,
+                    annotation_size,
+                    self.palette.apparatus_ink,
+                );
+            }
+        }
+        let footnote_heights: Vec<(AnnotationId, f32)> = annotations
+            .iter()
+            .filter(|annotation| annotation.kind == AnnotationKind::Footnote)
+            .filter_map(|annotation| {
+                self.annotation_textures
+                    .body_height(annotation.id)
+                    .map(|height| (annotation.id, height))
+            })
+            .collect();
+        let footnotes = place_footnotes(&annotations, body_bottom, &footnote_heights);
         let footnote_bottom = footnotes
             .last()
-            .map(|placement| placement.y + FOOTNOTE_LINE_HEIGHT)
+            .map(|placement| {
+                footnote_heights
+                    .iter()
+                    .find(|(id, _)| *id == placement.annotation_id)
+                    .map(|(_, height)| placement.y + height)
+                    .unwrap_or(placement.y + FOOTNOTE_LINE_HEIGHT)
+            })
             .unwrap_or(body_bottom);
 
         let content_height = (footnote_bottom + PAGE_PADDING).max(ui.available_height());
@@ -2946,15 +2987,10 @@ impl KameApp {
         }
 
         // --- annotation text -------------------------------------------------
-        // Margin bodies sit in the gutter right of the measure; footnote
-        // entries span the measure. Both are cached separately from block
-        // textures because they are shaped at another width and size.
-        let annotation_size = config.body_size * ANNOTATION_SCALE;
+        // Margin bodies sit in the gutter right of the measure. Footnotes were
+        // shaped before the page was sized (they span the measure, so they
+        // needed no geometry); this pass only shapes the margin column.
         let margin_column = (geometry.margin_width - config.margin_size).max(40.0);
-        let footnote_number: HashMap<AnnotationId, usize> = footnotes
-            .iter()
-            .map(|placement| (placement.annotation_id, placement.number))
-            .collect();
         let mut live = HashSet::with_capacity(annotations.len());
         for annotation in &annotations {
             live.insert(annotation.id);
@@ -2971,23 +3007,11 @@ impl KameApp {
                     annotation_size,
                     self.palette.apparatus_ink,
                 ),
-                AnnotationKind::Footnote => {
-                    let number = footnote_number.get(&annotation.id).copied().unwrap_or(1);
-                    let entry = format!("{number}. {}", annotation.body);
-                    self.annotation_textures.sync(
-                        ui.ctx(),
-                        &mut self.renderer,
-                        annotation.id,
-                        &entry,
-                        config.body_width,
-                        annotation_size,
-                        self.palette.apparatus_ink,
-                    );
-                }
-                // A Note keeps its body behind the margin marker, so it has no
-                // texture until the popover opens (which uses egui text); a
-                // marginal in hide-margin mode is skipped above.
-                AnnotationKind::Marginal | AnnotationKind::Note => {}
+                // Footnotes were shaped above; a Note keeps its body behind the
+                // margin marker, so it has no texture until the popover opens
+                // (which uses egui text); a marginal in hide-margin mode is
+                // skipped above.
+                AnnotationKind::Footnote | AnnotationKind::Marginal | AnnotationKind::Note => {}
             }
         }
         self.annotation_textures.retain(&live);

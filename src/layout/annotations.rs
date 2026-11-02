@@ -14,7 +14,8 @@ use crate::model::{Annotation, AnnotationId, AnnotationKind, Block};
 /// Vertical gap between the last line of the body and the first footnote,
 /// leaving room for the rule that separates prose from apparatus.
 pub const FOOTNOTE_GAP: f32 = 24.0;
-/// Baseline-to-baseline advance between consecutive footnote entries.
+/// Baseline-to-baseline advance of a single footnote line, used as the fallback
+/// height for an entry whose texture has not been shaped yet.
 pub const FOOTNOTE_LINE_HEIGHT: f32 = 18.0;
 /// Clear space between one margin body's last line and the next placement
 /// below it.
@@ -154,22 +155,44 @@ fn is_margin(kind: &AnnotationKind) -> bool {
 }
 
 /// Number every `Footnote` in document order (1-based) and stack the entries at
-/// the foot of the page, starting [`FOOTNOTE_GAP`] below `doc_height` and
-/// advancing by [`FOOTNOTE_LINE_HEIGHT`] per entry.
+/// the foot of the page, starting [`FOOTNOTE_GAP`] below `doc_height`.
+///
+/// Each entry advances by its *rendered* height (from `body_heights`) plus
+/// [`MARGIN_GAP`], so a footnote that wraps to several lines pushes the next
+/// entry past all of them instead of overprinting it. `body_heights` maps an
+/// annotation id to the height its "N. body" entry actually renders to at the
+/// measure width; an id without a height falls back to one line.
 ///
 /// `annotations` is read in document order; only `Footnote`s take a number, so
 /// interleaved marginalia and notes do not leave gaps in the numbering. Callers
 /// must pass annotations in reading order — see [`reading_order`]; the stored
 /// vector is in creation order, which is not the same thing.
-pub fn place_footnotes(annotations: &[Annotation], doc_height: f32) -> Vec<FootnotePlacement> {
+pub fn place_footnotes(
+    annotations: &[Annotation],
+    doc_height: f32,
+    body_heights: &[(AnnotationId, f32)],
+) -> Vec<FootnotePlacement> {
+    let height_of = |id: AnnotationId| {
+        body_heights
+            .iter()
+            .find(|(candidate, _)| *candidate == id)
+            .map(|(_, height)| *height)
+            .unwrap_or(FOOTNOTE_LINE_HEIGHT)
+            .max(FOOTNOTE_LINE_HEIGHT)
+    };
+    let mut y = doc_height + FOOTNOTE_GAP;
     annotations
         .iter()
         .filter(|annotation| annotation.kind == AnnotationKind::Footnote)
         .enumerate()
-        .map(|(index, annotation)| FootnotePlacement {
-            annotation_id: annotation.id,
-            number: index + 1,
-            y: doc_height + FOOTNOTE_GAP + index as f32 * FOOTNOTE_LINE_HEIGHT,
+        .map(|(index, annotation)| {
+            let placement = FootnotePlacement {
+                annotation_id: annotation.id,
+                number: index + 1,
+                y,
+            };
+            y += height_of(annotation.id) + MARGIN_GAP;
+            placement
         })
         .collect()
 }
@@ -437,7 +460,7 @@ dance, on a page, of pen, eye and hand.";
         let second = footnote(block_id, 10);
         let doc_height = 800.0;
 
-        let placed = place_footnotes(&[first.clone(), second.clone()], doc_height);
+        let placed = place_footnotes(&[first.clone(), second.clone()], doc_height, &[]);
         assert_eq!(placed.len(), 2);
 
         let numbers: Vec<usize> = placed.iter().map(|p| p.number).collect();
@@ -450,6 +473,26 @@ dance, on a page, of pen, eye and hand.";
             "footnotes sit below the body"
         );
         assert!(placed[1].y > placed[0].y, "entries march down the foot");
+    }
+
+    #[test]
+    fn a_wrapped_footnote_pushes_the_next_entry_past_its_lines() {
+        let block_id = Uuid::new_v4();
+        let first = footnote(block_id, 0);
+        let second = footnote(block_id, 10);
+        let doc_height = 800.0;
+
+        // The first entry renders to three lines (54pt); the second must start
+        // below all three, not at a fixed one-line advance.
+        let heights = vec![(first.id, 54.0), (second.id, 18.0)];
+        let placed = place_footnotes(&[first.clone(), second.clone()], doc_height, &heights);
+
+        assert_eq!(placed[0].y, doc_height + FOOTNOTE_GAP);
+        assert_eq!(
+            placed[1].y,
+            doc_height + FOOTNOTE_GAP + 54.0 + MARGIN_GAP,
+            "the second entry clears the first's three lines plus a gap"
+        );
     }
 
     #[test]
@@ -585,7 +628,7 @@ dance, on a page, of pen, eye and hand.";
             note(block_id, 6),
             footnote(block_id, 12),
         ];
-        let placed = place_footnotes(&anns, 500.0);
+        let placed = place_footnotes(&anns, 500.0, &[]);
         assert_eq!(placed.len(), 2);
         assert_eq!(placed[0].number, 1);
         assert_eq!(placed[1].number, 2);
@@ -615,7 +658,7 @@ dance, on a page, of pen, eye and hand.";
         let ordered = reading_order(&[below.clone(), above.clone()], &blocks);
 
         assert_eq!(ordered[0].id, above.id, "the earlier paragraph reads first");
-        let placed = place_footnotes(&ordered, 400.0);
+        let placed = place_footnotes(&ordered, 400.0, &[]);
         assert_eq!(placed[0].annotation_id, above.id);
         assert_eq!(placed[0].number, 1);
         assert_eq!(placed[1].annotation_id, below.id);
@@ -633,6 +676,6 @@ dance, on a page, of pen, eye and hand.";
     fn no_annotations_place_nothing() {
         let (blocks, layouts) = laid_out(PARA);
         assert!(place_marginalia(&[], &blocks, &layouts, &[], &[0.0], &config()).is_empty());
-        assert!(place_footnotes(&[], 400.0).is_empty());
+        assert!(place_footnotes(&[], 400.0, &[]).is_empty());
     }
 }

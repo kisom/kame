@@ -13,12 +13,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
   types, and Finder sends the file by Apple event rather than as an argument, so
   kame needs code to receive it.
 
-## Features
-
-- [ ] **Document metadata and an editing dialog.** Title, author, date and so on,
-  stored in the document. Would replace `display_title`'s use of the file name for
-  documents started as Untitled, and keep the import front matter now left out.
-
 ## Typography
 
 - [ ] **Word spacing (low priority).** Justified text without hyphenation leaves
@@ -36,6 +30,10 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Markdown import
 
+- [ ] **An unsaved document exports to `document.md` in the working directory.** An
+  import could use its source's name and directory instead.
+- [ ] **A linked image loses its link.** `[![](a.png)](b.png)` imports as just the
+  image, because image blocks have no link.
 - [ ] **Site-root images show as missing.** `/files/images/...` cannot be found
   from the file alone, so they get the missing-image placeholder. Asking for a
   site root at import would resolve them.

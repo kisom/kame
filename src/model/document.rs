@@ -108,6 +108,21 @@ pub struct Annotation {
     pub body: String,
 }
 
+/// What a document says about itself, kept apart from its text: edits to it are
+/// not undo steps, and restoring a snapshot leaves it alone.
+///
+/// Dates are free text, written `YYYY-MM-DD` by kame. An empty title means the
+/// document goes by its file's name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Metadata {
+    pub title: String,
+    pub author: String,
+    pub created: String,
+    pub published: String,
+    pub tags: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub id: Uuid,

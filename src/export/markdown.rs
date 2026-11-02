@@ -7,7 +7,7 @@
 //! footnotes, and drops the apparatus that has no Markdown equivalent
 //! (marginalia and notes are v1-omitted).
 
-use crate::model::{AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle};
+use crate::model::{AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle};
 use std::collections::HashMap;
 
 /// Render `doc` as Markdown.
@@ -119,6 +119,53 @@ pub fn to_markdown(doc: &Document) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Render `doc` for publishing: [`to_markdown`] under a `Key: value` header, the
+/// form Pelican reads, leaving out any field that is empty.
+///
+/// A first heading repeating the title is dropped, since a blog renders the title
+/// itself, unless a footnote is anchored in it. The date is the published date,
+/// or the created date for a document not yet published.
+pub fn to_markdown_with(doc: &Document, metadata: &Metadata) -> String {
+    let date = if metadata.published.is_empty() {
+        &metadata.created
+    } else {
+        &metadata.published
+    };
+    let tags = metadata.tags.join(", ");
+    let header: String = [
+        ("Title", metadata.title.as_str()),
+        ("Date", date.as_str()),
+        ("Author", metadata.author.as_str()),
+        ("Tags", tags.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .map(|(key, value)| format!("{key}: {}\n", value.replace('\n', " ")))
+    .collect();
+
+    let repeats_title = doc.blocks.first().is_some_and(|first| {
+        matches!(first.kind, BlockKind::Heading { .. })
+            && first.text == metadata.title
+            && !doc
+                .annotations
+                .iter()
+                .any(|annotation| annotation.anchor.block_id() == first.id)
+    });
+    let body = if repeats_title {
+        let mut rest = doc.clone();
+        rest.blocks.remove(0);
+        to_markdown(&rest)
+    } else {
+        to_markdown(doc)
+    };
+
+    match (header.is_empty(), body.is_empty()) {
+        (true, _) => body,
+        (false, true) => header,
+        (false, false) => format!("{header}\n{body}"),
+    }
 }
 
 /// Footnotes in deterministic document order, numbered from 1.
@@ -872,5 +919,89 @@ mod tests {
         let mut doc = Document::new("t");
         doc.blocks[0].text = "first\n".to_string();
         assert_eq!(to_markdown(&doc), "first\n");
+    }
+
+    fn metadata() -> crate::model::Metadata {
+        crate::model::Metadata {
+            title: "On Burnout".to_string(),
+            author: "K. Isom".to_string(),
+            created: "2019-01-01".to_string(),
+            published: "2019-01-02".to_string(),
+            tags: vec!["life".to_string(), "work".to_string()],
+        }
+    }
+
+    #[test]
+    fn publishing_writes_front_matter_in_a_fixed_order() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Body.")];
+        assert_eq!(
+            to_markdown_with(&doc, &metadata()),
+            "Title: On Burnout\nDate: 2019-01-02\nAuthor: K. Isom\nTags: life, work\n\nBody.\n"
+        );
+    }
+
+    #[test]
+    fn an_unpublished_document_is_dated_by_its_creation() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Body.")];
+        let meta = crate::model::Metadata {
+            published: String::new(),
+            ..metadata()
+        };
+        assert!(to_markdown_with(&doc, &meta).contains("Date: 2019-01-01\n"));
+    }
+
+    #[test]
+    fn empty_fields_are_left_out_and_no_metadata_means_no_front_matter() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Body.")];
+        let title_only = crate::model::Metadata {
+            title: "T".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(to_markdown_with(&doc, &title_only), "Title: T\n\nBody.\n");
+        assert_eq!(
+            to_markdown_with(&doc, &crate::model::Metadata::default()),
+            "Body.\n"
+        );
+    }
+
+    /// A blog renders the title itself, so it would otherwise appear twice.
+    #[test]
+    fn a_first_heading_repeating_the_title_is_not_published_twice() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(BlockKind::Heading { level: 1 }, "On Burnout"),
+            paragraph("Body."),
+        ];
+        let out = to_markdown_with(&doc, &metadata());
+        assert!(!out.contains("# On Burnout"), "{out}");
+        assert!(out.contains("Title: On Burnout"), "{out}");
+    }
+
+    #[test]
+    fn a_different_first_heading_stays() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(BlockKind::Heading { level: 1 }, "Introduction"),
+            paragraph("Body."),
+        ];
+        assert!(to_markdown_with(&doc, &metadata()).contains("# Introduction"));
+    }
+
+    #[test]
+    fn a_title_heading_with_a_footnote_keeps_the_footnote() {
+        let mut doc = Document::new("t");
+        let heading = block(BlockKind::Heading { level: 1 }, "On Burnout");
+        doc.annotations = vec![annotation(
+            AnnotationKind::Footnote,
+            heading.id,
+            2,
+            2,
+            "A note.",
+        )];
+        doc.blocks = vec![heading, paragraph("Body.")];
+        assert!(to_markdown_with(&doc, &metadata()).contains("[^1]: A note."));
     }
 }

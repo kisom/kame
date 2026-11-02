@@ -108,10 +108,26 @@ Both dialogs take Enter as their primary action and Escape as cancel. Nothing
 auto-repeats: one press is one command, and a held Enter cannot step through
 the restore confirmation.
 
+## Document properties
+
+File > Document Properties holds the document's title, author, created and
+published dates, and tags. They are stored in the `.kame` file apart from its
+text: saving them is not an undo step, and restoring a snapshot leaves them alone.
+A document with no title goes by its file's name.
+
+They come from an import's front matter, where `Date` is the published date. Other
+front matter fields are left out, and the status line counts them.
+
+Exports publish them. Markdown opens with a `Title:`, `Date:`, `Author:` and
+`Tags:` header, in the form Pelican reads, leaving out empty fields, and drops a
+first heading repeating the title, since a blog renders the title itself. HTML puts
+them in the page's head. The date is the published date, or the created date until
+there is one.
+
 ## The menu bar and status row
 
 The menu bar holds every command with its shortcut: File (open, save, import,
-export, snapshots, and the document's counts), Annotate, View (type size, dark
+export, snapshots, document properties, and the document's counts), Annotate, View (type size, dark
 mode and the view modes) and Help.
 
 On Linux, Alt-F, Alt-A, Alt-V and Alt-H open those menus; arrows and Enter then

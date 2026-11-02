@@ -19,6 +19,8 @@ itself is a structured, first-class file, never a pile of markup.
 - **Distraction-free modes** — fullscreen, hide chrome, hide margin, paragraph
   focus, typewriter.
 - **Export** — deterministic Markdown and full-fidelity HTML.
+- **Document properties** — title, author, dates and tags, published with each
+  export.
 - **Markdown import** — open a `.md` file as a new document; the status line
   says what was simplified.
 - **Headings and lists** — `Ctrl-Shift-1/2/3` for H1/H2/H3, `Ctrl-Shift-3` for

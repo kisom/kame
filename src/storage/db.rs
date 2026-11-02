@@ -99,6 +99,11 @@ impl From<serde_json::Error> for DbError {
 /// migration.
 const SCHEMA_VERSION: i64 = 1;
 
+/// `metadata` holds what the document says about itself, as JSON in its single
+/// row: apart from the head so that edits to it are not undo steps and restoring
+/// a snapshot leaves it alone. A file from before it gains the table on open, and
+/// the session fills the empty row with defaults.
+///
 /// The whole document lives in the single row `id = 1`; every edit that
 /// produced it is appended to `ops`. `meta` holds the undo cursor: the number
 /// of ops in the log that are applied to the head document (`0..=n`). Head and
@@ -119,6 +124,10 @@ CREATE TABLE IF NOT EXISTS ops (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metadata (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS snapshots (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,6 +202,29 @@ impl Db {
         }
 
         Ok(Db { conn })
+    }
+
+    /// Reads the document's metadata, or `None` if it has none stored yet.
+    pub fn load_metadata(&self) -> Result<Option<crate::model::Metadata>, DbError> {
+        let json = self
+            .conn
+            .query_row("SELECT json FROM metadata WHERE id = 1", [], |row| {
+                row.get::<_, String>(0)
+            });
+        match json {
+            Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Replaces the document's metadata.
+    pub fn save_metadata(&mut self, metadata: &crate::model::Metadata) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (id, json) VALUES (1, ?1)",
+            [serde_json::to_string(metadata)?],
+        )?;
+        Ok(())
     }
 
     /// Reads the stored document. Errors if no document has been saved yet.
@@ -1027,5 +1059,40 @@ mod tests {
         assert_eq!(db.load_document().unwrap(), original);
         assert_eq!(db.load_ops().unwrap().len(), 1);
         assert_eq!(db.cursor().unwrap(), 1);
+    }
+
+    #[test]
+    fn metadata_starts_absent_and_round_trips() {
+        let mut db = Db::open_in_memory().unwrap();
+        assert_eq!(db.load_metadata().unwrap(), None);
+        let metadata = crate::model::Metadata {
+            title: "A Title".to_string(),
+            author: "K".to_string(),
+            created: "2026-11-02".to_string(),
+            published: String::new(),
+            tags: vec!["lisp".to_string(), "hacks".to_string()],
+        };
+        db.save_metadata(&metadata).unwrap();
+        assert_eq!(db.load_metadata().unwrap(), Some(metadata.clone()));
+        let newer = crate::model::Metadata {
+            author: "L".to_string(),
+            ..metadata
+        };
+        db.save_metadata(&newer).unwrap();
+        assert_eq!(db.load_metadata().unwrap(), Some(newer));
+    }
+
+    #[test]
+    fn a_file_without_the_metadata_table_gains_it_on_open() {
+        let dir = std::env::temp_dir().join(format!("kame-meta-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.kame");
+        drop(Db::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE metadata").ok();
+        drop(conn);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.load_metadata().unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

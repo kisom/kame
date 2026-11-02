@@ -7,6 +7,6 @@ pub use anchor::shift_anchors;
 // naming the type. Keep it re-exported for the tests.
 #[allow(unused_imports)]
 pub use document::{
-    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, Span,
-    SpanStyle,
+    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
+    Metadata, Span, SpanStyle,
 };

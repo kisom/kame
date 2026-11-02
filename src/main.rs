@@ -31,7 +31,7 @@ use crate::layout::{
 };
 use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
-    SpanStyle,
+    Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
     caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word, offset_at,
@@ -925,6 +925,7 @@ enum MenuAction {
     Open,
     Save,
     ImportMarkdown,
+    Properties,
     File(FileCommand),
     Annotate(AnnotationKind),
     TypeSize(f32),
@@ -954,6 +955,74 @@ fn menu_entry(
         ui.close();
     }
     response
+}
+
+/// `when` as a `YYYY-MM-DD` day, in UTC.
+fn iso_date(when: std::time::SystemTime) -> String {
+    let secs = when
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    // Howard Hinnant's civil-from-days, on years that start in March so the leap
+    // day falls at the end of one.
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// The tags typed into the properties dialog.
+fn parse_tags(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Today, as a metadata date.
+fn today() -> String {
+    iso_date(std::time::SystemTime::now())
+}
+
+/// Metadata for a file that has none stored: its title if it was ever given one,
+/// and its own date as the created date.
+fn default_metadata(title: &str, path: &Path) -> Metadata {
+    let created = std::fs::metadata(path)
+        .ok()
+        .and_then(|file| file.created().or_else(|_| file.modified()).ok())
+        .map_or_else(today, iso_date);
+    Metadata {
+        title: if title == "Untitled" {
+            String::new()
+        } else {
+            title.to_string()
+        },
+        created,
+        ..Metadata::default()
+    }
+}
+
+/// The Document Properties dialog: its fields as text until they are saved.
+struct MetadataPrompt {
+    title: String,
+    author: String,
+    created: String,
+    published: String,
+    tags: String,
+    /// Set for the frame the dialog opens on, so the first field takes the
+    /// keyboard.
+    focus: bool,
 }
 
 /// Whether `event` is the macOS quit shortcut. `mac_cmd` is never set elsewhere,
@@ -1195,6 +1264,8 @@ struct Session {
     save_failed: bool,
     /// The name of the file this document was imported from.
     source_stem: Option<String>,
+    /// What the document says about itself. Saved directly, not an undo step.
+    metadata: Metadata,
     /// The file this session is persisted to, or `None` for an anonymous
     /// (in-memory) document that has not been saved yet. Exports land beside
     /// it, and the snapshots it prompts for live in the database it names.
@@ -1278,6 +1349,16 @@ impl Session {
             Some(err) => (Some(format!("save failed — editing disabled: {err}")), true),
             None => (warning, false),
         };
+        let metadata = match db.load_metadata() {
+            Ok(Some(metadata)) => metadata,
+            // Missing or unreadable: the text is what matters, so fall back, and
+            // keep the defaults for next time if the file will take them.
+            _ => {
+                let metadata = default_metadata(&editor.document().title, path);
+                let _ = db.save_metadata(&metadata);
+                metadata
+            }
+        };
         Ok(Session {
             editor,
             db,
@@ -1286,6 +1367,7 @@ impl Session {
             last_error,
             save_failed,
             source_stem: None,
+            metadata,
             path: Some(path.to_path_buf()),
         })
     }
@@ -1318,6 +1400,10 @@ impl Session {
             last_error: Some(error),
             save_failed: false,
             source_stem: None,
+            metadata: Metadata {
+                created: today(),
+                ..Metadata::default()
+            },
             path: None,
         })
     }
@@ -1345,6 +1431,10 @@ impl Session {
             last_error: None,
             save_failed: false,
             source_stem: None,
+            metadata: Metadata {
+                created: today(),
+                ..Metadata::default()
+            },
             path: None,
         })
     }
@@ -1373,7 +1463,15 @@ impl Session {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("Untitled");
-        let Imported { document, report } = from_markdown(&source, base_dir, title);
+        let Imported {
+            document,
+            mut metadata,
+            report,
+        } = from_markdown(&source, base_dir, title);
+        if metadata.title.is_empty() {
+            metadata.title = document.title.clone();
+        }
+        metadata.created = today();
 
         let mut note = format!(
             "imported {} — not saved yet",
@@ -1388,7 +1486,8 @@ impl Session {
             note.push_str(&format!("; {missing} {noun} not found"));
         }
 
-        let db = Db::open_in_memory()?;
+        let mut db = Db::open_in_memory()?;
+        db.save_metadata(&metadata)?;
         let editor = Editor::new(document);
         let caret = editor
             .document()
@@ -1407,6 +1506,7 @@ impl Session {
             last_error: None,
             save_failed: false,
             source_stem: Some(title.to_string()),
+            metadata,
             path: None,
         };
         Ok((session, note))
@@ -1418,18 +1518,38 @@ impl Session {
         self.save_failed || (self.is_anonymous() && self.has_content())
     }
 
-    /// The name to show for this document. A document keeps the title it was
-    /// created with, so one started as Untitled and later saved takes the name
-    /// of its file; a real title, such as an import's, outranks the file name.
+    /// The name to show for this document: its metadata's title, or its file's
+    /// name if it has none.
     fn display_title(&self) -> String {
-        let title = self.document().title.as_str();
-        let stem = self
-            .path()
+        if !self.metadata.title.is_empty() {
+            return self.metadata.title.clone();
+        }
+        self.path()
             .and_then(Path::file_stem)
-            .and_then(|stem| stem.to_str());
-        match stem {
-            Some(stem) if title.is_empty() || title == "Untitled" => stem.to_string(),
-            _ => title.to_string(),
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Untitled")
+            .to_string()
+    }
+
+    /// Replaces the metadata and saves it at once. It is not an edit: it takes no
+    /// part in undo, and a failure to write costs nothing but the report.
+    fn set_metadata(&mut self, metadata: Metadata) {
+        self.metadata = metadata;
+        if let Err(err) = self.db.save_metadata(&self.metadata) {
+            self.last_error = Some(format!("could not save document properties — {err}"));
+        }
+    }
+
+    /// The metadata as an export publishes it, with the title the document goes by.
+    fn published_metadata(&self) -> Metadata {
+        let title = if self.metadata.title.is_empty() && self.is_anonymous() {
+            String::new()
+        } else {
+            self.display_title()
+        };
+        Metadata {
+            title,
+            ..self.metadata.clone()
         }
     }
 
@@ -1486,7 +1606,8 @@ impl Session {
     /// keep writing and take the export again.
     fn export_markdown(&mut self) -> Option<PathBuf> {
         let path = export_path(&self.export_base(), "md");
-        let markdown = crate::export::to_markdown(self.editor.document());
+        let markdown =
+            crate::export::to_markdown_with(self.editor.document(), &self.published_metadata());
         self.write_export(&path, &markdown)
     }
 
@@ -1494,7 +1615,7 @@ impl Session {
     /// and returns the path written.
     fn export_html(&mut self) -> Option<PathBuf> {
         let path = export_path(&self.export_base(), "html");
-        let html = crate::export::to_html(self.editor.document());
+        let html = crate::export::to_html_with(self.editor.document(), &self.published_metadata());
         self.write_export(&path, &html)
     }
 
@@ -1510,6 +1631,7 @@ impl Session {
             db.append_op(&op)?;
         }
         db.save_state(&doc, cursor)?;
+        db.save_metadata(&self.metadata)?;
         self.db = db;
         self.path = Some(path.to_path_buf());
         self.clear_save_error();
@@ -2762,6 +2884,8 @@ struct KameApp {
     /// next one. Failures are reported through `Session::last_error` instead.
     notice: Option<String>,
     notice_tracker: NoticeTracker,
+    /// The Document Properties dialog, while it is up.
+    metadata_prompt: Option<MetadataPrompt>,
     /// A menu chord waiting for the menu bar to be drawn.
     pending_menu: Option<BarMenu>,
     /// Keeps a failed write from being discarded by a stray close, while still
@@ -2819,6 +2943,7 @@ impl KameApp {
             restore_picker: None,
             notice,
             notice_tracker: NoticeTracker::default(),
+            metadata_prompt: None,
             pending_menu: None,
             close: CloseGuard::default(),
             close_flow: CloseFlow::default(),
@@ -2900,6 +3025,7 @@ impl KameApp {
     /// Whether a file dialog is up. While one is, it owns the keyboard.
     fn dialog_open(&self) -> bool {
         self.snapshot_prompt.is_some()
+            || self.metadata_prompt.is_some()
             || self.open_prompt.is_some()
             || self.image_prompt.is_some()
             || self.link_prompt.is_some()
@@ -2910,6 +3036,7 @@ impl KameApp {
     /// Escape can fall through to the note popover only when it was not.
     fn dismiss_dialog(&mut self) -> bool {
         let open = self.dialog_open();
+        self.metadata_prompt = None;
         self.snapshot_prompt = None;
         self.open_prompt = None;
         self.image_prompt = None;
@@ -3620,6 +3747,10 @@ impl KameApp {
                         action = Some(MenuAction::File(FileCommand::RestoreSnapshot));
                     }
                     ui.separator();
+                    if menu_item(ui, "Document Properties…", None, false) {
+                        action = Some(MenuAction::Properties);
+                    }
+                    ui.separator();
                     let plural = |n: usize| if n == 1 { "" } else { "s" };
                     ui.label(
                         egui::RichText::new(format!(
@@ -3738,6 +3869,7 @@ impl KameApp {
             MenuAction::Open => self.begin_open(),
             MenuAction::Save => self.save_action(ctx, false),
             MenuAction::ImportMarkdown => self.import_markdown(),
+            MenuAction::Properties => self.begin_properties(),
             MenuAction::File(command) => self.run_file_command(command),
             MenuAction::Annotate(kind) => {
                 if let Some(id) = self.session.add_annotation(kind) {
@@ -4521,6 +4653,8 @@ impl KameApp {
         });
         if self.snapshot_prompt.is_some() {
             self.show_snapshot_prompt(ctx, enter);
+        } else if self.metadata_prompt.is_some() {
+            self.show_metadata_prompt(ctx, enter);
         } else if self.open_prompt.is_some() {
             self.show_open_prompt(ctx, enter);
         } else if self.image_prompt.is_some() {
@@ -4774,6 +4908,89 @@ impl KameApp {
         let marks = footnote_marks(self.session.document());
         let block_marks = marks.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
         self.renderer.layout_marked(block, block_marks)
+    }
+
+    /// Opens the Document Properties dialog on the current metadata.
+    fn begin_properties(&mut self) {
+        let metadata = &self.session.metadata;
+        self.metadata_prompt = Some(MetadataPrompt {
+            title: metadata.title.clone(),
+            author: metadata.author.clone(),
+            created: metadata.created.clone(),
+            published: metadata.published.clone(),
+            tags: metadata.tags.join(", "),
+            focus: true,
+        });
+    }
+
+    /// The Document Properties dialog. Saving writes straight to the document's
+    /// file; there is nothing to undo.
+    fn show_metadata_prompt(&mut self, ctx: &egui::Context, enter: bool) {
+        let Some(prompt) = self.metadata_prompt.as_mut() else {
+            return;
+        };
+        let focus = prompt.focus;
+        prompt.focus = false;
+        // A chord and an Enter arriving in the same frame would otherwise save a
+        // dialog nobody has read.
+        let mut save = enter && !focus;
+        let mut cancel = false;
+        egui::Window::new("Document Properties")
+            .id(Id::unique("kame-metadata-prompt"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Grid::new("kame-metadata-fields")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        for (index, (label, value, hint)) in [
+                            ("Title", &mut prompt.title, "the file's name"),
+                            ("Author", &mut prompt.author, ""),
+                            ("Created", &mut prompt.created, "YYYY-MM-DD"),
+                            ("Published", &mut prompt.published, "YYYY-MM-DD"),
+                            ("Tags", &mut prompt.tags, "separated by commas"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            ui.label(label);
+                            let field = ui.add(
+                                egui::TextEdit::singleline(value)
+                                    .desired_width(320.0)
+                                    .hint_text(hint),
+                            );
+                            if focus && index == 0 {
+                                field.request_focus();
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            self.metadata_prompt = None;
+        } else if save {
+            if let Some(prompt) = self.metadata_prompt.take() {
+                self.session.set_metadata(Metadata {
+                    title: prompt.title.trim().to_string(),
+                    author: prompt.author.trim().to_string(),
+                    created: prompt.created.trim().to_string(),
+                    published: prompt.published.trim().to_string(),
+                    tags: parse_tags(&prompt.tags),
+                });
+            }
+        }
     }
 
     /// Opens the path prompt, clearing any other file dialog so it is the one
@@ -5980,6 +6197,133 @@ mod tests {
         assert!(desktop.contains("Exec=@PREFIX@/kame %f"), "{desktop}");
         assert!(mime.contains(r#"type="application/x-kame""#), "{mime}");
         assert!(mime.contains(r#"pattern="*.kame""#), "{mime}");
+    }
+
+    #[test]
+    fn dates_are_written_as_iso_days() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let day = |secs: u64| iso_date(UNIX_EPOCH + Duration::from_secs(secs));
+        assert_eq!(day(0), "1970-01-01");
+        assert_eq!(day(951_782_400), "2000-02-29");
+        assert_eq!(day(1_793_577_600), "2026-11-02");
+        assert_eq!(day(1_735_603_200), "2024-12-31");
+        assert_eq!(day(4_107_542_400), "2100-03-01");
+    }
+
+    #[test]
+    fn tags_split_on_commas_and_drop_blanks() {
+        assert_eq!(parse_tags(" life, work ,,"), vec!["life", "work"]);
+        assert!(parse_tags("  ").is_empty());
+    }
+
+    #[test]
+    fn a_new_document_is_created_today_and_goes_by_untitled() {
+        let session = Session::anonymous().unwrap();
+        assert_eq!(
+            session.metadata.created,
+            iso_date(std::time::SystemTime::now())
+        );
+        assert_eq!(session.metadata.title, "");
+        assert_eq!(session.display_title(), "Untitled");
+    }
+
+    #[test]
+    fn metadata_persists_across_a_reopen_outside_the_undo_log() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        let before = session.history();
+        session.set_metadata(Metadata {
+            title: "Stored".to_string(),
+            author: "K".to_string(),
+            ..session.metadata.clone()
+        });
+        assert_eq!(session.history(), before, "not an undo step");
+        assert_eq!(session.display_title(), "Stored");
+        drop(session);
+        let reopened = open(&path);
+        assert_eq!(reopened.metadata.title, "Stored");
+        assert_eq!(reopened.metadata.author, "K");
+    }
+
+    #[test]
+    fn save_as_carries_metadata_to_the_file() {
+        let path = temp_db_path();
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        session.set_metadata(Metadata {
+            title: "Carried".to_string(),
+            ..session.metadata.clone()
+        });
+        session.save_as(&path).unwrap();
+        drop(session);
+        assert_eq!(open(&path).metadata.title, "Carried");
+    }
+
+    #[test]
+    fn restoring_a_snapshot_leaves_metadata_alone() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("Words");
+        let id = session.snapshot(None).expect("a snapshot");
+        session.set_metadata(Metadata {
+            title: "After".to_string(),
+            ..session.metadata.clone()
+        });
+        assert!(session.restore(id));
+        assert_eq!(session.metadata.title, "After");
+    }
+
+    /// A file from before the metadata table takes its title from the document,
+    /// unless that was never named, and its date from the file.
+    #[test]
+    fn an_older_file_gets_reasonable_defaults() {
+        let path = temp_db_path().with_file_name("Essay.kame");
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        session.save_as(&path).unwrap();
+        drop(session);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE metadata").ok();
+        drop(conn);
+        let reopened = open(&path);
+        assert_eq!(reopened.metadata.title, "", "Untitled was never a name");
+        assert_eq!(reopened.display_title(), "Essay");
+        assert!(!reopened.metadata.created.is_empty());
+        assert_eq!(reopened.metadata.author, "");
+    }
+
+    #[test]
+    fn an_import_keeps_its_front_matter() {
+        let dir = std::env::temp_dir().join(format!("kame-meta-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("notes.md");
+        std::fs::write(&source, "Title: T\nAuthor: K\nTags: a, b\n\nWords.\n").unwrap();
+        let (session, _) = Session::open_any(&source).unwrap();
+        assert_eq!(session.metadata.title, "T");
+        assert_eq!(session.metadata.author, "K");
+        assert_eq!(session.metadata.tags, vec!["a", "b"]);
+        assert!(!session.metadata.created.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn exports_publish_the_metadata() {
+        let path = temp_db_path().with_file_name("Pub.kame");
+        let mut session = open(&path);
+        session.insert("Words");
+        session.set_metadata(Metadata {
+            author: "K".to_string(),
+            ..session.metadata.clone()
+        });
+        let markdown_path = session.export_markdown().expect("markdown written");
+        let markdown = std::fs::read_to_string(markdown_path).unwrap();
+        assert!(markdown.contains("Author: K\n"), "{markdown}");
+        let html_path = session.export_html().expect("html written");
+        let html = std::fs::read_to_string(html_path).unwrap();
+        assert!(
+            html.contains(r#"<meta name="author" content="K">"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -7496,7 +7840,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         session.insert("A paragraph.");
         session.split();
         session.insert("Another one.");
-        let expected = crate::export::to_markdown(session.document());
+        let expected =
+            crate::export::to_markdown_with(session.document(), &session.published_metadata());
         assert!(expected.contains("A paragraph."));
         assert!(expected.contains("Another one."));
 
@@ -7515,7 +7860,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let path = temp_db_path();
         let mut session = open(&path);
         session.insert("A paragraph.");
-        let expected = crate::export::to_html(session.document());
+        let expected =
+            crate::export::to_html_with(session.document(), &session.published_metadata());
 
         let written = session.export_html().expect("an html export");
         assert_eq!(written, path.with_extension("html"));

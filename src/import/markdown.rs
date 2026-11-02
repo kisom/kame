@@ -5,7 +5,9 @@
 //! is simplified rather than dropped, keeping every word, and counted in an
 //! [`ImportReport`] so the author can see what changed.
 
-use crate::model::{Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind, Document};
+use crate::model::{
+    Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata,
+};
 use crate::model::{Span, SpanStyle};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
@@ -16,6 +18,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImportReport {
     pub front_matter: bool,
+    pub dropped_front_matter: usize,
     pub code_blocks: usize,
     pub inline_code: usize,
     pub tables: usize,
@@ -71,9 +74,11 @@ impl ImportReport {
             "horizontal rule dropped",
             "horizontal rules dropped",
         );
-        if self.front_matter {
-            parts.push("front matter left out".to_string());
-        }
+        count(
+            self.dropped_front_matter,
+            "front matter field left out",
+            "front matter fields left out",
+        );
         (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
@@ -82,6 +87,7 @@ impl ImportReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Imported {
     pub document: Document,
+    pub metadata: Metadata,
     pub report: ImportReport,
 }
 
@@ -92,10 +98,14 @@ pub fn from_markdown(source: &str, base_dir: &Path, fallback_title: &str) -> Imp
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let front_matter = split_front_matter(source);
     let body = front_matter.as_ref().map_or(source, |found| found.body);
-    let title = front_matter.as_ref().and_then(|found| found.title.clone());
+    let metadata = front_matter
+        .as_ref()
+        .map_or_else(Metadata::default, |found| found.metadata.clone());
+    let title = (!metadata.title.is_empty()).then(|| metadata.title.clone());
 
     let mut builder = Builder::new(base_dir);
     builder.report.front_matter = front_matter.is_some();
+    builder.report.dropped_front_matter = front_matter.as_ref().map_or(0, |found| found.dropped);
     // Smart punctuation stays off: it would rewrite the author's characters,
     // and a straight quote kame exported would not read back as itself.
     let options = Options::ENABLE_FOOTNOTES | Options::ENABLE_TABLES;
@@ -122,7 +132,11 @@ pub fn from_markdown(source: &str, base_dir: &Path, fallback_title: &str) -> Imp
         document.blocks = blocks;
     }
     document.annotations = annotations;
-    Imported { document, report }
+    Imported {
+        document,
+        metadata,
+        report,
+    }
 }
 
 fn new_block(kind: BlockKind, text: String) -> Block {
@@ -136,8 +150,39 @@ fn new_block(kind: BlockKind, text: String) -> Block {
 
 /// Front matter found at the top of a source.
 struct FrontMatter<'a> {
-    title: Option<String>,
+    metadata: Metadata,
+    /// Fields with no place in [`Metadata`].
+    dropped: usize,
     body: &'a str,
+}
+
+impl FrontMatter<'_> {
+    /// Files one `key: value` field.
+    fn record(&mut self, key: &str, value: &str) {
+        let value = unquote(value);
+        let slot = match key.to_ascii_lowercase().as_str() {
+            "title" => &mut self.metadata.title,
+            "date" => &mut self.metadata.published,
+            "author" | "authors" => &mut self.metadata.author,
+            "tags" | "keywords" => {
+                self.metadata.tags = value
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .split(',')
+                    .map(|tag| unquote(tag.trim()).to_string())
+                    .filter(|tag| !tag.is_empty())
+                    .collect();
+                return;
+            }
+            _ => {
+                self.dropped += 1;
+                return;
+            }
+        };
+        if slot.is_empty() {
+            *slot = value.to_string();
+        }
+    }
 }
 
 fn split_front_matter(source: &str) -> Option<FrontMatter<'_>> {
@@ -152,7 +197,11 @@ fn yaml_front_matter(source: &str) -> Option<FrontMatter<'_>> {
         return None;
     }
     let mut consumed = source.split_inclusive('\n').next()?.len();
-    let mut title = None;
+    let mut found = FrontMatter {
+        metadata: Metadata::default(),
+        dropped: 0,
+        body: "",
+    };
     for (index, line) in lines.enumerate() {
         consumed += line.len();
         let trimmed = line.trim_end();
@@ -160,15 +209,11 @@ fn yaml_front_matter(source: &str) -> Option<FrontMatter<'_>> {
             return None;
         }
         if trimmed == "---" || trimmed == "..." {
-            return Some(FrontMatter {
-                title,
-                body: &source[consumed..],
-            });
+            found.body = &source[consumed..];
+            return Some(found);
         }
         if let Some((key, value)) = metadata_pair(trimmed) {
-            if key.eq_ignore_ascii_case("title") {
-                title = title.or_else(|| non_empty(unquote(value)));
-            }
+            found.record(key, value);
         }
     }
     None
@@ -179,9 +224,13 @@ fn yaml_front_matter(source: &str) -> Option<FrontMatter<'_>> {
 /// must fit and the block must carry a title or date to count as metadata.
 fn pelican_front_matter(source: &str) -> Option<FrontMatter<'_>> {
     let mut consumed = 0;
-    let mut title = None;
     let mut identified = false;
     let mut any = false;
+    let mut found = FrontMatter {
+        metadata: Metadata::default(),
+        dropped: 0,
+        body: "",
+    };
     for line in source.split_inclusive('\n') {
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
@@ -192,19 +241,16 @@ fn pelican_front_matter(source: &str) -> Option<FrontMatter<'_>> {
             continue;
         }
         let (key, value) = metadata_pair(trimmed)?;
-        if key.eq_ignore_ascii_case("title") {
-            title = title.or_else(|| non_empty(value));
-            identified = true;
-        } else if key.eq_ignore_ascii_case("date") {
-            identified = true;
-        }
+        identified |= key.eq_ignore_ascii_case("title") || key.eq_ignore_ascii_case("date");
+        found.record(key, value);
         any = true;
         consumed += line.len();
     }
-    identified.then(|| FrontMatter {
-        title,
-        body: &source[consumed..],
-    })
+    if !identified {
+        return None;
+    }
+    found.body = &source[consumed..];
+    Some(found)
 }
 
 /// Splits a `key: value` line. The key opens with a letter and holds only word
@@ -229,10 +275,6 @@ fn unquote(value: &str) -> &str {
         }
     }
     value
-}
-
-fn non_empty(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Folds parser events into blocks. Text collects until a block boundary, which
@@ -926,12 +968,12 @@ mod tests {
         );
         let two = ImportReport {
             code_blocks: 2,
-            front_matter: true,
+            dropped_front_matter: 1,
             ..ImportReport::default()
         };
         assert_eq!(
             two.summary().unwrap(),
-            "2 code blocks as plain text, front matter left out"
+            "2 code blocks as plain text, 1 front matter field left out"
         );
     }
 
@@ -1161,5 +1203,53 @@ mod tests {
             );
         }
         assert!(lost_files.is_empty(), "words were lost");
+    }
+
+    #[test]
+    fn pelican_front_matter_becomes_metadata() {
+        let imported = import(
+            "Title: On Burnout\nDate: 2019-01-02 21:01\nAuthor: K. Isom\nTags: life, work\n\nBody.\n",
+        );
+        let meta = imported.metadata;
+        assert_eq!(meta.title, "On Burnout");
+        assert_eq!(meta.published, "2019-01-02 21:01");
+        assert_eq!(meta.author, "K. Isom");
+        assert_eq!(meta.tags, vec!["life", "work"]);
+        assert_eq!(imported.report.dropped_front_matter, 0);
+    }
+
+    #[test]
+    fn yaml_front_matter_becomes_metadata() {
+        let imported = import(
+            "---\ntitle: \"On Burnout\"\nauthors: K. Isom\ndate: 2019-01-02\ntags: [life, work]\n---\n\nBody.\n",
+        );
+        let meta = imported.metadata;
+        assert_eq!(meta.title, "On Burnout");
+        assert_eq!(meta.author, "K. Isom");
+        assert_eq!(meta.published, "2019-01-02");
+        assert_eq!(meta.tags, vec!["life", "work"]);
+    }
+
+    #[test]
+    fn front_matter_with_no_equivalent_is_counted() {
+        let imported = import("Title: T\nSummary: A long\n    summary.\nSlug: t\n\nBody.\n");
+        assert_eq!(imported.report.dropped_front_matter, 2);
+        assert_eq!(
+            imported.report.summary().unwrap(),
+            "2 front matter fields left out"
+        );
+    }
+
+    #[test]
+    fn empty_tags_are_no_tags() {
+        let imported = import("Title: T\nTags:\n\nBody.\n");
+        assert!(imported.metadata.tags.is_empty());
+    }
+
+    #[test]
+    fn a_source_without_front_matter_has_no_metadata() {
+        let imported = import("Body.\n");
+        assert_eq!(imported.metadata, crate::model::Metadata::default());
+        assert_eq!(imported.report.summary(), None);
     }
 }

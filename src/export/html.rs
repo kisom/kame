@@ -225,7 +225,14 @@ struct BlockApparatus {
 ///   its anchor loses only its marker — the body is still emitted, unanchored,
 /// - text is escaped (`&`, `<`, `>`); the output carries no document or
 ///   annotation ids, so it is stable across runs and serde round trips.
+#[cfg(test)]
 pub fn to_html(doc: &Document) -> String {
+    to_html_with(doc, &crate::model::Metadata::default())
+}
+
+/// [`to_html`] for publishing: `metadata` fills the page's head. An empty title
+/// falls back to the document's own, and an empty date to the created date.
+pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String {
     let collected = collect_apparatus(doc);
 
     let mut body = String::new();
@@ -319,11 +326,30 @@ pub fn to_html(doc: &Document) -> String {
         body.push_str("</ol>\n");
     }
 
-    let title = escape(&doc.title);
+    let title = if metadata.title.is_empty() {
+        escape(&doc.title)
+    } else {
+        escape(&metadata.title)
+    };
+    let date = if metadata.published.is_empty() {
+        &metadata.created
+    } else {
+        &metadata.published
+    };
+    let tags = metadata.tags.join(", ");
+    let metas: String = [
+        ("author", metadata.author.as_str()),
+        ("date", date.as_str()),
+        ("keywords", tags.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .map(|(name, value)| format!("<meta name=\"{name}\" content=\"{}\">\n", escape(value)))
+    .collect();
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{title}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n\
+         {metas}<title>{title}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n\
          <main class=\"document\">\n{body}</main>\n</body>\n</html>\n"
     )
 }
@@ -1327,5 +1353,44 @@ mod tests {
             "{}",
             to_html(&doc)
         );
+    }
+
+    #[test]
+    fn publishing_fills_the_page_head() {
+        let mut doc = Document::new("stored");
+        doc.blocks = vec![block(BlockKind::Paragraph, "Body.")];
+        let meta = crate::model::Metadata {
+            title: "On <Burnout>".to_string(),
+            author: "K. Isom".to_string(),
+            created: "2019-01-01".to_string(),
+            published: "2019-01-02".to_string(),
+            tags: vec!["life".to_string(), "work".to_string()],
+        };
+        let html = to_html_with(&doc, &meta);
+        assert!(html.contains("<title>On &lt;Burnout&gt;</title>"), "{html}");
+        assert!(
+            html.contains(r#"<meta name="author" content="K. Isom">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<meta name="date" content="2019-01-02">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<meta name="keywords" content="life, work">"#),
+            "{html}"
+        );
+        assert!(!html.contains("stored"), "{html}");
+    }
+
+    #[test]
+    fn empty_metadata_writes_no_meta_tags() {
+        let mut doc = Document::new("stored");
+        doc.blocks = vec![block(BlockKind::Paragraph, "Body.")];
+        let html = to_html_with(&doc, &crate::model::Metadata::default());
+        assert!(!html.contains(r#"name="author""#), "{html}");
+        assert!(!html.contains(r#"name="keywords""#), "{html}");
+        assert!(!html.contains(r#"name="date""#), "{html}");
+        assert!(html.contains("<title>stored</title>"), "{html}");
     }
 }

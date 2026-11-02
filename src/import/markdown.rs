@@ -975,6 +975,38 @@ mod tests {
         assert_eq!(imported.report.unanchored_footnotes, 1);
     }
 
+    /// Line breaks inside a block survive the trip out and back.
+    #[test]
+    fn line_breaks_survive_export_and_import() {
+        for text in [
+            "Roses are red,\nviolets are blue.",
+            "one\n\nthree",
+            "plain\n# not a heading\n- not a list\n1. not a number",
+        ] {
+            let mut doc = Document::new("t");
+            doc.blocks[0].text = text.to_string();
+            let exported = to_markdown(&doc);
+            let again = import(&exported).document;
+            assert_eq!(again.blocks.len(), 1, "{exported:?} split up");
+            assert_eq!(again.blocks[0].text, text, "from {exported:?}");
+            assert_eq!(to_markdown(&again), exported);
+        }
+    }
+
+    #[test]
+    fn line_breaks_in_a_quote_and_a_list_item_stay_in_the_block() {
+        for kind in [
+            BlockKind::BlockQuote,
+            BlockKind::ListItem { ordered: false },
+        ] {
+            let mut doc = Document::new("t");
+            doc.blocks[0].kind = kind.clone();
+            doc.blocks[0].text = "first\nsecond".to_string();
+            let again = import(&to_markdown(&doc)).document;
+            assert_eq!(outline(&again), vec![(kind, "first\nsecond".to_string())]);
+        }
+    }
+
     /// The contract with the exporter: what kame writes, kame reads back to the
     /// same Markdown, byte for byte.
     #[test]

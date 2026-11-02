@@ -21,6 +21,7 @@ use std::collections::HashMap;
 ///   structure (`#`, `>`, `-`, `+`, `=`, `~`, or `1.`/`1)`) has that glyph
 ///   escaped too, so it stays a paragraph,
 /// - blocks are separated by a blank line and the document ends in a newline,
+/// - a line break inside a block becomes a hard break,
 /// - inline spans become `*italic*` / `**bold**`, nesting innermost-first,
 /// - footnotes get `[^n]` inline at the end of their anchored range and a
 ///   `[^n]: body` line after the body, numbered in document order,
@@ -83,7 +84,7 @@ pub fn to_markdown(doc: &Document) -> String {
             }
         };
         let markers = by_block.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
-        let mut body = render_block_text(block, markers);
+        let mut body = line_breaks(&render_block_text(block, markers), &block.kind);
         // A paragraph's own text must not turn into block structure. Headings
         // and list items already carry a marker, so they are left alone.
         if block.kind == BlockKind::Paragraph {
@@ -276,6 +277,26 @@ fn push_escaped(out: &mut String, text: &str) {
         }
         out.push(c);
     }
+}
+
+/// Writes a block's line breaks as Markdown hard breaks, since a bare newline
+/// renders as a space. Each line after a break could open block structure, so it
+/// is escaped the way a paragraph's first line is. A heading is one line by
+/// definition, so its breaks become spaces.
+fn line_breaks(rendered: &str, kind: &BlockKind) -> String {
+    let rendered = rendered.trim_end_matches('\n');
+    if matches!(kind, BlockKind::Heading { .. }) {
+        return rendered.replace('\n', " ");
+    }
+    let mut lines = rendered.split('\n');
+    let mut out = lines.next().unwrap_or("").to_string();
+    for line in lines {
+        let mut line = line.to_string();
+        escape_block_start(&mut line);
+        out.push_str("\\\n");
+        out.push_str(&line);
+    }
+    out
 }
 
 /// Escapes the first glyph of a rendered paragraph when CommonMark would read
@@ -822,5 +843,34 @@ mod tests {
         let id = body.id;
         let doc = document(vec![body], vec![footnote(id, 0, 4, "a *b* [c]")]);
         assert_eq!(to_markdown(&doc), "Body[^1]\n\n[^1]: a \\*b\\* \\[c\\]\n");
+    }
+
+    #[test]
+    fn a_line_break_exports_as_a_hard_break() {
+        let mut doc = Document::new("t");
+        doc.blocks[0].text = "first\nsecond".to_string();
+        assert_eq!(to_markdown(&doc), "first\\\nsecond\n");
+    }
+
+    #[test]
+    fn a_line_after_a_break_cannot_become_block_structure() {
+        let mut doc = Document::new("t");
+        doc.blocks[0].text = "first\n# second".to_string();
+        assert_eq!(to_markdown(&doc), "first\\\n\\# second\n");
+    }
+
+    #[test]
+    fn a_line_break_in_a_heading_is_a_space() {
+        let mut doc = Document::new("t");
+        doc.blocks[0].kind = BlockKind::Heading { level: 2 };
+        doc.blocks[0].text = "first\nsecond".to_string();
+        assert_eq!(to_markdown(&doc), "## first second\n");
+    }
+
+    #[test]
+    fn a_trailing_line_break_leaves_no_stray_backslash() {
+        let mut doc = Document::new("t");
+        doc.blocks[0].text = "first\n".to_string();
+        assert_eq!(to_markdown(&doc), "first\n");
     }
 }

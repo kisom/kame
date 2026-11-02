@@ -249,6 +249,13 @@ pub fn to_html(doc: &Document) -> String {
         }
         let apparatus = &collected.blocks[index];
         let inner = render_inline(block, &apparatus.notes, &apparatus.footnotes);
+        // A bare newline renders as a space. A heading is one line by definition.
+        let inner = inner.trim_end_matches('\n');
+        let inner = if matches!(block.kind, BlockKind::Heading { .. }) {
+            inner.replace('\n', " ")
+        } else {
+            inner.replace('\n', "<br>\n")
+        };
         let after = render_apparatus(apparatus);
         match block.kind {
             BlockKind::Heading { level } => {
@@ -1297,5 +1304,28 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let back: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(to_html(&d), to_html(&back));
+    }
+
+    #[test]
+    fn a_line_break_in_a_block_is_a_br() {
+        let mut doc = Document::new("t");
+        doc.blocks[0].text = "first\nsecond".to_string();
+        assert!(
+            to_html(&doc).contains("<p>first<br>\nsecond</p>"),
+            "{}",
+            to_html(&doc)
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_heading_is_a_space() {
+        let mut doc = Document::new("t");
+        doc.blocks[0].kind = BlockKind::Heading { level: 2 };
+        doc.blocks[0].text = "first\nsecond".to_string();
+        assert!(
+            to_html(&doc).contains("<h2>first second</h2>"),
+            "{}",
+            to_html(&doc)
+        );
     }
 }

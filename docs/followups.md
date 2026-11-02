@@ -39,9 +39,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
 - [ ] **Site-root images show as missing.** `/files/images/...` cannot be found
   from the file alone, so they get the missing-image placeholder. Asking for a
   site root at import would resolve them.
-- [ ] **Line breaks inside a block do not survive export.** Code and hard breaks
-  reflow when exported and re-imported, because the exporter writes a bare
-  newline. The corpus test skips export stability for those documents.
 - [ ] **Richer Markdown elements (deferred).** Code, tables and nested lists are
   simplified on import because the model has no equivalent. Code keeps its line
   breaks and indentation but not a monospaced face. Supporting them is significant

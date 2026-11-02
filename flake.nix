@@ -31,10 +31,20 @@
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
           buildInputs = runtimeDeps;
-          LD_LIBRARY_PATH = libPath;
+          # egui/wgpu load the X11/Wayland/Vulkan libs at runtime via dlopen,
+          # so build-time linking does not put them on the RPATH; wrap the
+          # binary with LD_LIBRARY_PATH so `nix run` / the installed package work.
+          postFixup = ''
+            wrapProgram $out/bin/kame --prefix LD_LIBRARY_PATH : ${libPath}
+          '';
           meta.mainProgram = "kame";
+        };
+
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/kame";
         };
 
         devShells.default = pkgs.mkShell {

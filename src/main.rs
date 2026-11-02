@@ -1201,6 +1201,20 @@ impl Session {
         }
     }
 
+    /// Applies a markdown-style prefix at the start of the caret's block (typed
+    /// `# `, `## `, `### `, `- `, `* `, `1. `): the prefix is stripped, the
+    /// block kind changes, and the caret returns to the start of the block.
+    fn apply_markdown_shortcut(&mut self) {
+        let caret = self.valid_caret();
+        if let Some(op) = self.editor.apply_markdown_prefix(caret.block_id) {
+            self.record(&op);
+            self.caret = Cursor {
+                block_id: caret.block_id,
+                offset: 0,
+            };
+        }
+    }
+
     /// Deletes `selection` and parks the caret at `caret_after`.
     fn delete_range(&mut self, selection: Selection, caret_after: Cursor) -> bool {
         let result = self.editor.delete_selection(&selection);
@@ -1880,6 +1894,8 @@ struct KameApp {
     /// Set when a find jump moves the caret to a match that may be off-screen;
     /// the next frame's draw scrolls the caret into view.
     reveal_caret: bool,
+    /// The help dialog (usage, keybindings), when it is open.
+    show_help: bool,
 }
 
 impl KameApp {
@@ -1917,6 +1933,7 @@ impl KameApp {
             close: CloseGuard::default(),
             find: None,
             reveal_caret: false,
+            show_help: false,
         }
     }
 
@@ -2261,6 +2278,10 @@ impl KameApp {
         if find_chord {
             self.toggle_find();
         }
+        // F1 toggles the help dialog (the usage and keybinding reference).
+        if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
+            self.show_help = !self.show_help;
+        }
         // Ctrl + / Ctrl - / Ctrl 0 step the body font size (every other size is
         // a ratio of it). `+` is Shift+= on most layouts, so both are accepted.
         let (font_inc, font_dec, font_reset) = ctx.input(|input| {
@@ -2301,7 +2322,11 @@ impl KameApp {
             self.adjust_font_size(-FONT_SIZE_STEP);
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            // Escape closes the find bar first, then a dialog, then the note.
+            // Escape closes help, then the find bar, then a dialog, then the note.
+            if self.show_help {
+                self.show_help = false;
+                return;
+            }
             if self.find.take().is_some() {
                 return;
             }
@@ -2341,7 +2366,9 @@ impl KameApp {
             };
             match command {
                 Command::Insert(text) => {
-                    self.session.insert(&text);
+                    if self.session.insert(&text) {
+                        self.session.apply_markdown_shortcut();
+                    }
                 }
                 Command::Paste(text) => {
                     self.session.paste(&text);
@@ -2616,7 +2643,6 @@ impl KameApp {
                 });
             });
             ui.horizontal(|ui| {
-                ui.label("Annotate the selection (or the word under the caret):");
                 for (label, kind) in [
                     ("+ Note", AnnotationKind::Note),
                     ("+ Marginal", AnnotationKind::Marginal),
@@ -2628,6 +2654,11 @@ impl KameApp {
                             self.open_note_pos = None;
                         }
                     }
+                }
+                // Usage lives in a help dialog (F1); this button points at it.
+                ui.separator();
+                if ui.small_button("?").on_hover_text("help (F1)").clicked() {
+                    self.show_help = true;
                 }
                 // The active modes are named here so a hidden-chrome state is
                 // discoverable again the moment the panel comes back.
@@ -2648,55 +2679,6 @@ impl KameApp {
                 }
                 if !any {
                     ui.label(egui::RichText::new("none").small().weak());
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Block:");
-                // The caret block's kind, so the active style can be shown as
-                // selected. Read before the loop: the buttons below mutate the
-                // session.
-                let current = self
-                    .session
-                    .document()
-                    .blocks
-                    .iter()
-                    .find(|block| block.id == self.session.caret.block_id)
-                    .map(|block| block.kind.clone());
-                for (label, kind, hint) in [
-                    ("body", BlockKind::Paragraph, "body text · Ctrl-Shift-0"),
-                    (
-                        "H1",
-                        BlockKind::Heading { level: 1 },
-                        "heading level 1 · Ctrl-Shift-1",
-                    ),
-                    (
-                        "H2",
-                        BlockKind::Heading { level: 2 },
-                        "heading level 2 · Ctrl-Shift-2",
-                    ),
-                    (
-                        "H3",
-                        BlockKind::Heading { level: 3 },
-                        "heading level 3 · Ctrl-Shift-3",
-                    ),
-                    (
-                        "• list",
-                        BlockKind::ListItem { ordered: false },
-                        "bulleted list item",
-                    ),
-                    (
-                        "1. list",
-                        BlockKind::ListItem { ordered: true },
-                        "numbered list item",
-                    ),
-                ] {
-                    if ui
-                        .selectable_label(current.as_ref() == Some(&kind), label)
-                        .on_hover_text(hint)
-                        .clicked()
-                    {
-                        self.set_block_kind(kind);
-                    }
                 }
             });
             ui.horizontal(|ui| {
@@ -3276,6 +3258,40 @@ impl KameApp {
             self.set_open_note(None);
         }
 
+        // --- context menu -----------------------------------------------------
+        // Block formatting and annotation actions live here, on the page's
+        // right-click, rather than as rows of buttons in the status bar.
+        response.context_menu(|ui| {
+            ui.set_min_width(180.0);
+            for (label, kind) in [
+                ("Body", BlockKind::Paragraph),
+                ("Heading 1", BlockKind::Heading { level: 1 }),
+                ("Heading 2", BlockKind::Heading { level: 2 }),
+                ("Heading 3", BlockKind::Heading { level: 3 }),
+                ("Bulleted list", BlockKind::ListItem { ordered: false }),
+                ("Numbered list", BlockKind::ListItem { ordered: true }),
+            ] {
+                if ui.button(label).clicked() {
+                    self.set_block_kind(kind);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            for (label, kind) in [
+                ("Note", AnnotationKind::Note),
+                ("Marginal", AnnotationKind::Marginal),
+                ("Footnote", AnnotationKind::Footnote),
+            ] {
+                if ui.button(label).clicked() {
+                    if let Some(id) = self.session.add_annotation(kind) {
+                        self.set_open_note(Some(id));
+                        self.open_note_pos = None;
+                    }
+                    ui.close();
+                }
+            }
+        });
+
         self.show_note_popover(ui.ctx());
     }
 
@@ -3403,6 +3419,63 @@ impl KameApp {
         } else if self.restore_picker.is_some() {
             self.show_restore_picker(ctx, enter);
         }
+        if self.show_help {
+            self.show_help_dialog(ctx);
+        }
+    }
+
+    /// The usage and keybinding reference, in a modal window. This is where the
+    /// "how to use it" text lives; the status bar stays to counts and toggles.
+    fn show_help_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        let mut close_clicked = false;
+        egui::Window::new("kame — help")
+            .id(Id::unique("kame-help"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::Grid::new("kame-help-grid")
+                    .num_columns(2)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for (keys, what) in [
+                            ("F1", "this help"),
+                            (
+                                "Enter",
+                                "split a block; on an empty list item, end the list",
+                            ),
+                            ("Ctrl-F", "find"),
+                            ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
+                            ("Ctrl-Shift-F", "footnote on the selection or word"),
+                            ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
+                            ("Ctrl-Shift-0", "back to body text"),
+                            ("#  ##  ###", "heading, typed at the start of a line"),
+                            ("-  *  1.", "list item, typed at the start of a line"),
+                            ("Ctrl +  Ctrl -", "larger / smaller type"),
+                            ("Ctrl-Shift-D", "dark mode"),
+                            ("F11", "fullscreen"),
+                            (
+                                "Ctrl-Shift-H/M/P/T",
+                                "hide chrome / margin / focus / typewriter",
+                            ),
+                            ("Ctrl-Shift-E", "export Markdown"),
+                            ("Ctrl-Shift-B", "export HTML"),
+                            ("Ctrl-Shift-S", "snapshot now"),
+                            ("Ctrl-Shift-R", "restore a snapshot"),
+                        ] {
+                            ui.monospace(keys);
+                            ui.label(what);
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(6.0);
+                if ui.button("Close").clicked() {
+                    close_clicked = true;
+                }
+            });
+        self.show_help = open && !close_clicked;
     }
 
     /// The "Snapshot Now" label prompt: a text field, a button, and Enter.

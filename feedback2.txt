@@ -1,0 +1,29 @@
+- [x] Hitting enter on an empty list item should switch from list to
+  body.
+- [x] There should be a dark mode switch.
+- [x] Also the usage text should be in a help dialog, not in the UI. The
+  UI in general needs to be simplified. Formatting options should maybe
+  be moved to a right click menu? Also, the formatting should probably
+  be done markdown style, as in typing '## This is a section' at the
+  start of a line, the '## ' should trigger a formatting change to H2.
+- [ ] As of right now, there doesn't appear to be a way to insert
+  images. Images should be sized to body width. There also isn't any way
+  to insert web links.
+- [ ] It's not a hard requirement for V1, but PDF export would also be
+  good.
+- [x] Consider what happens when a long marginal is insert. It will span
+  many blocks. If in the next block I insert another marginal note, that
+  marginal will be placed after the previous one, with no way to mention
+  where it's associated. I think there's one marginal associate with a
+  block, but there's no visual indication of which marginal goes with
+  which block.
+- [ ] Support for block quotes is also needed. These should be rendered
+  as italicized, and indented.
+- [ ] The body should take up 50% of the width; the other 50% should be
+  split equally between the unused left gutter and the right margin. The
+  right margin needs enough spacing from the far right edge of the
+  window so as to ensure the legibility of the text.
+- [ ] There are bunch of helper shortcuts that would make life better.
+  C-left/right arrow should skip by word; C-S-left/right arrow should
+  add whole words to the selected text.
+

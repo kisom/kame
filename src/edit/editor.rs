@@ -480,6 +480,22 @@ impl Editor {
         Ok(self.apply_edit(op))
     }
 
+    /// Applies a markdown-style prefix at the start of `block_id`'s paragraph
+    /// (see [`markdown_prefix`]): strips the prefix and changes the kind in one
+    /// atomic op. Returns the applied op, or `None` when there is nothing to
+    /// apply.
+    pub fn apply_markdown_prefix(&mut self, block_id: BlockId) -> Option<Op> {
+        let (kind, prefix_len) = {
+            let block = self.block(block_id).ok()?;
+            markdown_prefix(&block.text, &block.kind)?
+        };
+        let ops = vec![
+            Op::set_block_kind(&self.doc, block_id, kind),
+            Op::delete_text(&self.doc, block_id, 0, prefix_len),
+        ];
+        Some(self.apply_edit(Op::Batch { ops }))
+    }
+
     /// Anchors a new note of `kind` over `anchor`, returning the op that was
     /// applied. The note's id is fresh, so the returned op can be persisted as
     /// is.
@@ -605,6 +621,28 @@ fn split_kind(kind: &BlockKind) -> BlockKind {
         BlockKind::Heading { .. } => BlockKind::Paragraph,
         other => other.clone(),
     }
+}
+
+/// Recognizes a markdown-style prefix at the start of a paragraph and returns
+/// the block kind it selects plus the byte length of the prefix to strip.
+/// `# `, `## ` and `### ` become headings; `- `/`* ` start a bullet and `1. `
+/// an ordered item. A block that already has a kind is left alone.
+fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
+    if !matches!(kind, BlockKind::Paragraph) {
+        return None;
+    }
+    for (marker, level) in [("### ", 3), ("## ", 2), ("# ", 1)] {
+        if text.starts_with(marker) {
+            return Some((BlockKind::Heading { level }, marker.len()));
+        }
+    }
+    if text.starts_with("- ") || text.starts_with("* ") {
+        return Some((BlockKind::ListItem { ordered: false }, 2));
+    }
+    if text.starts_with("1. ") {
+        return Some((BlockKind::ListItem { ordered: true }, 3));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1276,6 +1314,54 @@ mod tests {
             e.document().blocks[0].kind,
             BlockKind::ListItem { ordered: false }
         );
+    }
+
+    #[test]
+    fn markdown_prefix_recognizes_headings_and_lists() {
+        let paragraph = BlockKind::Paragraph;
+        assert_eq!(
+            markdown_prefix("## Hi", &paragraph),
+            Some((BlockKind::Heading { level: 2 }, 3))
+        );
+        assert_eq!(
+            markdown_prefix("# Hi", &paragraph),
+            Some((BlockKind::Heading { level: 1 }, 2))
+        );
+        assert_eq!(
+            markdown_prefix("### Hi", &paragraph),
+            Some((BlockKind::Heading { level: 3 }, 4))
+        );
+        assert_eq!(
+            markdown_prefix("- Hi", &paragraph),
+            Some((BlockKind::ListItem { ordered: false }, 2))
+        );
+        assert_eq!(
+            markdown_prefix("1. Hi", &paragraph),
+            Some((BlockKind::ListItem { ordered: true }, 3))
+        );
+        // No trailing space, or a block that already has a kind: nothing.
+        assert_eq!(markdown_prefix("##Hi", &paragraph), None);
+        assert_eq!(
+            markdown_prefix("## Hi", &BlockKind::Heading { level: 1 }),
+            None
+        );
+    }
+
+    #[test]
+    fn apply_markdown_prefix_converts_and_strips_in_one_undo_step() {
+        let doc = doc_with("## Section");
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+
+        e.apply_markdown_prefix(id).expect("a prefix to apply");
+        let block = &e.document().blocks[0];
+        assert_eq!(block.kind, BlockKind::Heading { level: 2 });
+        assert_eq!(block.text, "Section");
+
+        e.undo().expect("the conversion is one undo step");
+        let block = &e.document().blocks[0];
+        assert_eq!(block.kind, BlockKind::Paragraph);
+        assert_eq!(block.text, "## Section");
     }
 
     #[test]

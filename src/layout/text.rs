@@ -98,19 +98,13 @@ pub struct BlockLayout {
 /// The returned [`BlockLayout`] owns the cosmic-text [`Buffer`], so callers can
 /// walk `buffer.layout_runs()` for glyphs (remembering that a glyph's `y` is
 /// line-relative — add `run.line_y`).
+#[cfg(test)]
 pub fn layout_block(
     font_system: &mut FontSystem,
     block: &Block,
     config: &LayoutConfig,
 ) -> BlockLayout {
-    // Prose paragraphs justify to the measure; headings, lists and quotes stay
-    // left-aligned so a ragged right edge reads naturally in narrow or indented
-    // columns.
-    let align = match block.kind {
-        BlockKind::Paragraph => Align::Justified,
-        _ => Align::Left,
-    };
-    layout_block_with_align(font_system, block, config, align)
+    layout_block_marked(font_system, block, config, &[])
 }
 
 /// [`layout_block`] with an explicit alignment, so callers shaping apparatus
@@ -121,6 +115,17 @@ pub fn layout_block_with_align(
     block: &Block,
     config: &LayoutConfig,
     align: Align,
+) -> BlockLayout {
+    layout_block_marked_with_align(font_system, block, config, align, &[])
+}
+
+/// [`layout_block_marked`] with an explicit alignment.
+pub fn layout_block_marked_with_align(
+    font_system: &mut FontSystem,
+    block: &Block,
+    config: &LayoutConfig,
+    align: Align,
+    marks: &[usize],
 ) -> BlockLayout {
     let (family, size, line_height, style) = match block.kind {
         BlockKind::Paragraph => (
@@ -181,7 +186,7 @@ pub fn layout_block_with_align(
             Weight::NORMAL
         })
         .style(style);
-    let spans = styled_spans(block, &attrs);
+    let spans = styled_spans(block, &attrs, marks);
     buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
     buffer.set_wrap(Wrap::Word);
     buffer.shape_until_scroll(font_system, false);
@@ -259,7 +264,11 @@ pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
 /// cosmic-text's offsets stay aligned with the block's byte offsets. Span
 /// boundaries that fall inside a UTF-8 sequence are ignored rather than
 /// panicking on a non-char-boundary slice.
-fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'a>)> {
+fn styled_spans<'a>(
+    block: &'a Block,
+    base: &Attrs<'a>,
+    marks: &[usize],
+) -> Vec<(&'a str, Attrs<'a>)> {
     let text = block.text.as_str();
     if text.is_empty() {
         return vec![(text, base.clone())];
@@ -283,6 +292,23 @@ fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'
             bounds.push(*end);
         }
     }
+    // Each mark's room is on the character before it, so that character is a run
+    // of its own. A mark with no character before it has nothing to widen.
+    let marked: Vec<usize> = marks
+        .iter()
+        .filter(|mark| **mark <= text.len() && text.is_char_boundary(**mark))
+        .filter_map(|mark| {
+            let before = text[..*mark].chars().next_back()?;
+            Some(*mark - before.len_utf8())
+        })
+        .collect();
+    bounds.extend(marked.iter().copied());
+    bounds.extend(
+        marks
+            .iter()
+            .copied()
+            .filter(|mark| *mark <= text.len() && text.is_char_boundary(*mark)),
+    );
     bounds.sort_unstable();
     bounds.dedup();
 
@@ -314,6 +340,9 @@ fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'
             if is_stored_link || links.iter().any(|(ls, le)| *ls <= start && end <= *le) {
                 attrs = attrs.color(LINK_COLOR);
             }
+            if marked.contains(&start) {
+                attrs = attrs.letter_spacing(FOOTNOTE_MARK_EM);
+            }
             (&text[start..end], attrs)
         })
         .collect()
@@ -330,6 +359,29 @@ pub fn heading_size_for(config: &LayoutConfig, level: u8) -> f32 {
         _ => 1.0 / HEADING_RATIO,
     };
     config.heading_size * ratio
+}
+
+/// Room reserved for a footnote's superscript, in ems of the body size. It fits
+/// one digit with a little air; two digits take some of the word space after them.
+pub const FOOTNOTE_MARK_EM: f32 = 0.4;
+
+/// [`layout_block`] leaving room at each byte offset in `marks`, for a footnote's
+/// superscript. The room is extra advance on the glyph before the mark, so the
+/// text and its offsets are unchanged.
+pub fn layout_block_marked(
+    font_system: &mut FontSystem,
+    block: &Block,
+    config: &LayoutConfig,
+    marks: &[usize],
+) -> BlockLayout {
+    // Prose paragraphs justify to the measure; headings, lists and quotes stay
+    // left-aligned so a ragged right edge reads naturally in narrow or indented
+    // columns.
+    let align = match block.kind {
+        BlockKind::Paragraph => Align::Justified,
+        _ => Align::Left,
+    };
+    layout_block_marked_with_align(font_system, block, config, align, marks)
 }
 
 /// Line height for headings, keeping the body's leading ratio so a heading
@@ -832,6 +884,77 @@ dance, on a page, of pen, eye and hand.";
         assert_eq!(layout.left_indent, config.body_size * 1.5);
         assert!(layout.height > 0.0, "a non-empty quote shapes a line");
         assert_eq!(layout.lines.len(), 1);
+    }
+
+    /// The pen position of the glyph starting at byte `offset`.
+    fn pen_at(layout: &BlockLayout, offset: usize) -> f32 {
+        layout
+            .buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .find(|glyph| glyph.start == offset)
+            .expect("a glyph at that offset")
+            .x
+    }
+
+    #[test]
+    fn a_footnote_mark_makes_room_before_the_following_text() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let block = paragraph_block("A claim stands.");
+        let plain = layout_block_with_align(&mut fs, &block, &config, Align::Left);
+        let marked = layout_block_marked_with_align(&mut fs, &block, &config, Align::Left, &[7]);
+        let room = FOOTNOTE_MARK_EM * config.body_size;
+        assert!(room > 0.0, "the mark needs room");
+        assert!(
+            (pen_at(&marked, 2) - pen_at(&plain, 2)).abs() < 0.01,
+            "before is untouched"
+        );
+        assert!(
+            (pen_at(&marked, 7) - pen_at(&plain, 7) - room).abs() < 0.01,
+            "the space after `claim` moved by {} not {room}",
+            pen_at(&marked, 7) - pen_at(&plain, 7)
+        );
+    }
+
+    #[test]
+    fn a_footnote_mark_leaves_the_text_and_its_offsets_alone() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let block = paragraph_block("Café claim stands.");
+        let marked = layout_block_marked(&mut fs, &block, &config, &[11]);
+        let plain = layout_block(&mut fs, &block, &config);
+        let offsets = |layout: &BlockLayout| -> Vec<(usize, usize)> {
+            layout
+                .buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .map(|glyph| (glyph.start, glyph.end))
+                .collect()
+        };
+        assert_eq!(offsets(&marked), offsets(&plain));
+        assert_eq!(marked.lines, plain.lines);
+    }
+
+    #[test]
+    fn a_mark_out_of_range_or_inside_a_character_is_ignored() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let block = paragraph_block("Café");
+        // Byte 4 is inside the two-byte é; 0 has no glyph before it.
+        let _ = layout_block_marked(&mut fs, &block, &config, &[0, 4, 99]);
+    }
+
+    fn paragraph_block(text: &str) -> Block {
+        Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: text.to_string(),
+            spans: Vec::new(),
+        }
     }
 
     #[test]

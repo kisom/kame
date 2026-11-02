@@ -27,7 +27,7 @@ use crate::layout::reading_order;
 use crate::layout::{
     heading_size_for, link_ranges, place_footnotes, place_marginalia, BlockLayout,
     FootnotePlacement, LayoutConfig, MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP,
-    FOOTNOTE_LINE_HEIGHT,
+    FOOTNOTE_LINE_HEIGHT, FOOTNOTE_MARK_EM,
 };
 use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
@@ -71,9 +71,9 @@ impl Palette {
         caret_ink: Color32::from_rgb(176, 58, 46),
         selection_fill: Color32::from_rgba_premultiplied(58, 78, 112, 62),
         note_highlight: Color32::from_rgba_unmultiplied_const(255, 170, 60, 70),
-        footnote_highlight: Color32::from_rgba_premultiplied(54, 96, 132, 34),
+        footnote_highlight: Color32::from_rgba_unmultiplied_const(54, 96, 132, 44),
         footnote_mark: Color32::from_rgb(54, 96, 132),
-        marginal_highlight: Color32::from_rgba_premultiplied(96, 96, 96, 26),
+        marginal_highlight: Color32::from_rgba_unmultiplied_const(96, 96, 96, 34),
         rule_ink: Color32::from_rgb(150, 141, 126),
         note_mark: Color32::from_rgb(140, 104, 40),
         list_marker_ink: Color32::from_rgb(32, 29, 25),
@@ -90,9 +90,9 @@ impl Palette {
         caret_ink: Color32::from_rgb(226, 92, 70),
         selection_fill: Color32::from_rgba_premultiplied(92, 112, 150, 66),
         note_highlight: Color32::from_rgba_unmultiplied_const(196, 128, 40, 80),
-        footnote_highlight: Color32::from_rgba_premultiplied(92, 132, 168, 42),
+        footnote_highlight: Color32::from_rgba_unmultiplied_const(92, 132, 168, 60),
         footnote_mark: Color32::from_rgb(120, 160, 190),
-        marginal_highlight: Color32::from_rgba_premultiplied(120, 120, 120, 30),
+        marginal_highlight: Color32::from_rgba_unmultiplied_const(120, 120, 120, 44),
         rule_ink: Color32::from_rgb(110, 104, 96),
         note_mark: Color32::from_rgb(188, 148, 68),
         list_marker_ink: Color32::from_rgb(222, 216, 205),
@@ -125,6 +125,26 @@ fn overlay_on(base: Color32, overlay: Color32) -> [u8; 3] {
         over(base.g(), overlay.g()),
         over(base.b(), overlay.b()),
     ]
+}
+
+/// Each block's footnote offsets, where its superscripts need room.
+fn footnote_marks(document: &Document) -> HashMap<BlockId, Vec<usize>> {
+    let mut marks: HashMap<BlockId, Vec<usize>> = HashMap::new();
+    for annotation in &document.annotations {
+        if annotation.kind != AnnotationKind::Footnote {
+            continue;
+        }
+        if let Some((_, end)) = annotation.anchor.byte_range() {
+            marks
+                .entry(annotation.anchor.block_id())
+                .or_default()
+                .push(end);
+        }
+    }
+    for offsets in marks.values_mut() {
+        offsets.sort_unstable();
+    }
+    marks
 }
 
 /// Per-block byte ranges whose background is an annotation wash (already
@@ -477,11 +497,11 @@ fn pick_markdown_path() -> Option<PathBuf> {
 /// is a full file browser: directories, navigation and a file-name field, the
 /// same dialog a GTK application shows. The synchronous API blocks the frame
 /// thread while the (modal) dialog is up, which is correct for a save prompt.
-fn pick_save_path() -> Option<PathBuf> {
+fn pick_save_path(suggested_name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Save kame document")
         .add_filter("kame document", &["kame"])
-        .set_file_name("Untitled.kame")
+        .set_file_name(suggested_name)
         .save_file()
 }
 
@@ -1173,6 +1193,8 @@ struct Session {
     /// Set when a write failed. Further mutations are refused until a write
     /// succeeds, so the in-memory undo cursor cannot drift from the DB cursor.
     save_failed: bool,
+    /// The name of the file this document was imported from.
+    source_stem: Option<String>,
     /// The file this session is persisted to, or `None` for an anonymous
     /// (in-memory) document that has not been saved yet. Exports land beside
     /// it, and the snapshots it prompts for live in the database it names.
@@ -1263,6 +1285,7 @@ impl Session {
             selection: None,
             last_error,
             save_failed,
+            source_stem: None,
             path: Some(path.to_path_buf()),
         })
     }
@@ -1294,6 +1317,7 @@ impl Session {
             selection: None,
             last_error: Some(error),
             save_failed: false,
+            source_stem: None,
             path: None,
         })
     }
@@ -1320,6 +1344,7 @@ impl Session {
             selection: None,
             last_error: None,
             save_failed: false,
+            source_stem: None,
             path: None,
         })
     }
@@ -1381,6 +1406,7 @@ impl Session {
             selection: None,
             last_error: None,
             save_failed: false,
+            source_stem: Some(title.to_string()),
             path: None,
         };
         Ok((session, note))
@@ -1390,6 +1416,12 @@ impl Session {
     /// save left only in memory, or an anonymous document with no file at all.
     fn would_lose_work(&self) -> bool {
         self.save_failed || (self.is_anonymous() && self.has_content())
+    }
+
+    /// What the first save suggests calling the file: the source's name for an
+    /// import, whatever title its front matter gave the document.
+    fn suggested_file_name(&self) -> String {
+        format!("{}.kame", self.source_stem.as_deref().unwrap_or("Untitled"))
     }
 
     fn document(&self) -> &Document {
@@ -2488,6 +2520,24 @@ fn open_in_browser(url: &str) {
     let _ = std::process::Command::new(program).arg(arg).spawn();
 }
 
+/// The space below a block of kind `block` when `next` follows it. A heading sits
+/// close to what it introduces and far from what it ends, more so the larger it
+/// is, and a quote is set off from the prose around it.
+fn gap_after(block: &BlockKind, next: &BlockKind) -> f32 {
+    let ratio = match (block, next) {
+        (BlockKind::Heading { .. }, _) => 0.4,
+        (_, BlockKind::Heading { level }) => match level {
+            0 | 1 => 2.6,
+            2 => 2.2,
+            _ => 1.7,
+        },
+        (BlockKind::BlockQuote, BlockKind::BlockQuote) => 1.0,
+        (BlockKind::BlockQuote, _) | (_, BlockKind::BlockQuote) => 1.4,
+        _ => 1.0,
+    };
+    BLOCK_GAP * ratio
+}
+
 /// Minimum height of a block, so an empty paragraph still has a line to click
 /// and a caret to show.
 fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f32 {
@@ -2501,13 +2551,16 @@ fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f
     layout.height.max(minimum)
 }
 
+/// Height of the placeholder drawn for an image that cannot be read.
+const MISSING_IMAGE_HEIGHT: f32 = 72.0;
+
 /// Display height of an image at `width`, preserving its aspect ratio. A file
-/// that cannot be read (or reports a zero dimension) falls back to a 3:2 box so
-/// a broken path still reserves space instead of collapsing the block.
+/// that cannot be read (or reports a zero dimension) takes a short placeholder's
+/// height, which says what is missing without leaving a blank stretch of page.
 fn image_height(path: &str, width: f32) -> f32 {
     match image::image_dimensions(path) {
         Ok((w, h)) if w > 0 && h > 0 => width * h as f32 / w as f32,
-        _ => width * 2.0 / 3.0,
+        _ => MISSING_IMAGE_HEIGHT,
     }
 }
 
@@ -2618,6 +2671,7 @@ fn superscript_origin(
     body_left: f32,
     block_top: f32,
     body_width: f32,
+    room: f32,
 ) -> Option<Pos2> {
     let (anchor_start, anchor_end) = anchor.byte_range()?;
     let end = anchor_end.max(anchor_start);
@@ -2633,7 +2687,7 @@ fn superscript_origin(
         ),
     };
     Some(Pos2::new(
-        body_left + layout.left_indent + x.clamp(0.0, body_width),
+        body_left + layout.left_indent + (x - room).clamp(0.0, body_width),
         block_top + line.y + line.height * 0.1,
     ))
 }
@@ -3344,7 +3398,7 @@ impl KameApp {
             return;
         };
         let block = self.session.document().blocks[index].clone();
-        let layout = self.renderer.layout(&block);
+        let layout = self.layout_of(&block);
         let Some(line) = caret_line(&layout, caret.offset) else {
             return;
         };
@@ -3387,7 +3441,7 @@ impl KameApp {
         let Some(adjacent) = adjacent else {
             return;
         };
-        let adj_layout = self.renderer.layout(&adjacent);
+        let adj_layout = self.layout_of(&adjacent);
         let line = if down {
             adj_layout.lines.first()
         } else {
@@ -3473,7 +3527,7 @@ impl KameApp {
             return;
         };
         let block = self.session.document().blocks[index].clone();
-        let layout = self.renderer.layout(&block);
+        let layout = self.layout_of(&block);
         let Some(line) = caret_line(&layout, caret.offset) else {
             return;
         };
@@ -3707,9 +3761,10 @@ impl KameApp {
 
         // Shape only blocks whose content changed since the last frame; an
         // idle repaint shapes nothing, and an edit re-shapes one block.
-        let layouts = self
-            .layouts
-            .sync(&mut self.renderer, &self.session.document().blocks);
+        let marks = footnote_marks(self.session.document());
+        let layouts =
+            self.layouts
+                .sync_marked(&mut self.renderer, &self.session.document().blocks, &marks);
 
         let paper: [u8; 3] = [
             self.palette.background.r(),
@@ -3762,9 +3817,14 @@ impl KameApp {
             .zip(layouts.iter())
             .map(|(block, layout)| block_height(block, layout, &config))
             .collect();
+        let gap_below = |index: usize| {
+            blocks
+                .get(index + 1)
+                .map_or(0.0, |next| gap_after(&blocks[index].kind, &next.kind))
+        };
         let body_bottom = PAGE_PADDING
             + heights.iter().sum::<f32>()
-            + BLOCK_GAP * blocks.len().saturating_sub(1) as f32;
+            + (0..blocks.len()).map(gap_below).sum::<f32>();
 
         // Footnote entries decide how tall the page must be, and a wrapped
         // entry must push the next one past all of its lines. Shape them before
@@ -3830,9 +3890,9 @@ impl KameApp {
 
         let mut tops = Vec::with_capacity(blocks.len());
         let mut y = response.rect.top() + PAGE_PADDING;
-        for height in &heights {
+        for (index, height) in heights.iter().enumerate() {
             tops.push(y);
-            y += height + BLOCK_GAP;
+            y += height + gap_below(index);
         }
 
         // --- annotation text -------------------------------------------------
@@ -3908,16 +3968,31 @@ impl KameApp {
             if let BlockKind::Image { path } = &block.kind {
                 // An image spans the measure at body width; its height keeps
                 // the source's aspect ratio (already baked into `tops`).
+                let height = image_height(path, config.body_width);
+                let rect = Rect::from_min_size(
+                    Pos2::new(body_left, tops[index]),
+                    Vec2::new(config.body_width, height),
+                );
                 if let Some(texture) = self.image_textures.get(path) {
-                    let height = image_height(path, config.body_width);
-                    let rect = Rect::from_min_size(
-                        Pos2::new(body_left, tops[index]),
-                        Vec2::new(config.body_width, height),
-                    );
                     painter.image(texture.id(), rect, uv, Color32::WHITE);
-                    if let Some(veil) = dim_veil(self.palette.dim_veil, focus, index, caret_index) {
-                        painter.rect_filled(rect, 0.0, veil);
-                    }
+                } else {
+                    painter.rect_stroke(
+                        rect,
+                        2.0,
+                        egui::Stroke::new(1.0, self.palette.rule_ink),
+                        egui::StrokeKind::Inside,
+                    );
+                    let galley = painter.layout(
+                        format!("Missing image: {path}"),
+                        FontId::proportional(config.body_size * 0.8),
+                        self.palette.list_marker_ink,
+                        (rect.width() - 24.0).max(40.0),
+                    );
+                    let at = rect.center() - galley.size() * 0.5;
+                    painter.galley(at, galley, self.palette.list_marker_ink);
+                }
+                if let Some(veil) = dim_veil(self.palette.dim_veil, focus, index, caret_index) {
+                    painter.rect_filled(rect, 0.0, veil);
                 }
                 continue;
             }
@@ -4182,6 +4257,7 @@ impl KameApp {
                 body_left,
                 tops[index],
                 config.body_width,
+                FOOTNOTE_MARK_EM * config.body_size,
             ) else {
                 continue;
             };
@@ -4677,6 +4753,14 @@ impl KameApp {
         self.open_document(path);
     }
 
+    /// Shapes `block` as the page does, footnote room included, so caret movement
+    /// and clicks agree with what is painted.
+    fn layout_of(&mut self, block: &Block) -> BlockLayout {
+        let marks = footnote_marks(self.session.document());
+        let block_marks = marks.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
+        self.renderer.layout_marked(block, block_marks)
+    }
+
     /// Opens the path prompt, clearing any other file dialog so it is the one
     /// thing on screen.
     fn begin_open(&mut self) {
@@ -4773,7 +4857,7 @@ impl KameApp {
             self.notice = Some("saved".to_string());
             return;
         }
-        let Some(path) = pick_save_path() else {
+        let Some(path) = pick_save_path(&self.session.suggested_file_name()) else {
             // The author cancelled the save; the close prompt stays open so
             // they can still discard or cancel explicitly.
             return;
@@ -5688,6 +5772,155 @@ mod tests {
     }
 
     #[test]
+    fn the_first_save_of_an_import_suggests_its_source_name() {
+        let dir = std::env::temp_dir().join(format!("kame-name-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.md");
+        std::fs::write(&path, "Title: Something Else\n\nWords.\n").unwrap();
+        let (session, _) = Session::open_any(&path).unwrap();
+        assert_eq!(session.suggested_file_name(), "notes.kame");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_document_suggests_untitled() {
+        let session = Session::anonymous().unwrap();
+        assert_eq!(session.suggested_file_name(), "Untitled.kame");
+    }
+
+    /// A premultiplied channel above alpha adds light instead of tinting: over
+    /// the paper it clamped to white, the look of a pasted patch.
+    #[test]
+    fn every_wash_is_a_valid_premultiplied_colour() {
+        for dark in [false, true] {
+            let palette = Palette::for_mode(dark);
+            for wash in [
+                palette.note_highlight,
+                palette.footnote_highlight,
+                palette.marginal_highlight,
+            ] {
+                let a = wash.a();
+                assert!(
+                    wash.r() <= a && wash.g() <= a && wash.b() <= a,
+                    "{wash:?} in dark={dark} is not premultiplied"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wash_tints_the_paper_rather_than_whitening_it() {
+        let palette = Palette::for_mode(false);
+        let paper = palette.background;
+        for wash in [palette.footnote_highlight, palette.marginal_highlight] {
+            let [r, g, b] = overlay_on(paper, wash);
+            assert!(
+                r <= paper.r() && g <= paper.g() && b <= paper.b(),
+                "wash {wash:?} over the paper gave {:?}",
+                [r, g, b]
+            );
+            assert_ne!(
+                [r, g, b],
+                [paper.r(), paper.g(), paper.b()],
+                "wash is invisible"
+            );
+        }
+    }
+
+    fn heading_kind(level: u8) -> BlockKind {
+        BlockKind::Heading { level }
+    }
+
+    #[test]
+    fn a_heading_sits_closer_to_what_it_introduces() {
+        let body = BlockKind::Paragraph;
+        assert!(gap_after(&heading_kind(2), &body) < BLOCK_GAP);
+        assert!(gap_after(&body, &heading_kind(2)) > BLOCK_GAP);
+        assert!(gap_after(&body, &heading_kind(2)) > gap_after(&heading_kind(2), &body) * 2.0);
+    }
+
+    #[test]
+    fn a_larger_heading_takes_more_space_above() {
+        let body = BlockKind::Paragraph;
+        assert!(gap_after(&body, &heading_kind(1)) > gap_after(&body, &heading_kind(2)));
+        assert!(gap_after(&body, &heading_kind(2)) > gap_after(&body, &heading_kind(3)));
+    }
+
+    #[test]
+    fn a_quote_is_set_off_from_the_prose_around_it() {
+        let body = BlockKind::Paragraph;
+        let quote = BlockKind::BlockQuote;
+        assert!(gap_after(&body, &quote) > BLOCK_GAP);
+        assert!(gap_after(&quote, &body) > BLOCK_GAP);
+        assert_eq!(
+            gap_after(&quote, &quote),
+            BLOCK_GAP,
+            "one quote's paragraphs stay together"
+        );
+    }
+
+    #[test]
+    fn plain_prose_keeps_its_gap() {
+        let body = BlockKind::Paragraph;
+        assert_eq!(gap_after(&body, &body), BLOCK_GAP);
+    }
+
+    #[test]
+    fn a_missing_image_reserves_a_short_placeholder() {
+        let height = image_height("/does/not/exist.png", 600.0);
+        assert_eq!(height, MISSING_IMAGE_HEIGHT);
+        assert!(
+            height < 120.0,
+            "a placeholder is not a blank page: {height}"
+        );
+    }
+
+    #[test]
+    fn a_footnote_needs_room_at_the_end_of_its_range_only_for_footnotes() {
+        let mut document = Document::new("t");
+        let block_id = document.blocks[0].id;
+        document.blocks[0].text = "One two three".to_string();
+        let annotation = |kind, start, end| Annotation {
+            id: uuid::Uuid::new_v4(),
+            kind,
+            anchor: Anchor::range(block_id, start, end),
+            body: "b".to_string(),
+        };
+        document.annotations = vec![
+            annotation(AnnotationKind::Footnote, 8, 13),
+            annotation(AnnotationKind::Footnote, 3, 3),
+            annotation(AnnotationKind::Note, 4, 7),
+        ];
+        assert_eq!(footnote_marks(&document)[&block_id], vec![3, 13]);
+    }
+
+    #[test]
+    fn the_mark_is_drawn_in_its_room_before_the_next_glyph() {
+        let config = LayoutConfig::with_body_size(16.0);
+        let mut renderer = GlyphRenderer::new(config);
+        let block = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "A claim stands.".to_string(),
+            spans: Vec::new(),
+        };
+        let plain = renderer.layout(&block);
+        let marked = renderer.layout_marked(&block, &[7]);
+        let anchor = Anchor::range(block.id, 7, 7);
+        let room = FOOTNOTE_MARK_EM * config.body_size;
+        let word_end = superscript_origin(&plain, &anchor, 0.0, 0.0, config.body_width, 0.0)
+            .unwrap()
+            .x;
+        let mark = superscript_origin(&marked, &anchor, 0.0, 0.0, config.body_width, room)
+            .unwrap()
+            .x;
+        assert!(
+            (mark - word_end).abs() < 1.0,
+            "{mark} vs the word's end {word_end}"
+        );
+    }
+
+    #[test]
     fn only_active_modes_get_a_badge() {
         let mut modes = Modes::default();
         assert!(mode_badges(&modes).is_empty(), "no modes, no clutter");
@@ -5981,7 +6214,6 @@ mod tests {
         // A 2:1 image at 600px wide is 300px tall.
         assert_eq!(image_height(path.to_str().unwrap(), 600.0), 300.0);
         // An unreadable path reserves a 3:2 box instead of collapsing.
-        assert_eq!(image_height("/does/not/exist.png", 600.0), 400.0);
     }
 
     #[test]
@@ -6615,7 +6847,7 @@ mod tests {
         // The mark for "Craft" (0..5) belongs after the "t", at the pen of byte
         // 5 — not at the pen of byte 0, which is inside the word's ink.
         let anchor = Anchor::range(block.id, 0, 5);
-        let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width)
+        let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width, 0.0)
             .expect("a footnote on a laid-out block has a superscript position");
         let start_x = caret_x(&layout, 0);
         let end_x = caret_x(&layout, 5);
@@ -6657,7 +6889,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(layout.lines.len() >= 2, "the paragraph wraps");
         let first_line = layout.lines[0];
         let anchor = Anchor::range(wrapped.id, first_line.start, first_line.end);
-        let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width)
+        let origin = superscript_origin(&layout, &anchor, body_left, block_top, body_width, 0.0)
             .expect("position");
         let last_glyph_x = caret_x(&layout, first_line.end - 1);
         let line_end_x = caret_x(&layout, first_line.end);

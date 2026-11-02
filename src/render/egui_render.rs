@@ -15,7 +15,7 @@ use egui::{
 };
 use image::RgbaImage;
 
-use crate::layout::{layout_block, layout_block_with_align, BlockLayout, LayoutConfig};
+use crate::layout::{layout_block_marked, layout_block_with_align, BlockLayout, LayoutConfig};
 use crate::model::{AnnotationId, AnnotationKind, Block, BlockId, BlockKind};
 use crate::render::GlyphAtlas;
 
@@ -259,13 +259,29 @@ impl LayoutCache {
         self.entries.clear();
     }
 
-    /// Returns one layout per block, in document order, shaping only blocks
-    /// whose fingerprint changed since the last call.
+    #[cfg(test)]
     pub fn sync(&mut self, renderer: &mut GlyphRenderer, blocks: &[Block]) -> Vec<&BlockLayout> {
+        self.sync_marked(renderer, blocks, &HashMap::new())
+    }
+
+    /// Returns one layout per block, in document order, shaping only blocks
+    /// whose fingerprint changed since the last call. `marks` holds each block's
+    /// footnote offsets, which a block needs room for.
+    pub fn sync_marked(
+        &mut self,
+        renderer: &mut GlyphRenderer,
+        blocks: &[Block],
+        marks: &HashMap<BlockId, Vec<usize>>,
+    ) -> Vec<&BlockLayout> {
         let mut live = HashSet::with_capacity(blocks.len());
         for block in blocks {
             live.insert(block.id);
-            let fingerprint = block_fingerprint(block, &[]);
+            let block_marks = marks.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
+            let as_ranges: Vec<_> = block_marks
+                .iter()
+                .map(|mark| (*mark, *mark, [0; 3]))
+                .collect();
+            let fingerprint = block_fingerprint(block, &as_ranges);
             let up_to_date = self
                 .entries
                 .get(&block.id)
@@ -273,7 +289,7 @@ impl LayoutCache {
             if up_to_date {
                 continue;
             }
-            let layout = renderer.layout(block);
+            let layout = renderer.layout_marked(block, block_marks);
             self.entries.insert(
                 block.id,
                 CachedLayout {
@@ -498,12 +514,19 @@ impl GlyphRenderer {
 
     /// Shapes one block with the configured column width. Callers keep the
     /// returned layouts for the frame to map carets and clicks.
+    #[cfg(test)]
     pub fn layout(&mut self, block: &Block) -> BlockLayout {
+        self.layout_marked(block, &[])
+    }
+
+    /// [`Self::layout`] leaving room for a footnote's superscript at each of
+    /// `marks`.
+    pub fn layout_marked(&mut self, block: &Block, marks: &[usize]) -> BlockLayout {
         #[cfg(test)]
         {
             self.layout_calls += 1;
         }
-        layout_block(&mut self.font_system, block, &self.config)
+        layout_block_marked(&mut self.font_system, block, &self.config, marks)
     }
 
     /// Shapes one block in a narrower column at a smaller body size, for

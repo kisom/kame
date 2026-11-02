@@ -20,22 +20,15 @@ Open work, most pressing first. Tick items off or delete them as they land.
   to choose its own breaks across the paragraph, with limits on hyphen runs and
   stretch. About 24 call sites read cosmic-text's lines directly, so prototype it
   outside the repo first, then write a spec.
-- [ ] **Footnote superscripts sit tight against the next word** (`source¹and`).
-  They render in the word space rather than taking room of their own.
-- [ ] **Annotation washes look like pasted patches**, such as the white box
-  around an anchored word.
-- [ ] **Finer spacing.** Space around headings and quotes, and hanging punctuation
-  in the margins.
-- [ ] **Antialiasing check.** On a Mac, drag the window to a display with a
-  different scale. Only tests have covered text re-rendering at the new scale.
+- [ ] **Hanging punctuation in the margins.** Not started.
+- [ ] **Selection colour.** `selection_fill` is built like the washes were, with
+  channels above alpha, so a selection lightens the page rather than tinting it.
 
 ## Markdown import
 
-- [ ] **Site-root images leave blank gaps.** `/files/images/...` cannot be found
-  from the file alone, and kame reserves blank space for an image it cannot load.
-  Options: ask for a site root at import, or collapse the space.
-- [ ] **First save suggests `Untitled.kame`** after an import. It should suggest
-  `<stem>.kame`.
+- [ ] **Site-root images show as missing.** `/files/images/...` cannot be found
+  from the file alone, so they get the missing-image placeholder. Asking for a
+  site root at import would resolve them.
 - [ ] **Line breaks inside a block do not survive export.** Code and hard breaks
   reflow when exported and re-imported, because the exporter writes a bare
   newline. The corpus test skips export stability for those documents.

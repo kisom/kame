@@ -761,10 +761,12 @@ fn open_error(path: &Path, err: DbError) -> std::io::Error {
         ),
         DbError::Sqlite(err) => {
             let detail = err.to_string();
-            if detail.to_ascii_lowercase().contains("locked")
-                || detail.to_ascii_lowercase().contains("busy")
-            {
+            let lower = detail.to_ascii_lowercase();
+            if lower.contains("locked") || lower.contains("busy") {
                 format!("the document is already open in another kame instance ({detail})")
+            } else if lower.contains("unable to open") {
+                // Usually a wrong path or a missing directory, not corruption.
+                format!("the file could not be opened — is the path correct? ({detail})")
             } else {
                 format!("the file is not a valid kame document ({detail})")
             }

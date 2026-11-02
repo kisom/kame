@@ -337,6 +337,11 @@ impl Editor {
         let block = self.block(cursor.block_id)?;
         self.check_offset(block, cursor.offset)?;
         let text = block.text.clone();
+        // Enter on an empty list item exits the list: the item becomes body
+        // text instead of spawning another empty bullet.
+        if text.is_empty() && matches!(&block.kind, BlockKind::ListItem { .. }) {
+            return self.set_block_kind(cursor.block_id, BlockKind::Paragraph);
+        }
         let kind = split_kind(&block.kind);
 
         // Exactly the range-scoped notes the tail delete below will drop:
@@ -1246,6 +1251,28 @@ mod tests {
         assert_eq!(e.document().blocks.len(), 2);
         assert_eq!(e.document().blocks[0].text, "end");
         assert_eq!(e.document().blocks[1].text, "");
+    }
+
+    #[test]
+    fn enter_on_an_empty_list_item_turns_it_into_body_text() {
+        let mut doc = doc_with("");
+        doc.blocks[0].kind = BlockKind::ListItem { ordered: false };
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+
+        e.split_paragraph(&Cursor { block_id: id, offset: 0 })
+            .expect("split an empty list item");
+
+        // No new block: the empty bullet becomes a body paragraph.
+        assert_eq!(e.document().blocks.len(), 1);
+        assert_eq!(e.document().blocks[0].kind, BlockKind::Paragraph);
+        assert_eq!(e.document().blocks[0].text, "");
+
+        e.undo().expect("undo the exit");
+        assert_eq!(
+            e.document().blocks[0].kind,
+            BlockKind::ListItem { ordered: false }
+        );
     }
 
     #[test]

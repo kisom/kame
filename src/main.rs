@@ -2816,7 +2816,12 @@ impl KameApp {
                     let center =
                         Pos2::new(origin.x + 4.0, origin.y + config.body_line_height * 0.5);
                     let open = self.open_note == Some(annotation.id);
-                    painter.circle_filled(center, 3.5, NOTE_MARK);
+                    // A note with no body yet is a bare highlight: a hollow ring
+                    // rather than a filled dot, so "something written" reads at
+                    // a glance and the marker stays a click target either way.
+                    if !annotation.body.trim().is_empty() {
+                        painter.circle_filled(center, 3.5, NOTE_MARK);
+                    }
                     painter.circle_stroke(
                         center,
                         if open { 7.5 } else { 6.0 },

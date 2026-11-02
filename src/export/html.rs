@@ -258,9 +258,11 @@ pub fn to_html(doc: &Document) -> String {
     close_list(&mut body, &mut open_list);
 
     // Notes whose anchor block no longer exists: the highlight is gone, the
-    // body is not.
+    // body is not. A bodyless highlight has nothing left to emit.
     for note in &collected.unanchored_notes {
-        body.push_str(&note_details(note));
+        if !note.body.trim().is_empty() {
+            body.push_str(&note_details(note));
+        }
     }
 
     // Margin notes in the same position, for the same reason.
@@ -515,7 +517,10 @@ fn render_apparatus(apparatus: &BlockApparatus) -> String {
         out.push_str(&marginalia_aside(body));
     }
     for note in &apparatus.notes {
-        out.push_str(&note_details(note));
+        // A highlight with nothing written yet has no body to expand.
+        if !note.body.trim().is_empty() {
+            out.push_str(&note_details(note));
+        }
     }
     out
 }
@@ -918,6 +923,25 @@ mod tests {
             html.contains("<summary><a class=\"note-ref\" href=\"#note1\">Note 1</a></summary>")
         );
         assert!(html.contains("<p>note body</p>"));
+    }
+
+    #[test]
+    fn a_bodyless_note_is_a_bare_highlight_without_details() {
+        let block = block(BlockKind::Paragraph, "highlighted");
+        let block_id = block.id;
+        let doc = document(
+            vec![block],
+            vec![annotation(AnnotationKind::Note, block_id, 0, 11, "")],
+        );
+        let html = to_html(&doc);
+        assert!(
+            html.contains("<mark id=\"note1\">"),
+            "the highlight still marks the range"
+        );
+        assert!(
+            !html.contains("<details"),
+            "no body, so there is nothing to expand"
+        );
     }
 
     #[test]

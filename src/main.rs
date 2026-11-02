@@ -25,8 +25,9 @@ use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::layout::reading_order;
 use crate::layout::{
-    link_ranges, place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
-    MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
+    heading_size_for, link_ranges, place_footnotes, place_marginalia, BlockLayout,
+    FootnotePlacement, LayoutConfig, MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP,
+    FOOTNOTE_LINE_HEIGHT,
 };
 use crate::model::{
     Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
@@ -2494,7 +2495,7 @@ fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f
         return image_height(path, config.body_width);
     }
     let minimum = match block.kind {
-        crate::model::BlockKind::Heading { .. } => config.heading_size * 1.4,
+        crate::model::BlockKind::Heading { level } => heading_size_for(config, level) * 1.4,
         _ => config.body_line_height,
     };
     layout.height.max(minimum)
@@ -5664,6 +5665,26 @@ mod tests {
             assert_eq!(take_menu_chord(&mut events, false), None, "{event:?}");
             assert_eq!(events, vec![event]);
         }
+    }
+
+    /// An empty heading still needs a line, at its own level's size: a shared
+    /// minimum would leave small headings in blocks sized for the largest.
+    #[test]
+    fn a_blocks_minimum_height_follows_its_heading_level() {
+        let config = LayoutConfig::with_body_size(16.0);
+        let mut renderer = GlyphRenderer::new(config);
+        let mut height = |level| {
+            let block = Block {
+                id: uuid::Uuid::new_v4(),
+                kind: BlockKind::Heading { level },
+                text: String::new(),
+                spans: Vec::new(),
+            };
+            let layout = renderer.layout(&block);
+            block_height(&block, &layout, &config)
+        };
+        let (one, two, three) = (height(1), height(2), height(3));
+        assert!(one > two && two > three, "{one} {two} {three}");
     }
 
     #[test]

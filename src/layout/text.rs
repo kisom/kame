@@ -129,12 +129,15 @@ pub fn layout_block_with_align(
             config.body_line_height,
             Style::Normal,
         ),
-        BlockKind::Heading { .. } => (
-            HEADING_FAMILY,
-            config.heading_size,
-            heading_line_height(config),
-            Style::Normal,
-        ),
+        BlockKind::Heading { level } => {
+            let size = heading_size_for(config, level);
+            (
+                HEADING_FAMILY,
+                size,
+                heading_line_height(config, size),
+                Style::Normal,
+            )
+        }
         BlockKind::ListItem { .. } => (
             BODY_FAMILY,
             config.body_size,
@@ -312,13 +315,26 @@ fn styled_spans<'a>(block: &'a Block, base: &Attrs<'a>) -> Vec<(&'a str, Attrs<'
         .collect()
 }
 
+/// The size a heading of `level` is set at: `heading_size` for the largest, then
+/// down a 1.25 ratio per level, reaching the body size at level 4, where the
+/// heading face alone sets it apart.
+pub fn heading_size_for(config: &LayoutConfig, level: u8) -> f32 {
+    let ratio = match level {
+        0 | 1 => 1.0,
+        2 => 0.8,
+        3 => 0.64,
+        _ => 1.0 / HEADING_RATIO,
+    };
+    config.heading_size * ratio
+}
+
 /// Line height for headings, keeping the body's leading ratio so a heading
 /// occupies proportionally more vertical space than a body line.
-fn heading_line_height(config: &LayoutConfig) -> f32 {
+fn heading_line_height(config: &LayoutConfig, size: f32) -> f32 {
     if config.body_size > 0.0 {
-        config.heading_size * (config.body_line_height / config.body_size)
+        size * (config.body_line_height / config.body_size)
     } else {
-        config.heading_size * 1.2
+        size * 1.2
     }
 }
 
@@ -811,6 +827,52 @@ dance, on a page, of pen, eye and hand.";
         assert_eq!(layout.left_indent, config.body_size * 1.5);
         assert!(layout.height > 0.0, "a non-empty quote shapes a line");
         assert_eq!(layout.lines.len(), 1);
+    }
+
+    #[test]
+    fn heading_sizes_step_down_by_level() {
+        let config = LayoutConfig::with_body_size(16.0);
+        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(close(heading_size_for(&config, 1), 28.0));
+        assert!(close(heading_size_for(&config, 2), 22.4));
+        assert!(close(heading_size_for(&config, 3), 17.92));
+        assert!(
+            close(heading_size_for(&config, 4), 16.0),
+            "level 4 is body size"
+        );
+        assert!(close(heading_size_for(&config, 6), 16.0));
+        assert!(
+            close(heading_size_for(&config, 0), 28.0),
+            "a bad level is not tiny"
+        );
+    }
+
+    #[test]
+    fn a_heading_is_shaped_at_its_levels_size() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let mut heights = Vec::new();
+        for level in 1..=3 {
+            let block = Block {
+                id: Uuid::new_v4(),
+                kind: BlockKind::Heading { level },
+                text: "Heading".to_string(),
+                spans: Vec::new(),
+            };
+            let layout = layout_block(&mut fs, &block, &config);
+            let run = layout.buffer.layout_runs().next().expect("a shaped line");
+            assert_eq!(
+                run.glyphs[0].font_size,
+                heading_size_for(&config, level),
+                "level {level}"
+            );
+            heights.push(layout.height);
+        }
+        assert!(
+            heights[0] > heights[1] && heights[1] > heights[2],
+            "a smaller heading takes less room: {heights:?}"
+        );
     }
 
     #[test]

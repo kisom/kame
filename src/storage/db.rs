@@ -45,12 +45,6 @@ pub enum DbError {
     SnapshotNotFound(i64),
 }
 
-/// Convenience alias for [`DbError`]; kept for interface compatibility.
-///
-/// This is a concrete error type, not a boxed trait object: callers can match
-/// on it to tell "no document yet" apart from a real failure.
-pub type Error = DbError;
-
 impl fmt::Display for DbError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -220,6 +214,7 @@ impl Db {
     /// Sequence numbers are strictly increasing; they are what
     /// [`Db::truncate_ops_after`] cuts at. A failed insert leaves the log
     /// unchanged (single-statement transaction).
+    #[cfg(test)]
     pub fn append_op(&mut self, op: &Op) -> Result<i64, DbError> {
         let json = serde_json::to_string(op)?;
         self.conn
@@ -246,6 +241,7 @@ impl Db {
     /// A new edit after an undo discards the redo tail so the log stays a
     /// single linear history. [`Db::record_edit`] does this itself inside the
     /// same transaction; call this directly only for a standalone truncation.
+    #[cfg(test)]
     pub fn truncate_ops_after(&mut self, seq: i64) -> Result<(), DbError> {
         self.conn
             .execute("DELETE FROM ops WHERE seq > ?1", params![seq])?;
@@ -910,7 +906,7 @@ mod tests {
             db.create_snapshot(&doc, Some("before restart")).unwrap()
         };
 
-        let mut db = Db::open(&path).unwrap();
+        let db = Db::open(&path).unwrap();
         let snaps = db.list_snapshots().unwrap();
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].id, id);

@@ -1,3 +1,3 @@
 mod db;
 
-pub use db::{Db, DbError, Error, SnapshotMeta};
+pub use db::{Db, DbError, SnapshotMeta};

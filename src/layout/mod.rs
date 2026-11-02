@@ -6,5 +6,5 @@ pub use annotations::{
     FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
 };
 pub use text::{
-    anchor_to_y, layout_block, BlockLayout, LayoutConfig, LayoutLine, DEFAULT_BODY_SIZE,
+    layout_block, BlockLayout, LayoutConfig, LayoutLine, DEFAULT_BODY_SIZE,
 };

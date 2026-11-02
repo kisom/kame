@@ -110,6 +110,7 @@ impl Editor {
     ///
     /// Prefer [`Editor::with_cursor`] with `Db::cursor()`: this treats every
     /// logged op as applied, which is only right when nothing was undone.
+    #[cfg(test)]
     pub fn with_history(doc: Document, ops: Vec<Op>) -> Editor {
         let cursor = ops.len();
         Editor::with_cursor(doc, ops, cursor)

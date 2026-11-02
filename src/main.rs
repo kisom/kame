@@ -31,7 +31,7 @@ use crate::render::egui_render::{
     caret_line, caret_x, command_for_event, next_boundary, offset_at, prev_boundary, range_rects,
     word_at, AnnotationTextureCache, Command, GlyphRenderer, LayoutCache, TextureCache,
 };
-use crate::storage::{Db, DbError};
+use crate::storage::{Db, DbError, SnapshotMeta};
 
 /// Paper-coloured canvas behind the page.
 const BACKGROUND: Color32 = Color32::from_rgb(247, 243, 235);
@@ -67,6 +67,8 @@ const ANNOTATION_SCALE: f32 = 0.82;
 const DIM_VEIL: Color32 = Color32::from_rgba_unmultiplied_const(247, 243, 235, 168);
 /// Ink for a failed write, in the status line and in the always-on indicator.
 const ERROR_INK: Color32 = Color32::from_rgb(168, 32, 32);
+/// Ink for the confirmation of a file command (an export path, a snapshot id).
+const NOTICE_INK: Color32 = Color32::from_rgb(46, 96, 60);
 /// Height of the failure strip drawn across the top of the central panel.
 const ERROR_STRIP_HEIGHT: f32 = 3.0;
 
@@ -165,6 +167,163 @@ fn mode_commands_for_events(events: &[egui::Event]) -> Vec<ModeCommand> {
             _ => None,
         })
         .collect()
+}
+
+// --- file, export and snapshot commands ------------------------------------
+
+/// The document-level commands that sit outside the editing history: two
+/// exports, taking a snapshot, and going back to one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileCommand {
+    ExportMarkdown,
+    ExportHtml,
+    SnapshotNow,
+    RestoreSnapshot,
+}
+
+/// Keyboard map for the file commands. Every chord is Ctrl (Cmd on macOS) +
+/// Shift + a letter, so none of them can be mistaken for prose, and none
+/// collides with the editor map (`command_for_key`) or the mode map
+/// (`mode_for_key`) — both of which are asserted against this map in the
+/// tests. `E` exports the Markdown, `B` the page you would open in a browser,
+/// `S` snapshots and `R` restores.
+fn file_command_for_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<FileCommand> {
+    if !(modifiers.command && modifiers.shift) {
+        return None;
+    }
+    match key {
+        egui::Key::E => Some(FileCommand::ExportMarkdown),
+        egui::Key::B => Some(FileCommand::ExportHtml),
+        egui::Key::S => Some(FileCommand::SnapshotNow),
+        egui::Key::R => Some(FileCommand::RestoreSnapshot),
+        _ => None,
+    }
+}
+
+/// The file-command chords in a frame's event stream. Reading the events keeps
+/// each chord matched with the modifiers that were down when its key went
+/// down, and ignoring repeats stops a held key from exporting twice.
+fn file_commands_for_events(events: &[egui::Event]) -> Vec<FileCommand> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } => file_command_for_key(*key, *modifiers),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Where an export of `source` lands: `<stem>.<extension>` in the same
+/// directory as the `.kame` file it was opened from.
+///
+/// A bare file name (no directory part) resolves in the current working
+/// directory, which is also where a source with no usable stem falls back to —
+/// an unnamed document exports as `document.md` rather than `..md`.
+fn export_path(source: &Path, extension: &str) -> PathBuf {
+    let name = match source.file_stem().filter(|stem| !stem.is_empty()) {
+        Some(stem) => format!("{}.{extension}", stem.to_string_lossy()),
+        None => format!("document.{extension}"),
+    };
+    match source.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        Some(dir) => dir.join(name),
+        None => PathBuf::from(name),
+    }
+}
+
+/// Current Unix time, used to describe how old a snapshot is.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// A coarse relative age for the snapshot picker: snapshots are chosen as "the
+/// one from before lunch", not to the second.
+fn format_age(timestamp: i64, now: i64) -> String {
+    let age = now.saturating_sub(timestamp).max(0);
+    if age < 60 {
+        "just now".to_string()
+    } else if age < 60 * 60 {
+        format!("{}m ago", age / 60)
+    } else if age < 24 * 60 * 60 {
+        format!("{}h ago", age / 3600)
+    } else {
+        format!("{}d ago", age / 86_400)
+    }
+}
+
+/// One line for a snapshot in the picker: id, age, and the label it was taken
+/// with (or a word saying it has none).
+fn describe_snapshot(meta: &SnapshotMeta, now: i64) -> String {
+    let label = meta
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or("unlabelled");
+    format!(
+        "#{} · {} · {label}",
+        meta.id,
+        format_age(meta.timestamp, now)
+    )
+}
+
+/// The "Snapshot Now" label prompt.
+struct SnapshotPrompt {
+    /// The label being typed. Empty means an unlabelled snapshot.
+    label: String,
+    /// Set for the frame the prompt opens on, so the field takes the keyboard
+    /// without a click.
+    focus: bool,
+}
+
+/// The "Restore Snapshot" picker: the listed snapshots (newest first), which
+/// one is chosen, and which of its two steps is showing. The second step is the
+/// confirmation, because restoring discards whatever is in the document now.
+struct RestorePicker {
+    snapshots: Vec<SnapshotMeta>,
+    selected: Option<i64>,
+    confirming: bool,
+}
+
+impl RestorePicker {
+    fn new(snapshots: Vec<SnapshotMeta>) -> RestorePicker {
+        // The newest snapshot is preselected: a picker that opens with the
+        // likely choice already made is one Enter away from a restore.
+        let selected = snapshots.first().map(|meta| meta.id);
+        RestorePicker {
+            snapshots,
+            selected,
+            confirming: false,
+        }
+    }
+
+    /// Moves the choice one row, clamped to the ends.
+    fn move_selection(&mut self, down: bool) {
+        if self.snapshots.is_empty() {
+            return;
+        }
+        let Some(index) = self
+            .selected
+            .and_then(|id| self.snapshots.iter().position(|meta| meta.id == id))
+        else {
+            self.selected = self.snapshots.first().map(|meta| meta.id);
+            return;
+        };
+        let target = if down {
+            (index + 1).min(self.snapshots.len() - 1)
+        } else {
+            index.saturating_sub(1)
+        };
+        self.selected = self.snapshots.get(target).map(|meta| meta.id);
+    }
 }
 
 /// Page geometry for one frame, all as offsets from the painter's top-left.
@@ -296,6 +455,9 @@ struct Session {
     /// Set when a write failed. Further mutations are refused until a write
     /// succeeds, so the in-memory undo cursor cannot drift from the DB cursor.
     save_failed: bool,
+    /// The file this session was opened from. Exports land beside it, and the
+    /// snapshots it prompts for live in the database it names.
+    path: PathBuf,
 }
 
 impl Session {
@@ -341,6 +503,7 @@ impl Session {
             selection: None,
             last_error: None,
             save_failed: false,
+            path: path.to_path_buf(),
         })
     }
 
@@ -348,8 +511,140 @@ impl Session {
         self.editor.document()
     }
 
+    /// The `.kame` file this session was opened from.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
     fn history(&self) -> (usize, usize) {
         self.editor.history()
+    }
+
+    // --- files, exports and snapshots --------------------------------------
+
+    /// Writes the document as Markdown beside the `.kame` file and returns the
+    /// path written.
+    ///
+    /// A failed export is reported through `last_error` but never sets
+    /// `save_failed`: the document itself is still stored, so the author can
+    /// keep writing and take the export again.
+    fn export_markdown(&mut self) -> Option<PathBuf> {
+        let path = export_path(&self.path, "md");
+        let markdown = crate::export::to_markdown(self.editor.document());
+        self.write_export(&path, &markdown)
+    }
+
+    /// Writes the document as a standalone HTML page beside the `.kame` file
+    /// and returns the path written.
+    fn export_html(&mut self) -> Option<PathBuf> {
+        let path = export_path(&self.path, "html");
+        let html = crate::export::to_html(self.editor.document());
+        self.write_export(&path, &html)
+    }
+
+    /// The one write path for both exports.
+    fn write_export(&mut self, path: &Path, contents: &str) -> Option<PathBuf> {
+        match std::fs::write(path, contents) {
+            Ok(()) => {
+                self.clear_error_from("export failed");
+                Some(path.to_path_buf())
+            }
+            Err(err) => {
+                self.last_error = Some(format!("export failed — {}: {err}", path.display()));
+                None
+            }
+        }
+    }
+
+    /// Stores the current document as a snapshot, labelled `label` when it has
+    /// any text, and returns the new id.
+    ///
+    /// The snapshot is the inverse of [`Session::restore`]: it captures the
+    /// text exactly as it stands, independent of the head document and the op
+    /// log, so undo and redo cannot move it.
+    fn snapshot(&mut self, label: Option<&str>) -> Option<i64> {
+        let label = label.map(str::trim).filter(|label| !label.is_empty());
+        match self.db.create_snapshot(self.editor.document(), label) {
+            Ok(id) => {
+                self.clear_error_from("snapshot failed");
+                Some(id)
+            }
+            Err(err) => {
+                self.last_error = Some(format!("snapshot failed — {err}"));
+                None
+            }
+        }
+    }
+
+    /// The stored snapshots, newest first, or `None` when they could not be
+    /// listed (the failure lands in `last_error`).
+    fn snapshots(&mut self) -> Option<Vec<SnapshotMeta>> {
+        match self.db.list_snapshots() {
+            Ok(snapshots) => {
+                self.clear_error_from("could not list snapshots");
+                Some(snapshots)
+            }
+            Err(err) => {
+                self.last_error = Some(format!("could not list snapshots — {err}"));
+                None
+            }
+        }
+    }
+
+    /// Replaces the document with snapshot `id` and persists it.
+    ///
+    /// A restore is deliberately not an op: the snapshot is the undo point, so
+    /// the restored document starts a fresh history and the op log that
+    /// described the replaced text is dropped. Returns whether the restore
+    /// landed; on failure the in-memory document is untouched.
+    fn restore(&mut self, id: i64) -> bool {
+        let document = match self.db.restore_snapshot(id) {
+            Ok(document) => document,
+            Err(err) => {
+                self.last_error = Some(format!("restore failed — {err}"));
+                return false;
+            }
+        };
+        let Some(caret) = document.blocks.first().map(|block| Cursor {
+            block_id: block.id,
+            offset: 0,
+        }) else {
+            self.last_error = Some("restore failed — the snapshot holds no blocks".to_string());
+            return false;
+        };
+        // Head and cursor first: the restored text must never be stored under
+        // the cursor of the history it replaces, or a reopen would offer that
+        // history's ops for undo against a document they never touched.
+        if let Err(err) = self.db.save_state(&document, 0) {
+            self.mark_save_failed(err);
+            return false;
+        }
+        self.editor = Editor::new(document);
+        self.caret = caret;
+        self.selection = None;
+        self.save_failed = false;
+        self.last_error = None;
+        // The old ops describe a document that no longer exists. Dropping them
+        // makes the next edit a clean start; if the delete itself fails the
+        // restore still stands, and `record_edit` truncates to the cursor
+        // before appending, so the stale tail cannot be replayed.
+        if let Err(err) = self.db.truncate_ops_after(0) {
+            self.last_error = Some(format!("restore: old history could not be cleared — {err}"));
+        }
+        true
+    }
+
+    /// Clears `last_error` when it came from the command named by `prefix`, so
+    /// a retried command does not leave its old failure on screen. A save
+    /// failure is never cleared here: it is a different class of problem.
+    fn clear_error_from(&mut self, prefix: &str) {
+        if self
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with(prefix))
+        {
+            self.last_error = None;
+        }
     }
 
     /// Persists the head document and the undo cursor together, the write
@@ -1018,6 +1313,12 @@ fn note_body_edit_id() -> Id {
     Id::unique("kame-note-body")
 }
 
+/// Widget id of the snapshot prompt's label field, so the prompt can give it
+/// the keyboard on the frame it opens.
+fn snapshot_label_edit_id() -> Id {
+    Id::unique("kame-snapshot-label")
+}
+
 /// Short label for an annotation kind, shown above its body in the popover.
 fn annotation_kind_label(kind: &AnnotationKind) -> &'static str {
     match kind {
@@ -1106,7 +1407,14 @@ struct KameApp {
     /// Scroll offset requested by last frame's typewriter centring. Applied to
     /// the scroll area on the next frame, when its geometry is known.
     pending_scroll: Option<f32>,
-    path: PathBuf,
+    /// The "Snapshot Now" label prompt, when it is open.
+    snapshot_prompt: Option<SnapshotPrompt>,
+    /// The "Restore Snapshot" picker, when it is open. At most one of this and
+    /// `snapshot_prompt` is up at a time.
+    restore_picker: Option<RestorePicker>,
+    /// What the last file command did, shown in the status panel until the
+    /// next one. Failures are reported through `Session::last_error` instead.
+    notice: Option<String>,
 }
 
 impl KameApp {
@@ -1126,7 +1434,9 @@ impl KameApp {
             modes: Modes::default(),
             typewriter_anchor: None,
             pending_scroll: None,
-            path,
+            snapshot_prompt: None,
+            restore_picker: None,
+            notice: None,
         })
     }
 
@@ -1181,13 +1491,102 @@ impl KameApp {
         }
     }
 
+    /// Whether a file dialog is up. While one is, it owns the keyboard.
+    fn dialog_open(&self) -> bool {
+        self.snapshot_prompt.is_some() || self.restore_picker.is_some()
+    }
+
+    /// Closes whichever file dialog is open. Returns whether one was closed, so
+    /// Escape can fall through to the note popover only when it was not.
+    fn dismiss_dialog(&mut self) -> bool {
+        let open = self.dialog_open();
+        self.snapshot_prompt = None;
+        self.restore_picker = None;
+        open
+    }
+
+    /// Runs the file-command chords pressed this frame. A chord is never read
+    /// while a dialog is open: the dialog owns those keystrokes.
+    fn handle_file_commands(&mut self, ctx: &egui::Context) {
+        if self.dialog_open() {
+            return;
+        }
+        let commands = ctx.input(|input| file_commands_for_events(&input.events));
+        for command in commands {
+            self.run_file_command(command);
+        }
+    }
+
+    /// The one entry point for the four file commands, shared by the chords and
+    /// the toolbar buttons so the two cannot drift apart.
+    fn run_file_command(&mut self, command: FileCommand) {
+        match command {
+            FileCommand::ExportMarkdown => {
+                self.notice = self
+                    .session
+                    .export_markdown()
+                    .map(|path| format!("exported Markdown to {}", path.display()));
+            }
+            FileCommand::ExportHtml => {
+                self.notice = self
+                    .session
+                    .export_html()
+                    .map(|path| format!("exported HTML to {}", path.display()));
+            }
+            FileCommand::SnapshotNow => {
+                self.restore_picker = None;
+                self.notice = None;
+                self.snapshot_prompt = Some(SnapshotPrompt {
+                    label: String::new(),
+                    focus: true,
+                });
+            }
+            FileCommand::RestoreSnapshot => {
+                let Some(snapshots) = self.session.snapshots() else {
+                    // `last_error` carries the reason; the notice would only
+                    // contradict it.
+                    self.notice = None;
+                    return;
+                };
+                self.snapshot_prompt = None;
+                if snapshots.is_empty() {
+                    self.notice = Some("no snapshots yet — take one with Ctrl-Shift-S".into());
+                } else {
+                    self.notice = None;
+                    self.restore_picker = Some(RestorePicker::new(snapshots));
+                }
+            }
+        }
+    }
+
+    /// Restores snapshot `id`, after the picker's confirmation step.
+    fn restore_snapshot(&mut self, id: i64) {
+        self.restore_picker = None;
+        if !self.session.restore(id) {
+            self.notice = None;
+            return;
+        }
+        self.notice = Some(format!("restored snapshot #{id}"));
+        // The popover's note and the typewriter's centring both pointed into
+        // the text that was just replaced, so that view state goes with it.
+        self.set_open_note(None);
+        self.typewriter_anchor = None;
+        self.pending_scroll = None;
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
-        // Modes are window-level, so they are read before the note field's
-        // focus check: a chord should work whether the prose or a note has the
-        // keyboard.
+        // Modes and file commands are window-level, so they are read before the
+        // note field's focus check: a chord should work whether the prose or a
+        // note has the keyboard.
         self.handle_modes(ctx);
-        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        self.handle_file_commands(ctx);
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && !self.dismiss_dialog() {
             self.set_open_note(None);
+        }
+        // A file dialog owns the keyboard while it is up: its label field would
+        // otherwise also type into the document behind it.
+        if self.dialog_open() {
+            return;
         }
         // While the popover's body field has focus the keystrokes are the
         // note's, not the document's: without this the same character would be
@@ -1299,8 +1698,15 @@ impl KameApp {
         let blocks = self.session.document().blocks.len();
         let annotations = self.session.document().annotations.len();
         let (undo, redo) = self.session.history();
-        let path = self.path.display().to_string();
+        let path = self.session.path().display().to_string();
         let error = self.session.last_error.clone();
+        let notice = self.notice.clone();
+        // Where the two exports would land, spelled out on the buttons so the
+        // author knows the file name before clicking.
+        let markdown_path = export_path(self.session.path(), "md").display().to_string();
+        let html_path = export_path(self.session.path(), "html")
+            .display()
+            .to_string();
 
         egui::Panel::top("kame-status").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1354,6 +1760,42 @@ impl KameApp {
                     ui.label(egui::RichText::new("none").small().weak());
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label("File:");
+                if ui
+                    .small_button("Export Markdown")
+                    .on_hover_text(format!("write {markdown_path} · Ctrl-Shift-E"))
+                    .clicked()
+                {
+                    self.run_file_command(FileCommand::ExportMarkdown);
+                }
+                if ui
+                    .small_button("Export HTML")
+                    .on_hover_text(format!("write {html_path} · Ctrl-Shift-B"))
+                    .clicked()
+                {
+                    self.run_file_command(FileCommand::ExportHtml);
+                }
+                ui.separator();
+                if ui
+                    .small_button("Snapshot Now")
+                    .on_hover_text("capture the text as it stands · Ctrl-Shift-S")
+                    .clicked()
+                {
+                    self.run_file_command(FileCommand::SnapshotNow);
+                }
+                if ui
+                    .small_button("Restore Snapshot")
+                    .on_hover_text("replace the text with a stored snapshot · Ctrl-Shift-R")
+                    .clicked()
+                {
+                    self.run_file_command(FileCommand::RestoreSnapshot);
+                }
+                if let Some(notice) = &notice {
+                    ui.separator();
+                    ui.label(egui::RichText::new(notice).small().color(NOTICE_INK));
+                }
+            });
             ui.label(
                 egui::RichText::new(
                     "Type to write · Enter new paragraph · Backspace/Delete · \
@@ -1368,6 +1810,14 @@ impl KameApp {
                     "Modes: F11 fullscreen · Ctrl-Shift-H hide chrome · \
                      Ctrl-Shift-M hide margin · Ctrl-Shift-P paragraph focus · \
                      Ctrl-Shift-T typewriter",
+                )
+                .small()
+                .weak(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "File: Ctrl-Shift-E export Markdown · Ctrl-Shift-B export HTML · \
+                     Ctrl-Shift-S snapshot now · Ctrl-Shift-R restore snapshot",
                 )
                 .small()
                 .weak(),
@@ -1869,6 +2319,214 @@ impl KameApp {
             self.set_open_note(None);
         }
     }
+
+    // --- file dialogs -------------------------------------------------------
+
+    /// Draws whichever file dialog is open.
+    ///
+    /// Called from the app root rather than from the page so hide-chrome cannot
+    /// hide a dialog that its own chord can still open.
+    fn show_dialogs(&mut self, ctx: &egui::Context) {
+        // Enter is the primary action of both dialogs. It is taken from the
+        // event stream with repeats filtered out, so holding it down steps
+        // once: the restore confirmation must never be skipped over.
+        let enter = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
+            })
+        });
+        if self.snapshot_prompt.is_some() {
+            self.show_snapshot_prompt(ctx, enter);
+        } else if self.restore_picker.is_some() {
+            self.show_restore_picker(ctx, enter);
+        }
+    }
+
+    /// The "Snapshot Now" label prompt: a text field, a button, and Enter.
+    fn show_snapshot_prompt(&mut self, ctx: &egui::Context, enter: bool) {
+        let Some(prompt) = &self.snapshot_prompt else {
+            return;
+        };
+        let mut buffer = prompt.label.clone();
+        let focus = prompt.focus;
+        // A chord and an Enter arriving in the same frame would otherwise take
+        // a snapshot of a label nobody has typed yet.
+        let mut submit = enter && !focus;
+        let mut cancel = false;
+
+        egui::Window::new("Snapshot Now")
+            .id(Id::unique("kame-snapshot-prompt"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                ui.label("Name this snapshot (optional):");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut buffer)
+                        .id(snapshot_label_edit_id())
+                        .desired_width(260.0)
+                        .hint_text("e.g. before the rewrite"),
+                );
+                if focus {
+                    field.request_focus();
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Take snapshot").clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if let Some(prompt) = self.snapshot_prompt.as_mut() {
+            prompt.label = buffer;
+            prompt.focus = false;
+        }
+        if cancel {
+            self.dismiss_dialog();
+            return;
+        }
+        if !submit {
+            return;
+        }
+
+        let label = self
+            .snapshot_prompt
+            .as_ref()
+            .map(|prompt| prompt.label.trim().to_string())
+            .unwrap_or_default();
+        // Closing the prompt before the write keeps the notice truthful: a
+        // failed snapshot leaves its reason in `last_error`, not a stale dialog.
+        self.snapshot_prompt = None;
+        self.notice = self.session.snapshot(Some(&label)).map(|id| {
+            if label.is_empty() {
+                format!("snapshot #{id} taken")
+            } else {
+                format!("snapshot #{id} \"{label}\" taken")
+            }
+        });
+    }
+
+    /// The "Restore Snapshot" picker: choose a snapshot, then confirm that the
+    /// current text is discarded.
+    fn show_restore_picker(&mut self, ctx: &egui::Context, enter: bool) {
+        let (up, down) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowUp),
+                input.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+        let Some(picker) = self.restore_picker.as_mut() else {
+            return;
+        };
+        // The picker has no text field, so the frame's arrow keys are its own.
+        // Arrows do not walk the confirmation step.
+        if !picker.confirming && up != down {
+            picker.move_selection(down);
+        }
+        let confirming = picker.confirming;
+        let mut picked = picker.selected;
+        let snapshots = picker.snapshots.clone();
+        let now = now_unix();
+
+        let mut advance = enter;
+        let mut back = false;
+        let mut cancel = false;
+        egui::Window::new(if confirming {
+            "Restore snapshot?"
+        } else {
+            "Restore snapshot"
+        })
+        .id(Id::unique("kame-restore-picker"))
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            if confirming {
+                let Some(meta) = picked.and_then(|id| snapshots.iter().find(|meta| meta.id == id))
+                else {
+                    cancel = true;
+                    return;
+                };
+                ui.label(format!("Restore {}?", describe_snapshot(meta, now)));
+                ui.label(
+                    egui::RichText::new(
+                        "The text in the document now is discarded and the restored version \
+                         starts a fresh history. The snapshot stays in the list, so restoring \
+                         again is how this is undone.",
+                    )
+                    .small(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Restore and discard the current text").clicked() {
+                        advance = true;
+                    }
+                    if ui.button("Back").clicked() {
+                        back = true;
+                    }
+                });
+            } else {
+                ui.label(
+                    egui::RichText::new("Choose a snapshot (newest first):")
+                        .small()
+                        .weak(),
+                );
+                for meta in &snapshots {
+                    if ui
+                        .selectable_label(picked == Some(meta.id), describe_snapshot(meta, now))
+                        .clicked()
+                    {
+                        picked = Some(meta.id);
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(picked.is_some(), egui::Button::new("Restore…"))
+                        .clicked()
+                    {
+                        advance = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            }
+        });
+
+        if let Some(picker) = self.restore_picker.as_mut() {
+            picker.selected = picked;
+            if back {
+                picker.confirming = false;
+                return;
+            }
+        }
+        if cancel {
+            self.dismiss_dialog();
+            return;
+        }
+        if !advance {
+            return;
+        }
+        if confirming {
+            if let Some(id) = picked {
+                self.restore_snapshot(id);
+            }
+        } else if let Some(picker) = self.restore_picker.as_mut() {
+            picker.confirming = true;
+        }
+    }
 }
 
 impl eframe::App for KameApp {
@@ -1896,6 +2554,9 @@ impl eframe::App for KameApp {
                     draw_error_indicator(ui, error);
                 }
             });
+        // Dialogs are drawn last, from the root: above the page, and available
+        // even while the chrome (and with it the buttons) is hidden.
+        self.show_dialogs(ui.ctx());
     }
 }
 
@@ -2833,5 +3494,316 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
 
         let reopened = open(&path);
         assert_eq!(reopened.document().annotations[0].body, "");
+    }
+
+    // --- file, export and snapshot commands --------------------------------
+
+    fn file_chord() -> egui::Modifiers {
+        egui::Modifiers {
+            command: true,
+            shift: true,
+            ..egui::Modifiers::default()
+        }
+    }
+
+    const FILE_KEYS: [egui::Key; 4] = [egui::Key::E, egui::Key::B, egui::Key::S, egui::Key::R];
+
+    /// A chord claimed by two maps acts twice, so the file chords have to be
+    /// unclaimed by both the mode map and the editor's own map.
+    #[test]
+    fn file_chords_are_disjoint_from_the_mode_and_editor_maps() {
+        let chord = file_chord();
+        assert_eq!(
+            file_command_for_key(egui::Key::E, chord),
+            Some(FileCommand::ExportMarkdown)
+        );
+        assert_eq!(
+            file_command_for_key(egui::Key::B, chord),
+            Some(FileCommand::ExportHtml)
+        );
+        assert_eq!(
+            file_command_for_key(egui::Key::S, chord),
+            Some(FileCommand::SnapshotNow)
+        );
+        assert_eq!(
+            file_command_for_key(egui::Key::R, chord),
+            Some(FileCommand::RestoreSnapshot)
+        );
+
+        // A bare key is prose and a command-only chord is the editor's: Ctrl-S
+        // must not silently write a file, and Ctrl-Z stays undo.
+        for key in FILE_KEYS {
+            assert_eq!(file_command_for_key(key, egui::Modifiers::NONE), None);
+            assert_eq!(
+                file_command_for_key(
+                    key,
+                    egui::Modifiers {
+                        command: true,
+                        ..egui::Modifiers::default()
+                    }
+                ),
+                None
+            );
+            assert_eq!(mode_for_key(key, chord), None, "{key:?} is not a mode");
+            assert_eq!(
+                crate::render::egui_render::command_for_key(key, chord),
+                None,
+                "{key:?} is not an editing command"
+            );
+        }
+        // Every mode chord is still a mode, and never a file command.
+        for key in [egui::Key::H, egui::Key::M, egui::Key::P, egui::Key::T] {
+            assert!(mode_for_key(key, chord).is_some());
+            assert_eq!(file_command_for_key(key, chord), None);
+        }
+    }
+
+    #[test]
+    fn only_pressed_non_repeating_events_are_file_chords() {
+        let chord = file_chord();
+        let key = |pressed: bool, repeat: bool| egui::Event::Key {
+            key: egui::Key::E,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers: chord,
+        };
+        assert_eq!(
+            file_commands_for_events(&[key(true, false)]),
+            vec![FileCommand::ExportMarkdown]
+        );
+        assert!(
+            file_commands_for_events(&[key(true, true)]).is_empty(),
+            "a held key exports once, not once per repeat"
+        );
+        assert!(
+            file_commands_for_events(&[key(false, false)]).is_empty(),
+            "the key-up is not a second export"
+        );
+        assert!(file_commands_for_events(&[egui::Event::Text("e".to_string())]).is_empty());
+    }
+
+    #[test]
+    fn exports_land_beside_the_source_and_fall_back_to_the_cwd() {
+        assert_eq!(
+            export_path(Path::new("/tmp/notes/draft.kame"), "md"),
+            PathBuf::from("/tmp/notes/draft.md")
+        );
+        assert_eq!(
+            export_path(Path::new("/tmp/notes/draft.kame"), "html"),
+            PathBuf::from("/tmp/notes/draft.html")
+        );
+        // A bare name has no directory part, so it resolves in the working
+        // directory — the fallback for a session whose path is just a file name.
+        assert_eq!(
+            export_path(Path::new("draft.kame"), "md"),
+            PathBuf::from("draft.md")
+        );
+        // A path with no stem at all still exports to something nameable.
+        assert_eq!(
+            export_path(Path::new(".."), "md"),
+            PathBuf::from("document.md")
+        );
+    }
+
+    #[test]
+    fn exporting_markdown_writes_the_document_beside_the_database() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("A paragraph.");
+        session.split();
+        session.insert("Another one.");
+        let expected = crate::export::to_markdown(session.document());
+        assert!(expected.contains("A paragraph."));
+        assert!(expected.contains("Another one."));
+
+        let written = session.export_markdown().expect("a markdown export");
+        assert_eq!(written, path.with_extension("md"));
+        let contents = std::fs::read_to_string(&written).expect("read the export");
+        assert_eq!(
+            contents, expected,
+            "the file is exactly to_markdown's output, not a re-render"
+        );
+        assert!(session.last_error.is_none());
+    }
+
+    #[test]
+    fn exporting_html_writes_a_page_beside_the_database() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("A paragraph.");
+        let expected = crate::export::to_html(session.document());
+
+        let written = session.export_html().expect("an html export");
+        assert_eq!(written, path.with_extension("html"));
+        let contents = std::fs::read_to_string(&written).expect("read the export");
+        assert_eq!(contents, expected, "the file is exactly to_html's output");
+        assert!(contents.starts_with("<!DOCTYPE html>"), "{contents:.40}");
+        assert!(contents.contains("<p>A paragraph.</p>"), "{contents}");
+    }
+
+    #[test]
+    fn a_failed_export_reports_itself_without_locking_the_document() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("some text");
+        // A directory where the Markdown file belongs makes the write fail.
+        std::fs::create_dir(path.with_extension("md")).unwrap();
+
+        assert_eq!(session.export_markdown(), None);
+        let error = session.last_error.as_deref().expect("an export error");
+        assert!(error.starts_with("export failed"), "{error}");
+        assert!(
+            !session.save_failed,
+            "an export failure is not a save failure: the document is still stored"
+        );
+        assert!(session.insert(" more"), "editing carries on");
+        assert!(
+            session.export_html().is_some(),
+            "the other format still writes"
+        );
+        assert!(
+            session.last_error.is_none(),
+            "a later successful export clears the old export error"
+        );
+    }
+
+    #[test]
+    fn snapshots_list_newest_first_with_their_labels() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("first draft");
+        let first = session.snapshot(Some("  first  ")).expect("a snapshot");
+        session.insert(" again");
+        let second = session.snapshot(Some("")).expect("a second snapshot");
+
+        let listed = session.snapshots().expect("list the snapshots");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, second);
+        assert_eq!(listed[1].id, first);
+        assert_eq!(
+            listed[1].label.as_deref(),
+            Some("first"),
+            "labels are trimmed and kept"
+        );
+        assert_eq!(listed[0].label, None, "an empty label stores no label");
+    }
+
+    #[test]
+    fn restoring_a_snapshot_drops_the_edits_made_after_it() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("the version I kept");
+        let id = session.snapshot(Some("kept")).expect("a snapshot");
+        session.insert(" and the text I regret");
+        assert!(session.document().blocks[0].text.ends_with("regret"));
+
+        assert!(session.restore(id));
+        assert_eq!(session.document().blocks[0].text, "the version I kept");
+        // The snapshot is the undo point, so the restore is not itself an edit:
+        // there is nothing to undo afterwards.
+        assert_eq!(session.history(), (0, 0));
+        assert!(!session.undo(), "the restore is not undone by Ctrl-Z");
+        drop(session);
+
+        // The head, not just the view, moved: reopen sees the restored text.
+        let mut reopened = open(&path);
+        assert_eq!(reopened.document().blocks[0].text, "the version I kept");
+        assert_eq!(reopened.history(), (0, 0), "the old op log was dropped");
+        assert_eq!(
+            reopened.db.load_ops().unwrap().len(),
+            0,
+            "the log describes a document that no longer exists"
+        );
+        assert_eq!(
+            reopened.snapshots().unwrap().len(),
+            1,
+            "restoring keeps the snapshots it read from"
+        );
+        // The restored document is a clean start for new edits.
+        assert!(reopened.insert("!"));
+        assert_eq!(reopened.history(), (1, 0));
+    }
+
+    #[test]
+    fn restoring_a_missing_snapshot_leaves_the_document_alone() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("still here");
+
+        assert!(!session.restore(9_999), "there is no such snapshot");
+        assert_eq!(session.document().blocks[0].text, "still here");
+        let error = session.last_error.as_deref().expect("a restore error");
+        assert!(error.starts_with("restore failed"), "{error}");
+        assert!(!session.save_failed, "a failed read is not a failed write");
+        assert!(session.insert("!"), "editing carries on");
+    }
+
+    #[test]
+    fn snapshot_ages_are_coarse_and_never_negative() {
+        assert_eq!(format_age(1_000, 1_000), "just now");
+        assert_eq!(format_age(1_000, 1_059), "just now");
+        assert_eq!(format_age(1_000, 1_060), "1m ago");
+        assert_eq!(format_age(1_000, 1_000 + 59 * 60), "59m ago");
+        assert_eq!(format_age(1_000, 1_000 + 3_600), "1h ago");
+        assert_eq!(format_age(1_000, 1_000 + 86_400), "1d ago");
+        // A clock that moved backwards must not read as a future snapshot.
+        assert_eq!(format_age(2_000, 1_000), "just now");
+    }
+
+    #[test]
+    fn snapshot_lines_carry_the_id_the_age_and_the_label() {
+        let labelled = SnapshotMeta {
+            id: 7,
+            timestamp: 1_000,
+            label: Some("before the cut".to_string()),
+        };
+        assert_eq!(
+            describe_snapshot(&labelled, 1_000),
+            "#7 · just now · before the cut"
+        );
+        let blank = SnapshotMeta {
+            id: 8,
+            timestamp: 1_000,
+            label: Some("   ".to_string()),
+        };
+        assert_eq!(
+            describe_snapshot(&blank, 1_000),
+            "#8 · just now · unlabelled"
+        );
+    }
+
+    #[test]
+    fn the_restore_picker_preselects_the_newest_and_clamps_its_selection() {
+        let metas = vec![
+            SnapshotMeta {
+                id: 3,
+                timestamp: 30,
+                label: Some("c".to_string()),
+            },
+            SnapshotMeta {
+                id: 2,
+                timestamp: 20,
+                label: Some("b".to_string()),
+            },
+            SnapshotMeta {
+                id: 1,
+                timestamp: 10,
+                label: None,
+            },
+        ];
+        let mut picker = RestorePicker::new(metas);
+        assert_eq!(picker.selected, Some(3), "the newest is preselected");
+        assert!(
+            !picker.confirming,
+            "the picker opens on its chooser step, never on the confirmation"
+        );
+        picker.move_selection(true);
+        assert_eq!(picker.selected, Some(2));
+        picker.move_selection(true);
+        picker.move_selection(true);
+        assert_eq!(picker.selected, Some(1), "the last row is the floor");
+        picker.move_selection(false);
+        assert_eq!(picker.selected, Some(2));
     }
 }

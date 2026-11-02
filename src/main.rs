@@ -3086,14 +3086,29 @@ impl KameApp {
                     if focus {
                         field.request_focus();
                     }
-                    if ui.small_button("Close").clicked() {
+                    if ui
+                        .small_button("Close")
+                        .on_hover_text("close (Ctrl/Cmd-Enter)")
+                        .clicked()
+                    {
                         close = true;
                     }
                 });
             });
 
         self.open_note_focus = false;
-        if changed {
+        // Ctrl/Cmd-Enter closes the popover, like the Close button. The
+        // multiline field may have already appended a newline for that key, so
+        // trailing newlines are dropped before committing.
+        let command_enter =
+            ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+        if command_enter {
+            while buffer.ends_with('\n') {
+                buffer.pop();
+            }
+            close = true;
+        }
+        if changed || command_enter {
             self.open_note_body = buffer;
             self.session.set_annotation_body(id, &self.open_note_body);
         }

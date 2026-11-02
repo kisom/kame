@@ -3389,6 +3389,7 @@ impl KameApp {
                 ("Heading 3", BlockKind::Heading { level: 3 }),
                 ("Bulleted list", BlockKind::ListItem { ordered: false }),
                 ("Numbered list", BlockKind::ListItem { ordered: true }),
+                ("Block quote", BlockKind::BlockQuote),
             ] {
                 if ui.button(label).clicked() {
                     self.set_block_kind(kind);

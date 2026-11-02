@@ -339,7 +339,12 @@ impl Editor {
         let text = block.text.clone();
         // Enter on an empty list item exits the list: the item becomes body
         // text instead of spawning another empty bullet.
-        if text.is_empty() && matches!(&block.kind, BlockKind::ListItem { .. }) {
+        if text.is_empty()
+            && matches!(
+                &block.kind,
+                BlockKind::ListItem { .. } | BlockKind::BlockQuote
+            )
+        {
             return self.set_block_kind(cursor.block_id, BlockKind::Paragraph);
         }
         let kind = split_kind(&block.kind);
@@ -625,8 +630,9 @@ fn split_kind(kind: &BlockKind) -> BlockKind {
 
 /// Recognizes a markdown-style prefix at the start of a paragraph and returns
 /// the block kind it selects plus the byte length of the prefix to strip.
-/// `# `, `## ` and `### ` become headings; `- `/`* ` start a bullet and `1. `
-/// an ordered item. A block that already has a kind is left alone.
+/// `# `, `## ` and `### ` become headings; `- `/`* ` start a bullet, `1. ` an
+/// ordered item and `> ` a block quote. A block that already has a kind is left
+/// alone.
 fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
     if !matches!(kind, BlockKind::Paragraph) {
         return None;
@@ -641,6 +647,9 @@ fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
     }
     if text.starts_with("1. ") {
         return Some((BlockKind::ListItem { ordered: true }, 3));
+    }
+    if text.starts_with("> ") {
+        return Some((BlockKind::BlockQuote, 2));
     }
     None
 }
@@ -1338,6 +1347,10 @@ mod tests {
         assert_eq!(
             markdown_prefix("1. Hi", &paragraph),
             Some((BlockKind::ListItem { ordered: true }, 3))
+        );
+        assert_eq!(
+            markdown_prefix("> A quote", &paragraph),
+            Some((BlockKind::BlockQuote, 2))
         );
         // No trailing space, or a block that already has a kind: nothing.
         assert_eq!(markdown_prefix("##Hi", &paragraph), None);

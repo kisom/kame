@@ -17,13 +17,13 @@
   where it's associated. I think there's one marginal associate with a
   block, but there's no visual indication of which marginal goes with
   which block.
-- [ ] Support for block quotes is also needed. These should be rendered
+- [x] Support for block quotes is also needed. These should be rendered
   as italicized, and indented.
 - [x] The body should take up 50% of the width; the other 50% should be
   split equally between the unused left gutter and the right margin. The
   right margin needs enough spacing from the far right edge of the
   window so as to ensure the legibility of the text.
-- [ ] There are bunch of helper shortcuts that would make life better.
+- [x] There are bunch of helper shortcuts that would make life better.
   C-left/right arrow should skip by word; C-S-left/right arrow should
   add whole words to the selected text.
 - [ ] Click to select words is usually off by a letter. If I click in

@@ -245,6 +245,10 @@ pub fn to_html(doc: &Document) -> String {
                 body.push_str(&format!("<p>{inner}</p>\n"));
                 body.push_str(&after);
             }
+            BlockKind::BlockQuote => {
+                close_list(&mut body, &mut open_list);
+                body.push_str(&format!("<blockquote>{inner}{after}</blockquote>\n"));
+            }
             BlockKind::ListItem { ordered } => {
                 if open_list != Some(ordered) {
                     close_list(&mut body, &mut open_list);
@@ -890,6 +894,19 @@ mod tests {
         assert!(html.contains("<ol>"));
         assert!(html.contains("<li>Bullet</li>"));
         assert!(html.contains("<li>First</li>"));
+    }
+
+    #[test]
+    fn block_quotes_export_as_blockquote() {
+        let doc = document(
+            vec![
+                paragraph("Before."),
+                block(BlockKind::BlockQuote, "Quoted words"),
+            ],
+            Vec::new(),
+        );
+        let html = to_html(&doc);
+        assert!(html.contains("<blockquote>Quoted words</blockquote>"));
     }
 
     #[test]

@@ -67,6 +67,10 @@ pub fn to_markdown(doc: &Document) -> String {
                 ordered_index = 0;
                 String::new()
             }
+            BlockKind::BlockQuote => {
+                ordered_index = 0;
+                "> ".to_string()
+            }
         };
         let markers = by_block.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
         let mut body = render_block_text(block, markers);
@@ -74,6 +78,11 @@ pub fn to_markdown(doc: &Document) -> String {
         // and list items already carry a marker, so they are left alone.
         if block.kind == BlockKind::Paragraph {
             escape_block_start(&mut body);
+        }
+        // Every line of a quoted passage keeps the `>` marker, so a pasted
+        // multi-line quote still exports as one block quote.
+        if block.kind == BlockKind::BlockQuote {
+            body = body.replace('\n', "\n> ");
         }
         parts.push(format!("{prefix}{body}"));
     }
@@ -425,6 +434,20 @@ mod tests {
         );
         let md = to_markdown(&doc_with_heading_and_para);
         assert_eq!(md, "# Title\n\nBody text\n");
+    }
+
+    #[test]
+    fn block_quotes_export_with_gt_markers() {
+        let doc = document(
+            vec![
+                paragraph("Before."),
+                block(BlockKind::BlockQuote, "Quoted words"),
+                paragraph("After."),
+            ],
+            Vec::new(),
+        );
+        let md = to_markdown(&doc);
+        assert_eq!(md, "Before.\n\n> Quoted words\n\nAfter.\n");
     }
 
     #[test]

@@ -37,6 +37,9 @@ const LINE_HEIGHT_RATIO: f32 = 1.5;
 const HEADING_RATIO: f32 = 1.75;
 const MARGIN_RATIO: f32 = 0.75;
 const LIST_INDENT_RATIO: f32 = 1.75;
+/// How far a block quote is indented from the measure, as a ratio of
+/// `body_size`.
+const QUOTE_INDENT_RATIO: f32 = 1.5;
 
 impl LayoutConfig {
     /// A config whose font-derived sizes are ratios of `body_size`, at the
@@ -96,32 +99,44 @@ pub fn layout_block(
     block: &Block,
     config: &LayoutConfig,
 ) -> BlockLayout {
-    let (family, size, line_height, align) = match block.kind {
+    let (family, size, line_height, align, style) = match block.kind {
         BlockKind::Paragraph => (
             BODY_FAMILY,
             config.body_size,
             config.body_line_height,
             Align::Justified,
+            Style::Normal,
         ),
         BlockKind::Heading { .. } => (
             HEADING_FAMILY,
             config.heading_size,
             heading_line_height(config),
             Align::Left,
+            Style::Normal,
         ),
         BlockKind::ListItem { .. } => (
             BODY_FAMILY,
             config.body_size,
             config.body_line_height,
             Align::Left,
+            Style::Normal,
+        ),
+        BlockKind::BlockQuote => (
+            BODY_FAMILY,
+            config.body_size,
+            config.body_line_height,
+            Align::Left,
+            Style::Italic,
         ),
     };
 
     // List items reserve a gutter on the left for their marker, and wrap their
     // text in the remaining column so continuation lines hang under the text
-    // rather than under the marker.
+    // rather than under the marker. A block quote is indented with no marker:
+    // its whole column shifts right and wraps in the remaining width.
     let left_indent = match block.kind {
         BlockKind::ListItem { .. } => config.list_indent,
+        BlockKind::BlockQuote => config.body_size * QUOTE_INDENT_RATIO,
         _ => 0.0,
     };
     let width = (config.body_width - left_indent).max(1.0);
@@ -131,7 +146,7 @@ pub fn layout_block(
     let attrs = Attrs::new()
         .family(Family::Name(family))
         .weight(Weight::NORMAL)
-        .style(Style::Normal);
+        .style(style);
     let spans = styled_spans(block, &attrs);
     buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
     buffer.set_wrap(Wrap::Word);
@@ -614,6 +629,25 @@ dance, on a page, of pen, eye and hand.";
             config.list_indent
         );
         assert_eq!(layout_block(&mut fs, &paragraph, &config).left_indent, 0.0);
+    }
+
+    #[test]
+    fn block_quotes_indent_from_the_measure() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = config();
+        let quote = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::BlockQuote,
+            text: "To be, or not to be.".to_string(),
+            spans: Vec::new(),
+        };
+        let layout = layout_block(&mut fs, &quote, &config);
+        // Indented from the measure, but with no marker to fill the gutter:
+        // the whole column shifts right and wraps in the remaining width.
+        assert_eq!(layout.left_indent, config.body_size * 1.5);
+        assert!(layout.height > 0.0, "a non-empty quote shapes a line");
+        assert_eq!(layout.lines.len(), 1);
     }
 
     #[test]

@@ -7,8 +7,14 @@ pub type AnnotationId = Uuid;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockKind {
     Paragraph,
-    Heading { level: u8 },
-    ListItem { ordered: bool },
+    Heading {
+        level: u8,
+    },
+    ListItem {
+        ordered: bool,
+    },
+    /// An indented, italicized quotation.
+    BlockQuote,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

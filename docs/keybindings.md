@@ -19,6 +19,11 @@ Block kind is also the status panel's `Block:` row — body, H1–H3 and both li
 kinds. Changing the kind is one undoable edit, and undo restores the previous
 kind (including a heading's level).
 
+The digit chords are matched against the physical digit as well as the typed
+character: `Shift`+1 gives `!`, which egui names `Exclamationmark`, and a
+layout where `Shift`+1 is not `!` at all still reaches H1 through the digit's
+position on the keyboard.
+
 ## Distraction-free modes
 
 Every mode is view-only UI state: never persisted, never an undo step, and

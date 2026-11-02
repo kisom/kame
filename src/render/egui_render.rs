@@ -643,10 +643,44 @@ pub fn command_for_event(event: &Event) -> Option<Command> {
         Event::Paste(text) if !text.is_empty() => Some(Command::Paste(text.clone())),
         Event::Key {
             key,
+            physical_key,
             pressed: true,
             modifiers,
             ..
-        } => command_for_key(*key, *modifiers),
+        } => command_for_key(*key, *modifiers).or_else(|| {
+            // Shift turns a digit into a symbol, and egui-winit looks the typed
+            // character up with `Key::from_name` before falling back to the
+            // physical key: Shift+1 becomes `Exclamationmark`, not `Num1`, so a
+            // chord bound to the digit misses. `block_kind_for_key` names the
+            // one symbol it knows, and the physical digit catches the rest (a
+            // layout where the shifted symbol has no name, or one where Shift+1
+            // is not `!` at all). The fallback is limited to the block-kind
+            // digits: other chords are letters, and a physical position means
+            // something else on a non-QWERTY layout.
+            if !(modifiers.command && modifiers.shift) {
+                return None;
+            }
+            let physical = (*physical_key)?;
+            if block_kind_for_key(physical).is_none() {
+                return None;
+            }
+            command_for_key(physical, *modifiers)
+        }),
+        _ => None,
+    }
+}
+
+/// The block kind bound to `key`, if any: the digits of the
+/// Ctrl-Shift-1/2/3/0 chords and the shifted symbols that stand in for them.
+fn block_kind_for_key(key: Key) -> Option<BlockKind> {
+    match key {
+        Key::Num0 => Some(BlockKind::Paragraph),
+        Key::Num1 => Some(BlockKind::Heading { level: 1 }),
+        Key::Num2 => Some(BlockKind::Heading { level: 2 }),
+        Key::Num3 => Some(BlockKind::Heading { level: 3 }),
+        // Shift+1 is `!` on most layouts, and `Key::from_name("!")` names it,
+        // so egui-winit hands us this instead of the digit.
+        Key::Exclamationmark => Some(BlockKind::Heading { level: 1 }),
         _ => None,
     }
 }
@@ -661,19 +695,13 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::Y if command => Some(Command::Redo),
         // Ctrl-Shift-1/2/3 make a heading; Ctrl-Shift-0 returns a block to
         // body text. `command` is Ctrl (Cmd) on every platform, so the chords
-        // travel.
-        Key::Num0 if command && modifiers.shift => {
-            Some(Command::SetBlockKind(BlockKind::Paragraph))
+        // travel. The shifted symbols are the same chords as egui-winit
+        // delivers them (see `command_for_event`).
+        Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Exclamationmark
+            if command && modifiers.shift =>
+        {
+            block_kind_for_key(key).map(Command::SetBlockKind)
         }
-        Key::Num1 if command && modifiers.shift => Some(Command::SetBlockKind(
-            BlockKind::Heading { level: 1 },
-        )),
-        Key::Num2 if command && modifiers.shift => Some(Command::SetBlockKind(
-            BlockKind::Heading { level: 2 },
-        )),
-        Key::Num3 if command && modifiers.shift => Some(Command::SetBlockKind(
-            BlockKind::Heading { level: 3 },
-        )),
         Key::Enter => Some(Command::SplitParagraph),
         Key::Backspace => Some(Command::Backspace),
         Key::Delete => Some(Command::Delete),
@@ -1229,5 +1257,62 @@ visual form, and thus with an independent existence.";
         };
         assert_eq!(command_for_key(Key::Num1, none), None);
         assert_eq!(command_for_key(Key::Num1, ctrl), None);
+    }
+
+    /// A Ctrl-Shift-<digit> key event exactly as egui-winit builds it: the
+    /// typed character goes through `Key::from_name` (Shift+1 types `!`, which
+    /// is `Exclamationmark`), and only a character with no key name falls back
+    /// to the physical key.
+    fn shifted_digit_event(symbol: &str, physical: Key) -> Event {
+        Event::Key {
+            key: Key::from_name(symbol).unwrap_or(physical),
+            physical_key: Some(physical),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                command: true,
+                ..Modifiers::NONE
+            },
+        }
+    }
+
+    #[test]
+    fn every_block_kind_chord_fires_from_the_event_egui_winit_sends() {
+        // Shift+1 is named, so the logical key is `Exclamationmark`, never
+        // `Num1` — the case a hand-built `Modifiers` cannot catch.
+        assert_eq!(Key::from_name("!"), Some(Key::Exclamationmark));
+        for (symbol, physical, kind) in [
+            ("!", Key::Num1, BlockKind::Heading { level: 1 }),
+            ("@", Key::Num2, BlockKind::Heading { level: 2 }),
+            ("#", Key::Num3, BlockKind::Heading { level: 3 }),
+            (")", Key::Num0, BlockKind::Paragraph),
+        ] {
+            assert_eq!(
+                command_for_event(&shifted_digit_event(symbol, physical)),
+                Some(Command::SetBlockKind(kind)),
+                "Ctrl-Shift-{symbol} must set the caret block's kind"
+            );
+        }
+
+        // The shifted symbols with no key name arrive as the physical digit;
+        // the named one must not double up when the physical key is elsewhere
+        // on the keyboard.
+        assert_eq!(Key::from_name("@"), None);
+        assert_eq!(Key::from_name("#"), None);
+        assert_eq!(Key::from_name(")"), None);
+        assert_eq!(
+            command_for_event(&shifted_digit_event("?", Key::Num1)),
+            Some(Command::SetBlockKind(BlockKind::Heading { level: 1 })),
+            "a layout whose Shift+1 is '?' still makes an H1 via the digit"
+        );
+
+        // A press without the chord is still just a typed character.
+        let mut bare = shifted_digit_event("!", Key::Num1);
+        if let Event::Key { modifiers, .. } = &mut bare {
+            *modifiers = Modifiers::NONE;
+        }
+        assert_eq!(command_for_event(&bare), None);
     }
 }

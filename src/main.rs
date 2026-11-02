@@ -434,10 +434,14 @@ fn error_indicator(last_error: Option<&str>) -> Option<&str> {
 /// drawn from the central panel, never the status panel, so hide-chrome cannot
 /// leave the author typing into a document that failed to save with no signal.
 ///
-/// Returns whether the author clicked it. The strip is the retry affordance: a
-/// transient write failure (a full disk that was emptied) must be recoverable
-/// in place, not by quitting and losing the session.
-fn draw_error_indicator(ui: &mut egui::Ui, error: &str) -> bool {
+/// Returns whether the author clicked it. For a failed write the strip is the
+/// retry affordance: a transient write failure (a full disk that was emptied)
+/// must be recoverable in place, not by quitting and losing the session.
+///
+/// `retry` marks that failed-write class. Every other message (a degraded open,
+/// a failed export) has no pending write to retry, so its strip dismisses the
+/// message instead of offering a write that would do nothing.
+fn draw_error_indicator(ui: &mut egui::Ui, error: &str, retry: bool) -> bool {
     let rect = ui.max_rect();
     {
         let painter = ui.painter();
@@ -454,9 +458,14 @@ fn draw_error_indicator(ui: &mut egui::Ui, error: &str) -> bool {
         Pos2::new(rect.left(), rect.top()),
         Pos2::new(rect.right(), rect.top() + 12.0),
     );
+    let hint = if retry {
+        "click to retry the save · close again to quit without saving"
+    } else {
+        "click to dismiss"
+    };
     let strip = ui
         .interact(band, Id::unique("kame-error-strip"), Sense::click())
-        .on_hover_text(format!("{error}\n\nclick to retry the save"));
+        .on_hover_text(format!("{error}\n\n{hint}"));
     let dot = ui
         .interact(
             Rect::from_center_size(
@@ -466,16 +475,39 @@ fn draw_error_indicator(ui: &mut egui::Ui, error: &str) -> bool {
             Id::unique("kame-error-indicator"),
             Sense::click(),
         )
-        .on_hover_text(error);
+        .on_hover_text(format!("{error}\n\n{hint}"));
     strip.clicked() || dot.clicked()
 }
 
-/// Whether a close request must be refused because the last write failed.
+/// The window's close guard against a failed write, without ever trapping the
+/// author.
 ///
-/// Closing there would silently discard everything typed since the failed
-/// write, so the window stays open until the retry (the error strip) lands.
-fn refuse_close(save_failed: bool, close_requested: bool) -> bool {
-    save_failed && close_requested
+/// The first close request is cancelled: quitting there would silently discard
+/// everything typed since the failed write, and the error strip is the retry
+/// affordance. A second request is allowed through — if the write cannot land
+/// at all (the file was yanked, the volume went read-only), the session must
+/// still be closable, and the edits lost were unsaveable anyway.
+#[derive(Default)]
+struct CloseGuard {
+    /// Close requests already cancelled while the last write was failing.
+    refused: u32,
+}
+
+impl CloseGuard {
+    /// Records one frame's close state and says whether to cancel the close.
+    fn cancel_close(&mut self, save_failed: bool, close_requested: bool) -> bool {
+        if !save_failed {
+            // A healthy session closes at once; a later failure starts the
+            // guard's count over.
+            self.refused = 0;
+            return false;
+        }
+        if !close_requested {
+            return false;
+        }
+        self.refused += 1;
+        self.refused < 2
+    }
 }
 
 fn main() -> eframe::Result {
@@ -532,11 +564,14 @@ impl Session {
     /// document is the user's text, and history is only how it got there. One
     /// row written by a future build (or a partially written one) must not make
     /// the document unopenable, so the session starts with no history and a
-    /// non-fatal warning, leaving the log on disk untouched for a later build
-    /// to read.
+    /// non-fatal warning, and the durable state is reset to match that empty
+    /// history.
     fn open(path: &Path) -> AppResult<Session> {
         let mut db = Db::open(path)?;
         let mut warning = None;
+        // Set when the degrade path could not reset the database, which leaves
+        // it unable to write rather than merely historyless.
+        let mut reset_error: Option<DbError> = None;
         let editor = match db.load_document() {
             Ok(document) => match db.load_ops() {
                 Ok(ops) => {
@@ -552,7 +587,21 @@ impl Session {
                     warning = Some(format!(
                         "history unavailable — {err}; opening the document with no undo history"
                     ));
-                    Editor::new(document)
+                    let editor = Editor::new(document);
+                    // An in-memory editor with no history beside a DB cursor
+                    // still pointing into the unreadable log would desync on the
+                    // first edit: the edit truncates the log as a redo tail
+                    // (shifting the sequence numbers the cursor counts), and the
+                    // next undo writes the in-memory count as the DB cursor, so
+                    // a reopen puts a surviving op on the redo stack and redo
+                    // re-applies it to text it never touched. The unreadable ops
+                    // are unrecoverable anyway — the first edit would drop them —
+                    // so reset the DB to the degraded editor in one transaction:
+                    // head, cursor 0, empty log.
+                    if let Err(err) = db.restore_state(editor.document()) {
+                        reset_error = Some(err);
+                    }
+                    editor
                 }
             },
             Err(DbError::NoDocument) => {
@@ -576,13 +625,24 @@ impl Session {
                 offset: 0,
             })
             .ok_or("document has no blocks")?;
+        // A reset that failed leaves the unreadable log on disk beside an
+        // editor with no history. Do not open a session whose history could
+        // diverge from the DB: open it read-only, so the first edit cannot
+        // shift the log under the cursor.
+        let (last_error, save_failed) = match reset_error {
+            Some(err) => (
+                Some(format!("save failed — editing disabled: {err}")),
+                true,
+            ),
+            None => (warning, false),
+        };
         Ok(Session {
             editor,
             db,
             caret,
             selection: None,
-            last_error: warning,
-            save_failed: false,
+            last_error,
+            save_failed,
             path: path.to_path_buf(),
         })
     }
@@ -772,6 +832,22 @@ impl Session {
         if self.save_failed {
             self.save_failed = false;
             self.last_error = None;
+        }
+    }
+
+    /// The error strip's click: retry a failed write, or dismiss a message.
+    ///
+    /// Only a failed write has something to save, so only it retries. Every
+    /// other message — the degraded-open warning, a failed export or snapshot —
+    /// has no pending write: retrying there would write state the author never
+    /// changed, and `clear_save_error` would not clear it anyway, leaving a
+    /// permanently painted strip. Those messages are dismissed instead.
+    fn retry_or_dismiss(&mut self) -> bool {
+        if self.save_failed {
+            self.save_state()
+        } else {
+            self.last_error = None;
+            true
         }
     }
 
@@ -1503,6 +1579,9 @@ struct KameApp {
     /// What the last file command did, shown in the status panel until the
     /// next one. Failures are reported through `Session::last_error` instead.
     notice: Option<String>,
+    /// Keeps a failed write from being discarded by a stray close, while still
+    /// letting the author quit on a second request.
+    close: CloseGuard,
 }
 
 impl KameApp {
@@ -1525,6 +1604,7 @@ impl KameApp {
             snapshot_prompt: None,
             restore_picker: None,
             notice: None,
+            close: CloseGuard::default(),
         })
     }
 
@@ -2681,11 +2761,17 @@ impl KameApp {
 impl eframe::App for KameApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_input(ui.ctx());
-        // A failed write is not a reason to lose the session: refuse the close
-        // while the flag is set. The error strip is the way out — it retries
-        // the saved state, and a successful write re-enables closing.
+        // A failed write is not a reason to lose the session: the first close
+        // request is refused while the flag is set, and the error strip retries
+        // the save. A second request is allowed through, so a write that can
+        // never land cannot make the window unclosable. (egui delivers one
+        // close request per X click, so `cancel_close` counts clicks, not
+        // frames.)
         let close_requested = ui.ctx().input(|input| input.viewport().close_requested());
-        if refuse_close(self.session.save_failed, close_requested) {
+        if self
+            .close
+            .cancel_close(self.session.save_failed, close_requested)
+        {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
@@ -2730,9 +2816,12 @@ impl eframe::App for KameApp {
                 // The save-failure signal belongs to the page, not the chrome:
                 // it is painted in this panel so it outlives hide-chrome.
                 if let Some(error) = &error {
-                    // The strip is the retry affordance for a failed write.
-                    if draw_error_indicator(ui, error) {
-                        self.session.save_state();
+                    // A failed write's strip retries the save; any other message
+                    // (a degraded open, a failed export) is dismissed, so it
+                    // cannot sit there offering a write that does nothing.
+                    let retry = self.session.save_failed;
+                    if draw_error_indicator(ui, error, retry) {
+                        self.session.retry_or_dismiss();
                     }
                 }
             });
@@ -2940,17 +3029,37 @@ mod tests {
     }
 
     #[test]
-    fn a_close_is_refused_only_while_a_write_is_outstanding() {
+    fn a_close_is_refused_once_and_then_yields() {
+        let mut guard = CloseGuard::default();
         assert!(
-            refuse_close(true, true),
+            !guard.cancel_close(true, false),
+            "no close request, nothing to cancel"
+        );
+        assert!(
+            guard.cancel_close(true, true),
             "a failed write must keep the window open"
         );
         assert!(
-            !refuse_close(true, false),
-            "no close request, nothing to do"
+            !guard.cancel_close(true, false),
+            "a frame without a request neither cancels nor counts"
         );
-        assert!(!refuse_close(false, true), "a healthy session closes");
-        assert!(!refuse_close(false, false));
+        assert!(
+            !guard.cancel_close(true, true),
+            "a second close goes through: a write that can never land must not trap the session"
+        );
+
+        // A healthy session closes on the first request.
+        let mut guard = CloseGuard::default();
+        assert!(!guard.cancel_close(false, true), "a healthy session closes");
+
+        // A successful write re-arms the guard for a later failure.
+        let mut guard = CloseGuard::default();
+        assert!(guard.cancel_close(true, true));
+        assert!(!guard.cancel_close(false, true), "the write landed: close");
+        assert!(
+            guard.cancel_close(true, true),
+            "a later failure gets its own refusal"
+        );
     }
 
     #[test]
@@ -3418,13 +3527,26 @@ mod tests {
         );
         assert!(!session.save_failed, "a bad read is not a failed write");
 
-        // The log is left on disk for a later build to read.
+        // The log cannot be resumed from, and leaving it beside an editor with
+        // no history desyncs the two: the first edit truncates the log as a
+        // redo tail (shifting the sequence numbers the cursor counts), the next
+        // undo writes the in-memory count as the cursor, and a reopen offers a
+        // surviving op as redo against text it never touched. So the open
+        // resets the durable state to the degraded editor: empty log, cursor 0.
         {
             let conn = rusqlite::Connection::open(&path).expect("open the db directly");
             let rows: i64 = conn
                 .query_row("SELECT COUNT(*) FROM ops", [], |row| row.get(0))
                 .expect("count ops");
-            assert_eq!(rows, 2, "the unreadable row was not deleted");
+            assert_eq!(rows, 0, "the unresumable log is dropped with the reset");
+            let cursor: String = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'undo_cursor'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read the cursor");
+            assert_eq!(cursor, "0", "the cursor no longer points into the log");
         }
 
         let block_id = first_block_id(&session);
@@ -3434,6 +3556,57 @@ mod tests {
         });
         assert!(session.insert("!"), "the session stays writable");
         assert_eq!(session.document().blocks[0].text, "kept!");
+        assert_eq!(session.history(), (1, 0));
+        assert!(session.undo(), "the new edit is undoable in this session");
+        assert_eq!(session.document().blocks[0].text, "kept");
+        drop(session);
+
+        // The regression this guards: with the DB left as it was, the first edit
+        // truncated the log under a cursor that still counted the pre-degrade
+        // op, and the undo then wrote the in-memory count, so the reopen put the
+        // pre-degrade op on the redo stack and redo re-applied it to text that
+        // already contained it ("kept" -> "keptkept"). After the reset the log
+        // holds only the edit made since the degrade, so the only thing redo can
+        // re-apply is the author's own undone edit.
+        let mut reopened = open(&path);
+        assert_eq!(reopened.document().blocks[0].text, "kept");
+        assert_eq!(
+            reopened.history(),
+            (0, 1),
+            "the log holds one post-degrade op and no older one"
+        );
+        assert!(reopened.redo(), "the author's own undone edit is redoable");
+        assert_eq!(
+            reopened.document().blocks[0].text, "kept!",
+            "redo re-applies the typed edit exactly once, never the pre-degrade op"
+        );
+        assert!(!reopened.redo(), "nothing else is on the redo stack");
+        assert_eq!(reopened.document().blocks[0].text, "kept!");
+    }
+
+    /// FIX 3: a message that has no pending write (the degraded-open warning, a
+    /// failed export) is dismissed by the strip's click, not retried: retrying
+    /// writes state the author never changed and never clears the message.
+    #[test]
+    fn a_message_with_no_pending_write_is_dismissed_not_retried() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        assert!(session.insert("draft"));
+
+        session.last_error = Some("export failed — no such directory".into());
+        assert!(!session.save_failed, "the export failure is not a save failure");
+        assert!(session.retry_or_dismiss(), "a click clears the message");
+        assert!(session.last_error.is_none(), "the strip goes away");
+        assert!(!session.save_failed);
+        assert_eq!(session.history(), (1, 0), "nothing was rewritten");
+
+        // A failed write is the other class: the same click retries it, and it
+        // stays until a write lands.
+        session.save_failed = true;
+        session.last_error = Some("save failed — editing disabled: disk full".into());
+        assert!(session.retry_or_dismiss(), "the retry lands");
+        assert!(!session.save_failed);
+        assert!(session.last_error.is_none());
     }
 
     // --- Task 12: annotations ------------------------------------------------

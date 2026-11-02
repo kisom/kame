@@ -26,7 +26,9 @@ use crate::layout::{
     place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
     MarginalPlacement, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
 };
-use crate::model::{Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, Document};
+use crate::model::{
+    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
+};
 use crate::render::egui_render::{
     caret_line, caret_x, command_for_event, next_boundary, offset_at, prev_boundary, range_rects,
     word_at, AnnotationTextureCache, Command, GlyphRenderer, LayoutCache, TextureCache,
@@ -59,6 +61,12 @@ const NOTE_MARK: Color32 = Color32::from_rgb(140, 104, 40);
 const PAGE_PADDING: f32 = 36.0;
 /// Vertical space between blocks.
 const BLOCK_GAP: f32 = 14.0;
+/// Width the vertical scroll bar takes out of the scroll area's inner rect.
+///
+/// The measure is computed from the panel width (so the scroll bar's presence
+/// cannot feed back into the wrap), which means its width has to be reserved
+/// here or the page's right edge is clipped by the bar at the threshold.
+const SCROLLBAR_ALLOWANCE: f32 = 16.0;
 /// Annotation text is set a little smaller than the prose.
 const ANNOTATION_SCALE: f32 = 0.82;
 /// Veil painted over the blocks that are not being written in paragraph-focus
@@ -326,11 +334,45 @@ impl RestorePicker {
     }
 }
 
+/// The narrowest measure the page shrinks to. Below this the window is simply
+/// too small for legible prose, and the page is allowed to clip rather than
+/// wrap every line to three words.
+const MIN_MEASURE: f32 = 320.0;
+
+/// The measure and gutter a window of `available_width` can actually show.
+///
+/// The page is `body + 2 * margin` wide and nothing scrolls horizontally, so a
+/// window narrower than that would put the right end of every line out of
+/// reach. The measure therefore follows the window: it shrinks first, and once
+/// it would fall below [`MIN_MEASURE`] the margin column is dropped instead and
+/// the prose takes the whole width.
+fn page_measure(
+    body_width: f32,
+    margin_width: f32,
+    hide_margin: bool,
+    available_width: f32,
+) -> (f32, f32) {
+    let gutter = if hide_margin { 0.0 } else { margin_width };
+    let available = available_width.max(1.0);
+    if available - 2.0 * gutter >= MIN_MEASURE {
+        (
+            body_width.min(available - 2.0 * gutter).max(MIN_MEASURE),
+            gutter,
+        )
+    } else {
+        (body_width.min(available).max(MIN_MEASURE), 0.0)
+    }
+}
+
 /// Page geometry for one frame, all as offsets from the painter's top-left.
+///
+/// `config` is the measured config for this frame: `page_measure` has already
+/// shrunk the measure (and collapsed the gutter) to what the window can show,
+/// so this only centres the page.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PageGeometry {
     /// Width of the page: the measure plus both margins (or just the measure
-    /// when the margin column is hidden).
+    /// when the margin column is hidden or collapsed).
     page_width: f32,
     /// Distance from the painter's left edge to the body text.
     body_left: f32,
@@ -338,11 +380,10 @@ struct PageGeometry {
     margin_width: f32,
 }
 
-/// Centres the page in `available_width`. Hiding the margin column collapses
-/// the gutter to zero, so the measure re-centres on the window; callers skip
-/// the margin apparatus, which has nowhere left to sit.
-fn page_geometry(config: LayoutConfig, hide_margin: bool, available_width: f32) -> PageGeometry {
-    let margin_width = if hide_margin { 0.0 } else { config.margin_width };
+/// Centres the page in `available_width`. A zero gutter means the margin
+/// apparatus has nowhere to sit, so callers skip it.
+fn page_geometry(config: LayoutConfig, available_width: f32) -> PageGeometry {
+    let margin_width = config.margin_width;
     let page_width = config.body_width + 2.0 * margin_width;
     let page_left = ((available_width - page_width) * 0.5).max(0.0);
     PageGeometry {
@@ -392,7 +433,11 @@ fn error_indicator(last_error: Option<&str>) -> Option<&str> {
 /// central panel and a corner dot whose tooltip carries the message. It is
 /// drawn from the central panel, never the status panel, so hide-chrome cannot
 /// leave the author typing into a document that failed to save with no signal.
-fn draw_error_indicator(ui: &mut egui::Ui, error: &str) {
+///
+/// Returns whether the author clicked it. The strip is the retry affordance: a
+/// transient write failure (a full disk that was emptied) must be recoverable
+/// in place, not by quitting and losing the session.
+fn draw_error_indicator(ui: &mut egui::Ui, error: &str) -> bool {
     let rect = ui.max_rect();
     {
         let painter = ui.painter();
@@ -403,15 +448,34 @@ fn draw_error_indicator(ui: &mut egui::Ui, error: &str) {
         painter.rect_filled(strip, 0.0, ERROR_INK);
         painter.circle_filled(Pos2::new(rect.right() - 12.0, rect.top() + 12.0), 4.0, ERROR_INK);
     }
-    ui.interact(
-        Rect::from_center_size(
-            Pos2::new(rect.right() - 12.0, rect.top() + 12.0),
-            Vec2::splat(24.0),
-        ),
-        Id::unique("kame-error-indicator"),
-        Sense::hover(),
-    )
-    .on_hover_text(error);
+    // The painted strip is a hairline; the click target reaches down into the
+    // page's top padding, above the first line of prose, so it can be hit.
+    let band = Rect::from_min_max(
+        Pos2::new(rect.left(), rect.top()),
+        Pos2::new(rect.right(), rect.top() + 12.0),
+    );
+    let strip = ui
+        .interact(band, Id::unique("kame-error-strip"), Sense::click())
+        .on_hover_text(format!("{error}\n\nclick to retry the save"));
+    let dot = ui
+        .interact(
+            Rect::from_center_size(
+                Pos2::new(rect.right() - 12.0, rect.top() + 12.0),
+                Vec2::splat(24.0),
+            ),
+            Id::unique("kame-error-indicator"),
+            Sense::click(),
+        )
+        .on_hover_text(error);
+    strip.clicked() || dot.clicked()
+}
+
+/// Whether a close request must be refused because the last write failed.
+///
+/// Closing there would silently discard everything typed since the failed
+/// write, so the window stays open until the retry (the error strip) lands.
+fn refuse_close(save_failed: bool, close_requested: bool) -> bool {
+    save_failed && close_requested
 }
 
 fn main() -> eframe::Result {
@@ -463,14 +527,34 @@ struct Session {
 impl Session {
     /// Opens the database at `path`, creating a fresh document when it holds
     /// none yet, and resumes the editor at the persisted undo cursor.
+    ///
+    /// An unreadable op log is a degraded open, not a failure: the head
+    /// document is the user's text, and history is only how it got there. One
+    /// row written by a future build (or a partially written one) must not make
+    /// the document unopenable, so the session starts with no history and a
+    /// non-fatal warning, leaving the log on disk untouched for a later build
+    /// to read.
     fn open(path: &Path) -> AppResult<Session> {
         let mut db = Db::open(path)?;
-        let (document, ops, cursor) = match db.load_document() {
-            Ok(document) => {
-                let ops = db.load_ops()?.into_iter().map(|(_, op)| op).collect();
-                let cursor = db.cursor()?;
-                (document, ops, cursor)
-            }
+        let mut warning = None;
+        let editor = match db.load_document() {
+            Ok(document) => match db.load_ops() {
+                Ok(ops) => {
+                    let ops: Vec<Op> = ops.into_iter().map(|(_, op)| op).collect();
+                    let cursor = db.cursor()?;
+                    // Resume with the persisted cursor, never with_history: the
+                    // saved head may already have ops undone, and treating the
+                    // whole log as applied would offer those ops for undo a
+                    // second time.
+                    Editor::with_cursor(document, ops, cursor)
+                }
+                Err(err) => {
+                    warning = Some(format!(
+                        "history unavailable — {err}; opening the document with no undo history"
+                    ));
+                    Editor::new(document)
+                }
+            },
             Err(DbError::NoDocument) => {
                 let title = path
                     .file_stem()
@@ -478,15 +562,11 @@ impl Session {
                     .unwrap_or("Untitled");
                 let document = Document::new(title);
                 db.save_document(&document)?;
-                (document, Vec::new(), 0)
+                Editor::new(document)
             }
             Err(err) => return Err(Box::new(err)),
         };
 
-        // Resume with the persisted cursor, never with_history: the saved
-        // head may already have ops undone, and treating the whole log as
-        // applied would offer those ops for undo a second time.
-        let editor = Editor::with_cursor(document, ops, cursor);
         let caret = editor
             .document()
             .blocks
@@ -501,7 +581,7 @@ impl Session {
             db,
             caret,
             selection: None,
-            last_error: None,
+            last_error: warning,
             save_failed: false,
             path: path.to_path_buf(),
         })
@@ -685,8 +765,9 @@ impl Session {
 
     /// A later successful write re-establishes the head/log relationship.
     /// "A later successful write" here means `record`/`save_state`; commands
-    /// are suppressed while the flag is set, so in practice a restart or an
-    /// explicit retry resolves it.
+    /// are suppressed while the flag is set, so the recovery path is the
+    /// error strip's retry (`save_state`) — and the window refuses to close
+    /// until it lands.
     fn clear_save_error(&mut self) {
         if self.save_failed {
             self.save_failed = false;
@@ -930,6 +1011,18 @@ impl Session {
         } else {
             false
         }
+    }
+
+    /// Changes `block_id`'s kind, persisted as one undoable edit.
+    ///
+    /// This is the authoring path for headings and list items; without it every
+    /// block a user can create is a paragraph.
+    fn set_block_kind(&mut self, block_id: BlockId, kind: BlockKind) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let result = self.editor.set_block_kind(block_id, kind);
+        self.commit(result)
     }
 
     /// Inserts pasted text one line per block: each newline becomes a
@@ -1325,11 +1418,11 @@ fn annotation_kind_label(kind: &AnnotationKind) -> &'static str {
 
 /// Page position of a margin placement.
 ///
-/// `place_marginalia` returns block-relative Y and body-relative X, so both
-/// offsets have to be composed here: the placement's X is measured from the
-/// body measure's left edge, its Y from the anchor block's top.
-fn margin_origin(body_left: f32, block_top: f32, placement: &MarginalPlacement) -> Pos2 {
-    Pos2::new(body_left + placement.x, block_top + placement.y)
+/// Body-relative X and page Y: the placement's X is measured from the body
+/// measure's left edge, its Y is already composed with the anchor block's page
+/// top (see [`place_marginalia`]), so only the body's left edge is added here.
+fn margin_origin(body_left: f32, placement: &MarginalPlacement) -> Pos2 {
+    Pos2::new(body_left + placement.x, placement.y)
 }
 
 /// Page position of a footnote entry: footnotes span the measure and their Y
@@ -1569,6 +1662,13 @@ impl KameApp {
         self.pending_scroll = None;
     }
 
+    /// Applies a block-kind change to the caret's block. The toolbar and the
+    /// Ctrl-Shift chords share this one path so they cannot drift apart.
+    fn set_block_kind(&mut self, kind: BlockKind) {
+        let caret = self.session.valid_caret();
+        self.session.set_block_kind(caret.block_id, kind);
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
         // Modes and file commands are window-level, so they are read before the
         // note field's focus check: a chord should work whether the prose or a
@@ -1629,6 +1729,10 @@ impl KameApp {
                 Command::MoveDown => self.move_vertically(true),
                 Command::MoveLineStart => self.move_to_line_edge(false),
                 Command::MoveLineEnd => self.move_to_line_edge(true),
+                Command::SetBlockKind(kind) => {
+                    let caret = self.session.valid_caret();
+                    self.session.set_block_kind(caret.block_id, kind);
+                }
             }
         }
     }
@@ -1756,6 +1860,55 @@ impl KameApp {
                 }
             });
             ui.horizontal(|ui| {
+                ui.label("Block:");
+                // The caret block's kind, so the active style can be shown as
+                // selected. Read before the loop: the buttons below mutate the
+                // session.
+                let current = self
+                    .session
+                    .document()
+                    .blocks
+                    .iter()
+                    .find(|block| block.id == self.session.caret.block_id)
+                    .map(|block| block.kind.clone());
+                for (label, kind, hint) in [
+                    ("body", BlockKind::Paragraph, "body text · Ctrl-Shift-0"),
+                    (
+                        "H1",
+                        BlockKind::Heading { level: 1 },
+                        "heading level 1 · Ctrl-Shift-1",
+                    ),
+                    (
+                        "H2",
+                        BlockKind::Heading { level: 2 },
+                        "heading level 2 · Ctrl-Shift-2",
+                    ),
+                    (
+                        "H3",
+                        BlockKind::Heading { level: 3 },
+                        "heading level 3 · Ctrl-Shift-3",
+                    ),
+                    (
+                        "• list",
+                        BlockKind::ListItem { ordered: false },
+                        "bulleted list item",
+                    ),
+                    (
+                        "1. list",
+                        BlockKind::ListItem { ordered: true },
+                        "numbered list item",
+                    ),
+                ] {
+                    if ui
+                        .selectable_label(current.as_ref() == Some(&kind), label)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        self.set_block_kind(kind);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
                 ui.label("File:");
                 if ui
                     .small_button("Export Markdown")
@@ -1794,7 +1947,8 @@ impl KameApp {
             ui.label(
                 egui::RichText::new(
                     "Type to write · Enter new paragraph · Backspace/Delete · \
-                     Ctrl-Z undo · Ctrl-Shift-Z redo · drag to select · \
+                     Ctrl-Z undo · Ctrl-Shift-Z redo · Ctrl-Shift-1/2/3 heading · \
+                     Ctrl-Shift-0 body · drag to select · \
                      click to place the caret · click a margin marker to read its note",
                 )
                 .small()
@@ -1825,7 +1979,6 @@ impl KameApp {
 
     fn draw_surface(&mut self, ui: &mut egui::Ui) {
         let config = self.renderer.config();
-        let hide_margin = self.modes.hide_margin;
         let focus = self.modes.paragraph_focus;
         let typewriter = self.modes.typewriter;
 
@@ -1875,7 +2028,10 @@ impl KameApp {
             Vec2::new(ui.available_width(), content_height),
             Sense::click_and_drag(),
         );
-        let geometry = page_geometry(config, hide_margin, response.rect.width());
+        let geometry = page_geometry(config, response.rect.width());
+        // A zero gutter means the margin column has no room (hidden, or too
+        // narrow to sit beside a readable measure): marginalia cannot be set.
+        let show_margin = geometry.margin_width > 0.0;
         let body_left = response.rect.left() + geometry.body_left;
 
         let mut tops = Vec::with_capacity(blocks.len());
@@ -1902,7 +2058,7 @@ impl KameApp {
                 // The margin column is gone in hide-margin mode, so marginal
                 // bodies have nowhere to be set; skipping their textures also
                 // lets the cache drop them until the column returns.
-                AnnotationKind::Marginal if !hide_margin => self.annotation_textures.sync(
+                AnnotationKind::Marginal if show_margin => self.annotation_textures.sync(
                     ui.ctx(),
                     &mut self.renderer,
                     annotation.id,
@@ -2045,8 +2201,8 @@ impl KameApp {
         }
 
         // --- marginalia and note markers -------------------------------------
-        // `place_marginalia` works in block space, so each placement is
-        // composed with its block's page top (and the body's left edge).
+        // `place_marginalia` stacks on page Y, so it is given each block's page
+        // top and returns Y already composed with it.
         //
         // Stacking needs the height each margin body actually renders to, not a
         // one-line guess: a body that wraps to six lines must push the next
@@ -2060,12 +2216,19 @@ impl KameApp {
                     .map(|height| (annotation.id, height))
             })
             .collect();
-        let margins = if hide_margin {
+        let margins = if !show_margin {
             // No gutter to set notes in; their anchored ranges still show, so
             // the prose keeps its marks without the apparatus column.
             Vec::new()
         } else {
-            place_marginalia(&annotations, blocks, &layouts, &body_heights, &config)
+            place_marginalia(
+                &annotations,
+                blocks,
+                &layouts,
+                &body_heights,
+                &tops,
+                &config,
+            )
         };
         let by_id: HashMap<AnnotationId, &Annotation> = annotations
             .iter()
@@ -2076,13 +2239,7 @@ impl KameApp {
             let Some(annotation) = by_id.get(&placement.annotation_id) else {
                 continue;
             };
-            let Some(index) = blocks
-                .iter()
-                .position(|block| block.id == annotation.anchor.block_id)
-            else {
-                continue;
-            };
-            let origin = margin_origin(body_left, tops[index], placement);
+            let origin = margin_origin(body_left, placement);
             match annotation.kind {
                 AnnotationKind::Marginal => {
                     // A thin rule opens the margin block, the way a printed
@@ -2096,12 +2253,11 @@ impl KameApp {
                         RULE_INK,
                     );
                     if let Some(texture) = self.annotation_textures.get(annotation.id) {
-                        painter.image(
-                            texture.texture.id(),
-                            texture.rect(origin),
-                            uv,
-                            Color32::WHITE,
-                        );
+                        let rect = texture.rect(origin);
+                        painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
+                        // The body is the hit target, so a marginal can be
+                        // reopened and revised once its popover has closed.
+                        markers.push((annotation.id, rect));
                     }
                 }
                 AnnotationKind::Note => {
@@ -2141,12 +2297,10 @@ impl KameApp {
         for placement in &footnotes {
             if let Some(texture) = self.annotation_textures.get(placement.annotation_id) {
                 let origin = footnote_origin(response.rect.top(), body_left, placement);
-                painter.image(
-                    texture.texture.id(),
-                    texture.rect(origin),
-                    uv,
-                    Color32::WHITE,
-                );
+                let rect = texture.rect(origin);
+                painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
+                // The foot entry is the hit target for reopening its popover.
+                markers.push((placement.annotation_id, rect));
             }
         }
 
@@ -2527,6 +2681,36 @@ impl KameApp {
 impl eframe::App for KameApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_input(ui.ctx());
+        // A failed write is not a reason to lose the session: refuse the close
+        // while the flag is set. The error strip is the way out — it retries
+        // the saved state, and a successful write re-enables closing.
+        let close_requested = ui.ctx().input(|input| input.viewport().close_requested());
+        if refuse_close(self.session.save_failed, close_requested) {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        // The measure follows the window *before* the scroll area is built: the
+        // scroll bar's presence would otherwise feed back into the wrap width
+        // and make the page oscillate at the threshold. The panel width does not
+        // depend on it.
+        let base = LayoutConfig::default();
+        let available = (ui.available_width() - SCROLLBAR_ALLOWANCE).max(1.0);
+        let (body_width, margin_width) = page_measure(
+            base.body_width,
+            base.margin_width,
+            self.modes.hide_margin,
+            available,
+        );
+        let config = LayoutConfig {
+            body_width,
+            margin_width,
+            ..base
+        };
+        if self.renderer.set_config(config) {
+            // Everything cached was shaped and rasterized at the old measure.
+            self.layouts.clear();
+            self.textures.clear();
+        }
         let error = error_indicator(self.session.last_error.as_deref()).map(str::to_owned);
         // Hide-chrome mode drops the whole top panel: it is both the toolbar
         // (annotation buttons) and the status bar, so one toggle clears both.
@@ -2546,7 +2730,10 @@ impl eframe::App for KameApp {
                 // The save-failure signal belongs to the page, not the chrome:
                 // it is painted in this panel so it outlives hide-chrome.
                 if let Some(error) = &error {
-                    draw_error_indicator(ui, error);
+                    // The strip is the retry affordance for a failed write.
+                    if draw_error_indicator(ui, error) {
+                        self.session.save_state();
+                    }
                 }
             });
         // Dialogs are drawn last, from the root: above the page, and available
@@ -2753,10 +2940,29 @@ mod tests {
     }
 
     #[test]
+    fn a_close_is_refused_only_while_a_write_is_outstanding() {
+        assert!(
+            refuse_close(true, true),
+            "a failed write must keep the window open"
+        );
+        assert!(
+            !refuse_close(true, false),
+            "no close request, nothing to do"
+        );
+        assert!(!refuse_close(false, true), "a healthy session closes");
+        assert!(!refuse_close(false, false));
+    }
+
+    #[test]
     fn hiding_the_margin_collapses_the_gutter_and_keeps_the_measure_in_place() {
         let config = LayoutConfig::default();
-        let shown = page_geometry(config, false, 1400.0);
-        let hidden = page_geometry(config, true, 1400.0);
+        let shown = page_geometry(config, 1400.0);
+        // Hiding the margin is a collapsed gutter in the measured config.
+        let no_gutter = LayoutConfig {
+            margin_width: 0.0,
+            ..config
+        };
+        let hidden = page_geometry(no_gutter, 1400.0);
 
         assert_eq!(
             shown.page_width,
@@ -2768,11 +2974,38 @@ mod tests {
         // Collapsing the gutter re-centres the page but leaves the prose at
         // the same column, so hiding the margin does not move the text.
         assert_eq!(shown.body_left, hidden.body_left);
+    }
 
-        // A window narrower than the page pins the page to the left edge
-        // rather than letting the measure hang off it.
-        let narrow = page_geometry(config, false, 400.0);
-        assert_eq!(narrow.body_left, config.margin_width);
+    #[test]
+    fn the_measure_follows_the_window_instead_of_clipping() {
+        // A wide window keeps the designed measure and its gutters.
+        assert_eq!(page_measure(640.0, 180.0, false, 1400.0), (640.0, 180.0));
+        // Exactly fitting is still the full measure.
+        assert_eq!(page_measure(640.0, 180.0, false, 1000.0), (640.0, 180.0));
+        // Narrower: the measure shrinks, the gutters stay.
+        assert_eq!(page_measure(640.0, 180.0, false, 900.0), (540.0, 180.0));
+        assert_eq!(page_measure(640.0, 180.0, false, 700.0), (340.0, 180.0));
+        // Too narrow for a readable measure beside two gutters: the margin
+        // column collapses and the prose takes the window.
+        assert_eq!(page_measure(640.0, 180.0, false, 600.0), (600.0, 0.0));
+
+        // Whatever the window, the page is never wider than it — that is the
+        // clipping this replaces.
+        for width in [560.0f32, 700.0, 900.0, 1000.0, 1400.0] {
+            let (body, gutter) = page_measure(640.0, 180.0, false, width);
+            assert!(
+                body + 2.0 * gutter <= width + 0.01,
+                "page {} exceeds window {width}",
+                body + 2.0 * gutter
+            );
+            assert!(body >= MIN_MEASURE);
+        }
+
+        // Hiding the margin sets the prose full width.
+        assert_eq!(page_measure(640.0, 180.0, true, 800.0), (640.0, 0.0));
+        let narrow = page_measure(640.0, 180.0, false, 400.0);
+        assert_eq!(narrow, (400.0, 0.0), "below the minimum the prose fills");
+        assert_eq!(page_geometry(LayoutConfig { body_width: narrow.0, margin_width: narrow.1, ..LayoutConfig::default() }, 400.0).body_left, 0.0);
     }
 
     #[test]
@@ -3121,21 +3354,99 @@ mod tests {
         assert_eq!(session.document().blocks[0].text, "abcd");
     }
 
-    // --- Task 12: annotations ------------------------------------------------
+    #[test]
+    fn a_block_kind_change_commits_as_an_undoable_edit() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("Title");
+        let block_id = first_block_id(&session);
+        assert_eq!(session.document().blocks[0].kind, BlockKind::Paragraph);
+
+        assert!(session.set_block_kind(
+            block_id,
+            BlockKind::Heading { level: 1 }
+        ));
+        assert_eq!(
+            session.document().blocks[0].kind,
+            BlockKind::Heading { level: 1 }
+        );
+        assert_eq!(session.history(), (2, 0), "the change is one undoable op");
+
+        // Undo restores the previous kind: the op carries it.
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].kind, BlockKind::Paragraph);
+        assert!(session.redo());
+
+        // The kind is persisted with the head document, so a reopen sees it.
+        drop(session);
+        let reopened = open(&path);
+        assert_eq!(
+            reopened.document().blocks[0].kind,
+            BlockKind::Heading { level: 1 }
+        );
+    }
 
     #[test]
-    fn placement_composition_adds_block_and_page_offsets() {
-        // place_marginalia reports body-relative x and block-relative y; the
-        // page position adds the block's top and the body's left edge.
+    fn an_unreadable_op_row_degrades_to_a_writable_session() {
+        let path = temp_db_path();
+        {
+            let mut session = open(&path);
+            assert!(session.insert("kept"));
+        }
+        // A row serde cannot read — a field a future build added without
+        // `serde(default)`, or a half-written row.
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open the db directly");
+            conn.execute(
+                "INSERT INTO ops (json) VALUES ('{\"future\":\"variant\"}')",
+                [],
+            )
+            .expect("write a bad op row");
+        }
+
+        let mut session = open(&path);
+        assert_eq!(
+            session.document().blocks[0].text,
+            "kept",
+            "the head document opens even when history does not"
+        );
+        assert_eq!(session.history(), (0, 0), "history is unavailable");
+        let warning = session.last_error.clone().expect("a warning is shown");
+        assert!(
+            warning.contains("history unavailable"),
+            "the warning names the degradation, got {warning:?}"
+        );
+        assert!(!session.save_failed, "a bad read is not a failed write");
+
+        // The log is left on disk for a later build to read.
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open the db directly");
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ops", [], |row| row.get(0))
+                .expect("count ops");
+            assert_eq!(rows, 2, "the unreadable row was not deleted");
+        }
+
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 4,
+        });
+        assert!(session.insert("!"), "the session stays writable");
+        assert_eq!(session.document().blocks[0].text, "kept!");
+    }
+
+    // --- Task 12: annotations ------------------------------------------------
+    #[test]
+    fn placement_composition_adds_the_body_left_edge() {
+        // place_marginalia reports body-relative x and page y; the page
+        // position adds only the body's left edge.
         let marginal = MarginalPlacement {
             annotation_id: uuid::Uuid::new_v4(),
             x: 652.0,
-            y: 24.0,
+            y: 324.0,
         };
-        assert_eq!(
-            margin_origin(200.0, 300.0, &marginal),
-            Pos2::new(852.0, 324.0)
-        );
+        assert_eq!(margin_origin(200.0, &marginal), Pos2::new(852.0, 324.0));
 
         // Footnote Y is measured from the painter's top and spans the body.
         let footnote = FootnotePlacement {

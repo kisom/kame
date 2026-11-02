@@ -9,9 +9,15 @@ macOS (`Modifiers::command`).
 | --- | --- |
 | text, Enter, Backspace, Delete | insert, new paragraph, delete back/forward |
 | Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y | undo / redo / redo |
+| Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
+| Ctrl-Shift-0 | return the caret's block to body text |
 | Arrows, Home, End | move the caret (within the current block in v1) |
 | drag, shift-click | select |
 | Escape | close the note popover |
+
+Block kind is also the status panel's `Block:` row — body, H1–H3 and both list
+kinds. Changing the kind is one undoable edit, and undo restores the previous
+kind (including a heading's level).
 
 ## Distraction-free modes
 

@@ -1,8 +1,10 @@
 //! Headless annotation layout: where margin notes and footnotes sit on the page.
 //!
-//! Positions are in block/page pixel space with Y growing downward and the
-//! body measure starting at x = 0, so a caller places a margin note at
-//! `(body_left + x, block_top + y)` and a footnote at `(body_left, block_top + y)`.
+//! Positions are in page pixel space with Y growing downward and the body
+//! measure starting at x = 0, so a caller places a margin note at
+//! `(body_left + x, y)` and a footnote at `(body_left, block_top + y)`.
+//! `place_marginalia` takes the block tops and returns page Y, so margin
+//! placement and collision stacking work in the same space the caller draws in.
 
 use std::borrow::Borrow;
 
@@ -55,36 +57,42 @@ pub struct FootnotePlacement {
 /// Annotations whose anchor does not resolve to a line (unknown block, empty
 /// block, offset past the text) are omitted rather than guessed at.
 ///
-/// Y is relative to the top of the anchor's own block (`anchor_to_y` works in
-/// block space), so a caller adds the block's page offset. Collision stacking
-/// therefore compares block-relative Y: notes anchored in different blocks that
-/// happen to sit at the same in-block Y are separated even if the blocks are far
-/// apart on the page. That is conservative — it avoids overprinting for notes
-/// in one block but is only approximate across blocks — and the v1 document
-/// flow keeps the error small.
+/// Argument and return Y are page coordinates: `anchor_to_y` works in block
+/// space, so each anchor is composed with its block's page top from
+/// `block_tops` (parallel to `blocks`) before sorting and stacking. Stacking in
+/// page space is what makes the collision maths agree with the drawn positions:
+/// comparing block-relative Y let a tall margin body in one block print over a
+/// note anchored near the top of the next.
 pub fn place_marginalia<L: Borrow<BlockLayout>>(
     annotations: &[Annotation],
     blocks: &[Block],
     layouts: &[L],
     body_heights: &[(AnnotationId, f32)],
+    block_tops: &[f32],
     config: &LayoutConfig,
 ) -> Vec<MarginalPlacement> {
     let x = config.body_width + config.margin_size;
 
-    // (document index, anchor Y) for every margin annotation whose anchor
-    // resolves to a line.
+    // (document index, anchor Y on the page) for every margin annotation whose
+    // anchor resolves to a line.
     let mut anchored: Vec<(usize, f32)> = annotations
         .iter()
         .enumerate()
         .filter(|(_, annotation)| is_margin(&annotation.kind))
         .filter_map(|(index, annotation)| {
-            let y = anchor_to_y(
+            let block_index = blocks
+                .iter()
+                .position(|block| block.id == annotation.anchor.block_id)?;
+            let in_block = anchor_to_y(
                 blocks,
                 layouts,
                 annotation.anchor.block_id,
                 annotation.anchor.start,
             )?;
-            Some((index, y))
+            // A caller that passes no tops (or too few) degrades to block space
+            // rather than dropping the note.
+            let top = block_tops.get(block_index).copied().unwrap_or(0.0);
+            Some((index, top + in_block))
         })
         .collect();
 
@@ -278,7 +286,7 @@ dance, on a page, of pen, eye and hand.";
         assert!(layouts[0].lines.len() >= 3, "paragraph should wrap");
 
         let ann = marginal(blocks[0].id, offset_in(&layouts, 1));
-        let placed = place_marginalia(&[ann.clone()], &blocks, &layouts, &[], &config);
+        let placed = place_marginalia(&[ann.clone()], &blocks, &layouts, &[], &[0.0], &config);
 
         assert_eq!(placed.len(), 1);
         assert_eq!(placed[0].annotation_id, ann.id);
@@ -301,7 +309,14 @@ dance, on a page, of pen, eye and hand.";
         let first = marginal(blocks[0].id, offset);
         let second = marginal(blocks[0].id, offset);
 
-        let placed = place_marginalia(&[first.clone(), second.clone()], &blocks, &layouts, &[], &config);
+        let placed = place_marginalia(
+            &[first.clone(), second.clone()],
+            &blocks,
+            &layouts,
+            &[],
+            &[0.0],
+            &config,
+        );
         assert_eq!(placed.len(), 2);
 
         let a = placed
@@ -346,6 +361,7 @@ dance, on a page, of pen, eye and hand.";
             &blocks,
             &layouts,
             &heights,
+            &[0.0],
             &config,
         );
         let a = placed
@@ -375,6 +391,7 @@ dance, on a page, of pen, eye and hand.";
             &blocks,
             &layouts,
             &short,
+            &[0.0],
             &config,
         );
         assert!(
@@ -393,7 +410,7 @@ dance, on a page, of pen, eye and hand.";
         let first = marginal(blocks[0].id, offset);
         let second = marginal(blocks[0].id, offset);
 
-        let placed = place_marginalia(&[first, second], &blocks, &layouts, &[], &config);
+        let placed = place_marginalia(&[first, second], &blocks, &layouts, &[], &[0.0], &config);
         assert_eq!(placed.len(), 2);
         assert!(
             (placed[1].y - placed[0].y - 40.0).abs() < 0.01,
@@ -429,7 +446,7 @@ dance, on a page, of pen, eye and hand.";
         let config = config();
         let n = note(blocks[0].id, offset_in(&layouts, 0));
 
-        let placed = place_marginalia(&[n.clone()], &blocks, &layouts, &[], &config);
+        let placed = place_marginalia(&[n.clone()], &blocks, &layouts, &[], &[0.0], &config);
         assert_eq!(placed.len(), 1, "a Note also marks the margin");
         assert_eq!(placed[0].annotation_id, n.id);
         assert_eq!(placed[0].x, config.body_width + config.margin_size);
@@ -442,7 +459,7 @@ dance, on a page, of pen, eye and hand.";
         let foot = footnote(blocks[0].id, 0);
         let orphan = marginal(Uuid::new_v4(), 0);
 
-        let placed = place_marginalia(&[foot, orphan], &blocks, &layouts, &[], &config);
+        let placed = place_marginalia(&[foot, orphan], &blocks, &layouts, &[], &[0.0], &config);
         assert!(
             placed.is_empty(),
             "only resolvable margin annotations place"
@@ -458,7 +475,14 @@ dance, on a page, of pen, eye and hand.";
         let top = marginal(blocks[0].id, offset_in(&layouts, 0));
         let bottom = marginal(blocks[0].id, offset_in(&layouts, lines.len() - 1));
 
-        let placed = place_marginalia(&[top.clone(), bottom.clone()], &blocks, &layouts, &[], &config);
+        let placed = place_marginalia(
+            &[top.clone(), bottom.clone()],
+            &blocks,
+            &layouts,
+            &[],
+            &[0.0],
+            &config,
+        );
         assert_eq!(placed.len(), 2);
         assert_eq!(placed[0].annotation_id, top.id);
         assert_eq!(placed[0].y, lines[0].y);
@@ -468,6 +492,76 @@ dance, on a page, of pen, eye and hand.";
             lines[lines.len() - 1].y,
             "notes that do not crowd keep their anchor Y"
         );
+    }
+
+    #[test]
+    fn a_tall_body_in_an_earlier_block_clears_a_note_in_the_next() {
+        // Two blocks on the page. The first note anchors deep inside its block
+        // (in-block Y 24); the second anchors on its block's first line
+        // (in-block Y 0). Sorted in block space the second came first and the
+        // first was never pushed, so the first body printed over the second.
+        // Sorting on page Y gets the order right and the tall body pushes.
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = config();
+        let blocks = vec![
+            Block {
+                id: Uuid::new_v4(),
+                kind: BlockKind::Paragraph,
+                text: PARA.to_string(),
+                spans: Vec::new(),
+            },
+            Block {
+                id: Uuid::new_v4(),
+                kind: BlockKind::Paragraph,
+                text: "A second paragraph on the page.".to_string(),
+                spans: Vec::new(),
+            },
+        ];
+        let layouts: Vec<BlockLayout> = blocks
+            .iter()
+            .map(|block| layout_block(&mut fs, block, &config))
+            .collect();
+        assert!(layouts[0].lines.len() >= 3, "the first paragraph wraps");
+        // Page tops: the second block starts 60 px below the first.
+        let tops = [100.0f32, 160.0];
+        let first_line = layouts[0].lines[1];
+        let first = marginal(blocks[0].id, (first_line.start + first_line.end) / 2);
+        let second = marginal(blocks[1].id, 0);
+        let tall = [(first.id, 90.0f32)];
+
+        let placed = place_marginalia(
+            &[second.clone(), first.clone()],
+            &blocks,
+            &layouts,
+            &tall,
+            &tops,
+            &config,
+        );
+        let a = placed
+            .iter()
+            .find(|p| p.annotation_id == first.id)
+            .expect("the first marginal is placed");
+        let b = placed
+            .iter()
+            .find(|p| p.annotation_id == second.id)
+            .expect("the second marginal is placed");
+
+        assert!(
+            (a.y - (tops[0] + first_line.y)).abs() < 0.01,
+            "the first note keeps its anchor's page Y, got {}",
+            a.y
+        );
+        assert!(
+            b.y > a.y,
+            "the note lower on the page is stacked below, not above"
+        );
+        assert!(
+            b.y >= a.y + 90.0 + MARGIN_GAP - 0.01,
+            "the tall body must clear the next note; gap was {}",
+            b.y - a.y
+        );
+        assert!(a.y + 90.0 <= b.y, "the drawn bodies must not overlap");
     }
 
     #[test]
@@ -526,7 +620,7 @@ dance, on a page, of pen, eye and hand.";
     #[test]
     fn no_annotations_place_nothing() {
         let (blocks, layouts) = laid_out(PARA);
-        assert!(place_marginalia(&[], &blocks, &layouts, &[], &config()).is_empty());
+        assert!(place_marginalia(&[], &blocks, &layouts, &[], &[0.0], &config()).is_empty());
         assert!(place_footnotes(&[], 400.0).is_empty());
     }
 }

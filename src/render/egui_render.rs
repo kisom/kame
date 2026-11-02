@@ -13,7 +13,7 @@ use egui::{ColorImage, Context, Event, Key, Modifiers, Pos2, Rect, TextureHandle
 use image::RgbaImage;
 
 use crate::layout::{layout_block, BlockLayout, LayoutConfig};
-use crate::model::{AnnotationId, Block, BlockId};
+use crate::model::{AnnotationId, Block, BlockId, BlockKind};
 use crate::render::GlyphAtlas;
 
 /// Every face the layout can ask for, compiled into the binary.
@@ -138,6 +138,12 @@ impl TextureCache {
         self.entries.get(&block_id).map(|cached| &cached.block)
     }
 
+    /// Drops every cached texture, so the next `sync` re-rasterizes against the
+    /// current metrics. Used when the measure changes with the window.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -169,6 +175,12 @@ impl LayoutCache {
         LayoutCache {
             entries: HashMap::new(),
         }
+    }
+
+    /// Drops every cached layout, so the next `sync` shapes against the current
+    /// metrics. Used when the measure changes with the window.
+    pub fn clear(&mut self) {
+        self.entries.clear();
     }
 
     /// Returns one layout per block, in document order, shaping only blocks
@@ -372,6 +384,20 @@ impl GlyphRenderer {
 
     pub fn config(&self) -> LayoutConfig {
         self.config
+    }
+
+    /// Replaces the layout metrics. Returns whether anything changed.
+    ///
+    /// The measure follows the window, so the caller recomputes it every frame
+    /// and calls this when it differs. Any change invalidates every shaped
+    /// layout and glyph texture; callers must drop their caches or the page
+    /// will keep drawing at the old width.
+    pub fn set_config(&mut self, config: LayoutConfig) -> bool {
+        if self.config == config {
+            return false;
+        }
+        self.config = config;
+        true
     }
 
     /// Shapes one block with the configured column width. Callers keep the
@@ -602,6 +628,8 @@ pub enum Command {
     MoveDown,
     MoveLineStart,
     MoveLineEnd,
+    /// Change the caret block's kind (heading level, paragraph, list item).
+    SetBlockKind(BlockKind),
 }
 
 /// Maps one egui event to an editor command, or `None` for events the surface
@@ -631,6 +659,21 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::Z if command && modifiers.shift => Some(Command::Redo),
         Key::Z if command => Some(Command::Undo),
         Key::Y if command => Some(Command::Redo),
+        // Ctrl-Shift-1/2/3 make a heading; Ctrl-Shift-0 returns a block to
+        // body text. `command` is Ctrl (Cmd) on every platform, so the chords
+        // travel.
+        Key::Num0 if command && modifiers.shift => {
+            Some(Command::SetBlockKind(BlockKind::Paragraph))
+        }
+        Key::Num1 if command && modifiers.shift => Some(Command::SetBlockKind(
+            BlockKind::Heading { level: 1 },
+        )),
+        Key::Num2 if command && modifiers.shift => Some(Command::SetBlockKind(
+            BlockKind::Heading { level: 2 },
+        )),
+        Key::Num3 if command && modifiers.shift => Some(Command::SetBlockKind(
+            BlockKind::Heading { level: 3 },
+        )),
         Key::Enter => Some(Command::SplitParagraph),
         Key::Backspace => Some(Command::Backspace),
         Key::Delete => Some(Command::Delete),
@@ -1148,5 +1191,43 @@ visual form, and thus with an independent existence.";
             None
         );
         assert_eq!(command_for_key(Key::F5, none), None);
+    }
+
+    #[test]
+    fn block_kind_chords_map_to_the_command() {
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            command_for_key(Key::Num1, ctrl_shift),
+            Some(Command::SetBlockKind(BlockKind::Heading { level: 1 }))
+        );
+        assert_eq!(
+            command_for_key(Key::Num2, ctrl_shift),
+            Some(Command::SetBlockKind(BlockKind::Heading { level: 2 }))
+        );
+        assert_eq!(
+            command_for_key(Key::Num3, ctrl_shift),
+            Some(Command::SetBlockKind(BlockKind::Heading { level: 3 }))
+        );
+        assert_eq!(
+            command_for_key(Key::Num0, ctrl_shift),
+            Some(Command::SetBlockKind(BlockKind::Paragraph))
+        );
+
+        // Bare digits, and Ctrl-digit without Shift, are not the chord: they
+        // must not surprise anyone typing a number or using a window-manager
+        // shortcut.
+        let none = Modifiers::NONE;
+        let ctrl = Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(command_for_key(Key::Num1, none), None);
+        assert_eq!(command_for_key(Key::Num1, ctrl), None);
     }
 }

@@ -15,7 +15,7 @@ const BODY_FAMILY: &str = "EB Garamond";
 const HEADING_FAMILY: &str = "Crimson Pro";
 
 /// Metrics and column widths for headless layout.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutConfig {
     pub body_width: f32,
     pub body_size: f32,

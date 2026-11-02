@@ -26,7 +26,7 @@ use crate::layout::{
     place_footnotes, place_marginalia, BlockLayout, FootnotePlacement, LayoutConfig,
     MarginalPlacement, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
 };
-use crate::model::{Anchor, Annotation, AnnotationId, AnnotationKind, Block, Document};
+use crate::model::{Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, Document};
 use crate::render::egui_render::{
     caret_line, caret_x, command_for_event, next_boundary, offset_at, prev_boundary, range_rects,
     word_at, AnnotationTextureCache, Command, GlyphRenderer, LayoutCache, TextureCache,
@@ -61,8 +61,147 @@ const PAGE_PADDING: f32 = 36.0;
 const BLOCK_GAP: f32 = 14.0;
 /// Annotation text is set a little smaller than the prose.
 const ANNOTATION_SCALE: f32 = 0.82;
+/// Veil painted over the blocks that are not being written in paragraph-focus
+/// mode. It is a wash toward the page colour, not a darker tint, so dimmed
+/// prose fades into the paper instead of turning grey.
+const DIM_VEIL: Color32 = Color32::from_rgba_unmultiplied_const(247, 243, 235, 168);
 
 type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+// --- distraction-free modes ------------------------------------------------
+
+/// The distraction-free toggles. Pure view state: none of it is persisted and
+/// none of it touches the document, so every mode can be switched at any time
+/// without an undo step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Modes {
+    fullscreen: bool,
+    /// Hide the top panel: toolbar, status line and help text.
+    hide_chrome: bool,
+    /// Collapse the margin gutter so the measure re-centres on the window.
+    hide_margin: bool,
+    /// Dim every block but the one holding the caret.
+    paragraph_focus: bool,
+    /// Keep the caret's line at the vertical centre of the window.
+    typewriter: bool,
+}
+
+/// One toggleable view mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModeCommand {
+    Fullscreen,
+    HideChrome,
+    HideMargin,
+    ParagraphFocus,
+    Typewriter,
+}
+
+impl Modes {
+    fn is_on(&self, mode: ModeCommand) -> bool {
+        match mode {
+            ModeCommand::Fullscreen => self.fullscreen,
+            ModeCommand::HideChrome => self.hide_chrome,
+            ModeCommand::HideMargin => self.hide_margin,
+            ModeCommand::ParagraphFocus => self.paragraph_focus,
+            ModeCommand::Typewriter => self.typewriter,
+        }
+    }
+
+    /// Flips `mode` and returns its new state.
+    fn toggle(&mut self, mode: ModeCommand) -> bool {
+        let slot = match mode {
+            ModeCommand::Fullscreen => &mut self.fullscreen,
+            ModeCommand::HideChrome => &mut self.hide_chrome,
+            ModeCommand::HideMargin => &mut self.hide_margin,
+            ModeCommand::ParagraphFocus => &mut self.paragraph_focus,
+            ModeCommand::Typewriter => &mut self.typewriter,
+        };
+        *slot = !*slot;
+        *slot
+    }
+}
+
+/// Keyboard map for the distraction-free modes. `command` is Ctrl on
+/// Linux/Windows and Cmd on macOS — the same modifier the editor's own map
+/// uses — so the chords travel between platforms. F11 is the platform
+/// fullscreen key and needs no modifier. None of these collide with the
+/// editor map (`command_for_key`), which claims plain keys, undo/redo, and
+/// arrows.
+fn mode_for_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<ModeCommand> {
+    if key == egui::Key::F11 {
+        return Some(ModeCommand::Fullscreen);
+    }
+    if !(modifiers.command && modifiers.shift) {
+        return None;
+    }
+    match key {
+        egui::Key::H => Some(ModeCommand::HideChrome),
+        egui::Key::M => Some(ModeCommand::HideMargin),
+        egui::Key::P => Some(ModeCommand::ParagraphFocus),
+        egui::Key::T => Some(ModeCommand::Typewriter),
+        _ => None,
+    }
+}
+
+/// The mode chords in a frame's event stream. Reading the events (rather than
+/// `key_pressed` plus the frame's live modifiers) keeps each chord matched with
+/// the modifiers that were down when its key went down, and ignoring repeats
+/// stops a held toggle key from flapping the mode.
+fn mode_commands_for_events(events: &[egui::Event]) -> Vec<ModeCommand> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } => mode_for_key(*key, *modifiers),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Page geometry for one frame, all as offsets from the painter's top-left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PageGeometry {
+    /// Width of the page: the measure plus both margins (or just the measure
+    /// when the margin column is hidden).
+    page_width: f32,
+    /// Distance from the painter's left edge to the body text.
+    body_left: f32,
+    /// Width of the margin gutter on each side of the measure.
+    margin_width: f32,
+}
+
+/// Centres the page in `available_width`. Hiding the margin column collapses
+/// the gutter to zero, so the measure re-centres on the window; callers skip
+/// the margin apparatus, which has nowhere left to sit.
+fn page_geometry(config: LayoutConfig, hide_margin: bool, available_width: f32) -> PageGeometry {
+    let margin_width = if hide_margin { 0.0 } else { config.margin_width };
+    let page_width = config.body_width + 2.0 * margin_width;
+    let page_left = ((available_width - page_width) * 0.5).max(0.0);
+    PageGeometry {
+        page_width,
+        body_left: page_left + margin_width,
+        margin_width,
+    }
+}
+
+/// The veil for block `index` in paragraph-focus mode, or `None` when the block
+/// is the one being written in (or the mode is off, or no caret block resolved).
+fn dim_veil(enabled: bool, index: usize, caret_index: Option<usize>) -> Option<Color32> {
+    let caret_index = caret_index?;
+    (enabled && index != caret_index).then_some(DIM_VEIL)
+}
+
+/// Scroll offset that puts `caret_top` (page-local) at the vertical centre of a
+/// viewport, clamped so the page never scrolls past its own edges.
+fn typewriter_scroll_offset(caret_top: f32, viewport_height: f32, content_height: f32) -> f32 {
+    let furthest = (content_height - viewport_height).max(0.0);
+    (caret_top - viewport_height * 0.5).clamp(0.0, furthest)
+}
 
 fn main() -> eframe::Result {
     let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) else {
@@ -906,6 +1045,15 @@ struct KameApp {
     /// it first appears: a note that was just created is a note you meant to
     /// write, and the keystrokes that follow should land in it.
     open_note_focus: bool,
+    /// Distraction-free view toggles (never persisted).
+    modes: Modes,
+    /// The caret position typewriter mode last centred. A new position scrolls
+    /// the page so the caret returns to the middle; an unchanged one leaves the
+    /// reader free to scroll away.
+    typewriter_anchor: Option<(BlockId, usize)>,
+    /// Scroll offset requested by last frame's typewriter centring. Applied to
+    /// the scroll area on the next frame, when its geometry is known.
+    pending_scroll: Option<f32>,
     path: PathBuf,
 }
 
@@ -923,6 +1071,9 @@ impl KameApp {
             open_note_pos: None,
             open_note_body: String::new(),
             open_note_focus: false,
+            modes: Modes::default(),
+            typewriter_anchor: None,
+            pending_scroll: None,
             path,
         })
     }
@@ -952,7 +1103,36 @@ impl KameApp {
         self.open_note_focus = self.open_note.is_some();
     }
 
+    /// Applies the mode chords pressed this frame, and mirrors the window's
+    /// actual fullscreen state so a window-manager toggle cannot leave the
+    /// flag disagreeing with the window.
+    fn handle_modes(&mut self, ctx: &egui::Context) {
+        if let Some(fullscreen) = ctx.input(|input| input.viewport().fullscreen) {
+            self.modes.fullscreen = fullscreen;
+        }
+        // Read the chords from the event stream rather than from
+        // `key_pressed`: each event carries the modifiers that were down when
+        // the key went down, so a chord is never mistaken for the bare letter.
+        let toggles = ctx.input(|input| mode_commands_for_events(&input.events));
+        for mode in toggles {
+            let on = self.modes.toggle(mode);
+            match mode {
+                ModeCommand::Fullscreen => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+                }
+                // Entering typewriter mode recentres at once, even if the caret
+                // has not moved since the last keystroke.
+                ModeCommand::Typewriter if on => self.typewriter_anchor = None,
+                _ => {}
+            }
+        }
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
+        // Modes are window-level, so they are read before the note field's
+        // focus check: a chord should work whether the prose or a note has the
+        // keyboard.
+        self.handle_modes(ctx);
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.set_open_note(None);
         }
@@ -1100,12 +1280,41 @@ impl KameApp {
                         }
                     }
                 }
+                // The active modes are named here so a hidden-chrome state is
+                // discoverable again the moment the panel comes back.
+                ui.separator();
+                ui.label(egui::RichText::new("modes:").small().weak());
+                let mut any = false;
+                for (label, mode) in [
+                    ("fullscreen", ModeCommand::Fullscreen),
+                    ("no chrome", ModeCommand::HideChrome),
+                    ("no margin", ModeCommand::HideMargin),
+                    ("focus", ModeCommand::ParagraphFocus),
+                    ("typewriter", ModeCommand::Typewriter),
+                ] {
+                    if self.modes.is_on(mode) {
+                        any = true;
+                        ui.label(egui::RichText::new(label).small().strong());
+                    }
+                }
+                if !any {
+                    ui.label(egui::RichText::new("none").small().weak());
+                }
             });
             ui.label(
                 egui::RichText::new(
                     "Type to write · Enter new paragraph · Backspace/Delete · \
                      Ctrl-Z undo · Ctrl-Shift-Z redo · drag to select · \
                      click to place the caret · click a margin marker to read its note",
+                )
+                .small()
+                .weak(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Modes: F11 fullscreen · Ctrl-Shift-H hide chrome · \
+                     Ctrl-Shift-M hide margin · Ctrl-Shift-P paragraph focus · \
+                     Ctrl-Shift-T typewriter",
                 )
                 .small()
                 .weak(),
@@ -1118,6 +1327,9 @@ impl KameApp {
 
     fn draw_surface(&mut self, ui: &mut egui::Ui) {
         let config = self.renderer.config();
+        let hide_margin = self.modes.hide_margin;
+        let focus = self.modes.paragraph_focus;
+        let typewriter = self.modes.typewriter;
 
         // Shape only blocks whose content changed since the last frame; an
         // idle repaint shapes nothing, and an edit re-shapes one block.
@@ -1159,16 +1371,14 @@ impl KameApp {
             .map(|placement| placement.y + FOOTNOTE_LINE_HEIGHT)
             .unwrap_or(body_bottom);
 
-        let page_width = config.body_width + 2.0 * config.margin_width;
         let content_height = (footnote_bottom + PAGE_PADDING).max(ui.available_height());
 
         let (response, painter) = ui.allocate_painter(
             Vec2::new(ui.available_width(), content_height),
             Sense::click_and_drag(),
         );
-        let page_left =
-            response.rect.left() + ((response.rect.width() - page_width) * 0.5).max(0.0);
-        let body_left = page_left + config.margin_width;
+        let geometry = page_geometry(config, hide_margin, response.rect.width());
+        let body_left = response.rect.left() + geometry.body_left;
 
         let mut tops = Vec::with_capacity(blocks.len());
         let mut y = response.rect.top() + PAGE_PADDING;
@@ -1182,7 +1392,7 @@ impl KameApp {
         // entries span the measure. Both are cached separately from block
         // textures because they are shaped at another width and size.
         let annotation_size = config.body_size * ANNOTATION_SCALE;
-        let margin_column = (config.margin_width - config.margin_size).max(40.0);
+        let margin_column = (geometry.margin_width - config.margin_size).max(40.0);
         let footnote_number: HashMap<AnnotationId, usize> = footnotes
             .iter()
             .map(|placement| (placement.annotation_id, placement.number))
@@ -1191,7 +1401,10 @@ impl KameApp {
         for annotation in &annotations {
             live.insert(annotation.id);
             match annotation.kind {
-                AnnotationKind::Marginal => self.annotation_textures.sync(
+                // The margin column is gone in hide-margin mode, so marginal
+                // bodies have nowhere to be set; skipping their textures also
+                // lets the cache drop them until the column returns.
+                AnnotationKind::Marginal if !hide_margin => self.annotation_textures.sync(
                     ui.ctx(),
                     &mut self.renderer,
                     annotation.id,
@@ -1214,23 +1427,27 @@ impl KameApp {
                     );
                 }
                 // A Note keeps its body behind the margin marker, so it has no
-                // texture until the popover opens (which uses egui text).
-                AnnotationKind::Note => {}
+                // texture until the popover opens (which uses egui text); a
+                // marginal in hide-margin mode is skipped above.
+                AnnotationKind::Marginal | AnnotationKind::Note => {}
             }
         }
         self.annotation_textures.retain(&live);
 
         // --- prose -----------------------------------------------------------
+        // Paragraph-focus mode veils every block but the caret's: the veil is
+        // paper at partial alpha, so dimmed prose fades and the margins stay
+        // paper-coloured.
+        let caret_index = blocks.iter().position(|block| block.id == caret.block_id);
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (index, block) in blocks.iter().enumerate() {
             if let Some(texture) = self.textures.get(block.id) {
                 let origin = Pos2::new(body_left, tops[index]);
-                painter.image(
-                    texture.texture.id(),
-                    texture.rect(origin),
-                    uv,
-                    Color32::WHITE,
-                );
+                let rect = texture.rect(origin);
+                painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
+                if let Some(veil) = dim_veil(focus, index, caret_index) {
+                    painter.rect_filled(rect, 0.0, veil);
+                }
             }
         }
 
@@ -1293,17 +1510,40 @@ impl KameApp {
         }
 
         // --- caret -----------------------------------------------------------
-        if let Some(index) = blocks.iter().position(|block| block.id == caret.block_id) {
+        let mut caret_rect: Option<Rect> = None;
+        if let Some(index) = caret_index {
             let (line_y, line_height) = caret_line(layouts[index], caret.offset)
                 .map(|line| (line.y, line.height))
                 .unwrap_or((0.0, config.body_line_height));
             let x = caret_x(layouts[index], caret.offset);
             let top = tops[index] + line_y;
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(body_left + x, top), Vec2::new(1.5, line_height)),
-                0.0,
-                CARET_INK,
+            let rect = Rect::from_min_size(
+                Pos2::new(body_left + x, top),
+                Vec2::new(1.5, line_height),
             );
+            painter.rect_filled(rect, 0.0, CARET_INK);
+            caret_rect = Some(rect);
+        }
+
+        // --- typewriter centring ---------------------------------------------
+        // The offset is computed here, where the caret's page position and the
+        // content height are known, and applied by the scroll area next frame.
+        // Only a moved caret recentres: pinning it every frame would make the
+        // page unscrollable while the reader is idle.
+        if typewriter {
+            if let Some(rect) = caret_rect {
+                let anchor = (caret.block_id, caret.offset);
+                if self.typewriter_anchor != Some(anchor) {
+                    self.typewriter_anchor = Some(anchor);
+                    self.pending_scroll = Some(typewriter_scroll_offset(
+                        rect.top() - response.rect.top(),
+                        ui.clip_rect().height(),
+                        content_height,
+                    ));
+                }
+            }
+        } else {
+            self.typewriter_anchor = None;
         }
 
         // --- marginalia and note markers -------------------------------------
@@ -1322,7 +1562,13 @@ impl KameApp {
                     .map(|height| (annotation.id, height))
             })
             .collect();
-        let margins = place_marginalia(&annotations, blocks, &layouts, &body_heights, &config);
+        let margins = if hide_margin {
+            // No gutter to set notes in; their anchored ranges still show, so
+            // the prose keeps its marks without the apparatus column.
+            Vec::new()
+        } else {
+            place_marginalia(&annotations, blocks, &layouts, &body_heights, &config)
+        };
         let by_id: HashMap<AnnotationId, &Annotation> = annotations
             .iter()
             .map(|annotation| (annotation.id, annotation))
@@ -1575,13 +1821,21 @@ impl KameApp {
 impl eframe::App for KameApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_input(ui.ctx());
-        self.show_status(ui);
+        // Hide-chrome mode drops the whole top panel: it is both the toolbar
+        // (annotation buttons) and the status bar, so one toggle clears both.
+        if !self.modes.hide_chrome {
+            self.show_status(ui);
+        }
+        // The typewriter's centring offset was measured last frame, against the
+        // same geometry, and is applied here where the scroll area is built.
+        let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(offset) = self.pending_scroll.take() {
+            scroll = scroll.vertical_scroll_offset(offset);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BACKGROUND))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.draw_surface(ui));
+                scroll.show(ui, |ui| self.draw_surface(ui));
             });
     }
 }
@@ -1602,6 +1856,171 @@ mod tests {
 
     fn first_block_id(session: &Session) -> crate::model::BlockId {
         session.document().blocks[0].id
+    }
+
+    // --- distraction-free modes ---------------------------------------------
+
+    const ALL_MODES: [ModeCommand; 5] = [
+        ModeCommand::Fullscreen,
+        ModeCommand::HideChrome,
+        ModeCommand::HideMargin,
+        ModeCommand::ParagraphFocus,
+        ModeCommand::Typewriter,
+    ];
+
+    #[test]
+    fn modes_start_off_and_toggle_independently() {
+        for command in ALL_MODES {
+            let mut modes = Modes::default();
+            assert!(!modes.is_on(command), "{command:?} starts off");
+            assert!(modes.toggle(command), "{command:?} turns on");
+            for other in ALL_MODES {
+                assert_eq!(
+                    modes.is_on(other),
+                    other == command,
+                    "toggling {command:?} must not touch {other:?}"
+                );
+            }
+            assert!(!modes.toggle(command), "{command:?} turns back off");
+            assert!(!modes.is_on(command));
+        }
+    }
+
+    #[test]
+    fn mode_keys_are_chords_that_do_not_collide_with_the_editor() {
+        let chord = egui::Modifiers {
+            command: true,
+            shift: true,
+            ..egui::Modifiers::default()
+        };
+        assert_eq!(
+            mode_for_key(egui::Key::F11, egui::Modifiers::NONE),
+            Some(ModeCommand::Fullscreen)
+        );
+        // F11 stays fullscreen even if a modifier is held.
+        assert_eq!(
+            mode_for_key(egui::Key::F11, chord),
+            Some(ModeCommand::Fullscreen)
+        );
+        assert_eq!(
+            mode_for_key(egui::Key::H, chord),
+            Some(ModeCommand::HideChrome)
+        );
+        assert_eq!(
+            mode_for_key(egui::Key::M, chord),
+            Some(ModeCommand::HideMargin)
+        );
+        assert_eq!(
+            mode_for_key(egui::Key::P, chord),
+            Some(ModeCommand::ParagraphFocus)
+        );
+        assert_eq!(
+            mode_for_key(egui::Key::T, chord),
+            Some(ModeCommand::Typewriter)
+        );
+
+        // A bare letter is prose, a command-only chord is the editor's
+        // (Ctrl-T/undo/redo stay untouched), and unrelated chords are ignored.
+        assert_eq!(mode_for_key(egui::Key::H, egui::Modifiers::NONE), None);
+        assert_eq!(
+            mode_for_key(
+                egui::Key::T,
+                egui::Modifiers {
+                    command: true,
+                    ..egui::Modifiers::default()
+                }
+            ),
+            None
+        );
+        assert_eq!(mode_for_key(egui::Key::Z, chord), None);
+    }
+
+    #[test]
+    fn only_pressed_key_events_count_as_mode_chords() {
+        let chord = egui::Modifiers {
+            command: true,
+            shift: true,
+            ..egui::Modifiers::default()
+        };
+        let events = vec![
+            egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: chord,
+            },
+            // The key-up must not toggle the mode a second time.
+            egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: chord,
+            },
+            // Nor may a held key, which repeats: one press is one toggle.
+            egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: None,
+                pressed: true,
+                repeat: true,
+                modifiers: chord,
+            },
+            egui::Event::Text("p".to_string()),
+        ];
+        assert_eq!(
+            mode_commands_for_events(&events),
+            vec![ModeCommand::ParagraphFocus]
+        );
+    }
+
+    #[test]
+    fn hiding_the_margin_collapses_the_gutter_and_keeps_the_measure_in_place() {
+        let config = LayoutConfig::default();
+        let shown = page_geometry(config, false, 1400.0);
+        let hidden = page_geometry(config, true, 1400.0);
+
+        assert_eq!(
+            shown.page_width,
+            config.body_width + 2.0 * config.margin_width
+        );
+        assert_eq!(shown.margin_width, config.margin_width);
+        assert_eq!(hidden.page_width, config.body_width);
+        assert_eq!(hidden.margin_width, 0.0);
+        // Collapsing the gutter re-centres the page but leaves the prose at
+        // the same column, so hiding the margin does not move the text.
+        assert_eq!(shown.body_left, hidden.body_left);
+
+        // A window narrower than the page pins the page to the left edge
+        // rather than letting the measure hang off it.
+        let narrow = page_geometry(config, false, 400.0);
+        assert_eq!(narrow.body_left, config.margin_width);
+    }
+
+    #[test]
+    fn paragraph_focus_veils_every_block_but_the_carets() {
+        assert_eq!(dim_veil(false, 0, Some(1)), None, "mode off");
+        assert_eq!(dim_veil(true, 1, Some(1)), None, "the caret's block");
+        assert_eq!(
+            dim_veil(true, 0, Some(1)),
+            Some(DIM_VEIL),
+            "every other block"
+        );
+        // Without a resolved caret block nothing is dimmed, rather than the
+        // whole page going faint.
+        assert_eq!(dim_veil(true, 0, None), None);
+    }
+
+    #[test]
+    fn typewriter_offset_centres_the_caret_and_clamps_to_the_page() {
+        // Caret in the middle of a long page: centre it.
+        assert_eq!(typewriter_scroll_offset(600.0, 400.0, 2000.0), 400.0);
+        // Near the top the page cannot scroll above its own start.
+        assert_eq!(typewriter_scroll_offset(40.0, 400.0, 2000.0), 0.0);
+        // Near the bottom it stops at the last full viewport.
+        assert_eq!(typewriter_scroll_offset(1900.0, 400.0, 2000.0), 1600.0);
+        // Content shorter than the viewport never scrolls.
+        assert_eq!(typewriter_scroll_offset(300.0, 400.0, 300.0), 0.0);
     }
 
     #[test]

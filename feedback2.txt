@@ -26,4 +26,15 @@
 - [ ] There are bunch of helper shortcuts that would make life better.
   C-left/right arrow should skip by word; C-S-left/right arrow should
   add whole words to the selected text.
+- [ ] Click to select words is usually off by a letter. If I click in
+  the middle of a glyph, it tends to start selecting the next glyph.
+  This is counterintuitive for a user.
+- [ ] The help text in the GUI ("Type to write ...") should all go in
+  the help dialog.
+- [ ] Right now most of the error messages are printed on the console. I
+  expect users will not be invoking kame from the terminal in the
+  future. Error messages should be printed via the GUI, not via the CLI,
+  and the text must be selectable.
+- [ ] C-o should allow the user to open a new document, replacing the
+  current one. This also means prompting to save if needed.
 

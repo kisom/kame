@@ -156,6 +156,10 @@ impl Db {
     pub fn open(path: &Path) -> Result<Db, DbError> {
         let conn = Connection::open(path)?;
 
+        // A second kame instance opening the same document contends for the
+        // WAL write lock; retry briefly instead of failing the open outright.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
         // `PRAGMA journal_mode` returns the resulting mode as a row, so it has
         // to be read rather than executed.
         let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;

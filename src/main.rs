@@ -759,7 +759,16 @@ fn open_error(path: &Path, err: DbError) -> std::io::Error {
             "the document was written by a newer version of kame \
              (schema {found}; this build supports {supported})"
         ),
-        DbError::Sqlite(_) => "the file is not a valid kame document".to_string(),
+        DbError::Sqlite(err) => {
+            let detail = err.to_string();
+            if detail.to_ascii_lowercase().contains("locked")
+                || detail.to_ascii_lowercase().contains("busy")
+            {
+                format!("the document is already open in another kame instance ({detail})")
+            } else {
+                format!("the file is not a valid kame document ({detail})")
+            }
+        }
         other => other.to_string(),
     };
     std::io::Error::new(

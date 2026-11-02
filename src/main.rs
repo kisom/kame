@@ -107,6 +107,49 @@ impl Palette {
         }
     }
 }
+
+/// The opaque colour a translucent annotation wash becomes over the paper.
+///
+/// The glyph atlas bakes subpixel antialiasing against this colour so that
+/// highlighted text stays crisp against the wash. egui stores colours
+/// premultiplied, so this composites `overlay` over `base` in premultiplied
+/// space; `base` is the opaque paper, so the result is already straight RGB.
+fn overlay_on(base: Color32, overlay: Color32) -> [u8; 3] {
+    let a = overlay.a() as f32 / 255.0;
+    let over = |b: u8, o: u8| (o as f32 + b as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+    [
+        over(base.r(), overlay.r()),
+        over(base.g(), overlay.g()),
+        over(base.b(), overlay.b()),
+    ]
+}
+
+/// Per-block byte ranges whose background is an annotation wash (already
+/// composited to opaque), keyed by the block the anchor pins to. The glyph
+/// atlas bakes these into the subpixel antialiasing of the marked prose.
+fn highlight_map(
+    document: &Document,
+    palette: &Palette,
+) -> HashMap<BlockId, Vec<(usize, usize, [u8; 3])>> {
+    let mut map: HashMap<BlockId, Vec<(usize, usize, [u8; 3])>> = HashMap::new();
+    for annotation in &document.annotations {
+        // Block-scoped anchors (marginalia) have no body range to wash.
+        let Some((start, end)) = annotation.anchor.byte_range() else {
+            continue;
+        };
+        let wash = match annotation.kind {
+            AnnotationKind::Marginal => palette.marginal_highlight,
+            AnnotationKind::Note => palette.note_highlight,
+            AnnotationKind::Footnote => palette.footnote_highlight,
+        };
+        map.entry(annotation.anchor.block_id()).or_default().push((
+            start,
+            end,
+            overlay_on(palette.background, wash),
+        ));
+    }
+    map
+}
 /// Gap between a list marker's right edge and its item's text.
 const LIST_MARKER_GAP: f32 = 6.0;
 /// Font-size step for the Ctrl + / Ctrl - chords, and the clamp bounds (body
@@ -3306,12 +3349,20 @@ impl KameApp {
             .layouts
             .sync(&mut self.renderer, &self.session.document().blocks);
 
+        let paper: [u8; 3] = [
+            self.palette.background.r(),
+            self.palette.background.g(),
+            self.palette.background.b(),
+        ];
+        let highlights = highlight_map(&self.session.document(), &self.palette);
         self.textures.sync(
             ui.ctx(),
             &mut self.renderer,
             &self.session.document().blocks,
             &layouts,
             self.palette.body_ink,
+            paper,
+            &highlights,
         );
 
         let document = self.session.document();
@@ -3378,6 +3429,7 @@ impl KameApp {
                     config.body_width,
                     annotation_size,
                     self.palette.apparatus_ink,
+                    paper,
                 );
             }
         }
@@ -3441,6 +3493,7 @@ impl KameApp {
                     margin_column,
                     annotation_size,
                     self.palette.apparatus_ink,
+                    paper,
                 ),
                 // Footnotes were shaped above; a Note keeps its body behind the
                 // margin marker, so it has no texture until the popover opens

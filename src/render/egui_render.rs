@@ -145,12 +145,15 @@ impl TextureCache {
         renderer: &mut GlyphRenderer,
         blocks: &[Block],
         layouts: &[&BlockLayout],
-        color: [u8; 3],
+        ink: [u8; 3],
+        background: [u8; 3],
+        highlights: &HashMap<BlockId, Vec<(usize, usize, [u8; 3])>>,
     ) {
         let mut live = HashSet::with_capacity(blocks.len());
         for (block, layout) in blocks.iter().zip(layouts.iter().copied()) {
             live.insert(block.id);
-            let fingerprint = block_fingerprint(block);
+            let block_highlights = highlights.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
+            let fingerprint = block_fingerprint(block, block_highlights);
             let up_to_date = self
                 .entries
                 .get(&block.id)
@@ -159,7 +162,7 @@ impl TextureCache {
                 continue;
             }
 
-            let (image, left, top) = renderer.rasterize(layout, color);
+            let (image, left, top) = renderer.rasterize(layout, ink, background, block_highlights);
             let size = [image.width() as usize, image.height() as usize];
             let color_image = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
             let texture = ctx.load_texture(
@@ -233,7 +236,7 @@ impl LayoutCache {
         let mut live = HashSet::with_capacity(blocks.len());
         for block in blocks {
             live.insert(block.id);
-            let fingerprint = block_fingerprint(block);
+            let fingerprint = block_fingerprint(block, &[]);
             let up_to_date = self
                 .entries
                 .get(&block.id)
@@ -310,6 +313,7 @@ impl AnnotationTextureCache {
         width: f32,
         size: f32,
         color: [u8; 3],
+        background: [u8; 3],
     ) {
         if text.trim().is_empty() {
             self.entries.remove(&annotation_id);
@@ -332,7 +336,7 @@ impl AnnotationTextureCache {
         };
         let layout = renderer.layout_in_column(&block, width, size);
         let body_height = layout.height;
-        let (image, left, top) = renderer.rasterize(&layout, color);
+        let (image, left, top) = renderer.rasterize(&layout, color, background, &[]);
         let size_px = [image.width() as usize, image.height() as usize];
         if size_px[0] == 0 || size_px[1] == 0 {
             self.entries.remove(&annotation_id);
@@ -391,7 +395,9 @@ fn annotation_fingerprint(text: &str, width: f32, size: f32) -> u64 {
 }
 
 /// Content hash used to decide whether a block's texture or layout is stale.
-fn block_fingerprint(block: &Block) -> u64 {
+/// `highlights` are the note washes baked into this block's text, so moving a
+/// note re-rasterizes the prose it marks.
+fn block_fingerprint(block: &Block, highlights: &[(usize, usize, [u8; 3])]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     format!("{:?}", block.kind).hash(&mut hasher);
     block.text.hash(&mut hasher);
@@ -399,6 +405,11 @@ fn block_fingerprint(block: &Block) -> u64 {
         span.start.hash(&mut hasher);
         span.end.hash(&mut hasher);
         format!("{:?}", span.style).hash(&mut hasher);
+    }
+    for (start, end, color) in highlights {
+        start.hash(&mut hasher);
+        end.hash(&mut hasher);
+        color.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -487,14 +498,23 @@ impl GlyphRenderer {
     }
 
     /// Paints `layout` into an ink-cropped RGBA image and returns it with its
-    /// block-relative `(left, top)` offset.
-    pub fn rasterize(&mut self, layout: &BlockLayout, color: [u8; 3]) -> (RgbaImage, i32, i32) {
+    /// block-relative `(left, top)` offset. `ink` is the text colour, `background`
+    /// the paper it is baked against for subpixel antialiasing, and `highlights`
+    /// the note washes whose ranges get a different background.
+    pub fn rasterize(
+        &mut self,
+        layout: &BlockLayout,
+        ink: [u8; 3],
+        background: [u8; 3],
+        highlights: &[(usize, usize, [u8; 3])],
+    ) -> (RgbaImage, i32, i32) {
         self.rasterizes_since_clear += 1;
         if self.rasterizes_since_clear >= RASTERIZES_PER_CACHE_CLEAR {
             self.atlas.clear_cache();
             self.rasterizes_since_clear = 0;
         }
-        self.atlas.rasterize(&mut self.font_system, layout, color)
+        self.atlas
+            .rasterize(&mut self.font_system, layout, ink, background, highlights)
     }
 }
 
@@ -997,7 +1017,15 @@ mod tests {
         let mut cache = TextureCache::new();
 
         let layout_refs: Vec<&BlockLayout> = layouts.iter().collect();
-        cache.sync(&ctx, &mut renderer, &blocks, &layout_refs, [10, 10, 10]);
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            &blocks,
+            &layout_refs,
+            [10, 10, 10],
+            [255, 255, 255],
+            &HashMap::new(),
+        );
         assert_eq!(cache.len(), 2);
 
         let texture = cache.get(blocks[0].id).expect("first block texture");
@@ -1020,13 +1048,29 @@ mod tests {
         let mut layouts: Vec<BlockLayout> = blocks.iter().map(|b| renderer.layout(b)).collect();
         let mut cache = TextureCache::new();
         let refs: Vec<&BlockLayout> = layouts.iter().collect();
-        cache.sync(&ctx, &mut renderer, &blocks, &refs, [0, 0, 0]);
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            &blocks,
+            &refs,
+            [0, 0, 0],
+            [255, 255, 255],
+            &HashMap::new(),
+        );
         let first_size = cache.get(blocks[0].id).unwrap().texture.size();
 
         blocks[0].text = "Hello, much longer line".to_string();
         layouts = blocks.iter().map(|b| renderer.layout(b)).collect();
         let refs: Vec<&BlockLayout> = layouts.iter().collect();
-        cache.sync(&ctx, &mut renderer, &blocks, &refs, [0, 0, 0]);
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            &blocks,
+            &refs,
+            [0, 0, 0],
+            [255, 255, 255],
+            &HashMap::new(),
+        );
         assert_ne!(
             cache.get(blocks[0].id).unwrap().texture.size(),
             first_size,
@@ -1036,7 +1080,15 @@ mod tests {
         blocks.pop();
         layouts = blocks.iter().map(|b| renderer.layout(b)).collect();
         let refs: Vec<&BlockLayout> = layouts.iter().collect();
-        cache.sync(&ctx, &mut renderer, &blocks, &refs, [0, 0, 0]);
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            &blocks,
+            &refs,
+            [0, 0, 0],
+            [255, 255, 255],
+            &HashMap::new(),
+        );
         assert_eq!(cache.len(), 1, "the removed block's texture is dropped");
     }
 
@@ -1337,7 +1389,16 @@ mod tests {
         let mut cache = AnnotationTextureCache::new();
         let note = "Typography is the craft of endowing human language with a durable \
 visual form, and thus with an independent existence.";
-        cache.sync(&ctx, &mut renderer, id, note, 120.0, 12.0, [0, 0, 0]);
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            id,
+            note,
+            120.0,
+            12.0,
+            [0, 0, 0],
+            [255, 255, 255],
+        );
 
         let height = cache
             .body_height(id)
@@ -1351,7 +1412,16 @@ visual form, and thus with an independent existence.";
         // The height tracks the body: a one-line note is shorter than the
         // wrapped one, so margin stacking can tell them apart.
         let short = Uuid::new_v4();
-        cache.sync(&ctx, &mut renderer, short, "a note", 120.0, 12.0, [0, 0, 0]);
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            short,
+            "a note",
+            120.0,
+            12.0,
+            [0, 0, 0],
+            [255, 255, 255],
+        );
         let short_height = cache.body_height(short).expect("height");
         assert!(short_height < height);
         assert!(
@@ -1375,6 +1445,7 @@ visual form, and thus with an independent existence.";
             120.0,
             12.0,
             [0, 0, 0],
+            [255, 255, 255],
         );
         assert_eq!(cache.len(), 1);
         let size = cache.get(id).expect("annotation texture").texture.size();
@@ -1388,6 +1459,7 @@ visual form, and thus with an independent existence.";
             80.0,
             12.0,
             [0, 0, 0],
+            [255, 255, 255],
         );
         assert_eq!(cache.len(), 1);
 
@@ -1400,6 +1472,7 @@ visual form, and thus with an independent existence.";
             80.0,
             12.0,
             [0, 0, 0],
+            [255, 255, 255],
         );
         assert_ne!(cache.get(id).unwrap().texture.size(), size);
     }

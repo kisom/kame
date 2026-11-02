@@ -1339,12 +1339,16 @@ impl Session {
         Some(Anchor::range(block.id, start, end))
     }
 
-    fn move_left(&mut self) {
-        // An arrow collapses a selection to its edge before moving.
-        if let Some((start, _)) = self.ordered_selection() {
-            self.caret = start;
-            self.selection = None;
-            return;
+    fn move_left(&mut self, select: bool) {
+        // An arrow collapses a selection to its edge before moving — unless it
+        // is extending the selection, which keeps the fixed edge and moves the
+        // caret end.
+        if !select {
+            if let Some((start, _)) = self.ordered_selection() {
+                self.caret = start;
+                self.selection = None;
+                return;
+            }
         }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
@@ -1368,14 +1372,20 @@ impl Session {
                 None => caret,
             }
         };
-        self.caret = target;
+        if select {
+            self.select_to(target);
+        } else {
+            self.caret = target;
+        }
     }
 
-    fn move_right(&mut self) {
-        if let Some((_, end)) = self.ordered_selection() {
-            self.caret = end;
-            self.selection = None;
-            return;
+    fn move_right(&mut self, select: bool) {
+        if !select {
+            if let Some((_, end)) = self.ordered_selection() {
+                self.caret = end;
+                self.selection = None;
+                return;
+            }
         }
         let caret = self.valid_caret();
         let Some(index) = self.block_index(caret.block_id) else {
@@ -1398,7 +1408,11 @@ impl Session {
                 },
             }
         };
-        self.caret = target;
+        if select {
+            self.select_to(target);
+        } else {
+            self.caret = target;
+        }
     }
 }
 
@@ -2089,12 +2103,18 @@ impl KameApp {
                         self.set_open_note(self.open_note);
                     }
                 }
-                Command::MoveLeft => self.session.move_left(),
-                Command::MoveRight => self.session.move_right(),
-                Command::MoveUp => self.move_vertically(false),
-                Command::MoveDown => self.move_vertically(true),
-                Command::MoveLineStart => self.move_to_line_edge(false),
-                Command::MoveLineEnd => self.move_to_line_edge(true),
+                Command::MoveLeft => self.session.move_left(false),
+                Command::SelectLeft => self.session.move_left(true),
+                Command::MoveRight => self.session.move_right(false),
+                Command::SelectRight => self.session.move_right(true),
+                Command::MoveUp => self.move_vertically(false, false),
+                Command::SelectUp => self.move_vertically(false, true),
+                Command::MoveDown => self.move_vertically(true, false),
+                Command::SelectDown => self.move_vertically(true, true),
+                Command::MoveLineStart => self.move_to_line_edge(false, false),
+                Command::SelectLineStart => self.move_to_line_edge(false, true),
+                Command::MoveLineEnd => self.move_to_line_edge(true, false),
+                Command::SelectLineEnd => self.move_to_line_edge(true, true),
                 Command::SelectAll => self.select_all(),
                 Command::SetBlockKind(kind) => {
                     let caret = self.session.valid_caret();
@@ -2113,7 +2133,7 @@ impl KameApp {
     /// Up/Down move by visual line, keeping the caret's horizontal position.
     /// At the first or last line of a block they cross into the adjacent block
     /// (first line down, last line up), so paragraphs are not dead ends.
-    fn move_vertically(&mut self, down: bool) {
+    fn move_vertically(&mut self, down: bool, select: bool) {
         let caret = self.session.valid_caret();
         let Some(index) = self.session.block_index(caret.block_id) else {
             return;
@@ -2141,10 +2161,13 @@ impl KameApp {
         };
         if let Some(target) = target {
             let offset = offset_at(&layout, x, target.y + 1.0, block.text.len());
-            self.session.set_caret(Cursor {
-                block_id: block.id,
-                offset,
-            });
+            self.move_caret(
+                Cursor {
+                    block_id: block.id,
+                    offset,
+                },
+                select,
+            );
             return;
         }
 
@@ -2169,10 +2192,22 @@ impl KameApp {
             Some(line) => offset_at(&adj_layout, x, line.y + 1.0, adjacent.text.len()),
             None => 0,
         };
-        self.session.set_caret(Cursor {
-            block_id: adjacent.id,
-            offset,
-        });
+        self.move_caret(
+            Cursor {
+                block_id: adjacent.id,
+                offset,
+            },
+            select,
+        );
+    }
+
+    /// Moves the caret to `target`, extending the selection when `select`.
+    fn move_caret(&mut self, target: Cursor, select: bool) {
+        if select {
+            self.session.select_to(target);
+        } else {
+            self.session.set_caret(target);
+        }
     }
 
     /// C-a selects the caret's whole block; pressing it again while the block
@@ -2221,7 +2256,7 @@ impl KameApp {
         self.session.select_to(moving);
     }
 
-    fn move_to_line_edge(&mut self, end: bool) {
+    fn move_to_line_edge(&mut self, end: bool, select: bool) {
         let caret = self.session.valid_caret();
         let Some(index) = self.session.block_index(caret.block_id) else {
             return;
@@ -2232,10 +2267,13 @@ impl KameApp {
             return;
         };
         let offset = if end { line.end } else { line.start };
-        self.session.set_caret(Cursor {
-            block_id: block.id,
-            offset,
-        });
+        self.move_caret(
+            Cursor {
+                block_id: block.id,
+                offset,
+            },
+            select,
+        );
     }
 
     fn show_status(&mut self, ui: &mut egui::Ui) {
@@ -3694,12 +3732,45 @@ mod tests {
             block_id: session.caret.block_id,
             offset: 0,
         });
-        session.move_left();
+        session.move_left(false);
         assert_eq!(session.caret.offset, 2);
         assert_eq!(session.caret.block_id, first_block_id(&session));
-        session.move_right();
+        session.move_right(false);
         assert_eq!(session.caret.offset, 0);
         assert_eq!(session.caret.block_id, session.document().blocks[1].id);
+    }
+
+    #[test]
+    fn shift_arrow_extends_the_selection() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("word");
+        let block_id = first_block_id(&session);
+        session.set_caret(Cursor {
+            block_id,
+            offset: 4,
+        });
+
+        // Shift-Left from the end selects the previous character, anchored at
+        // the start (offset 4).
+        session.move_left(true);
+        assert_eq!(
+            session.ordered_selection(),
+            Some((
+                Cursor {
+                    block_id,
+                    offset: 3
+                },
+                Cursor {
+                    block_id,
+                    offset: 4
+                },
+            ))
+        );
+
+        // Shift-Right back onto the anchor collapses the selection to nothing.
+        session.move_right(true);
+        assert_eq!(session.ordered_selection(), None);
     }
 
     #[test]
@@ -3842,7 +3913,7 @@ mod tests {
             block_id,
             offset: 3,
         });
-        session.move_left();
+        session.move_left(false);
         assert_eq!(session.caret.offset, 2);
         session.set_caret(Cursor {
             block_id,

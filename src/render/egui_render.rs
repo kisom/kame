@@ -628,6 +628,14 @@ pub enum Command {
     MoveDown,
     MoveLineStart,
     MoveLineEnd,
+    /// Shift-arrow selection: move the caret's edge while keeping the edge where
+    /// the selection began.
+    SelectLeft,
+    SelectRight,
+    SelectUp,
+    SelectDown,
+    SelectLineStart,
+    SelectLineEnd,
     /// Select the caret's whole block (or the whole document when the block is
     /// already selected).
     SelectAll,
@@ -719,11 +727,17 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         }
         Key::Backspace => Some(Command::Backspace),
         Key::Delete => Some(Command::Delete),
+        Key::ArrowLeft if modifiers.shift && !command => Some(Command::SelectLeft),
         Key::ArrowLeft if !command => Some(Command::MoveLeft),
+        Key::ArrowRight if modifiers.shift && !command => Some(Command::SelectRight),
         Key::ArrowRight if !command => Some(Command::MoveRight),
+        Key::ArrowUp if modifiers.shift && !command => Some(Command::SelectUp),
         Key::ArrowUp if !command => Some(Command::MoveUp),
+        Key::ArrowDown if modifiers.shift && !command => Some(Command::SelectDown),
         Key::ArrowDown if !command => Some(Command::MoveDown),
+        Key::Home if modifiers.shift && !command => Some(Command::SelectLineStart),
         Key::Home if !command => Some(Command::MoveLineStart),
+        Key::End if modifiers.shift && !command => Some(Command::SelectLineEnd),
         Key::End if !command => Some(Command::MoveLineEnd),
         Key::A if command => Some(Command::SelectAll),
         _ => None,
@@ -1207,6 +1221,32 @@ visual form, and thus with an independent existence.";
         assert_eq!(
             command_for_key(Key::ArrowDown, none),
             Some(Command::MoveDown)
+        );
+
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            command_for_key(Key::ArrowLeft, shift),
+            Some(Command::SelectLeft)
+        );
+        assert_eq!(
+            command_for_key(Key::ArrowRight, shift),
+            Some(Command::SelectRight)
+        );
+        assert_eq!(command_for_key(Key::ArrowUp, shift), Some(Command::SelectUp));
+        assert_eq!(
+            command_for_key(Key::ArrowDown, shift),
+            Some(Command::SelectDown)
+        );
+        assert_eq!(
+            command_for_key(Key::Home, shift),
+            Some(Command::SelectLineStart)
+        );
+        assert_eq!(
+            command_for_key(Key::End, shift),
+            Some(Command::SelectLineEnd)
         );
 
         let ctrl = Modifiers {

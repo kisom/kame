@@ -15,7 +15,7 @@ macOS (`Modifiers::command`).
 | Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |
 | Ctrl-A | select the caret's whole block (again for the whole document) |
 | Ctrl-F | find — open the find bar |
-| drag, shift-click | select |
+| drag, shift-click, Shift-arrows | select / extend the selection |
 | Escape | close the find bar, a dialog, or the note popover |
 
 ## Search

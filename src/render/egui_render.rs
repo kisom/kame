@@ -1037,7 +1037,7 @@ mod tests {
     #[test]
     fn runtime_headings_shape_with_crimson_pro() {
         let mut renderer = GlyphRenderer::new(config());
-        let crimson = face(&renderer, "Crimson Pro", Weight::NORMAL, Style::Normal);
+        let crimson = face(&renderer, "Crimson Pro", Weight::BOLD, Style::Normal);
         let body_face = face(&renderer, "EB Garamond", Weight::NORMAL, Style::Normal);
         let block = heading("On the Shape of Letters");
         let layout = renderer.layout(&block);

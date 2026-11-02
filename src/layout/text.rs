@@ -175,7 +175,11 @@ pub fn layout_block_with_align(
     buffer.set_size(Some(width), None);
     let attrs = Attrs::new()
         .family(Family::Name(family))
-        .weight(Weight::NORMAL)
+        .weight(if matches!(block.kind, BlockKind::Heading { .. }) {
+            Weight::BOLD
+        } else {
+            Weight::NORMAL
+        })
         .style(style);
     let spans = styled_spans(block, &attrs);
     buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
@@ -394,6 +398,7 @@ dance, on a page, of pen, eye and hand.";
             "EBGaramond-Bold.otf",
             "EBGaramond-Italic.otf",
             "CrimsonPro-Regular.ttf",
+            "CrimsonPro-Bold.ttf",
         ] {
             fs.db_mut()
                 .load_font_file(font_path(file))
@@ -578,7 +583,7 @@ dance, on a page, of pen, eye and hand.";
     fn heading_shapes_with_crimson_pro() {
         let mut fs = FontSystem::new();
         load_fonts(&mut fs);
-        let crimson = face(&fs, "Crimson Pro", Weight::NORMAL, Style::Normal);
+        let crimson = face(&fs, "Crimson Pro", Weight::BOLD, Style::Normal);
         let body_face = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
         assert_ne!(
             crimson, body_face,
@@ -827,6 +832,30 @@ dance, on a page, of pen, eye and hand.";
         assert_eq!(layout.left_indent, config.body_size * 1.5);
         assert!(layout.height > 0.0, "a non-empty quote shapes a line");
         assert_eq!(layout.lines.len(), 1);
+    }
+
+    #[test]
+    fn every_heading_level_is_set_in_bold_crimson() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let bold = face(&fs, "Crimson Pro", Weight::BOLD, Style::Normal);
+        let regular = face(&fs, "Crimson Pro", Weight::NORMAL, Style::Normal);
+        assert_ne!(bold, regular, "the test needs both faces loaded");
+        for level in 1..=6 {
+            let block = Block {
+                id: Uuid::new_v4(),
+                kind: BlockKind::Heading { level },
+                text: "Heading".to_string(),
+                spans: Vec::new(),
+            };
+            let layout = layout_block(&mut fs, &block, &config);
+            let run = layout.buffer.layout_runs().next().expect("a shaped line");
+            for glyph in run.glyphs.iter() {
+                assert_eq!(glyph.font_id, bold, "level {level}");
+                assert_eq!(glyph.font_weight, Weight::BOLD, "level {level}");
+            }
+        }
     }
 
     #[test]

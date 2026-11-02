@@ -26,7 +26,7 @@
 - [x] There are bunch of helper shortcuts that would make life better.
   C-left/right arrow should skip by word; C-S-left/right arrow should
   add whole words to the selected text.
-- [ ] Click to select words is usually off by a letter. If I click in
+- [x] Click to select words is usually off by a letter. If I click in
   the middle of a glyph, it tends to start selecting the next glyph.
   This is counterintuitive for a user.
 - [ ] The help text in the GUI ("Type to write ...") should all go in

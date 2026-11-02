@@ -533,8 +533,12 @@ pub fn caret_line(layout: &BlockLayout, offset: usize) -> Option<crate::layout::
 
 /// The byte offset in a block closest to block-relative point (`x`, `y`).
 ///
-/// The nearest visual line is chosen by vertical distance, then the nearest
-/// glyph boundary on that line. An empty layout (or a blank line) maps to 0.
+/// The nearest visual line is chosen by vertical distance, then the glyph whose
+/// advance the click falls in. The caret lands at that glyph's *start* — so a
+/// click anywhere on a letter places the caret before it, rather than snapping
+/// to the next letter over when the pointer is past the glyph's midpoint. An
+/// empty layout (or a blank line) maps to 0, and a click past the last glyph of
+/// a line maps to that line's end.
 pub fn offset_at(layout: &BlockLayout, x: f32, y: f32, text_len: usize) -> usize {
     let mut best: Option<(f32, usize)> = None;
     for run in layout.buffer.layout_runs() {
@@ -547,19 +551,17 @@ pub fn offset_at(layout: &BlockLayout, x: f32, y: f32, text_len: usize) -> usize
             continue;
         }
 
-        let mut candidates: Vec<(f32, usize)> = Vec::with_capacity(run.glyphs.len() + 1);
-        candidates.push((first.x, first.start));
-        for glyph in run.glyphs.iter() {
-            candidates.push((glyph.x + glyph.w, glyph.end));
-        }
+        // The caret belongs to the glyph under the pointer: walk the run and
+        // stop at the first glyph whose right edge is past `x`. That glyph's
+        // start is the boundary the caret precedes. Falling off the end means
+        // the click is past the line, so the caret goes to the line's end.
         let mut offset = first.start;
-        let mut nearest = f32::INFINITY;
-        for (pen, candidate) in candidates {
-            let dx = (x - pen).abs();
-            if dx < nearest {
-                nearest = dx;
-                offset = candidate;
+        for glyph in run.glyphs.iter() {
+            if x < glyph.x + glyph.w {
+                offset = glyph.start;
+                break;
             }
+            offset = glyph.end;
         }
         best = Some((distance, offset));
     }
@@ -1125,6 +1127,36 @@ mod tests {
         assert_eq!(
             offset_at(&layout, 10_000.0, 0.0, block.text.len()),
             block.text.len()
+        );
+    }
+
+    #[test]
+    fn offset_at_lands_the_caret_before_the_clicked_glyph() {
+        let mut renderer = GlyphRenderer::new(config());
+        let block = paragraph("Hello world");
+        let layout = renderer.layout(&block);
+        let run = layout.buffer.layout_runs().next().unwrap();
+        let y = run.line_top + 1.0;
+        // Click the dead centre of each glyph: the caret must precede it, never
+        // the next letter over.
+        for glyph in run.glyphs.iter() {
+            let midpoint = glyph.x + glyph.w * 0.5;
+            let offset = offset_at(&layout, midpoint, y, block.text.len());
+            assert_eq!(
+                offset, glyph.start,
+                "mid-glyph click jumped past the letter under the pointer"
+            );
+        }
+        // Just left of a glyph's right edge still belongs to that glyph.
+        let last = run.glyphs.last().unwrap();
+        assert_eq!(
+            offset_at(&layout, last.x + last.w - 0.5, y, block.text.len()),
+            last.start
+        );
+        // Past the end of the run falls to the line's end.
+        assert_eq!(
+            offset_at(&layout, last.x + last.w + 50.0, y, block.text.len()),
+            last.end
         );
     }
 

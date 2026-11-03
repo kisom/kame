@@ -30,10 +30,13 @@ Open work, most pressing first. Tick items off or delete them as they land.
 ## Linking
 
 - [ ] **Links to other kame documents.** Link from one document to another, and open it
-  in kame on a click rather than handing it to the system. Still to decide: how such a
-  link is stored so that it survives moving a folder of documents, whether it can point
-  at a place inside the document, and what it becomes on export. That last one depends
-  on the static site generator.
+  in kame on a click rather than handing it to the system. Decided so far:
+  - **Storage:** the target is kept exactly as it was entered. Like a web link, it can
+    rot and may need maintenance, and kame doesn't try to prevent that.
+  - **Target:** a path, optionally with `#header-text`, which looks for a heading with
+    exactly that text. Obsidian's `[[path/to/Node#Header|the link text]]` is the model.
+  - **Export:** the link can't lead anywhere outside kame, and it's unreasonable to
+    expect otherwise. In the editor it may just be underlined.
 
 ## From earlier feedback
 

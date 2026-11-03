@@ -25,7 +25,7 @@ use std::collections::HashMap;
 /// The fonts are named, not embedded: Crimson Pro and EB Garamond are the
 /// fonts the editor ships (`fonts/`), so an exported file picks them up
 /// wherever they are installed and falls back to a serif otherwise.
-const STYLE: &str = r#"
+pub const STYLE: &str = r#"
 :root {
   color-scheme: light;
   --paper: #fdfcf9;
@@ -223,14 +223,68 @@ struct BlockApparatus {
 ///   its anchor loses only its marker — the body is still emitted, unanchored,
 /// - text is escaped (`&`, `<`, `>`); the output carries no document or
 ///   annotation ids, so it is stable across runs and serde round trips.
-#[cfg(test)]
 pub fn to_html(doc: &Document) -> String {
     to_html_with(doc, &crate::model::Metadata::default())
+}
+
+/// How a document's outside references publish, for a tool that knows where everything
+/// ends up. On its own, kame can't know, so see [`Publish::plain`].
+pub struct Publish<'a> {
+    /// The URL for a document link's target, or `None` to publish it as its text.
+    pub document_link: &'a dyn Fn(&str) -> Option<String>,
+    /// The URL for an image's path.
+    pub image: &'a dyn Fn(&str) -> String,
+}
+
+impl Publish<'_> {
+    pub fn plain() -> Publish<'static> {
+        Publish {
+            document_link: &|_| None,
+            image: &|path| path.to_string(),
+        }
+    }
 }
 
 /// [`to_html`] for publishing: `metadata` fills the page's head. An empty title
 /// falls back to the document's own, and an empty date to the created date.
 pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String {
+    let body = html_body(doc, &Publish::plain());
+    let title = if metadata.title.is_empty() {
+        escape(&doc.title)
+    } else {
+        escape(&metadata.title)
+    };
+    let date = if metadata.published.is_empty() {
+        &metadata.created
+    } else {
+        &metadata.published
+    };
+    let tags = metadata.tags.join(", ");
+    let metas: String = [
+        ("author", metadata.author.as_str()),
+        ("date", date.as_str()),
+        ("keywords", tags.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .map(|(name, value)| {
+        format!(
+            "<meta name=\"{name}\" content=\"{}\">\n",
+            escape_attribute(value)
+        )
+    })
+    .collect();
+    format!(
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         {metas}<title>{title}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n\
+         <main class=\"document\">\n{body}</main>\n</body>\n</html>\n"
+    )
+}
+
+/// A document's own markup, without the page around it, for a tool that supplies its own
+/// page. A whole page is this inside [`to_html_with`]'s head.
+pub fn html_body(doc: &Document, publish: &Publish) -> String {
     let collected = collect_apparatus(doc);
 
     let mut body = String::new();
@@ -248,7 +302,7 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
             close_list(&mut body, &mut open_list);
             let image = format!(
                 "<img class=\"image\" src=\"{}\" alt=\"\">",
-                escape_attribute(path)
+                escape_attribute(&(publish.image)(path))
             );
             match link.as_deref().filter(|url| !is_script_url(url)) {
                 Some(url) => body.push_str(&format!(
@@ -269,7 +323,7 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
             continue;
         }
         let apparatus = &collected.blocks[index];
-        let inner = render_inline(block, &apparatus.footnotes);
+        let inner = render_inline(block, &apparatus.footnotes, publish);
         // A bare newline renders as a space. A heading is one line by definition, and
         // a verbatim block is preformatted, so its newlines stand.
         let inner = inner.trim_end_matches('\n');
@@ -362,38 +416,7 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
         }
         body.push_str("</ol>\n");
     }
-
-    let title = if metadata.title.is_empty() {
-        escape(&doc.title)
-    } else {
-        escape(&metadata.title)
-    };
-    let date = if metadata.published.is_empty() {
-        &metadata.created
-    } else {
-        &metadata.published
-    };
-    let tags = metadata.tags.join(", ");
-    let metas: String = [
-        ("author", metadata.author.as_str()),
-        ("date", date.as_str()),
-        ("keywords", tags.as_str()),
-    ]
-    .into_iter()
-    .filter(|(_, value)| !value.is_empty())
-    .map(|(name, value)| {
-        format!(
-            "<meta name=\"{name}\" content=\"{}\">\n",
-            escape_attribute(value)
-        )
-    })
-    .collect();
-    format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         {metas}<title>{title}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n\
-         <main class=\"document\">\n{body}</main>\n</body>\n</html>\n"
-    )
+    body
 }
 
 /// Close a list still open from the previous block, if any.
@@ -634,21 +657,26 @@ impl InlineTag {
 /// both tags at 10 and reopen bold, or the italic would silently cover 10..15.
 /// Notes open outside spans, so a highlighted phrase can carry emphasis without
 /// producing crossed tags.
-fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
+fn render_inline(block: &Block, footnotes: &[(usize, usize)], publish: &Publish) -> String {
     let text = block.text.as_str();
 
     let spans: Vec<(usize, usize, SpanStyle)> = block
         .spans
         .iter()
-        // A script link publishes as its text, as does a link to a kame document, which
-        // can't lead anywhere outside kame.
+        // A script link publishes as its text, as does a link to a kame document unless
+        // the hook knows where that document is.
         .filter(|span| !matches!(&span.style, SpanStyle::Link { url } if is_script_url(url)))
-        .filter(|span| !matches!(span.style, SpanStyle::DocumentLink { .. }))
         .filter_map(|span| {
+            let style = match &span.style {
+                SpanStyle::DocumentLink { target } => SpanStyle::Link {
+                    url: (publish.document_link)(target)?,
+                },
+                style => style.clone(),
+            };
             let start = snap_up(text, span.start);
             let end = snap_down(text, span.end);
             let (start, end) = trim_whitespace_edges(text, start, end);
-            (start < end).then(|| (start, end, span.style.clone()))
+            (start < end).then_some((start, end, style))
         })
         .collect();
     let links = bare_link_ranges(block);
@@ -1662,5 +1690,101 @@ mod tests {
     fn footnotes_keep_their_own_numbers() {
         let html = to_html(&list(&[(true, 0, "a")]));
         assert!(html.contains("ol:not(.footnotes)"), "{html}");
+    }
+
+    fn linking_to(target: &str) -> Document {
+        let mut doc = Document::new("t");
+        let mut block = paragraph("See the intro now.");
+        block.spans = vec![Span {
+            start: 4,
+            end: 13,
+            style: SpanStyle::DocumentLink {
+                target: target.to_string(),
+            },
+        }];
+        doc.blocks = vec![block];
+        doc
+    }
+
+    #[test]
+    fn a_body_is_only_the_documents_own_markup() {
+        let html = html_body(&linking_to("a.kame"), &Publish::plain());
+        assert_eq!(html, "<p>See the intro now.</p>\n");
+    }
+
+    #[test]
+    fn a_body_keeps_footnotes() {
+        let mut doc = Document::new("t");
+        let block = paragraph("Words.");
+        let id = block.id;
+        doc.blocks = vec![block];
+        doc.annotations.push(Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Footnote,
+            anchor: Anchor::Range {
+                block_id: id,
+                start: 0,
+                end: 5,
+            },
+            body: "A note.".to_string(),
+        });
+        let html = html_body(&doc, &Publish::plain());
+        assert!(html.contains("<ol class=\"footnotes\">"), "{html}");
+    }
+
+    #[test]
+    fn a_whole_page_wraps_exactly_the_body() {
+        let doc = linking_to("a.kame");
+        let page = to_html(&doc);
+        let body = html_body(&doc, &Publish::plain());
+        assert!(
+            page.contains(&format!("<main class=\"document\">\n{body}</main>")),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_document_link_publishes_where_the_hook_says() {
+        let publish = Publish {
+            document_link: &|target| (target == "a.kame#Intro").then(|| "/k/a/".to_string()),
+            image: &|path| path.to_string(),
+        };
+        assert_eq!(
+            html_body(&linking_to("a.kame#Intro"), &publish),
+            "<p>See <a href=\"/k/a/\">the intro</a> now.</p>\n"
+        );
+    }
+
+    #[test]
+    fn a_document_link_the_hook_doesnt_know_publishes_as_its_text() {
+        let publish = Publish {
+            document_link: &|_| None,
+            image: &|path| path.to_string(),
+        };
+        assert_eq!(
+            html_body(&linking_to("gone.kame"), &publish),
+            "<p>See the intro now.</p>\n"
+        );
+    }
+
+    #[test]
+    fn an_image_publishes_where_the_hook_says_and_is_escaped() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Image {
+                path: "/home/me/a.png".to_string(),
+                link: None,
+            },
+            "",
+        )];
+        let publish = Publish {
+            document_link: &|_| None,
+            image: &|path| format!("/k/s/{}\"", path.rsplit('/').next().unwrap()),
+        };
+        assert!(
+            html_body(&doc, &publish).contains("src=\"/k/s/a.png&quot;\""),
+            "{}",
+            html_body(&doc, &publish)
+        );
     }
 }

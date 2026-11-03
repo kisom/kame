@@ -38,7 +38,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `model/` — `Document`/`Block`/`Annotation` types + `anchor` shifting (byte offsets)
 - `storage/` — SQLite `Db` (WAL, `PRAGMA user_version` migrations, snapshots)
 - `edit/` — `Op` log + `Editor` (undo/redo, commands)
-- `export/` — `to_markdown`, `to_html` (deterministic)
+- `export/` — `to_markdown`, `to_html` (deterministic), and `html_body` with `Publish` hooks for a tool that knows where links and images end up
+- `links.rs` — where a link between documents leads
 - `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
 - `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk
 - `text.rs` — moving through text by character and word

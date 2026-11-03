@@ -4,11 +4,20 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Publishing
 
-- [ ] **A static site generator for blog posts.** A separate tool from the kame GUI,
-  most likely a command line one. Working from `.kame` files, and the
-  occasional Markdown file, so marginals can be laid out properly. Markdown export
-  drops them. It would also settle site-root images, like `/files/images/...`, which
-  cannot be found from the file alone and show the missing-image placeholder.
+- [ ] **A static site generator.** A separate command line tool in this workspace, built
+  on `kame-core`, which already has `Db::open_read_only`, `html_body` and its `Publish`
+  hooks, and `links`. Decided so far:
+  - **Config:** `site.yaml`. `publish` maps a fixed slug to a file, as in
+    `commanding-heights: ~/data/writing/CommandingHeights.kame`, so that adding a document
+    can never change a published URL. A separate `drafts` list is for early feedback.
+  - **URLs:** documents go under `/k/<slug>/`, with their images beside them, as Hugo does.
+  - **Output:** into `output/`.
+  - **Dates:** `published`, or `created` if there is none.
+  - **Document links:** one to a published document goes to its page, and any other
+    publishes as its text. A `#Heading` goes to the page, not the heading, and keeping
+    links good is the author's job, like web links.
+  - **Pages:** Markdown for pages like about and colophon, with Pelican- or Hugo-style
+    themes and listings by tag.
 
 ## Typography
 
@@ -33,5 +42,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Ideas
 
-- [ ] **A kame notebook.** Under consideration: an extended kame app for collections of
-  kame and Markdown documents.
+- [ ] **A kame notebook.** The long-term goal, and notes are in `MultiKame.kame`: an
+  extended kame for a binder of kame and Markdown documents, with search across them, quick
+  linking and publishing by path.

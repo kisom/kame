@@ -1783,13 +1783,13 @@ pub fn default_mode(directory: &Path) -> u32 {
     mode
 }
 
-pub fn known_mode(path: &Path) -> Result<Option<u32>, ()> {
+fn known_mode(path: &Path) -> Result<Option<u32>, ()> {
     mode_from(std::fs::metadata(path))
 }
 
 /// A file's mode. A file that is not there has none; `Err` means it could not be
 /// told, which callers treat as private.
-pub fn mode_from(metadata: std::io::Result<std::fs::Metadata>) -> Result<Option<u32>, ()> {
+fn mode_from(metadata: std::io::Result<std::fs::Metadata>) -> Result<Option<u32>, ()> {
     use std::os::unix::fs::PermissionsExt;
     match metadata {
         Ok(file) => Ok(Some(file.permissions().mode() & 0o777)),

@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -174,6 +174,15 @@ impl Db {
     ///
     /// Fails if the database was created by a newer schema version, rather
     /// than silently stamping it back down to [`SCHEMA_VERSION`].
+    /// Opens an existing file for reading only, for publishing what is written without
+    /// any chance of changing it: no migration runs and nothing can be saved. An older
+    /// file that needs migrating fails on whichever read needs what it lacks.
+    pub fn open_read_only(path: &Path) -> Result<Db, DbError> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Db { conn })
+    }
+
     pub fn open(path: &Path) -> Result<Db, DbError> {
         let conn = Connection::open(path)?;
         Self::init(conn)
@@ -1168,5 +1177,45 @@ mod tests {
         })
         .unwrap();
         assert_eq!(db.cursor().unwrap(), before);
+    }
+
+    fn saved_file(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("kame-{name}-{}.kame", uuid::Uuid::new_v4()));
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&Document::new("Saved")).unwrap();
+        drop(db);
+        path
+    }
+
+    #[test]
+    fn a_read_only_open_reads_the_document() {
+        let path = saved_file("read");
+        let db = Db::open_read_only(&path).unwrap();
+        assert_eq!(db.load_document().unwrap().title, "Saved");
+    }
+
+    #[test]
+    fn a_read_only_open_leaves_the_file_as_it_was() {
+        let path = saved_file("untouched");
+        let before = std::fs::read(&path).unwrap();
+        let db = Db::open_read_only(&path).unwrap();
+        db.load_document().unwrap();
+        let _ = db.load_metadata();
+        drop(db);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_read_only_open_refuses_to_write() {
+        let path = saved_file("refuses");
+        let mut db = Db::open_read_only(&path).unwrap();
+        assert!(db.save_document(&Document::new("Changed")).is_err());
+    }
+
+    #[test]
+    fn a_read_only_open_doesnt_create_a_missing_file() {
+        let path = std::env::temp_dir().join(format!("kame-gone-{}.kame", uuid::Uuid::new_v4()));
+        assert!(Db::open_read_only(&path).is_err());
+        assert!(!path.exists());
     }
 }

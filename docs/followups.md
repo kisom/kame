@@ -39,6 +39,12 @@ Open work, most pressing first. Tick items off or delete them as they land.
   Peritext, for rich text and annotations. The hard questions are marginalia anchored to a range,
   and what linear undo means after a merge.
 
+- [ ] **Footnotes in the site's margins.** Sidenotes beside their markers on wide screens, so
+  readers don't jump to the foot and back. Held back because kame already separates the two: a
+  marginal belongs beside the text, and a footnote is there if wanted. Long footnotes would also
+  stack and drift, and on narrow screens they'd have to fold back into the text. Worth trying if
+  footnotes on the live site start to feel like they belong in the margin, most likely as a
+  `site.yaml` setting, changing only how a page lays them out and not what kame stores.
 - [ ] **A kame notebook.** The long-term goal, and notes are in `MultiKame.kame`: an
   extended kame for a binder of kame and Markdown documents, with search across them, quick
   linking and publishing by path.

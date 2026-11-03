@@ -49,7 +49,7 @@ author: K. Isom
 remote: kyle@host:/srv/philosophy/
 ```
 
-`title` is required, and defaults to the file's name if left out. `url`, `author` and `remote` are only for
+`title` defaults to the file's name if left out. `url`, `author` and `remote` are only for
 publishing. `remote` is the same idea as `UPSTREAM` in a `kame-site` Makefile. Unknown keys are refused, as in
 `site.yaml`, so a typo shows up instead of quietly doing nothing.
 

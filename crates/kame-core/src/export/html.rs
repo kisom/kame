@@ -65,7 +65,7 @@ body {
   color: var(--ink);
   font-family: "EB Garamond", "Iowan Old Style", Georgia, serif;
   font-size: 1.25em;
-  line-height: 1.5;
+  line-height: 1.6;
   font-feature-settings: "liga" 1, "kern" 1;
 }
 main.document {
@@ -1907,7 +1907,7 @@ mod tests {
     #[test]
     fn the_stylesheet_sets_type_as_kame_does() {
         let body = rule_for("body", STYLE);
-        assert!(body.contains("line-height: 1.5;"), "{body}");
+        assert!(body.contains("line-height: 1.6;"), "{body}");
         assert!(!STYLE.contains("oldstyle-nums"), "kame uses lining figures");
         assert!(!STYLE.contains("hyphens: auto"), "kame doesn't hyphenate");
         assert!(rule_for("h1", STYLE).contains("font-size: 1.75em"));

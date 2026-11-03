@@ -1062,6 +1062,47 @@ struct MetadataPrompt {
     focus: bool,
 }
 
+/// The mode a saved file ends up with: the narrower of the file being replaced and
+/// the document being saved, so a save never widens who can read either one's
+/// content. With neither, the system's `default`.
+fn saved_mode(target: Option<u32>, source: Option<u32>, default: u32) -> u32 {
+    match (target, source) {
+        (Some(target), Some(source)) => target & source,
+        (Some(mode), None) | (None, Some(mode)) => mode,
+        (None, None) => default,
+    }
+}
+
+/// A file's mode. A file that is not there has none; `Err` means it could not be
+/// told, which callers treat as private.
+fn mode_from(metadata: std::io::Result<std::fs::Metadata>) -> Result<Option<u32>, ()> {
+    use std::os::unix::fs::PermissionsExt;
+    match metadata {
+        Ok(file) => Ok(Some(file.permissions().mode() & 0o777)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn known_mode(path: &Path) -> Result<Option<u32>, ()> {
+    mode_from(std::fs::metadata(path))
+}
+
+/// The mode the system gives a new file in `directory`, found by making one. If
+/// that fails the answer is private.
+fn default_mode(directory: &Path) -> u32 {
+    let probe = directory.join(format!(".kame-mode-{}", uuid::Uuid::new_v4()));
+    if std::fs::File::create_new(&probe).is_err() {
+        return PRIVATE_MODE;
+    }
+    let mode = known_mode(&probe).ok().flatten().unwrap_or(PRIVATE_MODE);
+    let _ = std::fs::remove_file(&probe);
+    mode
+}
+
+/// Readable and writable by the owner alone.
+const PRIVATE_MODE: u32 = 0o600;
+
 /// Whether `event` is the macOS quit shortcut. `mac_cmd` is never set elsewhere,
 /// so this binds no quit key on Linux.
 fn is_quit_chord(event: &egui::Event) -> bool {
@@ -1697,8 +1738,8 @@ impl Session {
     ///
     /// Anything already at `path` is replaced whole: the file dialog has confirmed
     /// that. The copy is written beside it and renamed into place, so a failure
-    /// leaves both the old file and this session as they were, and it takes the
-    /// old file's permissions, or failing that the current document's.
+    /// leaves both the old file and this session as they were. The result is as
+    /// private as the old file and the current document, whichever is more so.
     fn save_as(&mut self, path: &Path) -> AppResult<()> {
         if self.path.as_deref() == Some(path) {
             self.clear_save_error();
@@ -1714,18 +1755,24 @@ impl Session {
             .to_string_lossy();
         let partial = path.with_file_name(format!(".{name}.saving-{}", uuid::Uuid::new_v4()));
         // Replacing a file must not widen who can read it, and a private document
-        // stays private under a new name. The mode goes on while the copy is still
-        // empty, so the content is never readable under a wider one.
-        let permissions = std::fs::metadata(path)
-            .or_else(|err| self.path.as_deref().map_or(Err(err), std::fs::metadata))
-            .ok()
-            .map(|file| file.permissions());
+        // stays private under a new name. The copy is private from the moment it
+        // exists, so nobody can hold it open and read the content as it arrives,
+        // and takes its final mode only once complete.
+        let source = self.path.as_deref().map_or(Ok(None), known_mode);
+        let mode = match (known_mode(path), source) {
+            (Ok(None), Ok(None)) => default_mode(path.parent().unwrap_or(Path::new("."))),
+            (Ok(target), Ok(source)) => saved_mode(target, source, PRIVATE_MODE),
+            _ => PRIVATE_MODE,
+        };
         let written = (|| -> AppResult<()> {
-            std::fs::File::create_new(&partial)?;
-            if let Some(permissions) = permissions {
-                std::fs::set_permissions(&partial, permissions)?;
-            }
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(PRIVATE_MODE)
+                .open(&partial)?;
             self.db.save_copy(&partial)?;
+            std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(mode))?;
             for suffix in ["-wal", "-shm"] {
                 let mut stale = path.as_os_str().to_owned();
                 stale.push(suffix);
@@ -6704,9 +6751,44 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn a_saved_mode_never_widens_either_side() {
+        assert_eq!(saved_mode(Some(0o640), Some(0o600), 0o644), 0o600);
+        assert_eq!(saved_mode(Some(0o600), Some(0o644), 0o644), 0o600);
+        assert_eq!(saved_mode(Some(0o644), Some(0o664), 0o644), 0o644);
+        assert_eq!(saved_mode(None, Some(0o640), 0o644), 0o640);
+        assert_eq!(saved_mode(Some(0o640), None, 0o644), 0o640);
+        assert_eq!(saved_mode(None, None, 0o644), 0o644);
+    }
+
+    /// A file whose mode cannot be read is treated as private, not as default.
     #[cfg(unix)]
     #[test]
-    fn saving_over_a_file_keeps_its_mode_over_the_sources() {
+    fn an_unreadable_mode_fails_closed() {
+        assert_eq!(known_mode(Path::new("/no/such/file")), Ok(None));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(mode_from(Err(denied)), Err(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_document_gets_the_systems_default_mode() {
+        let dir = scratch_dir("mode");
+        let plain = dir.join("plain.txt");
+        std::fs::write(&plain, "x").unwrap();
+        let target = dir.join("new.kame");
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        session.save_as(&target).unwrap();
+        assert_eq!(mode_of(&target), mode_of(&plain));
+        let left = std::fs::read_dir(&dir).unwrap().count();
+        assert!(left <= 4, "stray files after a save: {left}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_private_document_over_a_shared_file_stays_private() {
         let dir = scratch_dir("mode");
         let source = dir.join("private.kame");
         let target = dir.join("shared.kame");
@@ -6716,7 +6798,7 @@ mod tests {
         session.insert("Words");
         set_mode(&source, 0o600);
         session.save_as(&target).unwrap();
-        assert_eq!(mode_of(&target), 0o640);
+        assert_eq!(mode_of(&target), 0o600);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

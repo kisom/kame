@@ -1759,8 +1759,9 @@ impl Session {
         // exists, so nobody can hold it open and read the content as it arrives,
         // and takes its final mode only once complete.
         // A document whose file has vanished may have been private, so that counts
-        // as not knowing. Only a document that never had a file has no mode.
-        let source = match self.path.as_deref() {
+        // as not knowing. An unsaved import answers for its source. Only a document
+        // that never had a file has no mode.
+        let source = match self.path.as_deref().or(self.source_path.as_deref()) {
             Some(current) => known_mode(current).and_then(|mode| mode.ok_or(()).map(Some)),
             None => Ok(None),
         };
@@ -6768,6 +6769,20 @@ mod tests {
         let copy = dir.join("copy.kame");
         session.save_as(&copy).unwrap();
         assert_eq!(mode_of(&copy), PRIVATE_MODE);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_an_import_of_a_private_file_stays_private() {
+        let dir = scratch_dir("mode");
+        let source = dir.join("private.md");
+        std::fs::write(&source, "Words.\n").unwrap();
+        set_mode(&source, 0o600);
+        let (mut session, _) = Session::open_any(&source).unwrap();
+        let target = dir.join("private.kame");
+        session.save_as(&target).unwrap();
+        assert_eq!(mode_of(&target), 0o600);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

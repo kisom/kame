@@ -489,12 +489,13 @@ fn render_apparatus(apparatus: &BlockApparatus) -> String {
 }
 
 /// The margin note's body. The `<aside>` is where a marginal is read, whether
-/// it kept its block or lost it. Line breaks become `<br>` so a blank line cannot
-/// end the block when this is embedded in Markdown.
+/// it kept its block or lost it. Line breaks of every kind become `<br>` so a blank
+/// line cannot end the block when this is embedded in Markdown, where the rest would
+/// parse as live Markdown. Some renderers read a lone `\r` as a line ending.
 pub(super) fn marginalia_aside(body: &str) -> String {
     format!(
         "<aside class=\"marginalia\"><p>{}</p></aside>\n",
-        escape(body).replace('\n', "<br>\n")
+        escape(&body.replace("\r\n", "\n").replace('\r', "\n")).replace('\n', "<br>\n")
     )
 }
 

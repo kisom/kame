@@ -748,4 +748,38 @@ mod tests {
             "{page}"
         );
     }
+
+    #[test]
+    fn a_draft_shows_its_author() {
+        let site = Site::new("plandraftauthor");
+        let d = site.add("d.kame", &metadata("D", "2026-01-01", &[]), "x");
+        site.config(&[], &[("d", &d)]);
+        let page = text(&site.plan(), "drafts/d/index.html");
+        let meta = &page[page.find("<p class=\"meta\">").unwrap()..];
+        assert!(
+            meta[..meta.find("</p>").unwrap()].contains("K. Isom"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_draft_with_no_author_shows_the_sites() {
+        let site = Site::new("plandraftsite");
+        let mut meta = metadata("D", "2026-01-01", &[]);
+        meta.author = String::new();
+        let d = site.add("d.kame", &meta, "x");
+        site.config(&[], &[("d", &d)]);
+        let yaml = std::fs::read_to_string(site.dir.join("site.yaml")).unwrap();
+        std::fs::write(
+            site.dir.join("site.yaml"),
+            yaml.replace("  url:", "  author: The Site\n  url:"),
+        )
+        .unwrap();
+        let page = text(&site.plan(), "drafts/d/index.html");
+        let meta = &page[page.find("<p class=\"meta\">").unwrap()..];
+        assert!(
+            meta[..meta.find("</p>").unwrap()].contains("The Site"),
+            "{page}"
+        );
+    }
 }

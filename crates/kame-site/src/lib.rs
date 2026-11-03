@@ -2,6 +2,9 @@
 
 pub mod config;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 /// What a build found wrong. Errors stop it, reported together; warnings don't.
 #[derive(Debug, Default)]
 pub struct Problems {

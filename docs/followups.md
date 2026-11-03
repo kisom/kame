@@ -4,15 +4,24 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Typography
 
-- [ ] **Word spacing (on hold).** Justified text without hyphenation leaves
-  wide gaps. cosmic-text picks each break on its own and only widens spaces.
-  Soft hyphens from `hypher` are not enough: on 378 devlog paragraphs at type 18,
-  lines with a space over 2x normal fell from 17.1% to 10.3%, but the widest 1% got
-  worse, up to 13 hyphenated lines ran in a row, the hyphen is invisible, and the
-  inserted characters break the byte-offset invariant. The likely fix is for kame
-  to choose its own breaks across the paragraph, with limits on hyphen runs and
-  stretch. About 24 call sites read cosmic-text's lines directly, so prototype it
-  outside the repo first, then write a spec.
+- [ ] **Word spacing.** Justified text leaves wide gaps because cosmic-text takes each line as it
+  comes and can only widen spaces. Studied on 586 devlog paragraphs through kame's own shaping, with a
+  model of first fit that matched the engine's line breaks on all 586 at type 16, width 640:
+
+  | Spaces over | Today | Spaces may close to 80% | Best breaks over the paragraph | Same, with hyphens |
+  |---|---|---|---|---|
+  | 1.5x | 28.8% | 13.1% | 12.2% | 3.4% |
+  | 2x | 5.7% | 2.2% | 1.5% | 0.6% |
+  | 3x | 0.5% | 0.3% | 0.1% | 0.1% |
+
+  Breaking over the paragraph moves lines further up: for 2.1% of words typed and 7.6% of words
+  removed in revising, against none for the two line-at-a-time rules. Hyphens land on about one line
+  in ten. Letting spaces close looks like the first step, since it gets most of the gain and keeps the
+  page still. Any of these needs kame to set its own lines: shape the paragraph once on a single line,
+  choose the breaks, and build `runs` and `lines` from it. Painting and hit-testing already read those
+  rather than cosmic-text's lines, and a fit took under a millisecond. Hyphens could be drawn without
+  entering the text, so they wouldn't touch byte offsets, but they would need `hypher` and a language.
+  Write a spec before building.
 
 ## Markdown import
 

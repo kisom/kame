@@ -1044,6 +1044,23 @@ fn body_with_replacement(body: &str, start: usize, end: usize, with: &str) -> Op
     (start <= end).then(|| format!("{before}{with}{after}"))
 }
 
+/// Where in the text a footnote belongs: just after what it's anchored to.
+fn footnote_return_cursor(annotation: &Annotation) -> Option<Cursor> {
+    (annotation.kind == AnnotationKind::Footnote).then(|| Cursor {
+        block_id: annotation.anchor.block_id(),
+        offset: annotation.anchor.byte_range().map_or(0, |(_, end)| end),
+    })
+}
+
+/// Where the number of a foot entry is drawn, given the layout of its text and its origin.
+fn footnote_number_rect(layout: &BlockLayout, number: usize, origin: Pos2) -> Option<Rect> {
+    // A digit is tiny, so the target reaches a little past it, as a superscript's does.
+    let shown = format!("{number}.").len();
+    range_rects(layout, 0, shown)
+        .first()
+        .map(|rect| rect.translate(origin.to_vec2()).expand(2.0))
+}
+
 /// How far a page key moves: a window's height, less two lines so the eye keeps its place.
 fn page_step(viewport_height: f32, line_height: f32) -> f32 {
     (viewport_height - 2.0 * line_height).max(line_height)
@@ -4236,6 +4253,8 @@ impl KameApp {
                 self.palette.rule_ink,
             );
         }
+        let pointer_at = ui.input(|input| input.pointer.hover_pos());
+        let mut footnote_number_under = None;
         for placement in &footnotes {
             if let Some(texture) = self.annotation_textures.get(placement.annotation_id) {
                 let origin = footnote_origin(response.rect.top(), body_left, placement);
@@ -4244,6 +4263,26 @@ impl KameApp {
                 // The foot entry is the hit target for reopening its popover.
                 markers.push((placement.annotation_id, rect));
                 let annotation = by_id.get(&placement.annotation_id);
+                // Its number goes back to the text instead. This shapes the entry again, which
+                // is why it waits until the pointer is on it.
+                if let (Some(at), Some(annotation)) =
+                    (pointer_at.filter(|at| rect.contains(*at)), annotation)
+                {
+                    let entry = Block {
+                        id: annotation.id,
+                        kind: BlockKind::Paragraph,
+                        text: format!("{}. {}", placement.number, annotation.body),
+                        spans: Vec::new(),
+                    };
+                    let layout =
+                        self.renderer
+                            .layout_in_column(&entry, config.body_width, annotation_size);
+                    if footnote_number_rect(&layout, placement.number, origin)
+                        .is_some_and(|number| number.contains(at))
+                    {
+                        footnote_number_under = footnote_return_cursor(annotation);
+                    }
+                }
                 if let Some(block) = annotation.and_then(|annotation| annotation_block(annotation))
                 {
                     let prefix = format!("{}. ", placement.number);
@@ -4484,9 +4523,15 @@ impl KameApp {
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
+        if footnote_number_under.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let mut footnote_return = None;
         if response.clicked() {
             if let Some(pos) = pointer {
-                if let Some(footnote_y) = footnote_mark_at(&footnote_marks_drawn, pos) {
+                if footnote_number_under.is_some() {
+                    footnote_return = footnote_number_under;
+                } else if let Some(footnote_y) = footnote_mark_at(&footnote_marks_drawn, pos) {
                     // A click on a footnote's number drops down to the footnote.
                     self.pending_scroll =
                         Some(footnote_scroll_offset(footnote_y, ui.clip_rect().height()));
@@ -4524,6 +4569,10 @@ impl KameApp {
             self.set_open_note(None);
         } else if let Some(target) = followed_link {
             self.follow_document_link(&target);
+        } else if let Some(cursor) = footnote_return {
+            self.session.set_caret(cursor);
+            self.reveal_caret = true;
+            self.set_open_note(None);
         } else if let Some((id, rect)) = marker_click {
             let open = if self.open_note == Some(id) {
                 None
@@ -8137,6 +8186,59 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         );
         assert_eq!(body_with_replacement("short", 2, 99, "x"), None);
         assert_eq!(body_with_replacement("short", 3, 2, "x"), None);
+    }
+
+    #[test]
+    fn a_footnote_returns_to_the_end_of_what_it_marks() {
+        let block_id = uuid::Uuid::new_v4();
+        let footnote = Annotation {
+            anchor: Anchor::range(block_id, 3, 9),
+            ..annotation(AnnotationKind::Footnote, "Body.")
+        };
+        assert_eq!(
+            footnote_return_cursor(&footnote),
+            Some(Cursor {
+                block_id,
+                offset: 9
+            })
+        );
+    }
+
+    #[test]
+    fn a_footnote_on_a_whole_block_returns_to_its_start() {
+        let block_id = uuid::Uuid::new_v4();
+        let footnote = Annotation {
+            anchor: Anchor::Block(block_id),
+            ..annotation(AnnotationKind::Footnote, "Body.")
+        };
+        assert_eq!(
+            footnote_return_cursor(&footnote),
+            Some(Cursor {
+                block_id,
+                offset: 0
+            })
+        );
+    }
+
+    #[test]
+    fn a_foot_entrys_number_is_only_its_number() {
+        let mut renderer = GlyphRenderer::new(LayoutConfig::default());
+        let entry = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "12. The footnote's own words, which aren't the number.".to_string(),
+            spans: Vec::new(),
+        };
+        let layout = renderer.layout_in_column(&entry, 400.0, 12.0);
+        let origin = Pos2::new(100.0, 500.0);
+        let rect = footnote_number_rect(&layout, 12, origin).expect("a number");
+        let number_end = caret_x(&layout, 3);
+        assert!(rect.contains(Pos2::new(100.0 + number_end * 0.5, 505.0)));
+        assert!(
+            !rect.contains(Pos2::new(100.0 + caret_x(&layout, 8), 505.0)),
+            "its words"
+        );
+        assert!(rect.right() < 100.0 + caret_x(&layout, 5));
     }
 
     #[test]

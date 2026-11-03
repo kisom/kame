@@ -173,7 +173,8 @@ Both dialogs take Enter as their primary action and Escape as cancel. Nothing
 auto-repeats: one press is one command, and a held Enter cannot step through
 the restore confirmation.
 
-Clicking a footnote's number drops down to the footnote.
+Clicking a footnote's number drops down to the footnote, and clicking the number at the start of the footnote goes
+back to its place in the text. Clicking the footnote's words opens it for editing.
 
 ## Coming back
 

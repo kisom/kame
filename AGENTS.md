@@ -27,7 +27,7 @@ Both `cargo build` and `cargo test` must pass. The test suite is headless (no di
 
 ## Typography
 
-Headings = Crimson Pro; body = EB Garamond. Fonts are `include_bytes!`-embedded from `fonts/` (7 faces: CrimsonPro Regular/Bold/Italic, EBGaramond Regular/Bold/Italic/SemiBold) — never system font paths. Body shapes with `Shaping::Advanced` + `Align::Justified`.
+Headings = Crimson Pro; body = EB Garamond; code = IBM Plex Mono. Fonts are `include_bytes!`-embedded from `fonts/` (10 faces: CrimsonPro Regular/Bold/Italic, EBGaramond Regular/Bold/Italic/SemiBold, IBMPlexMono Regular/Bold/Italic) — never system font paths. Body shapes with `Shaping::Advanced` + `Align::Justified`.
 
 ## Module map
 

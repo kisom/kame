@@ -23,6 +23,24 @@ pub enum BlockKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
     },
+    /// A horizontal rule. Its `text` is empty.
+    Rule,
+    /// Code, set in a monospaced face with its line breaks and spacing exact.
+    Code {
+        /// The language a fence named, kept for export.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    /// Prose quoted exactly: a code block in the serif, for verse or a passage whose
+    /// line breaks and spacing matter.
+    Prose,
+}
+
+impl BlockKind {
+    /// Whether the text is kept exactly as written, line breaks and all.
+    pub fn is_verbatim(&self) -> bool {
+        matches!(self, BlockKind::Code { .. } | BlockKind::Prose)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

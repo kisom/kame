@@ -9,6 +9,7 @@ macOS (`Modifiers::command`).
 | --- | --- |
 | text, Enter, Backspace, Delete | insert, new paragraph, delete back/forward |
 | Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y | undo / redo / redo |
+| Shift-Enter | in a code or prose block, a line without leaving the block |
 | Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
 | Ctrl-Shift-0 | return the caret's block to body text |
 | Ctrl-Shift-N / Ctrl-Shift-F | add a note (a highlight) / a footnote at the selection or the word under the caret |
@@ -31,8 +32,16 @@ word — each one is a single undo step:
 - `# `, `## `, `### ` at the start of a line → a heading
 - `- `, `* `, or `1. ` at the start of a line → a list item
 - `> ` at the start of a line → a block quote
+- `| ` at the start of a line → a prose block
+- ` ``` ` or ` ```rust ` then Enter → a code block
+- `---` then Enter → a horizontal rule
 - `*x*` / `**x**` around a word → italic / bold
 - `[text](url)` → a hyperlink on `text`
+
+A code or prose block keeps its text exactly: line breaks and spacing stand, and
+typed emphasis stays literal. Enter adds a line, and Enter on a blank last line returns
+to body text. Shift-Enter adds a line without ever leaving, for blank lines inside the
+block. Prose is set in the body face, code in IBM Plex Mono.
 
 ## Search
 
@@ -78,9 +87,8 @@ prompt for an unsaved document.
 Opening a `.md` or `.markdown` file imports it: with Ctrl-O, File > Import
 Markdown, or `kame notes.md`. The file is only read, and the result is a new
 document with no file, so the first save asks where to put it. Front matter
-names the document and becomes its opening heading. Code, tables and raw HTML
-become plain text, nested lists flatten, and rules and image descriptions are
-dropped; the status line reports what was simplified and any images it could
+names the document and becomes its opening heading. Tables, inline code and raw
+HTML become plain text, nested lists flatten, and image descriptions are dropped; the status line reports what was simplified and any images it could
 not find. Replacing a document that has no file, or whose last save failed,
 asks first.
 
@@ -121,6 +129,10 @@ the restore confirmation.
 Clicking a footnote's number drops down to the footnote.
 
 ## What exports publish
+
+Code exports as a fence and as `<pre><code>`, keeping its language. Prose exports to
+HTML exactly, and to Markdown as a block quote with hard line breaks, which keeps its
+lines but not extra spacing.
 
 Footnotes publish in both formats and marginalia in HTML. Markdown has no form for a
 marginal, so they stay out of it. Notes are private and never publish, in either

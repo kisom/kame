@@ -34,6 +34,9 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../fonts/CrimsonPro-Regular.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Bold.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Italic.ttf"),
+    include_bytes!("../../fonts/IBMPlexMono-Regular.ttf"),
+    include_bytes!("../../fonts/IBMPlexMono-Bold.ttf"),
+    include_bytes!("../../fonts/IBMPlexMono-Italic.ttf"),
 ];
 
 /// Loads the bundled faces into egui so the immediate-mode text — list markers,
@@ -864,6 +867,8 @@ pub enum Command {
     Backspace,
     Delete,
     SplitParagraph,
+    /// A line break that never leaves the block.
+    LineBreak,
     Undo,
     Redo,
     MoveLeft,
@@ -965,6 +970,7 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         {
             block_kind_for_key(key).map(Command::SetBlockKind)
         }
+        Key::Enter if modifiers.shift => Some(Command::LineBreak),
         Key::Enter => Some(Command::SplitParagraph),
         // Ctrl-Shift-N / Ctrl-Shift-F add a note (a highlight) or a footnote at
         // the selection.

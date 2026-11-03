@@ -24,10 +24,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Markdown import
 
-- [ ] **Richer Markdown elements (deferred).** Code, tables and nested lists are
-  simplified on import because the model has no equivalent. Code keeps its line
-  breaks and indentation but not a monospaced face. Supporting them is significant
-  work and is not needed yet.
+- [ ] **Richer Markdown elements (deferred).** Tables, nested lists and inline code
+  are simplified on import because the model has no equivalent.
 
 ## From earlier feedback
 

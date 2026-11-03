@@ -176,6 +176,8 @@ fn highlight_map(
     }
     map
 }
+/// A horizontal rule's width, as a share of the measure.
+const RULE_WIDTH: f32 = 0.25;
 /// Gap between a list marker's right edge and its item's text.
 const LIST_MARKER_GAP: f32 = 6.0;
 /// Font-size step for the Ctrl + / Ctrl - chords, and the clamp bounds (body
@@ -2074,6 +2076,14 @@ impl Session {
         if self.selection.is_some() && !self.delete_selected() {
             return false;
         }
+        // A rule holds no text, so writing on one starts a paragraph after it.
+        let caret = self.valid_caret();
+        let on_rule = self
+            .block_index(caret.block_id)
+            .is_some_and(|index| self.document().blocks[index].kind == BlockKind::Rule);
+        if on_rule && !self.split() {
+            return false;
+        }
         let caret = self.valid_caret();
         match self.editor.insert_text(&caret, text) {
             Ok(op) => {
@@ -2227,6 +2237,20 @@ impl Session {
         self.commit(result)
     }
 
+    /// Shift-Enter: a line in a verbatim block, however blank the one before it. In
+    /// any other block it is just Enter.
+    fn line_break(&mut self) -> bool {
+        let caret = self.valid_caret();
+        let verbatim = self
+            .block_index(caret.block_id)
+            .is_some_and(|index| self.document().blocks[index].kind.is_verbatim());
+        if verbatim {
+            self.insert("\n")
+        } else {
+            self.split()
+        }
+    }
+
     fn split(&mut self) -> bool {
         if self.save_failed {
             return false;
@@ -2238,9 +2262,21 @@ impl Session {
         let Some(index) = self.block_index(caret.block_id) else {
             return false;
         };
+        if self.editor.enter_adds_line(&caret) {
+            return self.insert("\n");
+        }
+        let blocks_before = self.editor.document().blocks.len();
         let result = self.editor.split_paragraph(&caret);
         if !self.commit(result) {
             return false;
+        }
+        // Enter can change the block instead of adding one, and then the caret stays.
+        if self.editor.document().blocks.len() == blocks_before {
+            self.caret = Cursor {
+                block_id: caret.block_id,
+                offset: 0,
+            };
+            return true;
         }
         if let Some(next) = self.editor.document().blocks.get(index + 1) {
             self.caret = Cursor {
@@ -2841,6 +2877,12 @@ fn open_in_browser(url: &str) {
 /// close to what it introduces and far from what it ends, more so the larger it
 /// is, and a quote is set off from the prose around it.
 fn gap_after(block: &BlockKind, next: &BlockKind) -> f32 {
+    let set_off = |kind: &BlockKind| {
+        matches!(
+            kind,
+            BlockKind::BlockQuote | BlockKind::Code { .. } | BlockKind::Prose | BlockKind::Rule
+        )
+    };
     let ratio = match (block, next) {
         (BlockKind::Heading { .. }, _) => 0.4,
         (_, BlockKind::Heading { level }) => match level {
@@ -2848,8 +2890,8 @@ fn gap_after(block: &BlockKind, next: &BlockKind) -> f32 {
             2 => 2.2,
             _ => 1.7,
         },
-        (BlockKind::BlockQuote, BlockKind::BlockQuote) => 1.0,
-        (BlockKind::BlockQuote, _) | (_, BlockKind::BlockQuote) => 1.4,
+        (block, next) if std::mem::discriminant(block) == std::mem::discriminant(next) => 1.0,
+        (block, next) if set_off(block) || set_off(next) => 1.4,
         _ => 1.0,
     };
     BLOCK_GAP * ratio
@@ -3694,6 +3736,9 @@ impl KameApp {
                 Command::SplitParagraph => {
                     self.session.split();
                 }
+                Command::LineBreak => {
+                    self.session.line_break();
+                }
                 Command::Undo => {
                     // Undo can rewrite this note's body (and can remove the note
                     // outright), so the open popover is reseeded from the
@@ -4316,6 +4361,16 @@ impl KameApp {
         let caret_index = blocks.iter().position(|block| block.id == caret.block_id);
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (index, block) in blocks.iter().enumerate() {
+            if block.kind == BlockKind::Rule {
+                let centre = body_left + config.body_width * 0.5;
+                let half = config.body_width * RULE_WIDTH * 0.5;
+                let y = tops[index] + heights[index] * 0.5;
+                painter.line_segment(
+                    [Pos2::new(centre - half, y), Pos2::new(centre + half, y)],
+                    egui::Stroke::new(1.0, self.palette.rule_ink),
+                );
+                continue;
+            }
             if let BlockKind::Image { path, .. } = &block.kind {
                 // An image spans the measure at body width; its height keeps
                 // the source's aspect ratio (already baked into `tops`).
@@ -4703,6 +4758,8 @@ impl KameApp {
                 ("Bulleted list", BlockKind::ListItem { ordered: false }),
                 ("Numbered list", BlockKind::ListItem { ordered: true }),
                 ("Block quote", BlockKind::BlockQuote),
+                ("Code block", BlockKind::Code { language: None }),
+                ("Prose block", BlockKind::Prose),
             ] {
                 if ui.button(label).clicked() {
                     self.set_block_kind(kind);
@@ -8639,5 +8696,221 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(picker.selected, Some(1), "the last row is the floor");
         picker.move_selection(false);
         assert_eq!(picker.selected, Some(2));
+    }
+
+    fn typed(session: &mut Session, text: &str) {
+        for c in text.chars() {
+            session.insert(&c.to_string());
+            session.apply_markdown_shortcut();
+        }
+    }
+
+    fn only_text(session: &Session, index: usize) -> (BlockKind, String) {
+        let block = &session.document().blocks[index];
+        (block.kind.clone(), block.text.clone())
+    }
+
+    #[test]
+    fn typing_a_bar_and_space_starts_a_prose_block() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| Roses");
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Prose, "Roses".to_string())
+        );
+    }
+
+    #[test]
+    fn a_fence_and_enter_starts_a_code_block() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "```rust");
+        session.split();
+        assert_eq!(session.document().blocks.len(), 1);
+        assert_eq!(
+            only_text(&session, 0),
+            (
+                BlockKind::Code {
+                    language: Some("rust".to_string())
+                },
+                String::new()
+            )
+        );
+        assert_eq!(session.caret.offset, 0);
+        typed(&mut session, "fn main()");
+        assert_eq!(session.document().blocks[0].text, "fn main()");
+    }
+
+    #[test]
+    fn a_bare_fence_has_no_language() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "```");
+        session.split();
+        assert_eq!(
+            session.document().blocks[0].kind,
+            BlockKind::Code { language: None }
+        );
+    }
+
+    #[test]
+    fn enter_adds_a_line_in_a_verbatim_block() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| one");
+        session.split();
+        typed(&mut session, "two");
+        assert_eq!(session.document().blocks.len(), 1);
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Prose, "one\ntwo".to_string())
+        );
+        assert_eq!(session.caret.offset, "one\ntwo".len());
+    }
+
+    #[test]
+    fn enter_on_a_blank_last_line_returns_to_body_text() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| one");
+        session.split();
+        session.split();
+        assert_eq!(session.document().blocks.len(), 2);
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Prose, "one".to_string())
+        );
+        assert_eq!(
+            only_text(&session, 1),
+            (BlockKind::Paragraph, String::new())
+        );
+        assert_eq!(session.caret.block_id, session.document().blocks[1].id);
+        assert_eq!(session.caret.offset, 0);
+    }
+
+    #[test]
+    fn shift_enter_keeps_blank_lines_without_leaving() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| one");
+        session.line_break();
+        session.line_break();
+        session.line_break();
+        typed(&mut session, "two");
+        assert_eq!(session.document().blocks.len(), 1);
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Prose, "one\n\n\ntwo".to_string())
+        );
+    }
+
+    #[test]
+    fn enter_in_the_middle_of_a_verbatim_block_only_adds_a_line() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| one");
+        session.line_break();
+        session.line_break();
+        typed(&mut session, "two");
+        session.caret.offset = 4; // the blank line
+        session.split();
+        assert_eq!(session.document().blocks.len(), 1);
+        assert_eq!(session.document().blocks[0].text, "one\n\n\ntwo");
+    }
+
+    #[test]
+    fn enter_on_an_empty_verbatim_block_returns_it_to_body_text() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| ");
+        session.split();
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Paragraph, String::new())
+        );
+    }
+
+    #[test]
+    fn leaving_a_verbatim_block_is_one_undo_step() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| one");
+        session.split();
+        session.split();
+        session.undo();
+        assert_eq!(session.document().blocks.len(), 1);
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Prose, "one\n".to_string())
+        );
+    }
+
+    #[test]
+    fn typed_emphasis_stays_literal_in_a_verbatim_block() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| ");
+        for c in "*a* and [b](c)".chars() {
+            session.insert(&c.to_string());
+            session.apply_inline_markdown();
+            session.apply_markdown_link();
+        }
+        assert_eq!(session.document().blocks[0].text, "*a* and [b](c)");
+        assert!(session.document().blocks[0].spans.is_empty());
+    }
+
+    #[test]
+    fn three_dashes_and_enter_make_a_rule_and_a_new_paragraph() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "---");
+        session.split();
+        assert_eq!(session.document().blocks.len(), 2);
+        assert_eq!(only_text(&session, 0), (BlockKind::Rule, String::new()));
+        assert_eq!(
+            only_text(&session, 1),
+            (BlockKind::Paragraph, String::new())
+        );
+        assert_eq!(session.caret.block_id, session.document().blocks[1].id);
+        session.undo();
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Paragraph, "---".to_string())
+        );
+    }
+
+    #[test]
+    fn typing_on_a_rule_starts_a_paragraph_after_it() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "---");
+        session.split();
+        let rule = session.document().blocks[0].id;
+        session.caret = Cursor {
+            block_id: rule,
+            offset: 0,
+        };
+        session.insert("x");
+        assert_eq!(only_text(&session, 0), (BlockKind::Rule, String::new()));
+        assert_eq!(session.document().blocks[1].text, "x");
+    }
+
+    /// The caret stays put when Enter changes the block rather than adding one, wherever
+    /// the block is in the document.
+    #[test]
+    fn leaving_an_empty_list_item_keeps_the_caret_on_it() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "first");
+        session.split();
+        typed(&mut session, "second");
+        session.caret = Cursor {
+            block_id: session.document().blocks[0].id,
+            offset: "first".len(),
+        };
+        session.split();
+        typed(&mut session, "- ");
+        let item = session.caret.block_id;
+        assert_eq!(session.document().blocks[1].text, "");
+        session.split();
+        assert_eq!(session.document().blocks.len(), 3);
+        assert_eq!(
+            session.caret.block_id, item,
+            "the caret jumped to the next block"
+        );
+    }
+
+    #[test]
+    fn an_older_document_reads_as_before() {
+        let kind: BlockKind = serde_json::from_str(r#"{"Code":{}}"#).unwrap();
+        assert_eq!(kind, BlockKind::Code { language: None });
     }
 }

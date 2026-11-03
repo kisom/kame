@@ -341,12 +341,58 @@ impl Editor {
         // Enter on an empty list item exits the list: the item becomes body
         // text instead of spawning another empty bullet.
         if text.is_empty()
-            && matches!(
-                &block.kind,
-                BlockKind::ListItem { .. } | BlockKind::BlockQuote
-            )
+            && (block.kind.is_verbatim()
+                || matches!(
+                    &block.kind,
+                    BlockKind::ListItem { .. } | BlockKind::BlockQuote
+                ))
         {
             return self.set_block_kind(cursor.block_id, BlockKind::Paragraph);
+        }
+        let at_end = cursor.offset == text.len();
+        // A blank last line leaves a verbatim block for body text. See
+        // `enter_adds_line` for what Enter does anywhere else in one.
+        if block.kind.is_verbatim() && at_end && text.ends_with('\n') {
+            let ops = vec![
+                Op::delete_text(&self.doc, cursor.block_id, text.len() - 1, text.len()),
+                Op::InsertBlock {
+                    index: index + 1,
+                    block: Block {
+                        id: Uuid::new_v4(),
+                        kind: BlockKind::Paragraph,
+                        text: String::new(),
+                        spans: Vec::new(),
+                    },
+                },
+            ];
+            return Ok(self.apply_edit(Op::Batch { ops }));
+        }
+        if block.kind == BlockKind::Paragraph && at_end {
+            // Three dashes and Enter draw a rule, and writing carries on below it.
+            if text.trim_end() == "---" {
+                let ops = vec![
+                    Op::delete_text(&self.doc, cursor.block_id, 0, text.len()),
+                    Op::set_block_kind(&self.doc, cursor.block_id, BlockKind::Rule),
+                    Op::InsertBlock {
+                        index: index + 1,
+                        block: Block {
+                            id: Uuid::new_v4(),
+                            kind: BlockKind::Paragraph,
+                            text: String::new(),
+                            spans: Vec::new(),
+                        },
+                    },
+                ];
+                return Ok(self.apply_edit(Op::Batch { ops }));
+            }
+            // A fence and Enter turn the line into a code block, in place.
+            if let Some(language) = fence_language(&text) {
+                let ops = vec![
+                    Op::set_block_kind(&self.doc, cursor.block_id, BlockKind::Code { language }),
+                    Op::delete_text(&self.doc, cursor.block_id, 0, text.len()),
+                ];
+                return Ok(self.apply_edit(Op::Batch { ops }));
+            }
         }
         let kind = split_kind(&block.kind);
 
@@ -427,6 +473,17 @@ impl Editor {
             ops.push(Op::AddAnnotation { annotation: moved });
         }
         Ok(self.apply_edit(Op::Batch { ops }))
+    }
+
+    /// Whether Enter at `cursor` only adds a line. In a verbatim block it does, except
+    /// on a blank last line or in an empty block, where it leaves for body text.
+    pub fn enter_adds_line(&self, cursor: &Cursor) -> bool {
+        let Ok(block) = self.block(cursor.block_id) else {
+            return false;
+        };
+        let leaving = block.text.is_empty()
+            || (cursor.offset == block.text.len() && block.text.ends_with('\n'));
+        block.kind.is_verbatim() && !leaving
     }
 
     /// Inserts an image block after the caret's block, returning the op that
@@ -525,6 +582,10 @@ impl Editor {
     /// applied op and the caret's new offset, or `None` when the caret has not
     /// just closed an emphasis.
     pub fn apply_inline_markdown(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
+        // What a verbatim block holds is literal.
+        if self.block(cursor.block_id).ok()?.kind.is_verbatim() {
+            return None;
+        }
         let (style, opener_start, closer_start, marker_len) = {
             let block = self.block(cursor.block_id).ok()?;
             inline_emphasis(&block.text, cursor.offset)?
@@ -573,6 +634,10 @@ impl Editor {
     /// span over it, in one atomic op. Returns the applied op and the caret's
     /// new offset, or `None` when the caret has not just closed a link.
     pub fn apply_markdown_link(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
+        // What a verbatim block holds is literal.
+        if self.block(cursor.block_id).ok()?.kind.is_verbatim() {
+            return None;
+        }
         let (open_bracket, close_bracket, url) = {
             let block = self.block(cursor.block_id).ok()?;
             markdown_link(&block.text, cursor.offset)?
@@ -758,9 +823,19 @@ impl Editor {
 /// The kind of block a split creates: a heading's successor is body text, and
 /// everything else keeps its kind (paragraphs stay paragraphs, list items stay
 /// list items).
+/// The language a line naming a code fence opens, if it is one: `Some(None)` for a
+/// bare fence.
+fn fence_language(line: &str) -> Option<Option<String>> {
+    let rest = line.strip_prefix("```")?.trim();
+    if rest.contains('`') {
+        return None;
+    }
+    Some((!rest.is_empty()).then(|| rest.to_string()))
+}
+
 fn split_kind(kind: &BlockKind) -> BlockKind {
     match kind {
-        BlockKind::Heading { .. } => BlockKind::Paragraph,
+        BlockKind::Heading { .. } | BlockKind::Rule => BlockKind::Paragraph,
         other => other.clone(),
     }
 }
@@ -787,6 +862,9 @@ fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
     }
     if text.starts_with("> ") {
         return Some((BlockKind::BlockQuote, 2));
+    }
+    if text.starts_with("| ") {
+        return Some((BlockKind::Prose, 2));
     }
     None
 }

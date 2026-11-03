@@ -10,7 +10,7 @@ use crate::model::{
     Metadata,
 };
 use crate::model::{Span, SpanStyle};
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
@@ -21,11 +21,9 @@ pub struct ImportReport {
     pub front_matter: bool,
     pub dropped_front_matter: usize,
     pub script_links: usize,
-    pub code_blocks: usize,
     pub inline_code: usize,
     pub tables: usize,
     pub raw_html: usize,
-    pub rules: usize,
     pub nested_list_items: usize,
     pub image_alt_text: usize,
     pub unanchored_footnotes: usize,
@@ -40,11 +38,6 @@ impl ImportReport {
                 parts.push(format!("{n} {}", if n == 1 { one } else { many }));
             }
         };
-        count(
-            self.code_blocks,
-            "code block as plain text",
-            "code blocks as plain text",
-        );
         count(
             self.inline_code,
             "inline code span as plain text",
@@ -70,11 +63,6 @@ impl ImportReport {
             self.unanchored_footnotes,
             "uncited footnote kept as prose",
             "uncited footnotes kept as prose",
-        );
-        count(
-            self.rules,
-            "horizontal rule dropped",
-            "horizontal rules dropped",
         );
         count(
             self.script_links,
@@ -323,6 +311,8 @@ struct Builder<'a> {
     image_depth: usize,
     /// In a code or HTML block, where leading whitespace is part of the text.
     preformatted: bool,
+    /// In a code block: its language, if it names one.
+    code: Option<Option<String>>,
     footnote: Option<(String, String)>,
     footnotes: HashMap<String, String>,
     footnote_order: Vec<String>,
@@ -344,6 +334,7 @@ impl<'a> Builder<'a> {
             lists: Vec::new(),
             image_depth: 0,
             preformatted: false,
+            code: None,
             footnote: None,
             footnotes: HashMap::new(),
             footnote_order: Vec::new(),
@@ -377,7 +368,9 @@ impl<'a> Builder<'a> {
             Event::HardBreak => self.push_text("\n"),
             Event::Rule => {
                 self.flush();
-                self.report.rules += 1;
+                if self.footnote.is_none() {
+                    self.blocks.push(new_block(BlockKind::Rule, String::new()));
+                }
             }
             // A body cannot hold a marker of its own: annotations are flat.
             Event::FootnoteReference(label) if self.footnote.is_none() => {
@@ -392,9 +385,17 @@ impl<'a> Builder<'a> {
         match tag {
             Tag::Paragraph | Tag::Table(_) | Tag::CodeBlock(_) | Tag::HtmlBlock => {
                 self.flush();
-                match tag {
+                match &tag {
                     Tag::Table(_) => self.report.tables += 1,
-                    Tag::CodeBlock(_) => self.report.code_blocks += 1,
+                    Tag::CodeBlock(kind) => {
+                        let language = match kind {
+                            CodeBlockKind::Fenced(info) => {
+                                info.split_whitespace().next().map(str::to_string)
+                            }
+                            CodeBlockKind::Indented => None,
+                        };
+                        self.code = Some(language);
+                    }
                     Tag::HtmlBlock => self.report.raw_html += 1,
                     _ => {}
                 }
@@ -466,6 +467,7 @@ impl<'a> Builder<'a> {
             TagEnd::CodeBlock | TagEnd::HtmlBlock => {
                 self.flush();
                 self.preformatted = false;
+                self.code = None;
             }
             TagEnd::Paragraph | TagEnd::TableHead | TagEnd::TableRow | TagEnd::Item => self.flush(),
             TagEnd::Heading(_) => {
@@ -567,7 +569,11 @@ impl<'a> Builder<'a> {
     }
 
     fn current_kind(&self) -> BlockKind {
-        if let Some(level) = self.heading {
+        if let Some(language) = &self.code {
+            BlockKind::Code {
+                language: language.clone(),
+            }
+        } else if let Some(level) = self.heading {
             BlockKind::Heading { level }
         } else if let Some(ordered) = self.lists.last() {
             BlockKind::ListItem { ordered: *ordered }
@@ -861,23 +867,16 @@ mod tests {
     }
 
     #[test]
-    fn code_keeps_its_words_as_plain_text_and_is_reported() {
-        let imported = import("Run `make` first.\n\n```c\nint a;\nint b;\n```\n");
+    fn inline_code_keeps_its_words_and_is_reported() {
+        let imported = import(
+            "Run `make` first.
+",
+        );
         assert_eq!(
             outline(&imported.document),
-            vec![paragraph("Run make first."), paragraph("int a;\nint b;")]
+            vec![paragraph("Run make first.")]
         );
         assert_eq!(imported.report.inline_code, 1);
-        assert_eq!(imported.report.code_blocks, 1);
-    }
-
-    #[test]
-    fn code_keeps_its_indentation() {
-        let imported = import("```\n    indented\n  less\n```\n");
-        assert_eq!(
-            outline(&imported.document),
-            vec![paragraph("    indented\n  less")]
-        );
     }
 
     #[test]
@@ -901,16 +900,6 @@ mod tests {
             ]
         );
         assert_eq!(imported.report.raw_html, 3);
-    }
-
-    #[test]
-    fn a_horizontal_rule_is_dropped_and_reported() {
-        let imported = import("One.\n\n***\n\nTwo.\n");
-        assert_eq!(
-            outline(&imported.document),
-            vec![paragraph("One."), paragraph("Two.")]
-        );
-        assert_eq!(imported.report.rules, 1);
     }
 
     #[test]
@@ -1010,23 +999,22 @@ mod tests {
     fn the_report_reads_as_english() {
         assert_eq!(ImportReport::default().summary(), None);
         let one = ImportReport {
-            code_blocks: 1,
             tables: 1,
-            rules: 1,
+            raw_html: 1,
             ..ImportReport::default()
         };
         assert_eq!(
             one.summary().unwrap(),
-            "1 code block as plain text, 1 table as plain text, 1 horizontal rule dropped"
+            "1 table as plain text, 1 raw HTML fragment as plain text"
         );
         let two = ImportReport {
-            code_blocks: 2,
+            tables: 2,
             dropped_front_matter: 1,
             ..ImportReport::default()
         };
         assert_eq!(
             two.summary().unwrap(),
-            "2 code blocks as plain text, 1 front matter field left out"
+            "2 tables as plain text, 1 front matter field left out"
         );
     }
 
@@ -1495,5 +1483,38 @@ mod tests {
                 link: None,
             }
         );
+    }
+
+    #[test]
+    fn a_rule_imports_as_a_rule() {
+        let imported = import("One.\n\n***\n\nTwo.\n");
+        assert_eq!(imported.document.blocks[1].kind, BlockKind::Rule);
+    }
+
+    #[test]
+    fn fenced_code_imports_as_code_with_its_language() {
+        let imported = import("```rust\nfn a() {\n    b();\n\n}\n```\n");
+        assert_eq!(
+            outline(&imported.document),
+            vec![(
+                BlockKind::Code {
+                    language: Some("rust".to_string())
+                },
+                "fn a() {\n    b();\n\n}".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn indented_code_imports_as_code() {
+        let doc = import("Text.\n\n    let a = 1;\n").document;
+        assert_eq!(doc.blocks[1].kind, BlockKind::Code { language: None });
+        assert_eq!(doc.blocks[1].text, "let a = 1;");
+    }
+
+    #[test]
+    fn code_survives_export_and_import_exactly() {
+        let source = "```rust\nfn a() {\n    let b = \"c -- d\";\n\n}\n```\n";
+        assert_eq!(to_markdown(&import(source).document), source);
     }
 }

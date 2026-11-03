@@ -58,6 +58,16 @@ pub fn to_markdown(doc: &Document) -> String {
             });
             continue;
         }
+        if block.kind == BlockKind::Rule {
+            ordered_index = 0;
+            parts.push("---".to_string());
+            continue;
+        }
+        if let (BlockKind::Code { language }, false) = (&block.kind, block.text.is_empty()) {
+            ordered_index = 0;
+            parts.push(code_fence(language.as_deref(), &block.text));
+            continue;
+        }
         // An empty block carries no text and no apparatus: exporting it would
         // only add stray blank lines. Checked before the prefix match so that a
         // just-emptied list item cannot consume an ordered number (or reset the
@@ -82,12 +92,12 @@ pub fn to_markdown(doc: &Document) -> String {
                 ordered_index = 0;
                 String::new()
             }
-            BlockKind::BlockQuote => {
+            BlockKind::BlockQuote | BlockKind::Prose => {
                 ordered_index = 0;
                 "> ".to_string()
             }
-            BlockKind::Image { .. } => {
-                unreachable!("images are emitted before the prefix match")
+            BlockKind::Image { .. } | BlockKind::Rule | BlockKind::Code { .. } => {
+                unreachable!("these are emitted before the prefix match, or empty")
             }
         };
         let markers = by_block.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
@@ -99,7 +109,7 @@ pub fn to_markdown(doc: &Document) -> String {
         }
         // Every line of a quoted passage keeps the `>` marker, so a pasted
         // multi-line quote still exports as one block quote.
-        if block.kind == BlockKind::BlockQuote {
+        if matches!(block.kind, BlockKind::BlockQuote | BlockKind::Prose) {
             body = body.replace('\n', "\n> ");
         }
         parts.push(format!("{prefix}{body}"));
@@ -350,6 +360,16 @@ fn push_escaped(out: &mut String, text: &str) {
         }
         out.push(c);
     }
+}
+
+/// A code block as a fence, its text exact. The fence is longer than any run of
+/// backticks in the text, which would otherwise close it.
+fn code_fence(language: Option<&str>, text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    let language = language.unwrap_or("");
+    let text = text.trim_end_matches('\n');
+    format!("{fence}{language}\n{text}\n{fence}")
 }
 
 /// Writes a block's line breaks as Markdown hard breaks, since a bare newline
@@ -1250,5 +1270,48 @@ mod tests {
             "",
         )];
         assert_eq!(to_markdown(&doc), "![](a.png)\n");
+    }
+
+    #[test]
+    fn a_rule_exports_as_three_dashes() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            paragraph("One."),
+            block(BlockKind::Rule, ""),
+            paragraph("Two."),
+        ];
+        assert_eq!(to_markdown(&doc), "One.\n\n---\n\nTwo.\n");
+    }
+
+    #[test]
+    fn code_exports_as_a_fence_with_its_text_exact() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Code {
+                language: Some("rust".to_string()),
+            },
+            "fn main() {\n    let a = *b_c;\n\n}",
+        )];
+        assert_eq!(
+            to_markdown(&doc),
+            "```rust\nfn main() {\n    let a = *b_c;\n\n}\n```\n"
+        );
+    }
+
+    #[test]
+    fn a_fence_inside_code_gets_a_longer_fence_around_it() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(BlockKind::Code { language: None }, "```\nx\n```")];
+        assert_eq!(to_markdown(&doc), "````\n```\nx\n```\n````\n");
+    }
+
+    #[test]
+    fn prose_exports_as_a_quote_with_hard_breaks() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(BlockKind::Prose, "Roses are red,\nviolets are blue.")];
+        assert_eq!(
+            to_markdown(&doc),
+            "> Roses are red,\\\n> violets are blue.\n"
+        );
     }
 }

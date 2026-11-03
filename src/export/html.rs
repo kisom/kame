@@ -88,6 +88,25 @@ ul, ol {
 li {
   margin: 0.2em 0;
 }
+pre {
+  margin: 1.2em 0 1.2em 1.5em;
+  white-space: pre-wrap;
+  text-align: left;
+}
+pre code {
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.84em;
+}
+pre.prose {
+  font-family: inherit;
+  hyphens: none;
+}
+hr {
+  width: 25%;
+  margin: 2em auto;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
 aside.marginalia {
   float: right;
   clear: right;
@@ -194,6 +213,11 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
     let mut body = String::new();
     let mut open_list: Option<bool> = None;
     for (index, block) in doc.blocks.iter().enumerate() {
+        if block.kind == BlockKind::Rule {
+            close_list(&mut body, &mut open_list);
+            body.push_str("<hr>\n");
+            continue;
+        }
         // An image is a block with no text: emit it as an `<img>` before the
         // empty-text skip drops it.
         if let BlockKind::Image { path, link } = &block.kind {
@@ -222,12 +246,13 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
         }
         let apparatus = &collected.blocks[index];
         let inner = render_inline(block, &apparatus.footnotes);
-        // A bare newline renders as a space. A heading is one line by definition.
+        // A bare newline renders as a space. A heading is one line by definition, and
+        // a verbatim block is preformatted, so its newlines stand.
         let inner = inner.trim_end_matches('\n');
-        let inner = if matches!(block.kind, BlockKind::Heading { .. }) {
-            inner.replace('\n', " ")
-        } else {
-            inner.replace('\n', "<br>\n")
+        let inner = match &block.kind {
+            BlockKind::Heading { .. } => inner.replace('\n', " "),
+            kind if kind.is_verbatim() => inner.to_string(),
+            _ => inner.replace('\n', "<br>\n"),
         };
         let after = render_apparatus(apparatus);
         match block.kind {
@@ -255,8 +280,24 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
                 }
                 body.push_str(&format!("<li>{after}{inner}</li>\n"));
             }
-            BlockKind::Image { .. } => {
-                unreachable!("images are emitted before the empty-text skip")
+            BlockKind::Code { ref language } => {
+                close_list(&mut body, &mut open_list);
+                body.push_str(&after);
+                match language {
+                    Some(language) => body.push_str(&format!(
+                        "<pre><code class=\"language-{}\">{inner}</code></pre>\n",
+                        escape_attribute(language)
+                    )),
+                    None => body.push_str(&format!("<pre><code>{inner}</code></pre>\n")),
+                }
+            }
+            BlockKind::Prose => {
+                close_list(&mut body, &mut open_list);
+                body.push_str(&after);
+                body.push_str(&format!("<pre class=\"prose\">{inner}</pre>\n"));
+            }
+            BlockKind::Image { .. } | BlockKind::Rule => {
+                unreachable!("these are emitted before the empty-text skip")
             }
         }
     }
@@ -562,7 +603,12 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
             (start < end).then(|| (start, end, span.style.clone()))
         })
         .collect();
-    let links = link_ranges(text);
+    // Code is literal, so a URL in it is only text.
+    let links = if matches!(block.kind, BlockKind::Code { .. }) {
+        Vec::new()
+    } else {
+        link_ranges(text)
+    };
 
     let mut boundaries =
         Vec::with_capacity(spans.len() * 2 + links.len() * 2 + footnotes.len() + 2);
@@ -1360,5 +1406,43 @@ mod tests {
         let html = to_html(&doc);
         assert!(!html.contains("javascript:"), "{html}");
         assert!(html.contains(r#"<img class="image" src="a.png""#), "{html}");
+    }
+
+    #[test]
+    fn a_rule_is_an_hr() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(BlockKind::Rule, "")];
+        assert!(to_html(&doc).contains("<hr>\n"));
+    }
+
+    #[test]
+    fn code_is_preformatted_with_its_language() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Code {
+                language: Some("rust".to_string()),
+            },
+            "a < b\n    c",
+        )];
+        let html = to_html(&doc);
+        assert!(
+            html.contains("<pre><code class=\"language-rust\">a &lt; b\n    c</code></pre>\n"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn prose_is_preformatted_in_the_serif() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(BlockKind::Prose, "one\n  two")];
+        let html = to_html(&doc);
+        assert!(
+            html.contains("<pre class=\"prose\">one\n  two</pre>\n"),
+            "{html}"
+        );
+        assert!(
+            html.contains("pre.prose"),
+            "the stylesheet sets its face: {html}"
+        );
     }
 }

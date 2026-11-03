@@ -13,6 +13,8 @@ use crate::model::{Block, BlockId, BlockKind, SpanStyle};
 const BODY_FAMILY: &str = "EB Garamond";
 /// Heading face; loaded by the caller into the `FontSystem`.
 const HEADING_FAMILY: &str = "Crimson Pro";
+/// Code face; loaded by the caller into the `FontSystem`.
+const CODE_FAMILY: &str = "IBM Plex Mono";
 /// The fixed colour a URL renders in. Chosen to read on both the light and the
 /// dark palette, so it can be baked into the layout without a palette swap
 /// invalidating the layout cache.
@@ -44,6 +46,8 @@ const LIST_INDENT_RATIO: f32 = 1.75;
 /// How far a block quote is indented from the measure, as a ratio of
 /// `body_size`.
 const QUOTE_INDENT_RATIO: f32 = 1.5;
+/// A monospaced face reads large beside the serif at the same size.
+const CODE_RATIO: f32 = 0.84;
 
 impl LayoutConfig {
     /// A config whose font-derived sizes are ratios of `body_size`, at the
@@ -193,9 +197,21 @@ pub fn layout_block_marked_with_align(
             config.body_line_height,
             Style::Italic,
         ),
-        // An image carries no prose: its text is empty, so this arm shapes an
-        // empty buffer and `block_height` supplies the block's real height.
-        BlockKind::Image { .. } => (
+        BlockKind::Code { .. } => (
+            CODE_FAMILY,
+            config.body_size * CODE_RATIO,
+            config.body_line_height * CODE_RATIO,
+            Style::Normal,
+        ),
+        BlockKind::Prose => (
+            BODY_FAMILY,
+            config.body_size,
+            config.body_line_height,
+            Style::Normal,
+        ),
+        // An image or a rule carries no prose: its text is empty, so this arm shapes
+        // an empty buffer and `block_height` supplies the block's real height.
+        BlockKind::Image { .. } | BlockKind::Rule => (
             BODY_FAMILY,
             config.body_size,
             config.body_line_height,
@@ -209,7 +225,9 @@ pub fn layout_block_marked_with_align(
     // its whole column shifts right and wraps in the remaining width.
     let left_indent = match block.kind {
         BlockKind::ListItem { .. } => config.list_indent,
-        BlockKind::BlockQuote => config.body_size * QUOTE_INDENT_RATIO,
+        BlockKind::BlockQuote | BlockKind::Code { .. } | BlockKind::Prose => {
+            config.body_size * QUOTE_INDENT_RATIO
+        }
         _ => 0.0,
     };
     let width = (config.body_width - left_indent).max(1.0);
@@ -328,7 +346,12 @@ fn styled_spans<'a>(
     if text.is_empty() {
         return vec![(text, base.clone())];
     }
-    let links = link_ranges(text);
+    // Code is literal, so a URL in it is only text.
+    let links = if matches!(block.kind, BlockKind::Code { .. }) {
+        Vec::new()
+    } else {
+        link_ranges(text)
+    };
 
     let mut bounds = Vec::with_capacity(block.spans.len() * 2 + links.len() * 2 + 2);
     bounds.push(0);
@@ -1094,5 +1117,71 @@ dance, on a page, of pen, eye and hand.";
         assert_eq!(config.body_width, 640.0);
         assert_eq!(config.margin_width, 180.0);
         assert_eq!(LayoutConfig::default().body_size, DEFAULT_BODY_SIZE);
+    }
+
+    fn kind_block(kind: BlockKind, text: &str) -> Block {
+        Block {
+            id: Uuid::new_v4(),
+            kind,
+            text: text.to_string(),
+            spans: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn code_is_set_in_the_monospaced_face() {
+        let mut fs = FontSystem::new();
+        fs.db_mut()
+            .load_font_file(font_path("IBMPlexMono-Regular.ttf"))
+            .unwrap();
+        load_fonts(&mut fs);
+        let mono = face(&fs, "IBM Plex Mono", Weight::NORMAL, Style::Normal);
+        let config = LayoutConfig::with_body_size(16.0);
+        let layout = layout_block(
+            &mut fs,
+            &kind_block(BlockKind::Code { language: None }, "fn main()"),
+            &config,
+        );
+        let run = layout.buffer.layout_runs().next().unwrap();
+        assert!(run.glyphs.iter().all(|glyph| glyph.font_id == mono));
+        assert!(run.glyphs[0].font_size < config.body_size);
+    }
+
+    #[test]
+    fn prose_is_upright_body_type_and_not_justified() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let body = face(&fs, "EB Garamond", Weight::NORMAL, Style::Normal);
+        let config = LayoutConfig::with_body_size(16.0);
+        let text = "one two three four five six seven eight nine ten eleven twelve thirteen \
+fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three \
+twenty-four twenty-five twenty-six twenty-seven";
+        let prose = layout_block(&mut fs, &kind_block(BlockKind::Prose, text), &config);
+        let run = prose.buffer.layout_runs().next().unwrap();
+        assert!(run.glyphs.iter().all(|glyph| glyph.font_id == body));
+        assert!(prose.left_indent > 0.0, "it is set in from the measure");
+        assert!(
+            run.line_w < config.body_width - prose.left_indent - 1.0 || prose.lines.len() == 1,
+            "the first line should not be stretched to the measure"
+        );
+    }
+
+    #[test]
+    fn a_bare_url_in_code_is_not_coloured_as_a_link() {
+        let mut fs = FontSystem::new();
+        fs.db_mut()
+            .load_font_file(font_path("IBMPlexMono-Regular.ttf"))
+            .unwrap();
+        load_fonts(&mut fs);
+        let layout = layout_block(
+            &mut fs,
+            &kind_block(
+                BlockKind::Code { language: None },
+                "see https://example.com now",
+            ),
+            &LayoutConfig::with_body_size(16.0),
+        );
+        let run = layout.buffer.layout_runs().next().unwrap();
+        assert!(run.glyphs.iter().all(|glyph| glyph.color_opt.is_none()));
     }
 }

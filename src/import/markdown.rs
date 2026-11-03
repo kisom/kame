@@ -1378,6 +1378,8 @@ mod tests {
                 body: body.to_string(),
             }];
             let exported = to_markdown(&doc);
+            // Other renderers read a lone carriage return as a line ending.
+            assert!(!exported.contains('\r'), "{body:?} kept a CR: {exported:?}");
             for event in Parser::new_ext(&exported, Options::empty()) {
                 assert!(
                     !matches!(event, Event::Start(Tag::Link { .. } | Tag::Heading { .. })),

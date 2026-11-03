@@ -4,4 +4,4 @@ mod editor;
 pub(crate) mod ops;
 
 pub use editor::{Cursor, EditError, Editor, Selection};
-pub use ops::Op;
+pub use ops::{apply_inverse, Op};

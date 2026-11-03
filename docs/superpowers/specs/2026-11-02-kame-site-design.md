@@ -211,9 +211,12 @@ A draft isn't private. Anyone with the URL can read it, and it is only as hidden
 
 ## 9. Themes
 
-A theme is a directory of templates and static files, which `kame-site new` writes out for you to
-edit. It is the only theme there is: a build uses `theme/`, and a missing template is an error, so
-what is on disk is exactly what publishes.
+A theme is a directory of templates and static files. The starting theme lives in the repository at
+`crates/kame-site/theme/` and is embedded in the binary, with `include_str!` and `include_bytes!`,
+so that `kame-site new` can write it out for you to edit.
+
+Only `new` reads the embedded copy. A build uses `theme/` and nothing else, and a missing template is
+an error, so what is on disk is exactly what publishes.
 
 ```
 theme/
@@ -246,7 +249,9 @@ theme/
 - `kame_css` is `export::STYLE`, so a theme that uses it gets the marginalia layout, which floats in
   wide windows and folds in narrow ones, with no work of its own.
 
-Templates escape HTML by default, and `body` is passed as safe.
+Templates escape HTML by default. `body` and every URL are passed as safe: `minijinja` escapes `/`, so
+a URL would otherwise come out as `&#x2f;k&#x2f;slug&#x2f;`, which browsers read correctly but which
+is ugly in the output.
 
 ### The home page
 

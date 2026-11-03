@@ -286,6 +286,8 @@ fn is_new_chord(event: &egui::Event) -> bool {
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
 /// The colour of [`LINK_COLOR`] as egui takes it.
 const DOCUMENT_LINK_INK: Color32 = Color32::from_rgb(59, 130, 246);
+/// How much of the page to keep in view past the caret when following it.
+const CARET_ROOM: f32 = 48.0;
 /// The least time between writes of the caret and scroll to the document.
 const POSITION_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// A horizontal rule's width, as a share of the measure.
@@ -819,6 +821,27 @@ fn dim_veil(
 fn typewriter_scroll_offset(caret_top: f32, viewport_height: f32, content_height: f32) -> f32 {
     let furthest = (content_height - viewport_height).max(0.0);
     (caret_top - viewport_height * 0.5).clamp(0.0, furthest)
+}
+
+/// The scroll offset that brings `top..bottom` on page into view with a little room
+/// around it, moving no further than it has to, or `None` if it is already in view.
+fn scroll_to_show(
+    top: f32,
+    bottom: f32,
+    scroll: f32,
+    viewport_height: f32,
+    content_height: f32,
+) -> Option<f32> {
+    let room = CARET_ROOM.min(viewport_height * 0.25);
+    let target = if bottom + room > scroll + viewport_height {
+        bottom + room - viewport_height
+    } else if top - room < scroll {
+        top - room
+    } else {
+        return None;
+    };
+    let furthest = (content_height - viewport_height).max(0.0);
+    Some(target.clamp(0.0, furthest)).filter(|target| (target - scroll).abs() > 0.5)
 }
 
 /// ASCII-fast, Unicode-correct case-insensitive character equality.
@@ -3525,6 +3548,8 @@ struct KameApp {
     /// Scroll offset requested by last frame's typewriter centring. Applied to
     /// the scroll area on the next frame, when its geometry is known.
     pending_scroll: Option<f32>,
+    /// A key moved the caret or changed the text, so the page should keep it in view.
+    follow_caret: bool,
     /// The heading a followed document link named, until its document opens.
     pending_heading: Option<String>,
     escape_prefix: EscapePrefix,
@@ -3603,6 +3628,7 @@ impl KameApp {
             palette: Palette::for_mode(dark),
             typewriter_anchor: None,
             pending_scroll: None,
+            follow_caret: false,
             pending_heading: None,
             escape_prefix: EscapePrefix::default(),
             page_scroll: 0.0,
@@ -4288,6 +4314,7 @@ impl KameApp {
             let Some(command) = prefixed.or_else(|| command_for_event(event)) else {
                 continue;
             };
+            self.follow_caret = true;
             match command {
                 Command::DeleteWordBack => {
                     self.session.delete_word_back();
@@ -5083,6 +5110,25 @@ impl KameApp {
                 ));
             }
             self.reveal_caret = false;
+        }
+
+        // --- following the caret ----------------------------------------------
+        // A key that takes the caret off the page brings the page with it, no further
+        // than it has to. A mouse or wheel leaves the page where the reader put it.
+        if std::mem::take(&mut self.follow_caret) && !typewriter {
+            if let Some(rect) = caret_rect {
+                let page_top = response.rect.top();
+                if let Some(offset) = scroll_to_show(
+                    rect.top() - page_top,
+                    rect.bottom() - page_top,
+                    self.page_scroll,
+                    ui.clip_rect().height(),
+                    content_height,
+                ) {
+                    self.pending_scroll = Some(offset);
+                    ui.ctx().request_repaint();
+                }
+            }
         }
 
         // --- typewriter centring ---------------------------------------------
@@ -10645,5 +10691,32 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             .link_to_document("~/a.kame".to_string(), "T")
             .is_err());
         assert_eq!(session.document().blocks.len(), 2);
+    }
+
+    #[test]
+    fn a_caret_in_view_leaves_the_page_alone() {
+        assert_eq!(scroll_to_show(300.0, 330.0, 100.0, 600.0, 5000.0), None);
+    }
+
+    #[test]
+    fn a_caret_below_the_page_scrolls_only_far_enough() {
+        let offset = scroll_to_show(800.0, 830.0, 100.0, 600.0, 5000.0).unwrap();
+        assert_eq!(offset, 830.0 + CARET_ROOM - 600.0);
+    }
+
+    #[test]
+    fn a_caret_above_the_page_scrolls_only_far_enough() {
+        let offset = scroll_to_show(500.0, 530.0, 1000.0, 600.0, 5000.0).unwrap();
+        assert_eq!(offset, 500.0 - CARET_ROOM);
+    }
+
+    #[test]
+    fn following_the_caret_stays_on_the_page() {
+        assert_eq!(scroll_to_show(10.0, 40.0, 30.0, 600.0, 5000.0), Some(0.0));
+        assert_eq!(
+            scroll_to_show(4980.0, 5000.0, 100.0, 600.0, 5000.0),
+            Some(4400.0)
+        );
+        assert_eq!(scroll_to_show(10.0, 40.0, 0.0, 600.0, 300.0), None);
     }
 }

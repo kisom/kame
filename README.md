@@ -7,6 +7,8 @@ You type into the typeset page; kame renders your prose with real typography
 the margin. Markdown and HTML are generated only on export — the document
 itself is a structured, first-class file, never a pile of markup.
 
+![kame screenshot](docs/images/kame.jpg)
+
 ## Features
 
 - **Anchored marginalia** — notes in the margin that stay with their paragraph.

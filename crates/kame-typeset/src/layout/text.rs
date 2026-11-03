@@ -590,7 +590,7 @@ fn measured_first_fit(
 ) -> Vec<usize> {
     let unbounded = LayoutConfig {
         body_width: 1e7,
-        ..config.clone()
+        ..*config
     };
     let layout = layout_block_with_align(font_system, block, &unbounded, Align::Left);
     let glyphs = &layout.runs[0].glyphs;
@@ -684,8 +684,6 @@ impl Hyphens<'_> {
         glyph
     }
 }
-
-/// How much of an opening mark's width hangs left of the measure.
 
 /// How much of an opening mark's width hangs left of the measure.
 fn left_hang(mark: char) -> f32 {
@@ -1253,7 +1251,7 @@ around at this measure.\n\nAnd one after a blank line."
             ..LayoutConfig::with_body_size(16.0)
         };
         let before = layout_block(&mut fs, &paragraph(LONG), &config);
-        let words: Vec<(usize, &str)> = LONG.match_indices(|c: char| c == ' ').collect();
+        let words: Vec<(usize, &str)> = LONG.match_indices(' ').collect();
         for pair in words.windows(2).step_by(5) {
             let (from, to) = (pair[0].0, pair[1].0);
             let edited = format!("{}{}", &LONG[..from], &LONG[to..]);

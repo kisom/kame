@@ -767,6 +767,37 @@ impl Session {
         self.caret = cursor(end);
     }
 
+    /// The word at `at`, as the cursors either side of it. Both are `at` where there is none.
+    pub fn word_range_at(&self, at: Cursor) -> (Cursor, Cursor) {
+        let at = clamp_cursor(self.editor.document(), at);
+        let Some(index) = self.block_index(at.block_id) else {
+            return (at, at);
+        };
+        let (start, end) = word_at(&self.document().blocks[index].text, at.offset);
+        if start == end {
+            return (at, at);
+        }
+        let cursor = |offset| Cursor {
+            block_id: at.block_id,
+            offset,
+        };
+        (cursor(start), cursor(end))
+    }
+
+    /// Selects whole words from the word `anchor`, which a double click chose, out to the word
+    /// at `at`, as dragging from a double click does. The caret follows the pointer.
+    pub fn select_words_between(&mut self, anchor: (Cursor, Cursor), at: Cursor) {
+        let (word_start, word_end) = self.word_range_at(at);
+        let position = |cursor: Cursor| (self.block_index(cursor.block_id), cursor.offset);
+        let (start, end) = if position(word_start) < position(anchor.0) {
+            (anchor.1, word_start)
+        } else {
+            (anchor.0, word_end)
+        };
+        self.selection = (start != end).then_some(Selection { start, end });
+        self.caret = end;
+    }
+
     pub fn select_to(&mut self, caret: Cursor) {
         let origin = self
             .selection
@@ -5221,5 +5252,86 @@ mod tests {
         });
         session.insert("2");
         assert_eq!(session.document().blocks[0].text, "one 2 three");
+    }
+
+    fn dragged_words(
+        text: &[&str],
+        anchor: (usize, usize),
+        to: (usize, usize),
+    ) -> (Option<String>, usize) {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(text[0]);
+        for line in &text[1..] {
+            session.split();
+            session.insert(line);
+        }
+        let id = |index: usize| session.document().blocks[index].id;
+        let at = |(block, offset): (usize, usize)| Cursor {
+            block_id: id(block),
+            offset,
+        };
+        let word = session.word_range_at(at(anchor));
+        let target = at(to);
+        session.select_words_between(word, target);
+        (session.selected_text(), session.caret.offset)
+    }
+
+    #[test]
+    fn dragging_after_a_double_click_takes_whole_words_forwards() {
+        let (selected, caret) = dragged_words(&["one two three four"], (0, 5), (0, 9));
+        assert_eq!(selected.as_deref(), Some("two three"));
+        assert_eq!(caret, "one two three".len());
+    }
+
+    #[test]
+    fn dragging_after_a_double_click_takes_whole_words_backwards() {
+        let (selected, caret) = dragged_words(&["one two three four"], (0, 9), (0, 1));
+        assert_eq!(selected.as_deref(), Some("one two three"));
+        assert_eq!(caret, 0, "the caret follows the pointer");
+    }
+
+    #[test]
+    fn dragging_within_the_word_keeps_the_word() {
+        let (selected, _) = dragged_words(&["one two three"], (0, 5), (0, 6));
+        assert_eq!(selected.as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn dragging_by_words_crosses_blocks_both_ways() {
+        let (selected, _) = dragged_words(&["one two", "three four"], (0, 5), (1, 1));
+        assert_eq!(selected.as_deref(), Some("two\nthree"));
+        let (selected, _) = dragged_words(&["one two", "three four"], (1, 1), (0, 5));
+        assert_eq!(selected.as_deref(), Some("two\nthree"));
+    }
+
+    #[test]
+    fn dragging_by_words_counts_bytes() {
+        let (selected, _) = dragged_words(&["un été ici"], (0, 4), (0, "un été i".len()));
+        assert_eq!(selected.as_deref(), Some("été ici"));
+    }
+
+    #[test]
+    fn a_word_range_on_nothing_is_empty() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("a  b");
+        let at = Cursor {
+            block_id: session.document().blocks[0].id,
+            offset: 2,
+        };
+        assert_eq!(session.word_range_at(at), (at, at));
+    }
+
+    #[test]
+    fn dragging_by_words_with_nothing_between_selects_nothing() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("a  b");
+        let at = Cursor {
+            block_id: session.document().blocks[0].id,
+            offset: 2,
+        };
+        let anchor = session.word_range_at(at);
+        session.select_words_between(anchor, at);
+        assert_eq!(session.selection, None);
+        assert_eq!(session.caret, at);
     }
 }

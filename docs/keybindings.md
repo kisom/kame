@@ -27,7 +27,8 @@ macOS (`Modifiers::command`).
 
 ## Selecting
 
-Double-click a word to select it, and drag or Shift-click to select a range.
+Double-click a word to select it, and keep the button down on the second click to drag out by
+whole words. Drag or Shift-click to select a range by character.
 
 ## Moving and deleting by word
 

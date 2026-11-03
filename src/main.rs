@@ -339,6 +339,19 @@ fn drop_tabs(events: &mut Vec<egui::Event>) {
     });
 }
 
+/// Whether a press at `at` is the second of a double click: soon after the last click and
+/// about where it was. A drag from there selects by word.
+fn is_second_press(
+    click: Option<(std::time::Instant, Pos2)>,
+    now: std::time::Instant,
+    at: Pos2,
+) -> bool {
+    click.is_some_and(|(when, where_it_was)| {
+        now.saturating_duration_since(when).as_secs_f32() <= DOUBLE_CLICK_SECONDS
+            && where_it_was.distance(at) <= DOUBLE_CLICK_REACH
+    })
+}
+
 /// Ctrl-N, or Cmd-N on a Mac. With Shift it adds a note.
 fn is_new_chord(event: &egui::Event) -> bool {
     matches!(
@@ -355,6 +368,10 @@ fn is_new_chord(event: &egui::Event) -> bool {
 
 /// How many links back can be followed.
 const MAX_BACK_STOPS: usize = 64;
+/// How long after a click a second press still counts as a double click.
+const DOUBLE_CLICK_SECONDS: f32 = 0.4;
+/// How far from a click a second press can land and still count as a double click.
+const DOUBLE_CLICK_REACH: f32 = 6.0;
 /// How far up from the bottom of its line a document link's underline sits, as a share
 /// of the line's height.
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
@@ -1801,6 +1818,10 @@ struct KameApp {
     last_document: LastDocument,
     /// The way back through followed links.
     back: BackStack,
+    /// When and where the page was last clicked, for telling a double click's second press.
+    last_click: Option<(std::time::Instant, Pos2)>,
+    /// Where a drag by words began, while one is going.
+    word_drag_start: Option<Cursor>,
     /// The author new documents start with.
     default_author: String,
     /// The "Snapshot Now" label prompt, when it is open.
@@ -1883,6 +1904,8 @@ impl KameApp {
             position_saved_at: std::time::Instant::now(),
             last_document: LastDocument::new(last_document),
             back: BackStack::default(),
+            last_click: None,
+            word_drag_start: None,
             default_author,
             snapshot_prompt: None,
             open_prompt: None,
@@ -3606,20 +3629,40 @@ impl KameApp {
         // --- pointer ---------------------------------------------------------
         let shift = ui.input(|input| input.modifiers.shift);
         let mut caret_action: Option<(Cursor, bool)> = None;
+        let mut word_drag_to = None;
         let mut followed_link = None;
         let mut word_selection = None;
         let mut marker_click: Option<(AnnotationId, Rect)> = None;
         let pointer = response.interact_pointer_pos();
-        if response.drag_started() {
+        if response.clicked() {
             if let Some(pos) = pointer {
+                self.last_click = Some((std::time::Instant::now(), pos));
+            }
+        }
+        if response.drag_started() {
+            // Where the press began, since the pointer has moved by the time this is a drag.
+            let origin = ui.input(|input| input.pointer.press_origin()).or(pointer);
+            let second_press = origin
+                .is_some_and(|at| is_second_press(self.last_click, std::time::Instant::now(), at));
+            self.word_drag_start = None;
+            if let Some(pos) = origin {
                 if let Some(cursor) = hit_test(blocks, &layouts, &tops, &heights, body_left, pos) {
-                    caret_action = Some((cursor, shift));
+                    if second_press && !shift {
+                        self.word_drag_start = Some(cursor);
+                    } else {
+                        caret_action = Some((cursor, shift));
+                    }
                 }
             }
-        } else if response.dragged() {
+        }
+        if response.dragged() {
             if let Some(pos) = pointer {
                 if let Some(cursor) = hit_test(blocks, &layouts, &tops, &heights, body_left, pos) {
-                    caret_action = Some((cursor, true));
+                    if self.word_drag_start.is_some() {
+                        word_drag_to = Some(cursor);
+                    } else {
+                        caret_action = Some((cursor, true));
+                    }
                 }
             }
         }
@@ -3661,7 +3704,10 @@ impl KameApp {
 
         // `blocks` borrows the document; every caret move is applied after the
         // borrow's last use.
-        if let Some(at) = word_selection {
+        if let (Some(start), Some(to)) = (self.word_drag_start, word_drag_to) {
+            let anchor = self.session.word_range_at(start);
+            self.session.select_words_between(anchor, to);
+        } else if let Some(at) = word_selection {
             self.session.select_word_at(at);
             self.set_open_note(None);
         } else if let Some(target) = followed_link {
@@ -6969,5 +7015,19 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             Some(&dir.join("gone.kame")),
             Some(&dir.join("gone2.kame"))
         ));
+    }
+
+    #[test]
+    fn a_press_soon_after_a_click_in_the_same_place_is_a_second_press() {
+        let now = std::time::Instant::now();
+        let soon = now + std::time::Duration::from_millis(200);
+        let late = now + std::time::Duration::from_millis(800);
+        let here = Pos2::new(100.0, 100.0);
+        let close = Pos2::new(102.0, 101.0);
+        let far = Pos2::new(160.0, 100.0);
+        assert!(is_second_press(Some((now, here)), soon, close));
+        assert!(!is_second_press(Some((now, here)), late, close));
+        assert!(!is_second_press(Some((now, here)), soon, far));
+        assert!(!is_second_press(None, soon, close));
     }
 }

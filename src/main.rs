@@ -1378,7 +1378,7 @@ fn main() -> eframe::Result {
         let _ = std::fs::create_dir_all(&dir);
         hold_instance_lock(&dir.join("instance.lock"))
     });
-    let last_document = config.last_document;
+    let mut last_document = config.last_document;
     let last = last_document.clone().filter(|_| first);
 
     // With an argument, open that file, and with none go back to the last document.
@@ -1401,7 +1401,18 @@ fn main() -> eframe::Result {
                 // reason in the status panel, since a desktop launch has no
                 // terminal to print to.
                 match Session::open_any(&path) {
-                    Ok(opened) => opened,
+                    Ok(opened) => {
+                        // An import has no file yet, so it is like a new document.
+                        if opened.0.is_anonymous() {
+                            last_document = None;
+                            save_config(&KameConfig {
+                                body_size,
+                                dark,
+                                last_document: None,
+                            });
+                        }
+                        opened
+                    }
                     Err(err) => {
                         let message = format!("could not open {} — {err}", path.display());
                         let session = Session::blank(&path, message).unwrap_or_else(|err| {
@@ -5726,6 +5737,11 @@ impl KameApp {
         match Session::open_any(&path) {
             Ok((session, note)) => {
                 self.adopt_session(session);
+                // An import has no file yet, so it is like a new document.
+                if self.session.is_anonymous() {
+                    self.last_document.forget();
+                    self.persist();
+                }
                 self.notice = Some(note.unwrap_or_else(|| format!("opened {}", path.display())));
             }
             Err(err) => {

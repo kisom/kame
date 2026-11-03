@@ -147,8 +147,8 @@ Clicking a footnote's number drops down to the footnote.
 ## Coming back
 
 Launching kame without naming a file reopens the last file you had open, if it is
-still there. After Ctrl-N it starts empty instead, until that document is saved or
-another file is opened. A second kame started while one is running begins empty instead, because two
+still there. After Ctrl-N, or after importing Markdown, it starts empty instead, until
+that document is saved or another file is opened. A second kame started while one is running begins empty instead, because two
 windows on one file would overwrite each other's edits.
 
 Each document keeps its caret and scroll position in its own file, and returns to them

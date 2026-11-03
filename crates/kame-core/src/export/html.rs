@@ -167,6 +167,9 @@ code {
   font-size: 0.84em;
   font-style: normal;
 }
+pre code {
+  font-size: 0.75em;
+}
 pre.prose {
   font-family: inherit;
 }
@@ -1650,6 +1653,13 @@ mod tests {
             html.contains("<pre><code class=\"language-rust\">a &lt; b\n    c</code></pre>\n"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn a_code_block_is_set_smaller_than_inline_code() {
+        let style = STYLE;
+        assert!(rule_for("code", style).contains("font-size: 0.84em"));
+        assert!(rule_for("pre code", style).contains("font-size: 0.75em"));
     }
 
     #[test]

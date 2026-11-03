@@ -51,6 +51,9 @@ const QUOTE_INDENT_RATIO: f32 = 1.5;
 const VERBATIM_TAB_WIDTH: u16 = 4;
 /// A monospaced face reads large beside the serif at the same size.
 const CODE_RATIO: f32 = 0.84;
+/// A code block stands apart from the text around it, so it can be smaller than inline code,
+/// and more of its lines fit without wrapping.
+const CODE_BLOCK_RATIO: f32 = 0.75;
 
 impl LayoutConfig {
     /// A config whose font-derived sizes are ratios of `body_size`, at the
@@ -218,8 +221,8 @@ pub fn layout_block_marked_with_align(
         ),
         BlockKind::Code { .. } => (
             CODE_FAMILY,
-            config.body_size * CODE_RATIO,
-            config.body_line_height * CODE_RATIO,
+            config.body_size * CODE_BLOCK_RATIO,
+            config.body_line_height * CODE_BLOCK_RATIO,
             Style::Normal,
         ),
         BlockKind::Prose => (
@@ -1288,7 +1291,8 @@ dance, on a page, of pen, eye and hand.";
         );
         let run = layout.buffer.layout_runs().next().unwrap();
         assert!(run.glyphs.iter().all(|glyph| glyph.font_id == mono));
-        assert!(run.glyphs[0].font_size < config.body_size);
+        assert_eq!(run.glyphs[0].font_size, config.body_size * 0.75);
+        assert_eq!(run.line_height, config.body_line_height * 0.75);
     }
 
     #[test]
@@ -1531,7 +1535,7 @@ dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
             .filter(|g| g.start >= 6 && g.end <= 10)
             .collect();
         assert!(code.iter().all(|g| g.font_id == mono));
-        assert!(code.iter().all(|g| g.font_size < config.body_size));
+        assert!(code.iter().all(|g| g.font_size == config.body_size * 0.84));
         assert_eq!(coded.height, plain.height, "the line's height moved");
         assert_eq!(
             coded.buffer.layout_runs().next().unwrap().line_y,

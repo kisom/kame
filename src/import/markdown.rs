@@ -108,15 +108,14 @@ pub fn from_markdown(source: &str, base_dir: &Path, fallback_title: &str) -> Imp
     let metadata = front_matter
         .as_ref()
         .map_or_else(Metadata::default, |found| found.metadata.clone());
+    let mut metadata = metadata;
+    metadata.title = typographic(&metadata.title);
     let title = (!metadata.title.is_empty()).then(|| metadata.title.clone());
 
     let mut builder = Builder::new(base_dir);
     builder.report.front_matter = front_matter.is_some();
     builder.report.dropped_front_matter = front_matter.as_ref().map_or(0, |found| found.dropped);
-    // Smart punctuation stays off: it would rewrite the author's characters,
-    // and a straight quote kame exported would not read back as itself.
-    let options = Options::ENABLE_FOOTNOTES | Options::ENABLE_TABLES;
-    for event in Parser::new_ext(body, options) {
+    for event in Parser::new_ext(body, parser_options()) {
         builder.event(event);
     }
     let (mut blocks, annotations, report) = builder.finish();
@@ -143,6 +142,32 @@ pub fn from_markdown(source: &str, base_dir: &Path, fallback_title: &str) -> Imp
         document,
         metadata,
         report,
+    }
+}
+
+/// How a source is parsed. Plain punctuation becomes typographic, as a page should
+/// have it: `---` an em dash, straight quotes curly. Code and link targets are left
+/// as written.
+fn parser_options() -> Options {
+    Options::ENABLE_FOOTNOTES | Options::ENABLE_TABLES | Options::ENABLE_SMART_PUNCTUATION
+}
+
+/// `text` with the same punctuation as the body, for what is read outside it. It
+/// is parsed after a placeholder word, so it cannot be read as block structure.
+fn typographic(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let source = format!("x {text}");
+    let parsed: String = Parser::new_ext(&source, Options::ENABLE_SMART_PUNCTUATION)
+        .filter_map(|event| match event {
+            Event::Text(part) | Event::Code(part) => Some(part.to_string()),
+            _ => None,
+        })
+        .collect();
+    match parsed.strip_prefix("x ") {
+        Some(words) if !words.is_empty() => words.to_string(),
+        _ => text.to_string(),
     }
 }
 
@@ -657,7 +682,7 @@ mod tests {
         let doc = import("Lately, I've been\ngoing through\na period.\n").document;
         assert_eq!(
             outline(&doc),
-            vec![paragraph("Lately, I've been going through a period.")]
+            vec![paragraph("Lately, I’ve been going through a period.")]
         );
     }
 
@@ -1099,7 +1124,7 @@ mod tests {
         let body = split_front_matter(source).map_or(source, |found| found.body);
         let mut words = HashMap::new();
         let mut in_image = 0;
-        for event in Parser::new_ext(body, Options::ENABLE_FOOTNOTES | Options::ENABLE_TABLES) {
+        for event in Parser::new_ext(body, parser_options()) {
             let text = match event {
                 Event::Start(Tag::Image { .. }) => {
                     in_image += 1;
@@ -1354,5 +1379,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn plain_punctuation_becomes_typographic() {
+        let doc = import("I've said \"it\" -- twice --- and 'more'...\n").document;
+        assert_eq!(doc.blocks[0].text, "I’ve said “it” – twice — and ‘more’…");
+    }
+
+    #[test]
+    fn code_keeps_its_plain_punctuation() {
+        let doc = import("Run `a --- 'b'`.\n\n```\nx = \"y\" -- z\n```\n").document;
+        assert_eq!(doc.blocks[0].text, "Run a --- 'b'.");
+        assert_eq!(doc.blocks[1].text, "x = \"y\" -- z");
+    }
+
+    #[test]
+    fn a_link_target_keeps_its_plain_punctuation() {
+        let doc = import("[a](https://x.example/it's--here)\n").document;
+        assert_eq!(
+            doc.blocks[0].spans[0].style,
+            SpanStyle::Link {
+                url: "https://x.example/it's--here".to_string(),
+            }
+        );
+    }
+
+    /// A title is read from front matter, not the body, but appears beside it.
+    #[test]
+    fn a_front_matter_title_gets_the_same_punctuation() {
+        let imported = import("Title: Can't Stop -- \"Won't\"\n\nBody.\n");
+        assert_eq!(imported.metadata.title, "Can’t Stop – “Won’t”");
+        assert_eq!(imported.document.blocks[0].text, "Can’t Stop – “Won’t”");
+    }
+
+    #[test]
+    fn a_title_that_looks_like_markdown_keeps_its_words() {
+        let imported = import("Title: 1. # First - 2019\n\nBody.\n");
+        assert_eq!(imported.metadata.title, "1. # First - 2019");
     }
 }

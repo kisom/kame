@@ -17,9 +17,9 @@ use std::collections::HashMap;
 /// Layout rules:
 /// - headings become `#` runs (level clamped to 1–6),
 /// - ordered list items are numbered per consecutive run, unordered ones use `- `,
-/// - prose is escaped: backslash, asterisk, underscore, backtick and square
+/// - prose is escaped: backslash, asterisk, underscore, backtick, square and angle
 ///   brackets in the text are backslash-escaped so they cannot open emphasis,
-///   code or a link, and a paragraph whose first glyph would start block
+///   code, a link or raw HTML, and a paragraph whose first glyph would start block
 ///   structure (`#`, `>`, `-`, `+`, `=`, `~`, or `1.`/`1)`) has that glyph
 ///   escaped too, so it stays a paragraph,
 /// - blocks are separated by a blank line and the document ends in a newline,
@@ -114,7 +114,9 @@ pub fn to_markdown(doc: &Document) -> String {
             .iter()
             .map(|(number, annotation)| {
                 let mut body = String::new();
-                push_escaped(&mut body, &annotation.body);
+                // One line: a footnote definition ends at a blank line, and what
+                // followed would parse as blocks of its own.
+                push_escaped(&mut body, &annotation.body.replace(['\r', '\n'], " "));
                 format!("[^{number}]: {body}")
             })
             .collect();
@@ -334,7 +336,7 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
 /// Markdown punctuation that would start emphasis, code or a link if it were
 /// emitted verbatim. Escaped per character, so cutting the text at a span edge
 /// cannot leave half an escape sequence in one segment.
-const ESCAPED_IN_TEXT: [char; 6] = ['\\', '*', '_', '`', '[', ']'];
+const ESCAPED_IN_TEXT: [char; 8] = ['\\', '*', '_', '`', '[', ']', '<', '>'];
 
 /// Appends `text` with the characters in [`ESCAPED_IN_TEXT`] backslash-escaped.
 fn push_escaped(out: &mut String, text: &str) {
@@ -1194,5 +1196,40 @@ mod tests {
         )];
         doc.blocks = vec![heading, paragraph("Body.")];
         assert!(!to_markdown_with(&doc, &metadata()).contains("# On Burnout"));
+    }
+
+    #[test]
+    fn angle_brackets_in_prose_cannot_become_html() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Run <script>alert(1)</script> & a > b.")];
+        assert_eq!(
+            to_markdown(&doc),
+            "Run \\<script\\>alert(1)\\</script\\> & a \\> b.\n"
+        );
+    }
+
+    #[test]
+    fn a_leading_angle_bracket_is_escaped_once() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("> not a quote")];
+        assert_eq!(to_markdown(&doc), "\\> not a quote\n");
+    }
+
+    #[test]
+    fn a_footnote_body_cannot_become_html_or_new_blocks() {
+        let mut doc = Document::new("t");
+        let first = paragraph("Body");
+        doc.annotations = vec![annotation(
+            AnnotationKind::Footnote,
+            first.id,
+            0,
+            4,
+            "<b>x</b>\n\n# not a heading",
+        )];
+        doc.blocks = vec![first];
+        assert_eq!(
+            to_markdown(&doc),
+            "Body[^1]\n\n[^1]: \\<b\\>x\\</b\\>  # not a heading\n"
+        );
     }
 }

@@ -17,10 +17,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 - [ ] **A static site generator for blog posts.** Working from `.kame` files, and the
   occasional Markdown file, so marginals can be laid out properly. Markdown export
-  drops them.
-- [ ] **Decide on raw HTML in Markdown export.** `<` is not escaped, so a literal
-  `<script>` in prose or a footnote exports as live HTML. Escaping it would also stop
-  deliberate inline HTML rendering.
+  drops them. It would also settle site-root images, like `/files/images/...`, which
+  cannot be found from the file alone and show the missing-image placeholder.
 
 ## Typography
 
@@ -39,16 +37,10 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 - [ ] **A linked image loses its link.** `[![](a.png)](b.png)` imports as just the
   image, because image blocks have no link.
-- [ ] **Site-root images show as missing.** `/files/images/...` cannot be found
-  from the file alone, so they get the missing-image placeholder. Asking for a
-  site root at import would resolve them.
 - [ ] **Richer Markdown elements (deferred).** Code, tables and nested lists are
   simplified on import because the model has no equivalent. Code keeps its line
   breaks and indentation but not a monospaced face. Supporting them is significant
   work and is not needed yet.
-- [ ] **Decide on smart punctuation.** `---` and straight quotes import as typed,
-  though posts may expect em dashes and curly quotes. Converting them on import
-  would break the export round trip.
 
 ## From earlier feedback
 

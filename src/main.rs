@@ -372,6 +372,8 @@ const MAX_BACK_STOPS: usize = 64;
 const DOUBLE_CLICK_SECONDS: f32 = 0.4;
 /// How far from a click a second press can land and still count as a double click.
 const DOUBLE_CLICK_REACH: f32 = 6.0;
+/// How often to look for the open file having been replaced on disk.
+const FILE_CHECK_SECONDS: f32 = 1.0;
 /// How far up from the bottom of its line a document link's underline sits, as a share
 /// of the line's height.
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
@@ -1822,6 +1824,10 @@ struct KameApp {
     last_click: Option<(std::time::Instant, Pos2)>,
     /// Where a drag by words began, while one is going.
     word_drag_start: Option<Cursor>,
+    /// When the open file was last checked for having been replaced.
+    last_file_check: std::time::Instant,
+    /// Asking what to do about a file replaced on disk.
+    replaced_prompt: bool,
     /// The author new documents start with.
     default_author: String,
     /// The "Snapshot Now" label prompt, when it is open.
@@ -1906,6 +1912,8 @@ impl KameApp {
             back: BackStack::default(),
             last_click: None,
             word_drag_start: None,
+            last_file_check: std::time::Instant::now(),
+            replaced_prompt: false,
             default_author,
             snapshot_prompt: None,
             open_prompt: None,
@@ -2001,6 +2009,7 @@ impl KameApp {
             || self.image_prompt.is_some()
             || self.link_prompt.is_some()
             || self.restore_picker.is_some()
+            || self.replaced_prompt
     }
 
     /// Closes whichever file dialog is open. Returns whether one was closed, so
@@ -2463,6 +2472,16 @@ impl KameApp {
         let back_chord = ctx.input(|input| input.events.iter().any(is_back_chord));
         if back_chord && !self.dialog_open() && !self.close_flow.prompting {
             self.go_back();
+        }
+        // Every write checks too, so this is only for saying so promptly.
+        if self.last_file_check.elapsed().as_secs_f32() >= FILE_CHECK_SECONDS {
+            self.last_file_check = std::time::Instant::now();
+            if self.session.check_file() {
+                self.replaced_prompt = true;
+            }
+        }
+        if !self.session.is_anonymous() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(FILE_CHECK_SECONDS));
         }
         let new_chord = ctx.input(|input| input.events.iter().any(is_new_chord));
         if new_chord && !self.dialog_open() && !self.close_flow.prompting {
@@ -4539,6 +4558,59 @@ impl KameApp {
         }
     }
 
+    /// What to do about a file replaced on disk: keep these words under a new name, or take
+    /// what is there now. Either way one version stays where it is, so neither button can lose
+    /// both, and the error strip brings this back after Not Now.
+    fn show_replaced_prompt(&mut self, ctx: &egui::Context) {
+        if !self.replaced_prompt {
+            return;
+        }
+        let Some(path) = self.session.path().map(Path::to_path_buf) else {
+            self.replaced_prompt = false;
+            return;
+        };
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let there = path.is_file();
+        let mut save = false;
+        let mut open = false;
+        let mut later = false;
+        egui::Window::new("File changed on disk")
+            .id(Id::unique("kame-replaced-prompt"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                ui.label(if there {
+                    format!("{name} was replaced, probably by a sync from another machine.")
+                } else {
+                    format!("{name} is no longer there.")
+                });
+                ui.label(
+                    "Nothing more can be saved to it. What is on this screen is safe for now.",
+                );
+                ui.horizontal(|ui| {
+                    save = ui.button("Save mine as…").clicked();
+                    if there {
+                        open = ui.button("Open the one on disk").clicked();
+                    }
+                    later = ui.button("Not now").clicked();
+                });
+            });
+        if save {
+            self.save_with_dialog(ctx, false);
+            self.replaced_prompt = self.session.replaced;
+        } else if open {
+            self.replaced_prompt = false;
+            self.open_document(path.display().to_string());
+        } else if later {
+            self.replaced_prompt = false;
+        }
+    }
+
     /// The "save this anonymous document before closing?" prompt: Save… opens
     /// the native save-as browser, Don't Save closes without saving, and Cancel
     /// keeps editing.
@@ -4955,12 +5027,14 @@ impl eframe::App for KameApp {
                     let retry = self.session.save_failed;
                     if draw_error_indicator(ui, error, retry, self.palette.error_ink) {
                         self.session.retry_or_dismiss();
+                        self.replaced_prompt = self.session.replaced;
                     }
                 }
             });
         // Dialogs are drawn last, from the root: above the page, and available
         // even while the chrome (and with it the buttons) is hidden.
         self.show_dialogs(ui.ctx());
+        self.show_replaced_prompt(ui.ctx());
         self.remember_document();
         self.keep_position(ui.ctx());
     }

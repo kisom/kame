@@ -42,6 +42,35 @@ pub struct Session {
     /// (in-memory) document that has not been saved yet. Exports land beside
     /// it, and the snapshots it prompts for live in the database it names.
     pub path: Option<PathBuf>,
+    /// Which file `path` named when it was opened.
+    on_disk: Option<FileIdentity>,
+    /// Which file its `-wal` was, as of the last write, so as to tell it from one that arrived.
+    log_on_disk: Option<FileIdentity>,
+    /// Set when `path` stopped being that file. Nothing more is written.
+    pub replaced: bool,
+}
+
+/// Where SQLite keeps the log of writes to the database at `path`.
+fn wal_path(path: &Path) -> PathBuf {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    PathBuf::from(wal)
+}
+
+/// Which file a path leads to, as opposed to what is in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let found = std::fs::metadata(path).ok()?;
+    Some(FileIdentity {
+        device: found.dev(),
+        inode: found.ino(),
+    })
 }
 
 impl Session {
@@ -162,6 +191,9 @@ impl Session {
             restored_scroll: position.map(|position| position.scroll),
             metadata,
             path: Some(path.to_path_buf()),
+            on_disk: file_identity(path),
+            log_on_disk: file_identity(&wal_path(path)),
+            replaced: false,
         })
     }
 
@@ -200,6 +232,9 @@ impl Session {
                 ..Metadata::default()
             },
             path: None,
+            on_disk: None,
+            log_on_disk: None,
+            replaced: false,
         })
     }
 
@@ -233,6 +268,9 @@ impl Session {
                 ..Metadata::default()
             },
             path: None,
+            on_disk: None,
+            log_on_disk: None,
+            replaced: false,
         })
     }
 
@@ -307,6 +345,9 @@ impl Session {
             restored_scroll: None,
             metadata,
             path: None,
+            on_disk: None,
+            log_on_disk: None,
+            replaced: false,
         };
         Ok((session, note))
     }
@@ -486,6 +527,9 @@ impl Session {
     /// leaves both the old file and this session as they were. The result is as
     /// private as the old file and the current document, whichever is more so.
     pub fn save_as(&mut self, path: &Path) -> AppResult<()> {
+        if self.replaced && self.path.as_deref() == Some(path) {
+            return Err("that file changed on disk, so this needs another name".into());
+        }
         if self.path.as_deref() == Some(path) {
             self.clear_save_error();
             return Ok(());
@@ -539,6 +583,9 @@ impl Session {
 
         self.db = Db::open(path)?;
         self.path = Some(path.to_path_buf());
+        self.on_disk = file_identity(path);
+        self.log_on_disk = file_identity(&wal_path(path));
+        self.replaced = false;
         self.clear_save_error();
         Ok(())
     }
@@ -646,6 +693,10 @@ impl Session {
     /// Persists the head document and the undo cursor together, the write
     /// path for undo/redo. Returns whether the write landed.
     pub fn save_state(&mut self) -> bool {
+        self.check_file();
+        if self.replaced {
+            return false;
+        }
         match self
             .db
             .save_state(self.editor.document(), self.editor.cursor())
@@ -664,10 +715,18 @@ impl Session {
     /// Persists one applied edit (op + head + cursor in one transaction).
     /// Returns whether the write landed.
     pub fn record(&mut self, op: &Op) -> bool {
+        self.check_file();
+        if self.replaced {
+            return false;
+        }
         let saved = match self.editor.coalesced_edit() {
             Some(joined) => self.db.replace_last_edit(self.editor.document(), joined),
             None => self.db.record_edit(self.editor.document(), op).map(|_| ()),
         };
+        self.log_on_disk = self
+            .path
+            .as_deref()
+            .and_then(|path| file_identity(&wal_path(path)));
         match saved {
             Ok(_) => {
                 self.clear_save_error();
@@ -678,6 +737,39 @@ impl Session {
                 false
             }
         }
+    }
+
+    /// Whether the file this document's path names has just stopped being the one it opened,
+    /// as when a sync tool renames a new copy over it. Writes after that go to a file nobody
+    /// can reach, so this makes the session read-only until it is saved elsewhere or reopened.
+    /// The words stay in memory. True once, when first noticed.
+    pub fn check_file(&mut self) -> bool {
+        let Some(path) = self.path.as_deref() else {
+            return false;
+        };
+        if self.replaced || file_identity(path) == self.on_disk {
+            return false;
+        }
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        // SQLite would pair this log with whatever file is at the path now, and it keeps it
+        // there when this connection closes. The connection still has it open, so it goes on
+        // working, for saving these words elsewhere.
+        let log = wal_path(path);
+        if self.log_on_disk.is_some() && file_identity(&log) == self.log_on_disk {
+            let _ = std::fs::remove_file(&log);
+            let mut index = path.as_os_str().to_owned();
+            index.push("-shm");
+            let _ = std::fs::remove_file(index);
+        }
+        self.replaced = true;
+        self.save_failed = true;
+        self.last_error = Some(format!(
+            "{name} changed on disk, so nothing more is being saved to it"
+        ));
+        true
     }
 
     /// A failed write makes the session read-only: the in-memory history can
@@ -694,7 +786,7 @@ impl Session {
     /// error strip's retry (`save_state`) — and the window refuses to close
     /// until it lands.
     pub fn clear_save_error(&mut self) {
-        if self.save_failed {
+        if self.save_failed && !self.replaced {
             self.save_failed = false;
             self.last_error = None;
         }
@@ -5333,5 +5425,174 @@ mod tests {
         session.select_words_between(anchor, at);
         assert_eq!(session.selection, None);
         assert_eq!(session.caret, at);
+    }
+
+    /// A session on a new file with `text` in it, then closed, as another machine's copy.
+    fn another_copy(path: &Path, text: &str) {
+        let mut other = Session::open(path).unwrap();
+        other.insert(text);
+    }
+
+    fn guard_dir() -> PathBuf {
+        let dir = crate::test_temp_dir().join(format!("guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn text_in(path: &Path) -> String {
+        Session::open(path).unwrap().document().blocks[0]
+            .text
+            .clone()
+    }
+
+    #[test]
+    fn a_file_left_alone_is_not_replaced() {
+        let dir = guard_dir();
+        let mut session = Session::open(&dir.join("a.kame")).unwrap();
+        session.insert("mine");
+        assert!(!session.check_file());
+        assert!(!session.replaced);
+        assert!(!session.save_failed);
+    }
+
+    #[test]
+    fn a_document_with_no_file_is_never_replaced() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("mine");
+        assert!(!session.check_file());
+    }
+
+    #[test]
+    fn a_file_renamed_over_the_open_one_is_noticed_once() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        assert!(session.check_file());
+        assert!(session.replaced && session.save_failed);
+        assert!(session.last_error.as_deref().unwrap().contains("a.kame"));
+        assert!(!session.check_file(), "already noticed");
+    }
+
+    #[test]
+    fn a_removed_file_counts_as_replaced() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        std::fs::remove_file(&path).unwrap();
+        assert!(session.check_file());
+        assert!(session.replaced);
+    }
+
+    #[test]
+    fn an_edit_made_before_anyone_looked_is_refused_and_flagged() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        session.insert(" more");
+        assert!(session.replaced && session.save_failed);
+        assert_eq!(text_in(&path), "theirs");
+    }
+
+    #[test]
+    fn retrying_does_not_pretend_the_file_is_back() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        session.check_file();
+        assert!(!session.retry_or_dismiss());
+        assert!(session.replaced && session.save_failed);
+        session.clear_save_error();
+        assert!(session.save_failed, "only a new file clears this");
+    }
+
+    #[test]
+    fn saving_elsewhere_keeps_my_words_and_leaves_theirs_alone() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mine = dir.join("mine.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        session.check_file();
+        session.save_as(&mine).unwrap();
+        assert!(!session.replaced && !session.save_failed);
+        assert!(session.insert_then_saved(" more"));
+        assert!(!session.check_file(), "the new file is the one now open");
+        drop(session);
+        assert_eq!(text_in(&mine), "mine more");
+        assert_eq!(text_in(&path), "theirs");
+    }
+
+    #[test]
+    fn saving_over_the_replaced_path_is_refused() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        session.check_file();
+        assert!(session.save_as(&path).is_err());
+        assert!(session.replaced);
+    }
+
+    /// SQLite leaves a moved database's `-wal` at its path when the connection closes, so
+    /// waiting for that would pair this log with the new file on the next open, however that
+    /// open came about: from here, or after a quit or a crash.
+    #[test]
+    fn noticing_takes_my_log_away_from_the_new_file() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        let wal = wal_path(&path);
+        assert!(wal.exists(), "the test needs a live log");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        session.check_file();
+        assert!(!wal.exists(), "my log is not the new file's");
+        assert_eq!(text_in(&path), "theirs", "while this session is still open");
+        session.insert_then_saved(" more");
+        assert_eq!(
+            session.document().blocks[0].text,
+            "mine",
+            "still here to save"
+        );
+        drop(session);
+        assert_eq!(text_in(&path), "theirs", "and after it closes");
+    }
+
+    /// A sync that also carries `-wal` files brings the log that goes with the new file.
+    #[test]
+    fn a_log_that_arrived_with_the_new_file_is_left_alone() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        std::fs::write(dir.join("incoming"), b"their log").unwrap();
+        std::fs::rename(dir.join("incoming"), wal_path(&path)).unwrap();
+        session.check_file();
+        assert_eq!(std::fs::read(wal_path(&path)).unwrap(), b"their log");
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    fn insert_then_saved(&mut self, text: &str) -> bool {
+        self.insert(text);
+        !self.save_failed
     }
 }

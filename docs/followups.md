@@ -25,9 +25,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Sync
 
-- [ ] **Syncthing can replace a `.kame` file while it is open.** It did, on 2026-11-02, with
-  kame running and a `-wal` beside the file. No text was lost that time, but the `-wal` could have
-  held unsaved edits. Until sync exists, close a document before editing it on another machine.
+- [x] **Syncthing can replace a `.kame` file while it is open.** kame now notices, stops saving
+  to it, and asks whether to save this copy elsewhere or open the one on disk.
 
 ## Ideas
 

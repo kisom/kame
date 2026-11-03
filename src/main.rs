@@ -1758,7 +1758,12 @@ impl Session {
         // stays private under a new name. The copy is private from the moment it
         // exists, so nobody can hold it open and read the content as it arrives,
         // and takes its final mode only once complete.
-        let source = self.path.as_deref().map_or(Ok(None), known_mode);
+        // A document whose file has vanished may have been private, so that counts
+        // as not knowing. Only a document that never had a file has no mode.
+        let source = match self.path.as_deref() {
+            Some(current) => known_mode(current).and_then(|mode| mode.ok_or(()).map(Some)),
+            None => Ok(None),
+        };
         let mode = match (known_mode(path), source) {
             (Ok(None), Ok(None)) => default_mode(path.parent().unwrap_or(Path::new("."))),
             (Ok(target), Ok(source)) => saved_mode(target, source, PRIVATE_MODE),
@@ -6748,6 +6753,21 @@ mod tests {
         let copy = dir.join("copy.kame");
         session.save_as(&copy).unwrap();
         assert_eq!(mode_of(&copy), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Its mode is gone with it, and may have been private.
+    #[cfg(unix)]
+    #[test]
+    fn saving_after_the_document_file_vanished_stays_private() {
+        let dir = scratch_dir("mode");
+        let source = dir.join("gone.kame");
+        let mut session = open(&source);
+        session.insert("Words");
+        std::fs::remove_file(&source).unwrap();
+        let copy = dir.join("copy.kame");
+        session.save_as(&copy).unwrap();
+        assert_eq!(mode_of(&copy), PRIVATE_MODE);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

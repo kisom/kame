@@ -397,6 +397,8 @@ const STATUS_MESSAGE_SHARE: f32 = 0.65;
 const CARET_ROOM: f32 = 48.0;
 /// How much of a code line to keep in view past the caret when scrolling it sideways.
 const CODE_CARET_ROOM: f32 = 24.0;
+/// How far outside a code block's column to draw the edge that says it carries on.
+const CODE_EDGE_GAP: f32 = 4.0;
 /// The least time between writes of the caret and scroll to the document.
 const POSITION_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// A horizontal rule's width, as a share of the measure.
@@ -924,6 +926,12 @@ fn code_scroll_to_show(scroll: f32, x: f32, column: f32) -> f32 {
 /// A code block's sideways scroll, kept to what it can actually scroll.
 fn clamp_code_scroll(scroll: f32, column: f32, content: f32) -> f32 {
     scroll.clamp(0.0, (content - column).max(0.0))
+}
+
+/// Whether a code block has more to see past its left and right edges.
+fn code_overflow_edges(scroll: f32, column: f32, content: f32) -> (bool, bool) {
+    // Within a pixel of the end counts as the end, since scrolling is in fractions.
+    (scroll > 0.5, content - column - scroll > 0.5)
 }
 
 /// How far a page key moves: a window's height, less two lines so the eye keeps its place.
@@ -3554,6 +3562,24 @@ impl KameApp {
                         [Pos2::new(left, y), Pos2::new(left + length, y)],
                         egui::Stroke::new(1.5, self.palette.rule_ink),
                     );
+                    // A solid edge wherever the lines carry on past the column.
+                    let (more_left, more_right) =
+                        code_overflow_edges(sideways[index], column, content);
+                    let edge = |x: f32| {
+                        painter.line_segment(
+                            [
+                                Pos2::new(x, tops[index]),
+                                Pos2::new(x, tops[index] + heights[index]),
+                            ],
+                            egui::Stroke::new(1.5, self.palette.rule_ink),
+                        );
+                    };
+                    if more_left {
+                        edge(body_left + indent - CODE_EDGE_GAP);
+                    }
+                    if more_right {
+                        edge(body_left + indent + column + CODE_EDGE_GAP);
+                    }
                 }
             }
         }
@@ -7267,6 +7293,19 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(clamp_code_scroll(5000.0, 400.0, 1000.0), 600.0);
         assert_eq!(clamp_code_scroll(-20.0, 400.0, 1000.0), 0.0);
         assert_eq!(clamp_code_scroll(50.0, 400.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn a_code_block_that_fits_shows_no_edges() {
+        assert_eq!(code_overflow_edges(0.0, 400.0, 300.0), (false, false));
+        assert_eq!(code_overflow_edges(0.0, 400.0, 400.0), (false, false));
+    }
+
+    #[test]
+    fn a_code_block_shows_an_edge_where_there_is_more() {
+        assert_eq!(code_overflow_edges(0.0, 400.0, 1000.0), (false, true));
+        assert_eq!(code_overflow_edges(200.0, 400.0, 1000.0), (true, true));
+        assert_eq!(code_overflow_edges(600.0, 400.0, 1000.0), (true, false));
     }
 
     #[test]

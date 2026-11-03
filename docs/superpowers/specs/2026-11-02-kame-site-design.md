@@ -18,11 +18,12 @@ Background notes are in `~/data/writing/MultiKame.kame`.
 
 1. Publish `.kame` documents as HTML, with marginalia, footnotes, nested numbering and images.
 2. Publish Markdown pages.
-3. Theme the site, Pelican or Hugo style, with listings by date and by tag.
+3. Theme the site, Pelican or Hugo style, with a home page, an archive, and listings by tag.
 4. Keep published URLs stable: adding or renaming anything must not move what is published.
 5. Never change a document. Publishing only ever reads.
 6. Share drafts for early feedback, without listing them.
 7. Offer an RSS feed of the latest published documents.
+8. Set up a working site with one command, with its templates there to edit.
 
 ## 3. Non-goals (v1)
 
@@ -62,7 +63,6 @@ All three were tried in a scratch project, including the behaviour §5 and §9 r
 ├── README.md
 ├── site.yaml
 ├── pages/
-│   ├── index.md
 │   ├── about.md
 │   └── colophon.md
 ├── static/
@@ -71,6 +71,8 @@ All three were tried in a scratch project, including the behaviour §5 and §9 r
 │   ├── css/
 │   └── js/
 ├── theme/
+│   ├── templates/
+│   └── static/
 └── output/
 ```
 
@@ -111,7 +113,9 @@ therefore reads these two maps through its own deserializer, which rejects a rep
 | `publish` entry | `/k/<slug>/` |
 | `drafts` entry | `/drafts/<slug>/` |
 | Images in a document | Beside its page, as `/k/<slug>/<file>` |
-| `pages/index.md` | `/` |
+| The home page | `/` |
+| The archive | `/archive/` |
+| The list of tags | `/tags/` |
 | `pages/about.md` | `/about/` |
 | `pages/a/b.md` | `/a/b/` |
 | Each tag | `/tags/<tag>/`, normalized: lowercase, with spaces and punctuation as hyphens. Two tags reducing to one are an error. |
@@ -199,7 +203,7 @@ build.
 A way to send someone an unfinished essay.
 
 - Built to `/drafts/<slug>/`, with `<meta name="robots" content="noindex">`.
-- Left out of the index and of tag pages.
+- Left out of every listing and the feed.
 - `kame-site build --no-drafts` leaves them out altogether, for a public deploy that shouldn't
   carry them.
 
@@ -207,41 +211,70 @@ A draft isn't private. Anyone with the URL can read it, and it is only as hidden
 
 ## 9. Themes
 
-A theme is a directory of templates and static files:
+A theme is a directory of templates and static files, which `kame-site new` writes out for you to
+edit. It is the only theme there is: a build uses `theme/`, and a missing template is an error, so
+what is on disk is exactly what publishes.
 
 ```
 theme/
 ├── templates/
 │   ├── base.html
-│   ├── document.html
-│   ├── page.html
 │   ├── index.html
-│   └── tag.html
+│   ├── archive.html
+│   ├── tags.html
+│   ├── tag.html
+│   ├── document.html
+│   └── page.html
 └── static/
+    ├── css/
+    └── fonts/
 ```
 
-A default theme is embedded in the binary, and `theme/` overrides it template by template, so a site
-with no theme works and adjusting one template doesn't mean copying the rest.
+| Template | Builds | Variables, beside `site` and `kame_css` |
+|---|---|---|
+| `index.html` | `/` | `documents` |
+| `archive.html` | `/archive/` | `documents` |
+| `tags.html` | `/tags/` | `tags` |
+| `tag.html` | `/tags/<tag>/` | `tag`, `documents` |
+| `document.html` | Each document | `title`, `date`, `author`, `tags`, `body`, `url`, `draft` |
+| `page.html` | Each Markdown page | `title`, `body`, `url` |
 
-Variables available:
+- `site` has `name`, `url`, `description` and `author`.
+- `documents` is the published documents, newest first and then by slug, each with `title`, `date`,
+  `url` and `tags`. Drafts are never in it.
+- `tags` is every tag on a published document, sorted by name, each with `name`, `url` and `count`.
+- `kame_css` is `export::STYLE`, so a theme that uses it gets the marginalia layout, which floats in
+  wide windows and folds in narrow ones, with no work of its own.
 
-| Template | Variables |
-|---|---|
-| All | `site` (`name`, `url`, `description`, `author`), `kame_css` |
-| `document.html` | `title`, `date`, `author`, `tags`, `body`, `url`, `draft` |
-| `page.html` | `title`, `body`, `url` |
-| `index.html` | `documents`, `body` (from `pages/index.md`, if any) |
-| `tag.html` | `tag`, `documents` |
+Templates escape HTML by default, and `body` is passed as safe.
 
-`documents` is every published document, newest first, then by slug. Templates escape HTML by
-default, and `body` is passed as safe.
+### The home page
 
-`kame_css` is `export::STYLE`, so a theme that uses it gets the marginalia layout, which floats in
-wide windows and folds in narrow ones, with no work of its own.
+The home page is a template you edit, not generated content. The one `new` writes is along the lines
+of this, with its paragraph there to replace and its list keeping to the latest five:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<p>A paragraph about this site.</p>
+
+<h2>Latest</h2>
+<ul>
+{% for document in documents[:5] %}
+  <li><a href="{{ document.url }}">{{ document.title }}</a>{% if document.date %} ({{ document.date }}){% endif %}</li>
+{% endfor %}
+</ul>
+<p><a href="/archive/">All posts</a></p>
+{% endblock %}
+```
+
+`/archive/` lists every document in the same form. `/tags/` lists the tags with their counts, and each
+tag's page lists its documents. All of these are plain lists on one page, with no pagination, which
+suits a site of essays. A document with no date simply shows none.
 
 ### Fonts
 
-The default theme carries EB Garamond, Crimson Pro and IBM Plex Mono with `@font-face`, since
+The theme `new` writes carries EB Garamond, Crimson Pro and IBM Plex Mono with `@font-face`, since
 `STYLE` names them and readers won't have them installed. All are OFL, so this is allowed, and the
 licences go with them. `kame-site` embeds them from `crates/kame-typeset/fonts/` by path, with no
 dependency on the crate.
@@ -267,10 +300,27 @@ Markdown pages are never in it.
 ## 11. Command line
 
 ```
+kame-site new DIR
 kame-site build [--no-drafts] [DIR]
 ```
 
-`DIR` defaults to the current directory, and it is the only command in v1.
+### `kame-site new`
+
+Like `pelican-quickstart`, this sets up a site that builds and browses straight away. It writes:
+
+- `site.yaml`, with placeholders and commented examples of `publish` and `drafts`
+- `pages/about.md`, as an example page
+- `theme/`, with every template, the stylesheet and the fonts
+- `static/`, with `images/`, `files/`, `css/` and `js/`
+- `README.md`, saying how to build and preview it, and a `.gitignore` for `output/`
+
+It asks no questions: the placeholders are in one short file you edit next. It refuses to run in a
+directory that already has anything in it, so it can't overwrite a site. Nothing updates a theme after
+this, because once written, the theme is yours.
+
+### `kame-site build`
+
+`DIR` defaults to the current directory.
 
 - **Output:** built into a temporary directory beside `output/`, which replaces `output/` only once
   everything has succeeded. A failed build leaves the last good site alone, and nothing stale
@@ -300,6 +350,8 @@ The crate separates working out the site from writing it:
 
 - **Unit tests:** config errors, including duplicate slugs, bad slugs and unknown keys. Link
   resolution for each row of §7. Image resolution for each case in §6. Output path collisions.
+- **New:** `new` followed straight away by `build` gives a browsable site with no documents. `new` in
+  a non-empty directory refuses and changes nothing.
 - **End to end:** a small site in a temporary directory with real `.kame` files, checking the output
   tree and key markup. Built twice to confirm byte-identical output, and a failed build must leave
   the previous `output/` in place.
@@ -313,16 +365,18 @@ The crate separates working out the site from writing it:
 
 ## 14. Acceptance criteria
 
-1. `kame-site build` turns a site directory with no `theme/` into a browsable site.
+1. `kame-site new` then `kame-site build` gives a browsable site, with no other steps.
 2. A published document shows its marginalia, footnotes, images and nested numbering.
 3. Adding a document, or one that shares a file name with another, changes no existing URL.
 4. A duplicate slug, missing document or output collision fails the build, naming each problem,
    and leaves the previous output in place.
-5. A link between published documents works, and any other document link is plain text.
-6. A draft is reachable at its URL, absent from the index and tags, and absent altogether with
-   `--no-drafts`.
-7. Building twice gives identical output, and no source document changes.
-8. `/feed.xml` validates as RSS 2.0, holds the 10 newest published documents, and its links and
+5. The home page shows what its edited template says, with the latest documents, and `/archive/`,
+   `/tags/` and each tag's page list the right documents.
+6. A link between published documents works, and any other document link is plain text.
+7. A draft is reachable at its URL, absent from every listing and the feed, and absent altogether
+   with `--no-drafts`.
+8. Building twice gives identical output, and no source document changes.
+9. `/feed.xml` validates as RSS 2.0, holds the 10 newest published documents, and its links and
    images work from outside the site.
-9. A date that won't parse fails the build, naming the document.
-10. `cargo build` and `cargo test` at the root pass, and `kame-core` still has no GUI dependency.
+10. A date that won't parse fails the build, naming the document.
+11. `cargo build` and `cargo test` at the root pass, and `kame-core` still has no GUI dependency.

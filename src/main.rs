@@ -6648,4 +6648,30 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             crate::external::Requests::default()
         );
     }
+
+    fn css_hex(color: Color32) -> String {
+        format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+    }
+
+    fn css_hex_of(ink: [u8; 3]) -> String {
+        format!("#{:02x}{:02x}{:02x}", ink[0], ink[1], ink[2])
+    }
+
+    /// What publishes should look like what was written, so the stylesheet follows the
+    /// palette. Change one and this says to change the other.
+    #[test]
+    fn the_published_stylesheet_uses_kames_palette() {
+        let style = kame_core::export::STYLE;
+        for palette in [Palette::LIGHT, Palette::DARK] {
+            for color in [
+                css_hex(palette.background),
+                css_hex_of(palette.body_ink),
+                css_hex_of(palette.apparatus_ink),
+                css_hex(palette.rule_ink),
+                css_hex(palette.footnote_mark),
+            ] {
+                assert!(style.contains(&color), "{color} isn't in the stylesheet");
+            }
+        }
+    }
 }

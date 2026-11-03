@@ -1,16 +1,29 @@
 /* The site around a document. The document itself is styled by kame's own stylesheet. */
-a {
-  color: inherit;
-  text-underline-offset: 0.15em;
-}
 nav.site {
   margin-bottom: 3em;
   font-size: 0.95em;
 }
+nav.site a {
+  color: var(--ink);
+  text-underline-offset: 0.15em;
+}
 nav.site a:first-child {
   font-weight: bold;
 }
+#theme-toggle {
+  float: right;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+#theme-toggle:hover {
+  color: var(--ink);
+}
 p.meta {
-  color: #6b6459;
+  color: var(--muted);
   font-size: 0.95em;
+  text-align: left;
 }

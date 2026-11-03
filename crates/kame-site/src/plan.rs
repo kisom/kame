@@ -707,4 +707,14 @@ mod tests {
             .files
             .contains_key(Path::new("tags/only-here/index.html")));
     }
+
+    #[test]
+    fn a_page_has_the_theme_toggle() {
+        let site = Site::new("plantoggle");
+        let plan = site.plan();
+        let home = text(&plan, "index.html");
+        assert!(home.contains("src=\"/js/theme.js\""), "{home}");
+        assert!(home.contains("id=\"theme-toggle\""), "{home}");
+        assert!(plan.files.contains_key(Path::new("js/theme.js")));
+    }
 }

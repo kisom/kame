@@ -193,7 +193,8 @@ lines but not extra spacing.
 A link to a kame document publishes as its text, since it can't lead anywhere outside
 kame.
 
-Footnotes publish in both formats and marginalia in HTML. Markdown has no form for a
+HTML uses kame's own type and colours, and follows the reader's system between light and
+dark. Footnotes publish in both formats and marginalia in HTML. Markdown has no form for a
 marginal, so they stay out of it. Notes are private and never publish, in either
 format.
 

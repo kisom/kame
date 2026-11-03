@@ -28,10 +28,30 @@ use std::collections::HashMap;
 pub const STYLE: &str = r#"
 :root {
   color-scheme: light;
-  --paper: #fdfcf9;
-  --ink: #1c1a17;
-  --muted: #6f675c;
-  --rule: #d9d2c5;
+  --paper: #f7f3eb;
+  --ink: #201d19;
+  --muted: #564f45;
+  --rule: #968d7e;
+  --footnote: #366084;
+  --link: #3b82f6;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #1e1c19;
+  --ink: #ded8cd;
+  --muted: #a8a094;
+  --rule: #6e6860;
+  --footnote: #78a0be;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #1e1c19;
+    --ink: #ded8cd;
+    --muted: #a8a094;
+    --rule: #6e6860;
+    --footnote: #78a0be;
+  }
 }
 html {
   font-size: 100%;
@@ -42,12 +62,8 @@ body {
   color: var(--ink);
   font-family: "EB Garamond", "Iowan Old Style", Georgia, serif;
   font-size: 1.2rem;
-  line-height: 1.62;
-  font-variant-numeric: oldstyle-nums;
-  font-feature-settings: "liga" 1, "kern" 1, "onum" 1;
-  text-align: justify;
-  hyphens: auto;
-  -webkit-hyphens: auto;
+  line-height: 1.5;
+  font-feature-settings: "liga" 1, "kern" 1;
 }
 main.document {
   box-sizing: border-box;
@@ -55,36 +71,56 @@ main.document {
   margin: 0 auto;
   padding: 5rem 1.5rem 6rem;
 }
+a {
+  color: var(--link);
+}
 img.image {
   max-width: 100%;
   height: auto;
   display: block;
-  margin: 1.4em 0;
+  margin: 1.2em 0;
 }
 h1, h2, h3, h4, h5, h6 {
   font-family: "Crimson Pro", "EB Garamond", Georgia, serif;
-  font-weight: 600;
-  line-height: 1.15;
+  font-weight: bold;
+  line-height: 1.5;
   text-align: left;
-  hyphens: none;
-  margin: 2.2em 0 0.6em;
+  margin: 2em 0 0.35em;
 }
-h1 { font-size: 2.6rem; letter-spacing: -0.01em; }
-h2 { font-size: 1.9rem; }
-h3 { font-size: 1.45rem; }
-h4 { font-size: 1.2rem; }
-h5, h6 { font-size: 1.05rem; }
+h1 {
+  font-size: 1.75em;
+  margin-top: 1.3em;
+}
+h2 {
+  font-size: 1.4em;
+  margin-top: 1.4em;
+}
+h3 {
+  font-size: 1.12em;
+  margin-top: 1.33em;
+}
+h4, h5, h6 {
+  font-size: 1em;
+  margin-top: 1.49em;
+}
 p {
-  margin: 0 0 1.1em;
+  margin: 0 0 0.875em;
+  text-align: justify;
+  hanging-punctuation: first allow-end last;
 }
 strong {
-  font-weight: 600;
+  font-weight: bold;
 }
 em {
   font-style: italic;
 }
+blockquote {
+  margin: 1.225em 0 1.225em;
+  margin-left: 1.5em;
+  font-style: italic;
+}
 li > ul, li > ol {
-  margin: 0;
+  margin: 0.875em 0 0;
 }
 ol:not(.footnotes) {
   counter-reset: item;
@@ -105,28 +141,27 @@ li ol:not(.footnotes) > li::before {
   content: counters(item, ".");
 }
 ul, ol {
-  margin: 0 0 1.1em;
-  padding-left: 1.4em;
+  margin: 0 0 0.875em;
+  padding-left: 1.75em;
 }
 li {
-  margin: 0.2em 0;
+  margin: 0.875em 0;
 }
 pre {
-  margin: 1.2em 0 1.2em 1.5em;
+  margin: 1.225em 0 1.225em 1.5em;
   white-space: pre-wrap;
-  text-align: left;
 }
 code {
   font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
   font-size: 0.84em;
+  font-style: normal;
 }
 pre.prose {
   font-family: inherit;
-  hyphens: none;
 }
 hr {
   width: 25%;
-  margin: 2em auto;
+  margin: 1.5em auto;
   border: 0;
   border-top: 1px solid var(--rule);
 }
@@ -135,15 +170,14 @@ aside.marginalia {
   clear: right;
   width: 13rem;
   margin: 0.2rem -16rem 1rem 2rem;
-  font-size: 0.82rem;
-  line-height: 1.45;
+  font-size: 0.75em;
+  line-height: 1.5;
   font-style: italic;
   color: var(--muted);
-  text-align: left;
-  hyphens: none;
 }
 aside.marginalia p {
   margin: 0 0 0.6em;
+  text-align: left;
 }
 sup.footnote-ref {
   font-size: 0.7em;
@@ -151,7 +185,7 @@ sup.footnote-ref {
   vertical-align: super;
 }
 sup.footnote-ref a {
-  color: var(--muted);
+  color: var(--footnote);
   text-decoration: none;
   padding: 0 0.15em;
 }
@@ -160,8 +194,6 @@ ol.footnotes {
   padding: 1.2rem 0 0 1.4rem;
   border-top: 1px solid var(--rule);
   font-size: 0.88rem;
-  line-height: 1.45;
-  text-align: left;
   color: var(--muted);
 }
 ol.footnotes li {
@@ -183,8 +215,18 @@ a.footnote-backref {
   }
 }
 @media print {
-  body { background: #fff; font-size: 11pt; }
+  :root, :root[data-theme="dark"], :root:not([data-theme="light"]) {
+    color-scheme: light;
+    --paper: #fff;
+    --ink: #000;
+    --muted: #333;
+    --rule: #888;
+    --footnote: #000;
+    --link: #000;
+  }
+  body { font-size: 11pt; }
   main.document { padding: 0; }
+  nav.site { display: none; }
   aside.marginalia {
     float: right;
     width: 11rem;
@@ -1151,7 +1193,6 @@ mod tests {
         assert!(html.contains("Crimson Pro"));
         assert!(html.contains("EB Garamond"));
         assert!(html.contains("text-align: justify"));
-        assert!(html.contains("font-variant-numeric: oldstyle-nums"));
     }
 
     #[test]
@@ -1786,5 +1827,52 @@ mod tests {
             "{}",
             html_body(&doc, &publish)
         );
+    }
+
+    fn rule_for<'a>(selector: &str, style: &'a str) -> &'a str {
+        let at = style
+            .find(&format!("\n{selector} {{"))
+            .unwrap_or_else(|| panic!("no rule for {selector}"));
+        let body = &style[at + 1..];
+        &body[..body.find('}').unwrap()]
+    }
+
+    #[test]
+    fn the_stylesheet_sets_type_as_kame_does() {
+        let body = rule_for("body", STYLE);
+        assert!(body.contains("line-height: 1.5;"), "{body}");
+        assert!(!STYLE.contains("oldstyle-nums"), "kame uses lining figures");
+        assert!(!STYLE.contains("hyphens: auto"), "kame doesn't hyphenate");
+        assert!(rule_for("h1", STYLE).contains("font-size: 1.75em"));
+        assert!(rule_for("h2", STYLE).contains("font-size: 1.4em"));
+        assert!(rule_for("h3", STYLE).contains("font-size: 1.12em"));
+    }
+
+    #[test]
+    fn only_paragraphs_are_justified_as_in_kame() {
+        assert!(!rule_for("body", STYLE).contains("text-align: justify"));
+        assert!(rule_for("p", STYLE).contains("text-align: justify"));
+    }
+
+    #[test]
+    fn a_quote_is_set_in_and_italic_as_in_kame() {
+        let quote = rule_for("blockquote", STYLE);
+        assert!(quote.contains("font-style: italic"), "{quote}");
+        assert!(quote.contains("margin-left: 1.5em"), "{quote}");
+    }
+
+    #[test]
+    fn the_stylesheet_follows_the_system_and_an_explicit_choice() {
+        assert!(STYLE.contains("@media (prefers-color-scheme: dark)"));
+        assert!(STYLE.contains(":root:not([data-theme=\"light\"])"));
+        assert!(STYLE.contains(":root[data-theme=\"dark\"]"));
+        assert!(STYLE.contains("color-scheme: dark"));
+    }
+
+    #[test]
+    fn printing_is_always_dark_on_white() {
+        let print = &STYLE[STYLE.find("@media print").unwrap()..];
+        assert!(print.contains("--paper: #fff"), "{print}");
+        assert!(print.contains("--ink: #000"), "{print}");
     }
 }

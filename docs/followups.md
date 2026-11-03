@@ -27,7 +27,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
   tests read them, and a fit took under a millisecond. Hyphens would be drawn without entering the
   text, so they wouldn't touch byte offsets, but need `hypher` and a language; a word too long to fit
   is the case only they fix, so judge them after the rest. How the movement feels can only be judged
-  in the app. The study left out the room footnote marks take. Write a spec before building.
+  in the app. The study left out the room footnote marks take. Designed in
+  `docs/superpowers/specs/2026-11-03-word-spacing-design.md`.
 
   Tuned on the two essays, which are the writing this is for, with the devlog only as a check. Best so
   far at type 16: look one line ahead, let spaces close to no less than 90%, and charge a high cost for
@@ -53,7 +54,24 @@ Open work, most pressing first. Tick items off or delete them as they land.
 - [x] **Syncthing can replace a `.kame` file while it is open.** kame now notices, stops saving
   to it, and asks whether to merge the two, save this copy elsewhere or open the one on disk.
 
+## Code blocks
+
+- [ ] **Scroll long code lines sideways instead of wrapping.** Wrapping misleads in code. Feasible, and
+  planned after word spacing: stop wrapping code blocks, keep a sideways offset for each, add it wherever
+  the block's text, caret and selection are drawn and clicks are mapped, clip at the column, and let
+  the caret pull a long line into view. Each block is one image, so a very long pasted line could
+  exceed the graphics card's limit and would need to fall back to wrapping. The site only needs a
+  stylesheet change, keeping wrapping for print. At 75% size about 0.5% of the devlog's code lines at
+  type 16 would still be too long.
+
 ## Ideas
+
+- [ ] **Spell check.** Typos in essays only get caught by rereading. Squiggles could use `range_rects`
+  and be drawn on the page without touching the text, with a personal word list in the config and code
+  skipped. It wouldn't catch mistakes made of real words, like "is has" or "what need", which is what
+  turned up in the essays. A check for doubled or odd word pairs, or a separate review pass, would be a
+  different tool.
+
 
 - [ ] **Sync for drift between one person's machines.** Designed and prototyped: see
   `docs/superpowers/specs/2026-11-03-sync-design.md` and `crates/kame-sync`. It merges document

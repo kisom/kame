@@ -1262,13 +1262,13 @@ fn main() -> eframe::Result {
     let app_creator: eframe::AppCreator<'_> =
         Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session, notice, body_size, dark))));
 
-    // macOS needs the application delegate installed before the event loop runs, or
-    // a file opened from Finder at launch is missed, so kame owns the loop there.
+    // On macOS, kame's application events have to be in place before the event loop
+    // runs, or a file opened from Finder at launch is missed, so it owns the loop there.
     #[cfg(target_os = "macos")]
     {
         let event_loop =
             winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build()?;
-        macos::install_delegate();
+        macos::install_app_events();
         let mut app = eframe::create_native("kame", native_options, app_creator, &event_loop);
         event_loop.run_app(&mut app)?;
         Ok(())

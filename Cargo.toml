@@ -24,9 +24,9 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "a
 
 [target.'cfg(target_os = "macos")'.dependencies]
 rfd = { version = "0.15", default-features = false }
-# All already built by eframe; named directly for the application delegate, which
-# receives files opened from Finder and every way of quitting, and the event loop it
-# has to be installed before.
+# All already built by eframe; named directly for the application events, which bring
+# files opened from Finder and every way of quitting, and the event loop they have to
+# be installed before.
 winit = { version = "0.30", default-features = false }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSObject", "NSString", "NSURL"] }

@@ -14,11 +14,12 @@ use std::borrow::Cow;
 use crate::model::{AnnotationKind, BlockKind, Document};
 
 /// `doc` without a first heading repeating `title`, for a page that prints the title itself.
+/// A difference of case or surrounding space doesn't make it a different title.
 /// It stays if a footnote is anchored in it, since the footnote would lose its place.
 pub fn without_repeated_title<'a>(doc: &'a Document, title: &str) -> Cow<'a, Document> {
     let repeats = doc.blocks.first().is_some_and(|first| {
         matches!(first.kind, BlockKind::Heading { .. })
-            && first.text == title
+            && first.text.trim().to_lowercase() == title.trim().to_lowercase()
             && !doc.annotations.iter().any(|annotation| {
                 annotation.kind == AnnotationKind::Footnote
                     && annotation.anchor.block_id() == first.id

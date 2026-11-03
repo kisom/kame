@@ -1571,6 +1571,22 @@ mod tests {
     }
 
     #[test]
+    fn a_title_differing_only_by_case_or_space_still_counts_as_repeated() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(
+                BlockKind::Heading { level: 1 },
+                " On The Commanding Heights ",
+            ),
+            paragraph("Words."),
+        ];
+        let without = crate::export::without_repeated_title(&doc, "On the Commanding Heights");
+        assert_eq!(without.blocks.len(), 1);
+        let different = crate::export::without_repeated_title(&doc, "On the Heights");
+        assert_eq!(different.blocks.len(), 2);
+    }
+
+    #[test]
     fn a_repeated_title_stays_if_a_footnote_is_anchored_in_it() {
         let mut doc = Document::new("t");
         let heading = block(BlockKind::Heading { level: 1 }, "The Title");

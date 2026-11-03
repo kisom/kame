@@ -268,6 +268,62 @@ fn tab_presses(events: &[egui::Event]) -> Vec<bool> {
         .collect()
 }
 
+/// Where to return to after following a document link.
+#[derive(Clone, Debug, PartialEq)]
+struct BackStop {
+    /// The document, or `None` for one with no file yet.
+    path: Option<PathBuf>,
+    caret: Cursor,
+    scroll: f32,
+}
+
+/// The way back through followed links, most recent last.
+#[derive(Debug, Default)]
+struct BackStack {
+    stops: Vec<BackStop>,
+}
+
+impl BackStack {
+    fn push(&mut self, stop: BackStop) {
+        if self.stops.len() == MAX_BACK_STOPS {
+            self.stops.remove(0);
+        }
+        self.stops.push(stop);
+    }
+
+    fn pop(&mut self) -> Option<BackStop> {
+        self.stops.pop()
+    }
+}
+
+/// Whether two paths are one document, however they were written: a launch can name a relative
+/// path, and a later open a full one. Two documents with no file are taken as the same one, as
+/// there is only ever one open.
+fn same_document(a: Option<&Path>, b: Option<&Path>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => a == b,
+        },
+        _ => false,
+    }
+}
+
+/// Ctrl-[, or Cmd-[ on a Mac, as browsers on a Mac use.
+fn is_back_chord(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key {
+            key: egui::Key::OpenBracket,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } if modifiers.command && !modifiers.shift
+    )
+}
+
 /// Removes the keys egui moves the focus on, for when there is nowhere useful to move it.
 fn drop_tabs(events: &mut Vec<egui::Event>) {
     events.retain(|event| {
@@ -297,6 +353,8 @@ fn is_new_chord(event: &egui::Event) -> bool {
     )
 }
 
+/// How many links back can be followed.
+const MAX_BACK_STOPS: usize = 64;
 /// How far up from the bottom of its line a document link's underline sits, as a share
 /// of the line's height.
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
@@ -1065,6 +1123,7 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
 /// Something chosen from the menu bar, applied once the panel closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    Back,
     CompactHistory,
     LinkDocument,
     New,
@@ -1740,6 +1799,8 @@ struct KameApp {
     saved_position: Option<(Cursor, f32)>,
     position_saved_at: std::time::Instant,
     last_document: LastDocument,
+    /// The way back through followed links.
+    back: BackStack,
     /// The author new documents start with.
     default_author: String,
     /// The "Snapshot Now" label prompt, when it is open.
@@ -1821,6 +1882,7 @@ impl KameApp {
             saved_position: None,
             position_saved_at: std::time::Instant::now(),
             last_document: LastDocument::new(last_document),
+            back: BackStack::default(),
             default_author,
             snapshot_prompt: None,
             open_prompt: None,
@@ -2375,6 +2437,10 @@ impl KameApp {
         if open_chord {
             self.open_with_dialog();
         }
+        let back_chord = ctx.input(|input| input.events.iter().any(is_back_chord));
+        if back_chord && !self.dialog_open() && !self.close_flow.prompting {
+            self.go_back();
+        }
         let new_chord = ctx.input(|input| input.events.iter().any(is_new_chord));
         if new_chord && !self.dialog_open() && !self.close_flow.prompting {
             self.request_new();
@@ -2784,6 +2850,9 @@ impl KameApp {
                     if menu_item(ui, "Compact History", None, false) {
                         action = Some(MenuAction::CompactHistory);
                     }
+                    if menu_item(ui, "Back", Some("Ctrl-["), false) {
+                        action = Some(MenuAction::Back);
+                    }
                     if menu_item(ui, "Link to Document…", None, false) {
                         action = Some(MenuAction::LinkDocument);
                     }
@@ -2923,6 +2992,7 @@ impl KameApp {
     /// Carries out a menu choice through the same path its shortcut uses.
     fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
         match action {
+            MenuAction::Back => self.go_back(),
             MenuAction::CompactHistory => match self.session.compact_history() {
                 Ok((before, after)) if before == after => {
                     self.notice = Some("the history is already compact".to_string());
@@ -4235,7 +4305,15 @@ impl KameApp {
     /// heading waits for the open.
     fn follow_document_link(&mut self, target: &str) {
         let (path, heading) = split_document_target(target);
+        let here = BackStop {
+            path: self.session.path().map(Path::to_path_buf),
+            caret: self.session.caret,
+            scroll: self.page_scroll,
+        };
         if path.is_empty() {
+            if heading.is_some_and(|heading| self.session.heading_cursor(heading).is_some()) {
+                self.back.push(here);
+            }
             self.go_to_heading(heading);
             return;
         }
@@ -4249,11 +4327,43 @@ impl KameApp {
             .and_then(|current| current.canonicalize().ok())
             .is_some_and(|current| found.canonicalize().is_ok_and(|found| found == current));
         if same {
+            if heading.is_some_and(|heading| self.session.heading_cursor(heading).is_some()) {
+                self.back.push(here);
+            }
             self.go_to_heading(heading);
             return;
         }
+        // A document with no file has nowhere to come back to.
+        if here.path.is_some() {
+            self.back.push(here);
+        }
         self.pending_heading = heading.map(str::to_string);
         self.open_or_confirm(found);
+    }
+
+    /// Returns to where the last followed link was followed from. Another document reopens
+    /// where it was left, since leaving it saved its place.
+    fn go_back(&mut self) {
+        let Some(stop) = self.back.pop() else {
+            self.notice = Some("no link to go back from".to_string());
+            return;
+        };
+        if same_document(stop.path.as_deref(), self.session.path()) {
+            self.session.set_caret(stop.caret);
+            self.pending_scroll = Some(stop.scroll);
+            self.notice = None;
+            return;
+        }
+        let Some(path) = stop.path else {
+            return;
+        };
+        // Opening a missing path would create it.
+        if !path.is_file() {
+            self.notice = Some(format!("{} is no longer there", path.display()));
+            return;
+        }
+        self.pending_heading = None;
+        self.open_or_confirm(path);
     }
 
     /// Moves to the heading a document link named, and says so if it isn't there.
@@ -6758,5 +6868,106 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     fn an_older_config_has_no_default_author() {
         let config: KameConfig = serde_json::from_str(r#"{"body_size":18.0}"#).unwrap();
         assert_eq!(config.author, "");
+    }
+
+    fn stop(scroll: f32) -> BackStop {
+        BackStop {
+            path: None,
+            caret: Cursor {
+                block_id: uuid::Uuid::nil(),
+                offset: 0,
+            },
+            scroll,
+        }
+    }
+
+    #[test]
+    fn back_returns_through_links_in_reverse() {
+        let mut back = BackStack::default();
+        back.push(stop(1.0));
+        back.push(stop(2.0));
+        assert_eq!(back.pop(), Some(stop(2.0)));
+        assert_eq!(back.pop(), Some(stop(1.0)));
+        assert_eq!(back.pop(), None);
+    }
+
+    #[test]
+    fn the_way_back_stops_growing_eventually() {
+        let mut back = BackStack::default();
+        for number in 0..(MAX_BACK_STOPS + 5) {
+            back.push(stop(number as f32));
+        }
+        assert_eq!(back.stops.len(), MAX_BACK_STOPS);
+        assert_eq!(back.pop(), Some(stop((MAX_BACK_STOPS + 4) as f32)));
+    }
+
+    #[test]
+    fn only_cmd_left_bracket_goes_back() {
+        let key = |key, pressed, repeat, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers,
+        };
+        let command = egui::Modifiers::COMMAND;
+        assert!(is_back_chord(&key(
+            egui::Key::OpenBracket,
+            true,
+            false,
+            command
+        )));
+        assert!(!is_back_chord(&key(
+            egui::Key::OpenBracket,
+            true,
+            false,
+            egui::Modifiers::NONE
+        )));
+        assert!(!is_back_chord(&key(
+            egui::Key::OpenBracket,
+            false,
+            false,
+            command
+        )));
+        assert!(!is_back_chord(&key(
+            egui::Key::OpenBracket,
+            true,
+            true,
+            command
+        )));
+        assert!(!is_back_chord(&key(
+            egui::Key::CloseBracket,
+            true,
+            false,
+            command
+        )));
+        let shifted = egui::Modifiers {
+            shift: true,
+            ..command
+        };
+        assert!(!is_back_chord(&key(
+            egui::Key::OpenBracket,
+            true,
+            false,
+            shifted
+        )));
+    }
+
+    #[test]
+    fn the_same_file_by_different_paths_is_the_same_document() {
+        let dir = test_temp_dir().join(format!("same-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.kame"), "").unwrap();
+        std::fs::write(dir.join("b.kame"), "").unwrap();
+        let a = dir.join("a.kame");
+        let roundabout = dir.join("sub/../a.kame");
+        assert!(same_document(Some(&a), Some(&roundabout)));
+        assert!(!same_document(Some(&a), Some(&dir.join("b.kame"))));
+        assert!(same_document(None, None), "the same document with no file");
+        assert!(!same_document(Some(&a), None));
+        assert!(!same_document(
+            Some(&dir.join("gone.kame")),
+            Some(&dir.join("gone2.kame"))
+        ));
     }
 }

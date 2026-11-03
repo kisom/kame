@@ -188,6 +188,9 @@ tried. `#The Intro` goes to the first heading with exactly that text, and on its
 means a heading in this document. If a link has rotted, the status row says so and nothing
 opens.
 
+Ctrl-[, or File > Back, returns to where you followed the link from, as many links back as you
+went.
+
 ## The default author
 
 A new document starts with the author you have chosen, as does an import that doesn't name one.

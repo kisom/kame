@@ -4,8 +4,9 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Publishing
 
-- [ ] **A static site generator.** A separate command line tool in this workspace, built
-  on `kame-core`, which already has `Db::open_read_only`, `html_body` and its `Publish`
+- [ ] **A static site generator.** Spec in
+  `docs/superpowers/specs/2026-11-02-kame-site-design.md`. A separate command line tool in
+  this workspace, built on `kame-core`, which already has `Db::open_read_only`, `html_body` and its `Publish`
   hooks, and `links`. Decided so far:
   - **Config:** `site.yaml`. `publish` maps a fixed slug to a file, as in
     `commanding-heights: ~/data/writing/CommandingHeights.kame`, so that adding a document

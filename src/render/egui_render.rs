@@ -1850,4 +1850,21 @@ visual form, and thus with an independent existence.";
         }
         assert_eq!(command_for_event(&bare), None);
     }
+
+    /// The OFL asks for its text to travel with the fonts.
+    #[test]
+    fn every_font_family_has_its_licence() {
+        let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        for entry in std::fs::read_dir(&fonts).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".ttf") || name.ends_with(".otf") {
+                let family = name.split('-').next().unwrap();
+                let licence = fonts.join(format!("{family}-OFL.txt"));
+                let text = std::fs::read_to_string(&licence)
+                    .unwrap_or_else(|_| panic!("{name} has no {}", licence.display()));
+                assert!(text.contains("SIL OPEN FONT LICENSE"), "{name}");
+            }
+        }
+    }
 }

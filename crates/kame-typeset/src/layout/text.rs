@@ -60,7 +60,7 @@ const VERBATIM_TAB_WIDTH: u16 = 4;
 const CODE_RATIO: f32 = 0.84;
 /// A code block stands apart from the text around it, so it can be smaller than inline code,
 /// and more of its lines fit without wrapping.
-const CODE_BLOCK_RATIO: f32 = 0.75;
+const CODE_BLOCK_RATIO: f32 = 0.7;
 
 impl LayoutConfig {
     /// A config whose font-derived sizes are ratios of `body_size`, at the
@@ -2013,8 +2013,8 @@ around at this measure.\n\nAnd one after a blank line."
         );
         let run = layout.buffer.layout_runs().next().unwrap();
         assert!(run.glyphs.iter().all(|glyph| glyph.font_id == mono));
-        assert_eq!(run.glyphs[0].font_size, config.body_size * 0.75);
-        assert_eq!(run.line_height, config.body_line_height * 0.75);
+        assert_eq!(run.glyphs[0].font_size, config.body_size * 0.7);
+        assert_eq!(run.line_height, config.body_line_height * 0.7);
     }
 
     #[test]

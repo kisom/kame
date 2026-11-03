@@ -168,7 +168,7 @@ code {
   font-style: normal;
 }
 pre code {
-  font-size: 0.75em;
+  font-size: 0.7em;
 }
 pre.prose {
   font-family: inherit;
@@ -1659,7 +1659,7 @@ mod tests {
     fn a_code_block_is_set_smaller_than_inline_code() {
         let style = STYLE;
         assert!(rule_for("code", style).contains("font-size: 0.84em"));
-        assert!(rule_for("pre code", style).contains("font-size: 0.75em"));
+        assert!(rule_for("pre code", style).contains("font-size: 0.7em"));
     }
 
     #[test]

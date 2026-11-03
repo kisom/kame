@@ -4,7 +4,7 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Typography
 
-- [ ] **Word spacing.** Justified text leaves wide gaps because cosmic-text takes each line as it
+- [x] **Word spacing.** Justified text leaves wide gaps because cosmic-text takes each line as it
   comes and can only widen spaces. Studied through kame's own shaping at type 16, width 640, on two
   essays (68 and 83 lines) and 586 devlog paragraphs, with a model of first fit that matched the
   engine's breaks on all but one paragraph. Each cell reads essay / essay / devlog:
@@ -28,7 +28,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
   text, so they wouldn't touch byte offsets, but need `hypher` and a language; a word too long to fit
   is the case only they fix, so judge them after the rest. How the movement feels can only be judged
   in the app. The study left out the room footnote marks take. Designed in
-  `docs/superpowers/specs/2026-11-03-word-spacing-design.md`, and built on `word-spacing`.
+  `docs/superpowers/specs/2026-11-03-word-spacing-design.md`. Built and landed, so what's left
+  is to adjust the numbers in `layout/breaks.rs` with use.
 
   Tuned on the two essays, which are the writing this is for, with the devlog only as a check. Best so
   far at type 16: look one line ahead, let spaces close to no less than 90%, and charge a high cost for
@@ -61,8 +62,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
   the block's text, caret and selection are drawn and clicks are mapped, clip at the column, and let
   the caret pull a long line into view. Each block is one image, so a very long pasted line could
   exceed the graphics card's limit and would need to fall back to wrapping. The site only needs a
-  stylesheet change, keeping wrapping for print. At 75% size about 0.5% of the devlog's code lines at
-  type 16 would still be too long.
+  stylesheet change, keeping wrapping for print. At 70% size few of the devlog's code lines at type 16
+  are too long: 8 of 3640.
 
 ## Ideas
 

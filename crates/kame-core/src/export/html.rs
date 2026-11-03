@@ -64,7 +64,7 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: "EB Garamond", "Iowan Old Style", Georgia, serif;
-  font-size: 1.2rem;
+  font-size: 1.25em;
   line-height: 1.5;
   font-feature-settings: "liga" 1, "kern" 1;
 }
@@ -2112,5 +2112,10 @@ mod tests {
             STYLE.matches("--mark:").count() >= 3,
             "light, dark and system dark"
         );
+    }
+
+    #[test]
+    fn body_type_is_twenty_pixels_at_a_browsers_default_size() {
+        assert!(rule_for("body", STYLE).contains("font-size: 1.25em;"));
     }
 }

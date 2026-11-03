@@ -54,7 +54,7 @@ const ABOUT: &str = "---\ntitle: About\n---\n\nA page about this site.\n";
 pub const FILES: &[(&str, &[u8])] = &[
     ("site.yaml", SITE_YAML.as_bytes()),
     ("README.md", README.as_bytes()),
-    (".gitignore", b"output/\n"),
+    (".gitignore", b"output/\n.output-building/\n.output-old/\n"),
     ("pages/about.md", ABOUT.as_bytes()),
     theme_text!("templates/base.html"),
     theme_text!("templates/index.html"),
@@ -179,5 +179,20 @@ mod tests {
             assert!(!path.contains(".."), "{path}");
             assert!(!path.starts_with('/'), "{path}");
         }
+    }
+
+    #[test]
+    fn git_ignores_everything_a_build_makes() {
+        let parent = temp_dir("gitignore");
+        let dir = parent.join("site");
+        new_site(&dir).unwrap();
+        let ignored = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        for name in ["output/", ".output-building/", ".output-old/"] {
+            assert!(
+                ignored.lines().any(|line| line == name),
+                "{name}: {ignored}"
+            );
+        }
+        std::fs::remove_dir_all(&parent).unwrap();
     }
 }

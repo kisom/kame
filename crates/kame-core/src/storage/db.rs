@@ -151,6 +151,14 @@ pub struct Position {
     pub scroll: f32,
 }
 
+/// A failure making a private copy to read, as the error kame reports for a bad open.
+fn scratch_error(err: std::io::Error) -> DbError {
+    DbError::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+        Some(format!("could not copy the document to read it: {err}")),
+    ))
+}
+
 /// `path` as a URI's path, with whatever a URI would read differently escaped.
 fn uri_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
@@ -181,6 +189,19 @@ pub struct SnapshotMeta {
 /// A handle to the document database.
 pub struct Db {
     conn: Connection,
+    /// A private copy a read-only open is reading from. After `conn`, so that it goes after
+    /// the connection using it has closed. Only ever held, for its `Drop`.
+    #[allow(dead_code)]
+    scratch: Option<ScratchCopy>,
+}
+
+/// A directory removed when it goes out of use.
+struct ScratchCopy(std::path::PathBuf);
+
+impl Drop for ScratchCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 impl Db {
@@ -196,11 +217,32 @@ impl Db {
     /// Reading a WAL database ordinarily creates `-wal` and `-shm` files beside it and leaves
     /// them there, which matters in a synced folder. With no `-wal` there, nothing is
     /// waiting to be read from one, so the file is opened as immutable, which creates
-    /// neither. With a `-wal` there, a writer may have newer text in it, so it is read as usual.
+    /// neither. With a `-wal` and a `-shm`, a writer has it open and may have newer text, so
+    /// it is read as usual, adding nothing. A `-wal` alone is left by a crash or a sync, and
+    /// reading that in place would create a `-shm`, so a private copy is read instead.
     pub fn open_read_only(path: &Path) -> Result<Db, DbError> {
-        let mut wal = path.as_os_str().to_os_string();
-        wal.push("-wal");
-        let conn = if Path::new(&wal).exists() {
+        let sibling = |suffix: &str| {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        };
+        let wal = sibling("-wal");
+        if wal.exists() && !sibling("-shm").exists() {
+            let scratch = ScratchCopy(
+                std::env::temp_dir().join(format!("kame-read-{}", uuid::Uuid::new_v4())),
+            );
+            std::fs::create_dir_all(&scratch.0).map_err(scratch_error)?;
+            let copy = scratch.0.join("document.kame");
+            std::fs::copy(path, &copy).map_err(scratch_error)?;
+            std::fs::copy(&wal, scratch.0.join("document.kame-wal")).map_err(scratch_error)?;
+            let conn = Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            return Ok(Db {
+                conn,
+                scratch: Some(scratch),
+            });
+        }
+        let conn = if wal.exists() {
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?
         } else {
             if !path.is_file() {
@@ -218,7 +260,10 @@ impl Db {
             )?
         };
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(Db { conn })
+        Ok(Db {
+            conn,
+            scratch: None,
+        })
     }
 
     pub fn open(path: &Path) -> Result<Db, DbError> {
@@ -260,7 +305,10 @@ impl Db {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
 
-        Ok(Db { conn })
+        Ok(Db {
+            conn,
+            scratch: None,
+        })
     }
 
     /// Writes a complete copy of the database to `path`, which must not exist:
@@ -1298,6 +1346,64 @@ mod tests {
         let reader = Db::open_read_only(&path).unwrap();
         assert_eq!(reader.load_document().unwrap().title, "Awkward");
         drop(reader);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A `-wal` with no `-shm`, as a crash or a sync can leave: the text in it has to be read,
+    /// and reading it in place would create a `-shm` beside the document.
+    fn crashed_copy(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let path = saved_file(name);
+        let mut writer = Db::open(&path).unwrap();
+        writer.save_document(&Document::new("In the wal")).unwrap();
+        let dir = std::env::temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("a.kame");
+        std::fs::copy(&path, &copy).unwrap();
+        std::fs::copy(
+            format!("{}-wal", path.display()),
+            format!("{}-wal", copy.display()),
+        )
+        .unwrap();
+        drop(writer);
+        (dir, copy)
+    }
+
+    #[test]
+    fn a_read_only_open_after_a_crash_reads_the_wal_and_adds_nothing() {
+        let (dir, copy) = crashed_copy("crashed");
+        let wal = std::fs::read(format!("{}-wal", copy.display())).unwrap();
+        let before = std::fs::read(&copy).unwrap();
+        let db = Db::open_read_only(&copy).unwrap();
+        assert_eq!(db.load_document().unwrap().title, "In the wal");
+        drop(db);
+        assert!(!Path::new(&format!("{}-shm", copy.display())).exists());
+        assert_eq!(std::fs::read(&copy).unwrap(), before);
+        assert_eq!(
+            std::fs::read(format!("{}-wal", copy.display())).unwrap(),
+            wal
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_open_after_a_crash_works_in_a_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, copy) = crashed_copy("crashedro");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let read = Db::open_read_only(&copy).and_then(|db| db.load_document());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(read.unwrap().title, "In the wal");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_open_cleans_up_after_itself() {
+        let (dir, copy) = crashed_copy("crashedclean");
+        let db = Db::open_read_only(&copy).unwrap();
+        let scratch = db.scratch.as_ref().map(|scratch| scratch.0.clone());
+        assert!(scratch.as_ref().is_some_and(|scratch| scratch.exists()));
+        drop(db);
+        assert!(!scratch.unwrap().exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

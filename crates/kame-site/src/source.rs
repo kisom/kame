@@ -234,11 +234,17 @@ mod tests {
     fn with_no_date_the_files_ctime_is_used_with_a_warning() {
         let dir = temp_dir("ctime");
         let path = dir.join("a.kame");
+        // Either side of the write, so that a build running across midnight UTC still passes.
+        let before = Date::from_system_time(std::time::SystemTime::now());
         write_kame(&path, &doc("A"), Some(&metadata("A", "", &[])));
         let mut problems = Problems::default();
         let found = read(&entry("a", path), false, &mut problems).unwrap();
-        let today = Date::from_system_time(std::time::SystemTime::now());
-        assert_eq!(found.date, today);
+        let after = Date::from_system_time(std::time::SystemTime::now());
+        assert!(
+            found.date >= before && found.date <= after,
+            "{}",
+            found.date
+        );
         assert_eq!(problems.warnings.len(), 1);
         assert!(problems.warnings[0].contains("\"a\""));
         std::fs::remove_dir_all(&dir).unwrap();

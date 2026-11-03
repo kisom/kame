@@ -8,6 +8,8 @@ use crate::plan::Plan;
 
 /// Where a build is assembled, beside `output/` so that the final rename stays on one disk.
 const BUILDING: &str = ".output-building";
+/// Where the last site waits while the new one moves in.
+const OLD: &str = ".output-old";
 
 pub fn write_site(plan: &Plan, site_dir: &Path) -> std::io::Result<()> {
     let building = site_dir.join(BUILDING);
@@ -27,11 +29,21 @@ pub fn write_site(plan: &Plan, site_dir: &Path) -> std::io::Result<()> {
             }
         }
     }
+    // Moved aside before anything is deleted, so that the worst an interruption can do is
+    // leave a whole site under the wrong name, for the next build to clear.
     let output = site_dir.join("output");
-    if output.exists() {
-        std::fs::remove_dir_all(&output)?;
+    let old = site_dir.join(OLD);
+    if old.exists() {
+        std::fs::remove_dir_all(&old)?;
     }
-    std::fs::rename(&building, &output)
+    if output.exists() {
+        std::fs::rename(&output, &old)?;
+    }
+    std::fs::rename(&building, &output)?;
+    if old.exists() {
+        std::fs::remove_dir_all(&old)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -194,5 +206,26 @@ mod tests {
         );
         assert_eq!(crate::run(&["build".to_string(), shown.clone()]), 0);
         assert!(dir.join("output/index.html").is_file());
+    }
+
+    /// The old site moves aside before the new one moves in, so what is left over from an
+    /// interrupted swap has to be cleared by the next build.
+    #[test]
+    fn a_site_left_aside_by_an_interrupted_swap_is_cleared() {
+        let dir = site("aside");
+        std::fs::create_dir_all(dir.join(".output-old/junk")).unwrap();
+        let problems = build(&dir, true);
+        assert!(problems.errors.is_empty(), "{:?}", problems.errors);
+        assert!(!dir.join(".output-old").exists());
+        assert!(dir.join("output/index.html").is_file());
+    }
+
+    #[test]
+    fn the_old_site_isnt_left_aside_after_a_good_build() {
+        let dir = site("noaside");
+        build(&dir, true);
+        build(&dir, true);
+        assert!(!dir.join(".output-old").exists());
+        assert!(!dir.join(".output-building").exists());
     }
 }

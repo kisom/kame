@@ -11,6 +11,11 @@ pub struct Date {
     day: u8,
 }
 
+/// Rust's number parsing also takes a leading sign, which no date has.
+fn digits(text: &str) -> bool {
+    text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 impl Date {
     /// Reads `YYYY-MM-DD`, optionally followed by `HH:MM` or `HH:MM:SS` as Markdown from
     /// Pelican carries. The time has to make sense, and is then ignored.
@@ -27,7 +32,7 @@ impl Date {
             }
             let limits = [24, 60, 60];
             for (part, limit) in parts.iter().zip(limits) {
-                if part.len() != 2 || part.parse::<u8>().ok()? >= limit {
+                if part.len() != 2 || !digits(part) || part.parse::<u8>().ok()? >= limit {
                     return None;
                 }
             }
@@ -37,6 +42,9 @@ impl Date {
             return None;
         };
         if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+            return None;
+        }
+        if !digits(year) || !digits(month) || !digits(day) {
             return None;
         }
         let year: i32 = year.parse().ok()?;
@@ -145,6 +153,19 @@ mod tests {
             "2026-11-02 25:00",
             "2026-11-02 10:61",
             "2026-1-2",
+        ] {
+            assert_eq!(shown(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn only_digits_count_as_numbers() {
+        for text in [
+            "-123-01-01",
+            "+123-01-01",
+            "2026-+1-02",
+            "2026-11-+2",
+            "2026-11-02 +1:30",
         ] {
             assert_eq!(shown(text), None, "{text}");
         }

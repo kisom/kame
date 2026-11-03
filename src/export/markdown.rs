@@ -1314,4 +1314,17 @@ mod tests {
             "> Roses are red,\\\n> violets are blue.\n"
         );
     }
+
+    #[test]
+    fn emphasis_in_prose_exports_inside_the_quote() {
+        let mut doc = Document::new("t");
+        let mut prose = block(BlockKind::Prose, "one\ntwo");
+        prose.spans = vec![Span {
+            start: 0,
+            end: 3,
+            style: SpanStyle::Italic,
+        }];
+        doc.blocks = vec![prose];
+        assert_eq!(to_markdown(&doc), "> *one*\\\n> two\n");
+    }
 }

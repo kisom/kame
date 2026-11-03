@@ -46,6 +46,8 @@ const LIST_INDENT_RATIO: f32 = 1.75;
 /// How far a block quote is indented from the measure, as a ratio of
 /// `body_size`.
 const QUOTE_INDENT_RATIO: f32 = 1.5;
+/// Columns between tab stops in a code or prose block.
+const VERBATIM_TAB_WIDTH: u16 = 4;
 /// A monospaced face reads large beside the serif at the same size.
 const CODE_RATIO: f32 = 0.84;
 
@@ -234,6 +236,9 @@ pub fn layout_block_marked_with_align(
 
     let mut buffer = Buffer::new(font_system, Metrics::new(size, line_height));
     buffer.set_size(Some(width), None);
+    if block.kind.is_verbatim() {
+        buffer.set_tab_width(VERBATIM_TAB_WIDTH);
+    }
     let attrs = Attrs::new()
         .family(Family::Name(family))
         .weight(if matches!(block.kind, BlockKind::Heading { .. }) {

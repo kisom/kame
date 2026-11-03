@@ -24,6 +24,16 @@ macOS (`Modifiers::command`).
 | Escape | close the find bar, a dialog, or the note popover |
 | F1 | toggle the help dialog |
 
+## Moving and deleting by word
+
+| Key | Action |
+| --- | --- |
+| Ctrl-Left/Right or Alt-Left/Right | move by word; add Shift to select |
+| Alt-Backspace or Esc then Backspace | delete the word before the caret |
+| Esc then `<` / Esc then `>` | go to the very start / the very end of the document |
+
+Esc counts as a prefix when it has nothing to close, and for two seconds.
+
 ## Typed markdown
 
 Formatting is also applied as you type, at the start of a line or around a
@@ -38,10 +48,13 @@ word — each one is a single undo step:
 - `*x*` / `**x**` around a word → italic / bold
 - `[text](url)` → a hyperlink on `text`
 
-A code or prose block keeps its text exactly: line breaks and spacing stand, and
-typed emphasis stays literal. Enter adds a line, and Enter on a blank last line returns
-to body text. Shift-Enter adds a line without ever leaving, for blank lines inside the
-block. Prose is set in the body face, code in IBM Plex Mono.
+A code or prose block keeps its text exactly: line breaks and spacing stand, Tab types
+a tab, and pasted lines stay in the block. Enter adds a line, and Enter on a blank last
+line returns to body text. Shift-Enter adds a line without ever leaving, for blank lines
+inside the block. Prose is set in the body face, code in IBM Plex Mono.
+
+Typed bold and italic work in prose. In code they stay literal, and typed links stay
+literal in both.
 
 ## Search
 

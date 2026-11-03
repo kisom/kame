@@ -1445,4 +1445,21 @@ mod tests {
             "the stylesheet sets its face: {html}"
         );
     }
+
+    #[test]
+    fn emphasis_in_prose_exports_inside_the_pre() {
+        let mut doc = Document::new("t");
+        let mut prose = block(BlockKind::Prose, "one\n  two");
+        prose.spans = vec![Span {
+            start: 6,
+            end: 9,
+            style: SpanStyle::Bold,
+        }];
+        doc.blocks = vec![prose];
+        let html = to_html(&doc);
+        assert!(
+            html.contains("<pre class=\"prose\">one\n  <strong>two</strong></pre>"),
+            "{html}"
+        );
+    }
 }

@@ -882,6 +882,12 @@ pub enum Command {
     MoveWordRight,
     SelectWordLeft,
     SelectWordRight,
+    /// Esc-Backspace or Alt-Backspace.
+    DeleteWordBack,
+    /// Esc-<: the very start of the first block.
+    MoveDocumentStart,
+    /// Esc->: the very end of the last block.
+    MoveDocumentEnd,
     /// Shift-arrow selection: move the caret's edge while keeping the edge where
     /// the selection began.
     SelectLeft,
@@ -898,6 +904,76 @@ pub enum Command {
     /// Add an annotation at the selection or the word under the caret. A note
     /// starts as a bare highlight (empty body) and its comment is added later.
     AddAnnotation(AnnotationKind),
+}
+
+/// How long after Escape the next key still counts as following it.
+pub const ESCAPE_PREFIX_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Escape as a prefix, as in Emacs: Esc-<, Esc-> and Esc-Backspace.
+#[derive(Default)]
+pub struct EscapePrefix {
+    armed_at: Option<std::time::Instant>,
+}
+
+impl EscapePrefix {
+    pub fn arm(&mut self, now: std::time::Instant) {
+        self.armed_at = Some(now);
+    }
+
+    /// The command `event` makes as the key after Escape, if it does. Keys the surface
+    /// ignores leave the prefix armed, because Shift-comma reaches here as a key that
+    /// means nothing and only then as the text `<`. Anything else uses it up.
+    pub fn command_for(&mut self, event: &Event, now: std::time::Instant) -> Option<Command> {
+        let armed_at = self.armed_at?;
+        if now.saturating_duration_since(armed_at) > ESCAPE_PREFIX_WINDOW {
+            self.armed_at = None;
+            return None;
+        }
+        match event {
+            Event::Text(text) => {
+                self.armed_at = None;
+                match text.as_str() {
+                    "<" => Some(Command::MoveDocumentStart),
+                    ">" => Some(Command::MoveDocumentEnd),
+                    _ => None,
+                }
+            }
+            Event::Key {
+                key: Key::Backspace,
+                pressed: true,
+                ..
+            } => {
+                self.armed_at = None;
+                Some(Command::DeleteWordBack)
+            }
+            other => {
+                if command_for_event(other).is_some() {
+                    self.armed_at = None;
+                }
+                None
+            }
+        }
+    }
+}
+
+/// The line above or below the caret's within its block. `None` at the block's edge,
+/// and in a block with no lines at all.
+pub fn adjacent_line(
+    layout: &BlockLayout,
+    offset: usize,
+    down: bool,
+) -> Option<crate::layout::LayoutLine> {
+    let line = caret_line(layout, offset)?;
+    let index = layout
+        .lines
+        .iter()
+        .position(|candidate| candidate.y == line.y)?;
+    let target = if down {
+        index + 1
+    } else {
+        index.checked_sub(1)?
+    };
+    layout.lines.get(target).copied()
 }
 
 /// Maps one egui event to an editor command, or `None` for events the surface
@@ -957,6 +1033,7 @@ fn block_kind_for_key(key: Key) -> Option<BlockKind> {
 /// (`Modifiers::command`), so Ctrl-Z / Cmd-Z both undo.
 pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
     let command = modifiers.command;
+    let word = command || modifiers.alt;
     match key {
         Key::Z if command && modifiers.shift => Some(Command::Redo),
         Key::Z if command => Some(Command::Undo),
@@ -978,14 +1055,15 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::F if command && modifiers.shift => {
             Some(Command::AddAnnotation(AnnotationKind::Footnote))
         }
+        Key::Backspace if modifiers.alt => Some(Command::DeleteWordBack),
         Key::Backspace => Some(Command::Backspace),
         Key::Delete => Some(Command::Delete),
-        // Ctrl/Cmd-arrow moves by word; with Shift it extends the selection a
-        // whole word at a time.
-        Key::ArrowLeft if command && modifiers.shift => Some(Command::SelectWordLeft),
-        Key::ArrowLeft if command => Some(Command::MoveWordLeft),
-        Key::ArrowRight if command && modifiers.shift => Some(Command::SelectWordRight),
-        Key::ArrowRight if command => Some(Command::MoveWordRight),
+        // Ctrl/Cmd-arrow moves by word, as does Alt-arrow, which is the Mac's habit;
+        // with Shift it extends the selection a whole word at a time.
+        Key::ArrowLeft if word && modifiers.shift => Some(Command::SelectWordLeft),
+        Key::ArrowLeft if word => Some(Command::MoveWordLeft),
+        Key::ArrowRight if word && modifiers.shift => Some(Command::SelectWordRight),
+        Key::ArrowRight if word => Some(Command::MoveWordRight),
         Key::ArrowLeft if modifiers.shift && !command => Some(Command::SelectLeft),
         Key::ArrowLeft if !command => Some(Command::MoveLeft),
         Key::ArrowRight if modifiers.shift && !command => Some(Command::SelectRight),
@@ -1982,5 +2060,157 @@ xyz"
         let rects = range_rects(&layout, 4, 7);
         assert_eq!(rects.len(), 1, "{rects:?}");
         assert_eq!(rects[0].min.y, layout.lines[1].y);
+    }
+
+    fn text_event(text: &str) -> Event {
+        Event::Text(text.to_string())
+    }
+
+    fn key_event(key: Key, pressed: bool) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn alt_arrows_move_and_select_by_word() {
+        let alt = Modifiers::ALT;
+        let alt_shift = Modifiers { shift: true, ..alt };
+        assert_eq!(
+            command_for_key(Key::ArrowLeft, alt),
+            Some(Command::MoveWordLeft)
+        );
+        assert_eq!(
+            command_for_key(Key::ArrowRight, alt),
+            Some(Command::MoveWordRight)
+        );
+        assert_eq!(
+            command_for_key(Key::ArrowLeft, alt_shift),
+            Some(Command::SelectWordLeft)
+        );
+        assert_eq!(
+            command_for_key(Key::ArrowRight, alt_shift),
+            Some(Command::SelectWordRight)
+        );
+    }
+
+    #[test]
+    fn alt_backspace_deletes_a_word_and_plain_backspace_does_not() {
+        assert_eq!(
+            command_for_key(Key::Backspace, Modifiers::ALT),
+            Some(Command::DeleteWordBack)
+        );
+        assert_eq!(
+            command_for_key(Key::Backspace, Modifiers::NONE),
+            Some(Command::Backspace)
+        );
+    }
+
+    #[test]
+    fn escape_then_angle_brackets_go_to_the_document_edges() {
+        let now = std::time::Instant::now();
+        let mut prefix = EscapePrefix::default();
+        prefix.arm(now);
+        // Shift-comma arrives as a key the surface ignores, then as text.
+        assert_eq!(prefix.command_for(&key_event(Key::Comma, true), now), None);
+        assert_eq!(
+            prefix.command_for(&text_event("<"), now),
+            Some(Command::MoveDocumentStart)
+        );
+        prefix.arm(now);
+        assert_eq!(
+            prefix.command_for(&text_event(">"), now),
+            Some(Command::MoveDocumentEnd)
+        );
+    }
+
+    #[test]
+    fn escape_then_backspace_deletes_a_word() {
+        let now = std::time::Instant::now();
+        let mut prefix = EscapePrefix::default();
+        prefix.arm(now);
+        assert_eq!(
+            prefix.command_for(&key_event(Key::Backspace, true), now),
+            Some(Command::DeleteWordBack)
+        );
+    }
+
+    #[test]
+    fn the_escape_prefix_is_used_up_by_one_key() {
+        let now = std::time::Instant::now();
+        let mut prefix = EscapePrefix::default();
+        prefix.arm(now);
+        assert!(prefix.command_for(&text_event("<"), now).is_some());
+        assert_eq!(prefix.command_for(&text_event("<"), now), None);
+        prefix.arm(now);
+        assert_eq!(prefix.command_for(&text_event("a"), now), None);
+        assert_eq!(prefix.command_for(&text_event(">"), now), None);
+        prefix.arm(now);
+        assert_eq!(
+            prefix.command_for(&key_event(Key::ArrowLeft, true), now),
+            None
+        );
+        assert_eq!(prefix.command_for(&text_event("<"), now), None);
+    }
+
+    #[test]
+    fn angle_brackets_are_only_text_without_a_recent_escape() {
+        let now = std::time::Instant::now();
+        let mut prefix = EscapePrefix::default();
+        assert_eq!(prefix.command_for(&text_event("<"), now), None);
+        prefix.arm(now);
+        let later = now + ESCAPE_PREFIX_WINDOW + std::time::Duration::from_millis(1);
+        assert_eq!(prefix.command_for(&text_event(">"), later), None);
+        assert_eq!(
+            prefix.command_for(&key_event(Key::Backspace, true), later),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_block_has_no_line_to_step_to() {
+        let mut renderer = GlyphRenderer::new(config());
+        let layout = renderer.layout(&paragraph(""));
+        assert!(adjacent_line(&layout, 0, true).is_none());
+        assert!(adjacent_line(&layout, 0, false).is_none());
+    }
+
+    #[test]
+    fn stepping_between_lines_stops_at_the_block_edges() {
+        let mut renderer = GlyphRenderer::new(LayoutConfig {
+            body_width: 160.0,
+            ..config()
+        });
+        let block = paragraph(
+            "Typography is the craft of endowing human language with a durable visual form.",
+        );
+        let layout = renderer.layout(&block);
+        assert!(layout.lines.len() >= 3, "expected a wrapped paragraph");
+        assert!(adjacent_line(&layout, 0, false).is_none());
+        assert_eq!(
+            adjacent_line(&layout, 0, true).unwrap().start,
+            layout.lines[1].start
+        );
+        assert!(adjacent_line(&layout, block.text.len(), true).is_none());
+    }
+
+    #[test]
+    fn a_tab_in_code_advances_four_columns() {
+        let mut renderer = GlyphRenderer::new(config());
+        let code = |text: &str| Block {
+            kind: BlockKind::Code { language: None },
+            ..paragraph(text)
+        };
+        let tab = renderer.layout(&code("\tx"));
+        let spaces = renderer.layout(&code("    x"));
+        let (with_tab, with_spaces) = (caret_x(&tab, 1), caret_x(&spaces, 4));
+        assert!(
+            (with_tab - with_spaces).abs() < 0.5,
+            "{with_tab} against {with_spaces}"
+        );
     }
 }

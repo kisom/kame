@@ -582,8 +582,11 @@ impl Editor {
     /// applied op and the caret's new offset, or `None` when the caret has not
     /// just closed an emphasis.
     pub fn apply_inline_markdown(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
-        // What a verbatim block holds is literal.
-        if self.block(cursor.block_id).ok()?.kind.is_verbatim() {
+        // What a code block holds is literal. Prose keeps its layout, not its asterisks.
+        if matches!(
+            self.block(cursor.block_id).ok()?.kind,
+            BlockKind::Code { .. }
+        ) {
             return None;
         }
         let (style, opener_start, closer_start, marker_len) = {

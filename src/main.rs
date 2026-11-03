@@ -37,9 +37,9 @@ use crate::model::{
     Document, Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
-    caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word, offset_at,
-    prev_boundary, prev_word, range_rects, word_at, AnnotationTextureCache, Command, GlyphRenderer,
-    LayoutCache, TextureCache,
+    adjacent_line, caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word,
+    offset_at, prev_boundary, prev_word, range_rects, word_at, AnnotationTextureCache, Command,
+    EscapePrefix, GlyphRenderer, LayoutCache, TextureCache,
 };
 use crate::storage::{Db, DbError, SnapshotMeta};
 
@@ -197,6 +197,29 @@ fn hold_instance_lock(path: &Path) -> bool {
         Err(std::fs::TryLockError::WouldBlock) => false,
         Err(std::fs::TryLockError::Error(_)) => true,
     }
+}
+
+/// Turns the Tab key into a typed tab. Shift-Tab has nothing to do in a block that takes
+/// tabs, so it goes too, or it would still move the keyboard focus.
+fn tabs_to_text(events: &mut Vec<egui::Event>) {
+    events.retain_mut(|event| {
+        let egui::Event::Key {
+            key: egui::Key::Tab,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        else {
+            return true;
+        };
+        if modifiers.shift_only() {
+            return false;
+        }
+        if !modifiers.any() {
+            *event = egui::Event::Text("\t".to_string());
+        }
+        true
+    });
 }
 
 /// Ctrl-N, or Cmd-N on a Mac. With Shift it adds a note.
@@ -2512,6 +2535,14 @@ impl Session {
             return false;
         }
         let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+        // A verbatim block holds line breaks, so what is pasted into one stays in it.
+        let caret = self.valid_caret();
+        let verbatim = self
+            .block_index(caret.block_id)
+            .is_some_and(|index| self.document().blocks[index].kind.is_verbatim());
+        if verbatim {
+            return self.insert(&normalised);
+        }
         let mut changed = false;
         for (index, line) in normalised.split('\n').enumerate() {
             if index > 0 {
@@ -2522,6 +2553,51 @@ impl Session {
             }
         }
         changed
+    }
+
+    /// Deletes the word before the caret. A selection goes instead, as it does for
+    /// Backspace, and at the start of a block this joins it to the one before.
+    fn delete_word_back(&mut self) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        if self.selection.is_some() {
+            return self.delete_selected();
+        }
+        let caret = self.valid_caret();
+        let Some(index) = self.block_index(caret.block_id) else {
+            return false;
+        };
+        let Some(offset) = prev_word(&self.document().blocks[index].text, caret.offset) else {
+            return self.backspace();
+        };
+        let target = Cursor {
+            block_id: caret.block_id,
+            offset,
+        };
+        self.delete_range(
+            Selection {
+                start: target,
+                end: caret,
+            },
+            target,
+        )
+    }
+
+    /// The very start of the first block, or the very end of the last.
+    fn document_edge(&self, end: bool) -> Option<Cursor> {
+        let blocks = &self.document().blocks;
+        if end {
+            blocks.last().map(|block| Cursor {
+                block_id: block.id,
+                offset: block.text.len(),
+            })
+        } else {
+            blocks.first().map(|block| Cursor {
+                block_id: block.id,
+                offset: 0,
+            })
+        }
     }
 
     fn undo(&mut self) -> bool {
@@ -3227,6 +3303,7 @@ struct KameApp {
     /// Scroll offset requested by last frame's typewriter centring. Applied to
     /// the scroll area on the next frame, when its geometry is known.
     pending_scroll: Option<f32>,
+    escape_prefix: EscapePrefix,
     /// How far the page was scrolled on the last frame.
     page_scroll: f32,
     /// The caret and scroll last written to the document.
@@ -3305,6 +3382,7 @@ impl KameApp {
             palette: Palette::for_mode(dark),
             typewriter_anchor: None,
             pending_scroll: None,
+            escape_prefix: EscapePrefix::default(),
             page_scroll: 0.0,
             saved_position: None,
             position_saved_at: std::time::Instant::now(),
@@ -3574,6 +3652,23 @@ impl KameApp {
         self.session.save_position(self.page_scroll);
         self.saved_position = Some((self.session.caret, self.page_scroll));
         self.position_saved_at = std::time::Instant::now();
+    }
+
+    /// Whether Tab goes to the page: the caret is in a verbatim block and nothing else
+    /// has the keyboard, the same conditions `handle_input` gives the page its keys.
+    fn prose_takes_tabs(&self, ctx: &egui::Context) -> bool {
+        let caret = self.session.caret;
+        let verbatim = self
+            .session
+            .block_index(caret.block_id)
+            .is_some_and(|index| self.session.document().blocks[index].kind.is_verbatim());
+        verbatim
+            && !self.dialog_open()
+            && !self.close_flow.prompting
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.memory(|memory| {
+                memory.has_focus(note_body_edit_id()) || memory.has_focus(find_query_id())
+            })
     }
 
     /// Ctrl-N: asks about unsaved work if there is any, then starts an empty document.
@@ -3918,6 +4013,10 @@ impl KameApp {
                 return;
             }
             if !self.dismiss_dialog() {
+                // With nothing to close, Escape is a prefix for the next key.
+                if self.open_note.is_none() {
+                    self.escape_prefix.arm(std::time::Instant::now());
+                }
                 self.set_open_note(None);
             }
         }
@@ -3951,11 +4050,23 @@ impl KameApp {
             return;
         }
         let events = ctx.input(|input| input.events.clone());
+        let now = std::time::Instant::now();
         for event in &events {
-            let Some(command) = command_for_event(event) else {
+            let prefixed = self.escape_prefix.command_for(event, now);
+            let Some(command) = prefixed.or_else(|| command_for_event(event)) else {
                 continue;
             };
             match command {
+                Command::DeleteWordBack => {
+                    self.session.delete_word_back();
+                }
+                Command::MoveDocumentStart | Command::MoveDocumentEnd => {
+                    let end = matches!(command, Command::MoveDocumentEnd);
+                    if let Some(edge) = self.session.document_edge(end) {
+                        self.session.set_caret(edge);
+                        self.reveal_caret = true;
+                    }
+                }
                 Command::Insert(text) => {
                     if self.session.insert(&text) {
                         self.session.apply_markdown_shortcut();
@@ -4032,26 +4143,10 @@ impl KameApp {
         };
         let block = self.session.document().blocks[index].clone();
         let layout = self.layout_of(&block);
-        let Some(line) = caret_line(&layout, caret.offset) else {
-            return;
-        };
-        let Some(line_index) = layout
-            .lines
-            .iter()
-            .position(|candidate| candidate.y == line.y)
-        else {
-            return;
-        };
         let x = caret_x(&layout, caret.offset);
 
-        let target = if down {
-            layout.lines.get(line_index + 1)
-        } else {
-            line_index
-                .checked_sub(1)
-                .and_then(|previous| layout.lines.get(previous))
-        };
-        if let Some(target) = target {
+        // A block with no lines, which is any empty one, falls through to crossing.
+        if let Some(target) = adjacent_line(&layout, caret.offset, down) {
             let offset = offset_at(&layout, x, target.y + 1.0, block.text.len());
             self.move_caret(
                 Cursor {
@@ -5957,6 +6052,14 @@ impl eframe::App for KameApp {
     ///
     /// This runs here rather than in `ui` because eframe skips `ui` while the
     /// window is minimized or occluded, and a close nothing cancels there exits.
+    /// egui moves the keyboard focus on Tab before any of kame's code sees the frame,
+    /// so a block that takes tabs has to claim the key here.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if self.prose_takes_tabs(ctx) {
+            tabs_to_text(&mut raw_input.events);
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // The OS asking to quit goes through the same close request as the window's
         // own button, and so through the unsaved-document prompt.
@@ -9083,19 +9186,6 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     }
 
     #[test]
-    fn typed_emphasis_stays_literal_in_a_verbatim_block() {
-        let mut session = Session::anonymous().unwrap();
-        typed(&mut session, "| ");
-        for c in "*a* and [b](c)".chars() {
-            session.insert(&c.to_string());
-            session.apply_inline_markdown();
-            session.apply_markdown_link();
-        }
-        assert_eq!(session.document().blocks[0].text, "*a* and [b](c)");
-        assert!(session.document().blocks[0].spans.is_empty());
-    }
-
-    #[test]
     fn three_dashes_and_enter_make_a_rule_and_a_new_paragraph() {
         let mut session = Session::anonymous().unwrap();
         typed(&mut session, "---");
@@ -9363,5 +9453,203 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         session.save_position(300.0);
         drop(session);
         assert_eq!(open(&path).restored_scroll, None);
+    }
+
+    fn type_marked(session: &mut Session, text: &str) {
+        for c in text.chars() {
+            session.insert(&c.to_string());
+            session.apply_inline_markdown();
+            session.apply_markdown_link();
+        }
+    }
+
+    fn code_session() -> Session {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "```");
+        session.split();
+        session
+    }
+
+    #[test]
+    fn typed_emphasis_stays_literal_in_code() {
+        let mut session = code_session();
+        type_marked(&mut session, "*a* **b** [c](d)");
+        assert_eq!(session.document().blocks[0].text, "*a* **b** [c](d)");
+        assert!(session.document().blocks[0].spans.is_empty());
+    }
+
+    #[test]
+    fn typed_emphasis_formats_in_prose() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| ");
+        type_marked(&mut session, "*a* and **b**");
+        let block = &session.document().blocks[0];
+        assert_eq!(block.kind, BlockKind::Prose);
+        assert_eq!(block.text, "a and b");
+        assert_eq!(block.spans.len(), 2);
+    }
+
+    #[test]
+    fn a_typed_link_stays_literal_in_prose() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "| ");
+        type_marked(&mut session, "[c](d)");
+        assert_eq!(session.document().blocks[0].text, "[c](d)");
+    }
+
+    #[test]
+    fn pasted_lines_stay_in_a_verbatim_block() {
+        let mut session = code_session();
+        assert!(session.paste("fn a() {\r\n    b();\n\n}\n\nfn c() {}"));
+        assert_eq!(session.document().blocks.len(), 1);
+        assert_eq!(
+            session.document().blocks[0].text,
+            "fn a() {\n    b();\n\n}\n\nfn c() {}"
+        );
+        assert_eq!(
+            session.caret.offset,
+            session.document().blocks[0].text.len()
+        );
+        session.undo();
+        assert_eq!(
+            session.document().blocks[0].text,
+            "",
+            "one undo takes it all back"
+        );
+    }
+
+    #[test]
+    fn pasted_lines_replace_a_selection_in_a_verbatim_block() {
+        let mut session = code_session();
+        session.paste("abc");
+        let block_id = session.document().blocks[0].id;
+        session.selection = Some(Selection {
+            start: Cursor {
+                block_id,
+                offset: 1,
+            },
+            end: Cursor {
+                block_id,
+                offset: 2,
+            },
+        });
+        session.paste("x\ny");
+        assert_eq!(session.document().blocks[0].text, "ax\nyc");
+    }
+
+    #[test]
+    fn pasted_lines_still_make_paragraphs_in_body_text() {
+        let mut session = Session::anonymous().unwrap();
+        session.paste("one\ntwo");
+        assert_eq!(session.document().blocks.len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_word_back_takes_the_word_before_the_caret() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two");
+        assert!(session.delete_word_back());
+        assert_eq!(session.document().blocks[0].text, "one ");
+        assert_eq!(session.caret.offset, 4);
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "one two");
+    }
+
+    #[test]
+    fn deleting_a_word_back_counts_bytes_not_characters() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("één élan");
+        assert!(session.delete_word_back());
+        assert_eq!(session.document().blocks[0].text, "één ");
+    }
+
+    #[test]
+    fn deleting_a_word_back_at_a_block_start_joins_the_blocks() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one");
+        session.split();
+        session.insert("two");
+        session.caret.offset = 0;
+        assert!(session.delete_word_back());
+        assert_eq!(session.document().blocks.len(), 1);
+        assert_eq!(session.document().blocks[0].text, "onetwo");
+    }
+
+    #[test]
+    fn deleting_a_word_back_with_a_selection_deletes_the_selection() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two");
+        let block_id = session.document().blocks[0].id;
+        session.selection = Some(Selection {
+            start: Cursor {
+                block_id,
+                offset: 1,
+            },
+            end: Cursor {
+                block_id,
+                offset: 2,
+            },
+        });
+        assert!(session.delete_word_back());
+        assert_eq!(session.document().blocks[0].text, "oe two");
+    }
+
+    #[test]
+    fn the_document_edges_are_the_first_and_last_blocks() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one");
+        session.split();
+        session.insert("second block");
+        let blocks = &session.document().blocks;
+        assert_eq!(
+            session.document_edge(false),
+            Some(Cursor {
+                block_id: blocks[0].id,
+                offset: 0
+            })
+        );
+        assert_eq!(
+            session.document_edge(true),
+            Some(Cursor {
+                block_id: blocks[1].id,
+                offset: "second block".len()
+            })
+        );
+    }
+
+    #[test]
+    fn a_tab_key_becomes_a_typed_tab() {
+        let key = |pressed, modifiers| egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        let shift = egui::Modifiers::SHIFT;
+        let mut events = vec![
+            key(true, egui::Modifiers::NONE),
+            key(false, egui::Modifiers::NONE),
+            key(true, shift),
+            key(true, egui::Modifiers::COMMAND),
+            egui::Event::Text("x".to_string()),
+        ];
+        tabs_to_text(&mut events);
+        assert_eq!(
+            events,
+            vec![
+                egui::Event::Text("\t".to_string()),
+                key(false, egui::Modifiers::NONE),
+                key(true, egui::Modifiers::COMMAND),
+                egui::Event::Text("x".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_typed_tab_lands_in_a_code_block() {
+        let mut session = code_session();
+        session.insert("\t");
+        assert_eq!(session.document().blocks[0].text, "\t");
     }
 }

@@ -4802,12 +4802,39 @@ impl eframe::App for KameApp {
     }
 }
 
+/// Where tests put their files: one folder, cleared of runs over an hour old, since otherwise
+/// every run leaves its files in what is often a memory-backed temporary directory.
+#[cfg(test)]
+pub(crate) fn test_temp_dir() -> std::path::PathBuf {
+    static CLEARED: std::sync::Once = std::sync::Once::new();
+    let root = std::env::temp_dir().join("kame-app-tests");
+    CLEARED.call_once(|| {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|found| found.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > 3600);
+            if stale {
+                let path = entry.path();
+                let _ = std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path));
+            }
+        }
+    });
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn temp_db_path() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kame-gui-test-{}", uuid::Uuid::new_v4()));
+        let dir = test_temp_dir().join(format!("kame-gui-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("doc.kame")
     }
@@ -5531,7 +5558,7 @@ mod tests {
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
+        let dir = test_temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -5738,7 +5765,7 @@ mod tests {
 
     #[test]
     fn opening_markdown_imports_it_as_an_unsaved_document() {
-        let dir = std::env::temp_dir().join(format!("kame-import-{}", uuid::Uuid::new_v4()));
+        let dir = test_temp_dir().join(format!("kame-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes.md");
         let source = "# Hello\n\nBody with `code`.\n\n![](missing.png)\n";
@@ -5769,7 +5796,7 @@ mod tests {
             "an empty document has nothing to lose"
         );
 
-        let dir = std::env::temp_dir().join(format!("kame-lose-{}", uuid::Uuid::new_v4()));
+        let dir = test_temp_dir().join(format!("kame-lose-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let prose = dir.join("prose.md");
         std::fs::write(&prose, "Unsaved words.\n").unwrap();
@@ -5815,7 +5842,7 @@ mod tests {
     #[test]
     fn image_height_preserves_aspect_ratio_and_falls_back() {
         // Write a real 200×100 image to test the aspect ratio.
-        let dir = std::env::temp_dir().join(format!("kame-img-test-{}", uuid::Uuid::new_v4()));
+        let dir = test_temp_dir().join(format!("kame-img-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("wide.png");
         image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 255]))
@@ -6285,7 +6312,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     /// Opening a missing path creates it, which is not what reopening should do.
     #[test]
     fn a_last_document_that_has_gone_is_not_reopened() {
-        let gone = std::env::temp_dir().join(format!("kame-gone-{}.kame", uuid::Uuid::new_v4()));
+        let gone = test_temp_dir().join(format!("kame-gone-{}.kame", uuid::Uuid::new_v4()));
         assert_eq!(document_to_open(None, Some(gone.clone())), None);
         assert!(!gone.exists());
         assert_eq!(document_to_open(None, None), None);

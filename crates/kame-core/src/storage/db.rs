@@ -690,7 +690,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db_path() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kame-db-test-{}", Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-db-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("kame.db")
     }
@@ -1270,7 +1270,7 @@ mod tests {
 
     #[test]
     fn a_file_without_the_metadata_table_gains_it_on_open() {
-        let dir = std::env::temp_dir().join(format!("kame-meta-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-meta-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.kame");
         drop(Db::open(&path).unwrap());
@@ -1310,7 +1310,8 @@ mod tests {
     }
 
     fn saved_file(name: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("kame-{name}-{}.kame", uuid::Uuid::new_v4()));
+        let path =
+            crate::test_temp_dir().join(format!("kame-{name}-{}.kame", uuid::Uuid::new_v4()));
         let mut db = Db::open(&path).unwrap();
         db.save_document(&Document::new("Saved")).unwrap();
         drop(db);
@@ -1344,7 +1345,7 @@ mod tests {
 
     #[test]
     fn a_read_only_open_doesnt_create_a_missing_file() {
-        let path = std::env::temp_dir().join(format!("kame-gone-{}.kame", uuid::Uuid::new_v4()));
+        let path = crate::test_temp_dir().join(format!("kame-gone-{}.kame", uuid::Uuid::new_v4()));
         assert!(Db::open_read_only(&path).is_err());
         assert!(!path.exists());
     }
@@ -1381,7 +1382,7 @@ mod tests {
 
     #[test]
     fn a_read_only_open_copes_with_an_awkward_file_name() {
-        let dir = std::env::temp_dir().join(format!("kame-awkward-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-awkward-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("été 100% ok?#1.kame");
         let mut db = Db::open(&path).unwrap();
@@ -1399,7 +1400,7 @@ mod tests {
         let path = saved_file(name);
         let mut writer = Db::open(&path).unwrap();
         writer.save_document(&Document::new("In the wal")).unwrap();
-        let dir = std::env::temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let copy = dir.join("a.kame");
         std::fs::copy(&path, &copy).unwrap();

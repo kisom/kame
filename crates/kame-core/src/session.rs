@@ -2023,7 +2023,7 @@ mod tests {
     use super::*;
 
     fn temp_db_path() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kame-gui-test-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-gui-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("doc.kame")
     }
@@ -2038,7 +2038,7 @@ mod tests {
 
     #[test]
     fn the_first_save_of_an_import_suggests_its_source_name() {
-        let dir = std::env::temp_dir().join(format!("kame-name-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-name-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes.md");
         std::fs::write(&path, "Title: Something Else\n\nWords.\n").unwrap();
@@ -2075,7 +2075,7 @@ mod tests {
 
     #[test]
     fn a_real_title_outranks_the_file_name() {
-        let dir = std::env::temp_dir().join(format!("kame-title-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-title-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("notes.md");
         std::fs::write(&source, "Title: A Real Title\n\nWords.\n").unwrap();
@@ -2175,7 +2175,7 @@ mod tests {
 
     #[test]
     fn an_import_keeps_its_front_matter() {
-        let dir = std::env::temp_dir().join(format!("kame-meta-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-meta-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("notes.md");
         std::fs::write(&source, "Title: T\nAuthor: K\nTags: a, b\n\nWords.\n").unwrap();
@@ -2208,7 +2208,7 @@ mod tests {
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2487,7 +2487,7 @@ mod tests {
 
     #[test]
     fn opening_a_missing_markdown_file_fails_without_creating_it() {
-        let path = std::env::temp_dir().join(format!("kame-missing-{}.md", uuid::Uuid::new_v4()));
+        let path = crate::test_temp_dir().join(format!("kame-missing-{}.md", uuid::Uuid::new_v4()));
         assert!(Session::open_any(&path).is_err());
         assert!(
             !path.exists(),
@@ -2497,7 +2497,7 @@ mod tests {
 
     #[test]
     fn opening_a_kame_path_still_opens_a_document() {
-        let path = std::env::temp_dir().join(format!("kame-any-{}.kame", uuid::Uuid::new_v4()));
+        let path = crate::test_temp_dir().join(format!("kame-any-{}.kame", uuid::Uuid::new_v4()));
         let (session, note) = Session::open_any(&path).unwrap();
         assert!(!session.is_anonymous());
         assert!(note.is_none());

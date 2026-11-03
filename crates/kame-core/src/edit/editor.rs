@@ -1343,7 +1343,7 @@ mod tests {
     }
 
     fn temp_db_path() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kame-edit-test-{}", Uuid::new_v4()));
+        let dir = crate::test_temp_dir().join(format!("kame-edit-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("kame.db")
     }

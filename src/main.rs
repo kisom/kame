@@ -1697,7 +1697,8 @@ impl Session {
     ///
     /// Anything already at `path` is replaced whole: the file dialog has confirmed
     /// that. The copy is written beside it and renamed into place, so a failure
-    /// leaves both the old file and this session as they were.
+    /// leaves both the old file and this session as they were, and it takes the
+    /// old file's permissions, or failing that the current document's.
     fn save_as(&mut self, path: &Path) -> AppResult<()> {
         if self.path.as_deref() == Some(path) {
             self.clear_save_error();
@@ -1712,15 +1713,30 @@ impl Session {
             .ok_or("the path does not name a file")?
             .to_string_lossy();
         let partial = path.with_file_name(format!(".{name}.saving-{}", uuid::Uuid::new_v4()));
-        self.db.save_copy(&partial)?;
-        for suffix in ["-wal", "-shm"] {
-            let mut stale = path.as_os_str().to_owned();
-            stale.push(suffix);
-            let _ = std::fs::remove_file(stale);
-        }
-        if let Err(err) = std::fs::rename(&partial, path) {
+        // Replacing a file must not widen who can read it, and a private document
+        // stays private under a new name. The mode goes on while the copy is still
+        // empty, so the content is never readable under a wider one.
+        let permissions = std::fs::metadata(path)
+            .or_else(|err| self.path.as_deref().map_or(Err(err), std::fs::metadata))
+            .ok()
+            .map(|file| file.permissions());
+        let written = (|| -> AppResult<()> {
+            std::fs::File::create_new(&partial)?;
+            if let Some(permissions) = permissions {
+                std::fs::set_permissions(&partial, permissions)?;
+            }
+            self.db.save_copy(&partial)?;
+            for suffix in ["-wal", "-shm"] {
+                let mut stale = path.as_os_str().to_owned();
+                stale.push(suffix);
+                let _ = std::fs::remove_file(stale);
+            }
+            std::fs::rename(&partial, path)?;
+            Ok(())
+        })();
+        if let Err(err) = written {
             let _ = std::fs::remove_file(&partial);
-            return Err(err.into());
+            return Err(err);
         }
 
         self.db = Db::open(path)?;
@@ -6645,6 +6661,81 @@ mod tests {
         assert!(session.is_anonymous());
         session.insert(" more");
         assert_eq!(session.document().blocks[0].text, "Words more");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_over_a_private_file_keeps_it_private() {
+        let dir = scratch_dir("mode");
+        let target = dir.join("private.kame");
+        drop(open(&target));
+        set_mode(&target, 0o600);
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        session.save_as(&target).unwrap();
+        assert_eq!(mode_of(&target), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_as_from_a_private_file_stays_private() {
+        let dir = scratch_dir("mode");
+        let source = dir.join("private.kame");
+        let mut session = open(&source);
+        session.insert("Words");
+        set_mode(&source, 0o600);
+        let copy = dir.join("copy.kame");
+        session.save_as(&copy).unwrap();
+        assert_eq!(mode_of(&copy), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_over_a_file_keeps_its_mode_over_the_sources() {
+        let dir = scratch_dir("mode");
+        let source = dir.join("private.kame");
+        let target = dir.join("shared.kame");
+        drop(open(&target));
+        set_mode(&target, 0o640);
+        let mut session = open(&source);
+        session.insert("Words");
+        set_mode(&source, 0o600);
+        session.save_as(&target).unwrap();
+        assert_eq!(mode_of(&target), 0o640);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_copy_leaves_no_partial_file_behind() {
+        let dir = scratch_dir("partial");
+        let target = dir.join("doc.kame");
+        std::fs::create_dir(&target).unwrap();
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        assert!(
+            session.save_as(&target).is_err(),
+            "a directory cannot be replaced"
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("doc.kame")]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

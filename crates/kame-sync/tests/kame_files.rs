@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use kame_core::edit::Cursor;
 use kame_core::session::Session;
@@ -22,7 +22,7 @@ fn diverged() -> (PathBuf, PathBuf) {
     (one, other)
 }
 
-fn edit(path: &PathBuf, block: usize, offset: usize, words: &str) {
+fn edit(path: &Path, block: usize, offset: usize, words: &str) {
     let mut session = Session::open(path).unwrap();
     let block_id = session.document().blocks[block].id;
     session.set_caret(Cursor { block_id, offset });

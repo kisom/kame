@@ -26,7 +26,7 @@ Open work, most pressing first. Tick items off or delete them as they land.
 ## Sync
 
 - [x] **Syncthing can replace a `.kame` file while it is open.** kame now notices, stops saving
-  to it, and asks whether to save this copy elsewhere or open the one on disk.
+  to it, and asks whether to merge the two, save this copy elsewhere or open the one on disk.
 
 ## Ideas
 

@@ -421,13 +421,14 @@ fn close_delimiter(style: &SpanStyle) -> String {
 /// A URL as a Markdown link destination, meaning the same URL once read back. A
 /// renderer decodes character references here, so `&` is escaped, or `&#58;` could
 /// decode into a scheme after [`is_script_url`] had passed it. A parenthesis or
-/// space would otherwise end the link early.
+/// space would otherwise end the link early, and a leading `<` would make the rest
+/// an angle-bracket destination, hiding a scheme from that check.
 fn link_destination(url: &str) -> String {
     let mut out = String::with_capacity(url.len());
     for c in url.chars() {
         match c {
             '&' => out.push_str("&amp;"),
-            '\\' | '(' | ')' => {
+            '\\' | '(' | ')' | '<' | '>' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -1134,7 +1135,10 @@ mod tests {
         let mut doc = Document::new("t");
         doc.blocks = vec![linked("a) <script>x</script> (b")];
         let out = to_markdown(&doc);
-        assert_eq!(out, "[the demo](a\\)%20<script>x</script>%20\\(b)\n");
+        assert_eq!(
+            out,
+            "[the demo](a\\)%20\\<script\\>x\\</script\\>%20\\(b)\n"
+        );
     }
 
     #[test]

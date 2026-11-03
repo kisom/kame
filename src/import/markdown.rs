@@ -1319,4 +1319,40 @@ mod tests {
             );
         }
     }
+
+    /// Whatever a stored URL looks like, a Markdown renderer reading the export must
+    /// not find a script link in it that the export's own check did not see.
+    #[test]
+    fn no_exported_destination_reads_back_as_a_script_link() {
+        for url in [
+            "<javascript:alert(1)>",
+            "javascript&#58;alert(1)",
+            "javascript&colon;alert(1)",
+            "&#106;avascript:alert(1)",
+            "java\\script:alert(1)",
+            "\\javascript:alert(1)",
+            "<javascript:alert(1)",
+            "x) [y](javascript:alert(1)",
+            "x\" onclick=\"alert(1)",
+        ] {
+            let mut doc = Document::new("t");
+            doc.blocks[0].text = "words".to_string();
+            doc.blocks[0].spans = vec![Span {
+                start: 0,
+                end: 5,
+                style: SpanStyle::Link {
+                    url: url.to_string(),
+                },
+            }];
+            let exported = to_markdown(&doc);
+            for event in Parser::new_ext(&exported, Options::empty()) {
+                if let Event::Start(Tag::Link { dest_url, .. }) = event {
+                    assert!(
+                        !crate::model::is_script_url(&dest_url),
+                        "{url:?} exported as {exported:?} reads back as {dest_url:?}"
+                    );
+                }
+            }
+        }
+    }
 }

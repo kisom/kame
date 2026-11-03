@@ -296,6 +296,8 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
     // Delimiters currently open, outermost first: always a prefix of `wanted`
     // for the segment being emitted, which is what keeps the output nested.
     let mut open: Vec<SpanStyle> = Vec::new();
+    // What closes the code span that is open, which depends on its text.
+    let mut code_close = String::new();
     for window in bounds.windows(2) {
         let (start, end) = (window[0], window[1]);
         if start >= end {
@@ -319,11 +321,18 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
         // A style that still covers it but sits under one that just ended stays
         // open and its run extends, rather than being reopened with a stack of
         // adjacent asterisks that no parser can unpick.
+        // A footnote marker inside code would be read as code, so code closes for it.
+        let marker_here = footnotes.iter().any(|(offset, _)| *offset == start);
         while let Some(innermost) = open.last().cloned() {
-            if wanted.contains(&innermost) {
+            let is_code = innermost == SpanStyle::Code;
+            if wanted.contains(&innermost) && !(is_code && marker_here) {
                 break;
             }
-            out.push_str(&close_delimiter(&innermost));
+            if is_code {
+                out.push_str(&code_close);
+            } else {
+                out.push_str(&close_delimiter(&innermost));
+            }
             open.pop();
         }
         // A marker at a span edge belongs after the closing and before the
@@ -332,15 +341,35 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
             out.push_str(&format!("[^{number}]"));
         }
         for style in &wanted {
-            if !open.contains(style) {
-                out.push_str(&open_delimiter(style));
-                open.push(style.clone());
+            if open.contains(style) {
+                continue;
             }
+            if *style == SpanStyle::Code {
+                let whole = spans
+                    .iter()
+                    .find(|(s, e, covered)| *covered == *style && *s <= start && *e >= end)
+                    .map_or(&text[start..end], |(s, e, _)| &text[*s..*e]);
+                let (opening, closing) = code_delimiters(whole);
+                out.push_str(&opening);
+                code_close = closing;
+            } else {
+                out.push_str(&open_delimiter(style));
+            }
+            open.push(style.clone());
         }
-        push_escaped(&mut out, &text[start..end]);
+        // What is inside a code span is not Markdown, so it isn't escaped either.
+        if open.contains(&SpanStyle::Code) {
+            out.push_str(&text[start..end]);
+        } else {
+            push_escaped(&mut out, &text[start..end]);
+        }
     }
     while let Some(style) = open.pop() {
-        out.push_str(&close_delimiter(&style));
+        if style == SpanStyle::Code {
+            out.push_str(&code_close);
+        } else {
+            out.push_str(&close_delimiter(&style));
+        }
     }
     // A marker past the last glyph has no segment of its own to sit in.
     for (_, number) in footnotes.iter().filter(|(offset, _)| *offset == text.len()) {
@@ -425,8 +454,21 @@ fn escape_block_start(rendered: &mut String) {
 /// Opening order for the two emphasis styles: bold outside, italic inside, so
 /// a segment carrying both exports as `**a *b***`. A link is not listed here:
 /// it is pushed first and therefore sits outermost, wrapping any emphasis.
-fn style_order() -> [SpanStyle; 2] {
-    [SpanStyle::Bold, SpanStyle::Italic]
+fn style_order() -> [SpanStyle; 3] {
+    [SpanStyle::Bold, SpanStyle::Italic, SpanStyle::Code]
+}
+
+/// The backticks around a code span of `text`, more than any run inside it. Text that
+/// starts or ends in a backtick needs a space between it and them, which is not part of
+/// the code.
+fn code_delimiters(text: &str) -> (String, String) {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let ticks = "`".repeat(longest + 1);
+    if text.starts_with('`') || text.ends_with('`') {
+        (format!("{ticks} "), format!(" {ticks}"))
+    } else {
+        (ticks.clone(), ticks)
+    }
 }
 
 /// The marker that opens `style`'s run.
@@ -435,6 +477,7 @@ fn open_delimiter(style: &SpanStyle) -> String {
         SpanStyle::Bold => "**".to_string(),
         SpanStyle::Italic => "*".to_string(),
         SpanStyle::Link { .. } => "[".to_string(),
+        SpanStyle::Code => unreachable!("a code span's delimiter depends on its text"),
         SpanStyle::DocumentLink { .. } => unreachable!("document links are dropped"),
     }
 }
@@ -445,6 +488,7 @@ fn close_delimiter(style: &SpanStyle) -> String {
         SpanStyle::Bold => "**".to_string(),
         SpanStyle::Italic => "*".to_string(),
         SpanStyle::Link { url } => format!("]({})", link_destination(url)),
+        SpanStyle::Code => unreachable!("a code span's delimiter depends on its text"),
         SpanStyle::DocumentLink { .. } => unreachable!("document links are dropped"),
     }
 }
@@ -1345,5 +1389,59 @@ mod tests {
         }];
         doc.blocks = vec![linked];
         assert_eq!(to_markdown(&doc), "See the intro now.\n");
+    }
+
+    fn with_code(text: &str, ranges: &[(usize, usize)]) -> Document {
+        let mut doc = Document::new("t");
+        let mut block = paragraph(text);
+        block.spans = ranges
+            .iter()
+            .map(|(start, end)| Span {
+                start: *start,
+                end: *end,
+                style: SpanStyle::Code,
+            })
+            .collect();
+        doc.blocks = vec![block];
+        doc
+    }
+
+    #[test]
+    fn inline_code_exports_in_backticks_without_escaping() {
+        assert_eq!(
+            to_markdown(&with_code("run a_b*c now", &[(4, 9)])),
+            "run `a_b*c` now\n"
+        );
+    }
+
+    #[test]
+    fn a_backtick_in_inline_code_gets_a_longer_delimiter() {
+        assert_eq!(to_markdown(&with_code("a`b", &[(0, 3)])), "``a`b``\n");
+    }
+
+    #[test]
+    fn inline_code_starting_or_ending_in_a_backtick_is_padded() {
+        assert_eq!(to_markdown(&with_code("`a", &[(0, 2)])), "`` `a ``\n");
+        assert_eq!(to_markdown(&with_code("a`", &[(0, 2)])), "`` a` ``\n");
+    }
+
+    #[test]
+    fn inline_code_nests_inside_bold_and_links() {
+        let mut doc = with_code("use it now", &[(4, 6)]);
+        doc.blocks[0].spans.push(Span {
+            start: 0,
+            end: 10,
+            style: SpanStyle::Bold,
+        });
+        assert_eq!(to_markdown(&doc), "**use `it` now**\n");
+        let mut doc = with_code("use it now", &[(4, 6)]);
+        doc.blocks[0].spans.push(Span {
+            start: 4,
+            end: 6,
+            style: SpanStyle::Link {
+                url: "https://a.b".to_string(),
+            },
+        });
+        assert_eq!(to_markdown(&doc), "use [`it`](https://a.b) now\n");
     }
 }

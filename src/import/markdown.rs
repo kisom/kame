@@ -21,7 +21,6 @@ pub struct ImportReport {
     pub front_matter: bool,
     pub dropped_front_matter: usize,
     pub script_links: usize,
-    pub inline_code: usize,
     pub tables: usize,
     pub raw_html: usize,
     pub nested_list_items: usize,
@@ -38,11 +37,6 @@ impl ImportReport {
                 parts.push(format!("{n} {}", if n == 1 { one } else { many }));
             }
         };
-        count(
-            self.inline_code,
-            "inline code span as plain text",
-            "inline code spans as plain text",
-        );
         count(self.tables, "table as plain text", "tables as plain text");
         count(
             self.raw_html,
@@ -356,8 +350,12 @@ impl<'a> Builder<'a> {
                 }
             }
             Event::Code(text) => {
-                self.report.inline_code += 1;
+                let start = self.text.len();
                 self.push_text(&text);
+                // A footnote's body is plain text, so its code has nowhere to go.
+                if self.footnote.is_none() {
+                    self.push_span(start, self.text.len(), SpanStyle::Code);
+                }
             }
             Event::Html(text) => self.push_text(&text),
             Event::InlineHtml(text) => {
@@ -864,19 +862,6 @@ mod tests {
             "A dangling[^gone] marker."
         );
         assert!(imported.document.annotations.is_empty());
-    }
-
-    #[test]
-    fn inline_code_keeps_its_words_and_is_reported() {
-        let imported = import(
-            "Run `make` first.
-",
-        );
-        assert_eq!(
-            outline(&imported.document),
-            vec![paragraph("Run make first.")]
-        );
-        assert_eq!(imported.report.inline_code, 1);
     }
 
     #[test]
@@ -1515,6 +1500,28 @@ mod tests {
     #[test]
     fn code_survives_export_and_import_exactly() {
         let source = "```rust\nfn a() {\n    let b = \"c -- d\";\n\n}\n```\n";
+        assert_eq!(to_markdown(&import(source).document), source);
+    }
+
+    #[test]
+    fn inline_code_imports_as_a_code_span() {
+        let imported = import("Run `make` first.\n");
+        let block = &imported.document.blocks[0];
+        assert_eq!(block.text, "Run make first.");
+        assert_eq!(
+            block.spans,
+            vec![Span {
+                start: 4,
+                end: 8,
+                style: SpanStyle::Code
+            }]
+        );
+        assert_eq!(imported.report.summary(), None);
+    }
+
+    #[test]
+    fn inline_code_survives_export_and_import_exactly() {
+        let source = "Run `a_b*c` and ``d`e`` and `` `f ``, **then `g`**.\n";
         assert_eq!(to_markdown(&import(source).document), source);
     }
 }

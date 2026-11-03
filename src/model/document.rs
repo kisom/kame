@@ -47,6 +47,8 @@ impl BlockKind {
 pub enum SpanStyle {
     Bold,
     Italic,
+    /// Inline code: set in the monospaced face, and exact on export.
+    Code,
     /// A hyperlink: the span covers the anchor text and `url` is the target.
     Link {
         url: String,

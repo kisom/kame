@@ -583,10 +583,8 @@ impl Editor {
     /// just closed an emphasis.
     pub fn apply_inline_markdown(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
         // What a code block holds is literal. Prose keeps its layout, not its asterisks.
-        if matches!(
-            self.block(cursor.block_id).ok()?.kind,
-            BlockKind::Code { .. }
-        ) {
+        let block = self.block(cursor.block_id).ok()?;
+        if matches!(block.kind, BlockKind::Code { .. }) || in_code(block, cursor.offset) {
             return None;
         }
         let (style, opener_start, closer_start, marker_len) = {
@@ -645,7 +643,8 @@ impl Editor {
     /// new offset, or `None` when the caret has not just closed a link.
     pub fn apply_markdown_link(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
         // What a verbatim block holds is literal.
-        if self.block(cursor.block_id).ok()?.kind.is_verbatim() {
+        let block = self.block(cursor.block_id).ok()?;
+        if block.kind.is_verbatim() || in_code(block, cursor.offset) {
             return None;
         }
         let (open_bracket, close_bracket, url) = {
@@ -678,10 +677,42 @@ impl Editor {
         Some((op, close_bracket - 1))
     }
 
+    /// Turns a `` `code` `` the caret just closed into inline code, as one edit, returning
+    /// it and where the caret goes.
+    pub fn apply_inline_code(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
+        let block = self.block(cursor.block_id).ok()?;
+        if block.kind.is_verbatim() {
+            return None;
+        }
+        let close = cursor.offset.checked_sub(1)?;
+        let open = inline_code(&block.text, cursor.offset)?;
+        let rebase = |span: &Span| {
+            shift_span_on_delete(span, close, cursor.offset)
+                .and_then(|span| shift_span_on_delete(&span, open, open + 1))
+        };
+        let spans: Vec<Span> = block
+            .spans
+            .iter()
+            .filter_map(rebase)
+            .chain(std::iter::once(Span {
+                start: open,
+                end: close - 1,
+                style: SpanStyle::Code,
+            }))
+            .collect();
+        let deletions = vec![
+            Op::delete_text(&self.doc, cursor.block_id, close, cursor.offset),
+            Op::delete_text(&self.doc, cursor.block_id, open, open + 1),
+        ];
+        let op = self.apply_edit(strip_markup(&self.doc, cursor.block_id, deletions, spans));
+        Some((op, close - 1))
+    }
+
     /// Turns a `[[target]]` or `[[target|text]]` the caret just closed into a document
     /// link, as one edit, returning it and where the caret goes.
     pub fn apply_document_link(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
-        if self.block(cursor.block_id).ok()?.kind.is_verbatim() {
+        let block = self.block(cursor.block_id).ok()?;
+        if block.kind.is_verbatim() || in_code(block, cursor.offset) {
             return None;
         }
         let (open, text_start, target) = {
@@ -969,6 +1000,30 @@ fn strip_markup(doc: &Document, block_id: BlockId, deletions: Vec<Op>, spans: Ve
         spans,
     });
     Op::Batch { ops }
+}
+
+/// Where the backtick opening a `` `code` `` that ends at `caret` is. Two backticks in a
+/// row open nothing here, which leaves a code fence alone.
+fn inline_code(text: &str, caret: usize) -> Option<usize> {
+    let head = &text[..caret];
+    let body = head.strip_suffix('`')?;
+    let open = body
+        .rfind(['`', '\n'])
+        .filter(|at| body.as_bytes()[*at] == b'`')?;
+    let doubled = open > 0 && body.as_bytes()[open - 1] == b'`';
+    (open + 1 < body.len() && !doubled).then_some(open)
+}
+
+/// Whether what is typed at `caret` is code: inside a code span or just at its end, as
+/// when the closing backtick has just made it, or after a backtick that has yet to close.
+/// Markup there stays literal.
+fn in_code(block: &Block, caret: usize) -> bool {
+    let line = block.text[..caret].rsplit('\n').next().unwrap_or("");
+    line.matches('`').count() % 2 == 1
+        || block
+            .spans
+            .iter()
+            .any(|span| span.style == SpanStyle::Code && span.start < caret && caret <= span.end)
 }
 
 /// A `[[target]]` or `[[target|text]]` ending at `caret`: where it opens, where its

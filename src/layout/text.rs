@@ -263,7 +263,12 @@ pub fn layout_block_marked_with_align(
             Weight::NORMAL
         })
         .style(style);
-    let spans = styled_spans(block, &attrs, marks);
+    let spans = styled_spans(
+        block,
+        &attrs,
+        marks,
+        Metrics::new(size * CODE_RATIO, line_height),
+    );
     buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
     buffer.set_wrap(Wrap::Word);
     buffer.shape_until_scroll(font_system, false);
@@ -301,7 +306,7 @@ pub fn layout_block_marked_with_align(
     }
     let height = lines.last().map_or(0.0, |line| line.y + line.height);
 
-    let runs = drawn_runs(&buffer, width, align, !block.kind.is_verbatim());
+    let runs = drawn_runs(&buffer, block, width, align);
 
     BlockLayout {
         #[cfg(test)]
@@ -315,7 +320,9 @@ pub fn layout_block_marked_with_align(
 }
 
 /// The shaped lines as they are drawn, with their punctuation hung if `hang`.
-fn drawn_runs(buffer: &Buffer, width: f32, align: Align, hang: bool) -> Vec<LayoutRun> {
+fn drawn_runs(buffer: &Buffer, block: &Block, width: f32, align: Align) -> Vec<LayoutRun> {
+    let hang = !block.kind.is_verbatim();
+    let starts = line_starts(&block.text);
     let shaped: Vec<_> = buffer.layout_runs().collect();
     shaped
         .iter()
@@ -329,7 +336,15 @@ fn drawn_runs(buffer: &Buffer, width: f32, align: Align, hang: bool) -> Vec<Layo
                     .get(index + 1)
                     .is_none_or(|next| next.line_i != run.line_i);
                 let justified = align == Align::Justified && !last_of_paragraph;
-                hang_line(&mut glyphs, run.text, width, justified);
+                let base = starts.get(run.line_i).copied().unwrap_or(0);
+                let exact = |glyph: &cosmic_text::LayoutGlyph| {
+                    block.spans.iter().any(|span| {
+                        span.style == SpanStyle::Code
+                            && span.start <= base + glyph.start
+                            && base + glyph.end <= span.end
+                    })
+                };
+                hang_line(&mut glyphs, run.text, width, justified, exact);
             }
             LayoutRun {
                 line_i: run.line_i,
@@ -366,7 +381,13 @@ fn right_hang(mark: char) -> f32 {
 /// Moves a line's glyphs so its punctuation hangs outside the measure, which keeps the
 /// edge of the text looking straight. A justified line is stretched by what was hung, so
 /// that its words still reach both edges.
-fn hang_line(glyphs: &mut [cosmic_text::LayoutGlyph], text: &str, width: f32, justified: bool) {
+fn hang_line(
+    glyphs: &mut [cosmic_text::LayoutGlyph],
+    text: &str,
+    width: f32,
+    justified: bool,
+    exact: impl Fn(&cosmic_text::LayoutGlyph) -> bool,
+) {
     let glyph_text = |glyph: &cosmic_text::LayoutGlyph| &text[glyph.start..glyph.end];
     let Some(last) = glyphs
         .iter()
@@ -377,7 +398,11 @@ fn hang_line(glyphs: &mut [cosmic_text::LayoutGlyph], text: &str, width: f32, ju
     if glyphs.iter().any(|glyph| glyph.level.is_rtl()) {
         return;
     }
-    let left = glyph_text(&glyphs[0]).chars().next().map_or(0.0, left_hang) * glyphs[0].w;
+    let left = if exact(&glyphs[0]) {
+        0.0
+    } else {
+        glyph_text(&glyphs[0]).chars().next().map_or(0.0, left_hang) * glyphs[0].w
+    };
     // Two marks can end a line together, as in a period and a closing quote.
     let right: f32 = if justified {
         glyphs[..=last]
@@ -385,10 +410,11 @@ fn hang_line(glyphs: &mut [cosmic_text::LayoutGlyph], text: &str, width: f32, ju
             .rev()
             .take(2)
             .take_while(|glyph| {
-                glyph_text(glyph)
-                    .chars()
-                    .next_back()
-                    .is_some_and(|mark| right_hang(mark) > 0.0)
+                !exact(glyph)
+                    && glyph_text(glyph)
+                        .chars()
+                        .next_back()
+                        .is_some_and(|mark| right_hang(mark) > 0.0)
             })
             .map(|glyph| {
                 glyph_text(glyph)
@@ -424,6 +450,23 @@ fn hang_line(glyphs: &mut [cosmic_text::LayoutGlyph], text: &str, width: f32, ju
             moved += spread;
         }
     }
+}
+
+/// The bare URLs in `block` that read as links. Code is literal, so a URL in a code
+/// block or in inline code is only text.
+pub fn bare_link_ranges(block: &Block) -> Vec<(usize, usize)> {
+    if matches!(block.kind, BlockKind::Code { .. }) {
+        return Vec::new();
+    }
+    link_ranges(&block.text)
+        .into_iter()
+        .filter(|(start, end)| {
+            !block
+                .spans
+                .iter()
+                .any(|span| span.style == SpanStyle::Code && span.start < *end && *start < span.end)
+        })
+        .collect()
 }
 
 /// Byte ranges of URLs in `text`, each extended to the next whitespace and
@@ -478,17 +521,13 @@ fn styled_spans<'a>(
     block: &'a Block,
     base: &Attrs<'a>,
     marks: &[usize],
+    code_metrics: Metrics,
 ) -> Vec<(&'a str, Attrs<'a>)> {
     let text = block.text.as_str();
     if text.is_empty() {
         return vec![(text, base.clone())];
     }
-    // Code is literal, so a URL in it is only text.
-    let links = if matches!(block.kind, BlockKind::Code { .. }) {
-        Vec::new()
-    } else {
-        link_ranges(text)
-    };
+    let links = bare_link_ranges(block);
 
     let mut bounds = Vec::with_capacity(block.spans.len() * 2 + links.len() * 2 + 2);
     bounds.push(0);
@@ -544,6 +583,19 @@ fn styled_spans<'a>(
             }
             if covers(SpanStyle::Italic) {
                 attrs = attrs.style(Style::Italic);
+            }
+            // Smaller to sit evenly beside the serif, on the line's own leading, and
+            // upright even in an italic quote unless it was itself made italic.
+            if covers(SpanStyle::Code) {
+                let style = if covers(SpanStyle::Italic) {
+                    Style::Italic
+                } else {
+                    Style::Normal
+                };
+                attrs = attrs
+                    .family(Family::Name(CODE_FAMILY))
+                    .style(style)
+                    .metrics(code_metrics);
             }
             // A stored hyperlink or a bare URL both read as a link, coloured the
             // same way so the two forms are indistinguishable on the page.
@@ -1485,5 +1537,95 @@ dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
                 assert!(pair[1].x > pair[0].x, "glyphs out of order");
             }
         }
+    }
+
+    fn with_code_span(kind: BlockKind, text: &str, start: usize, end: usize) -> Block {
+        let mut block = kind_block(kind, text);
+        block.spans = vec![Span {
+            start,
+            end,
+            style: SpanStyle::Code,
+        }];
+        block
+    }
+
+    #[test]
+    fn inline_code_is_smaller_and_monospaced_without_moving_the_lines() {
+        let mut fs = FontSystem::new();
+        fs.db_mut()
+            .load_font_file(font_path("IBMPlexMono-Regular.ttf"))
+            .unwrap();
+        load_fonts(&mut fs);
+        let mono = face(&fs, "IBM Plex Mono", Weight::NORMAL, Style::Normal);
+        let config = LayoutConfig::with_body_size(16.0);
+        let plain = layout_block(
+            &mut fs,
+            &kind_block(BlockKind::Paragraph, "plain code here"),
+            &config,
+        );
+        let coded = layout_block(
+            &mut fs,
+            &with_code_span(BlockKind::Paragraph, "plain code here", 6, 10),
+            &config,
+        );
+        let run = coded.buffer.layout_runs().next().unwrap();
+        let code: Vec<_> = run
+            .glyphs
+            .iter()
+            .filter(|g| g.start >= 6 && g.end <= 10)
+            .collect();
+        assert!(code.iter().all(|g| g.font_id == mono));
+        assert!(code.iter().all(|g| g.font_size < config.body_size));
+        assert_eq!(coded.height, plain.height, "the line's height moved");
+        assert_eq!(
+            coded.buffer.layout_runs().next().unwrap().line_y,
+            plain.buffer.layout_runs().next().unwrap().line_y,
+            "the baseline moved"
+        );
+    }
+
+    #[test]
+    fn a_url_in_inline_code_is_not_coloured_as_a_link() {
+        let block = with_code_span(BlockKind::Paragraph, "curl https://a.b", 0, 16);
+        assert!(bare_link_ranges(&block).is_empty());
+        let outside = with_code_span(BlockKind::Paragraph, "a b https://a.b", 0, 1);
+        assert_eq!(bare_link_ranges(&outside).len(), 1);
+        let code_block = kind_block(BlockKind::Code { language: None }, "https://a.b");
+        assert!(bare_link_ranges(&code_block).is_empty());
+    }
+
+    #[test]
+    fn punctuation_in_inline_code_does_not_hang() {
+        let mut fs = FontSystem::new();
+        fs.db_mut()
+            .load_font_file(font_path("IBMPlexMono-Regular.ttf"))
+            .unwrap();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let layout = layout_block_marked(
+            &mut fs,
+            &with_code_span(BlockKind::Paragraph, "\"a\" then", 0, 3),
+            &config,
+            &[],
+        );
+        assert_eq!(layout.runs[0].glyphs[0].x, 0.0);
+    }
+
+    #[test]
+    fn inline_code_in_an_italic_quote_stays_upright() {
+        let mut fs = FontSystem::new();
+        fs.db_mut()
+            .load_font_file(font_path("IBMPlexMono-Regular.ttf"))
+            .unwrap();
+        load_fonts(&mut fs);
+        let mono = face(&fs, "IBM Plex Mono", Weight::NORMAL, Style::Normal);
+        let layout = layout_block(
+            &mut fs,
+            &with_code_span(BlockKind::BlockQuote, "a code b", 2, 6),
+            &LayoutConfig::with_body_size(16.0),
+        );
+        let run = layout.buffer.layout_runs().next().unwrap();
+        let code = run.glyphs.iter().find(|g| g.start == 2).unwrap();
+        assert_eq!(code.font_id, mono);
     }
 }

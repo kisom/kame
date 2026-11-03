@@ -14,7 +14,7 @@
 //! position, then annotation id), never in storage order, so exporting the same
 //! document twice — or after a serde round trip — produces identical bytes.
 
-use crate::layout::link_ranges;
+use crate::layout::bare_link_ranges;
 use crate::model::{is_script_url, AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle};
 use std::collections::HashMap;
 
@@ -93,7 +93,7 @@ pre {
   white-space: pre-wrap;
   text-align: left;
 }
-pre code {
+code {
   font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
   font-size: 0.84em;
 }
@@ -555,6 +555,7 @@ fn marginalia_aside(body: &str) -> String {
 enum InlineTag {
     Bold,
     Italic,
+    Code,
     Link { url: String },
 }
 
@@ -563,6 +564,7 @@ impl InlineTag {
         match self {
             InlineTag::Bold => "<strong>".to_string(),
             InlineTag::Italic => "<em>".to_string(),
+            InlineTag::Code => "<code>".to_string(),
             InlineTag::Link { url } => format!("<a href=\"{}\">", escape_attribute(url)),
         }
     }
@@ -571,6 +573,7 @@ impl InlineTag {
         match self {
             InlineTag::Bold => "</strong>",
             InlineTag::Italic => "</em>",
+            InlineTag::Code => "</code>",
             InlineTag::Link { .. } => "</a>",
         }
     }
@@ -605,12 +608,7 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
             (start < end).then(|| (start, end, span.style.clone()))
         })
         .collect();
-    // Code is literal, so a URL in it is only text.
-    let links = if matches!(block.kind, BlockKind::Code { .. }) {
-        Vec::new()
-    } else {
-        link_ranges(text)
-    };
+    let links = bare_link_ranges(block);
 
     let mut boundaries =
         Vec::with_capacity(spans.len() * 2 + links.len() * 2 + footnotes.len() + 2);
@@ -638,7 +636,7 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
             continue;
         }
         let mut wanted: Vec<InlineTag> = Vec::new();
-        for style in [SpanStyle::Bold, SpanStyle::Italic] {
+        for style in [SpanStyle::Bold, SpanStyle::Italic, SpanStyle::Code] {
             let covered = spans
                 .iter()
                 .any(|(s, e, covered)| *covered == style && *s <= start && *e >= end);
@@ -646,6 +644,7 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
                 wanted.push(match style {
                     SpanStyle::Bold => InlineTag::Bold,
                     SpanStyle::Italic => InlineTag::Italic,
+                    SpanStyle::Code => InlineTag::Code,
                     SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. } => {
                         unreachable!("links are handled separately")
                     }
@@ -1482,5 +1481,37 @@ mod tests {
         let html = to_html(&doc);
         assert!(html.contains("<p>See the intro now.</p>"), "{html}");
         assert!(!html.contains("a.kame"), "{html}");
+    }
+
+    #[test]
+    fn inline_code_exports_as_code_and_is_escaped() {
+        let mut doc = Document::new("t");
+        let mut block = paragraph("use a<b now");
+        block.spans = vec![Span {
+            start: 4,
+            end: 7,
+            style: SpanStyle::Code,
+        }];
+        doc.blocks = vec![block];
+        let html = to_html(&doc);
+        assert!(
+            html.contains("<p>use <code>a&lt;b</code> now</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_url_in_inline_code_is_not_a_link() {
+        let mut doc = Document::new("t");
+        let text = "curl https://a.b now";
+        let mut block = paragraph(text);
+        block.spans = vec![Span {
+            start: 0,
+            end: 16,
+            style: SpanStyle::Code,
+        }];
+        doc.blocks = vec![block];
+        let html = to_html(&doc);
+        assert!(!html.contains("<a href"), "{html}");
     }
 }

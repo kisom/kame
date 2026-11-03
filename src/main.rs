@@ -28,7 +28,7 @@ use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::layout::reading_order;
 use crate::layout::{
-    heading_size_for, link_ranges, place_footnotes, place_marginalia, BlockLayout,
+    bare_link_ranges, heading_size_for, place_footnotes, place_marginalia, BlockLayout,
     FootnotePlacement, LayoutConfig, MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP,
     FOOTNOTE_LINE_HEIGHT, FOOTNOTE_MARK_EM,
 };
@@ -2362,7 +2362,11 @@ impl Session {
     /// bold/italic span, and the caret lands after the emphasised text.
     fn apply_inline_markdown(&mut self) {
         let caret = self.valid_caret();
-        if let Some((op, offset)) = self.editor.apply_inline_markdown(&caret) {
+        let applied = self
+            .editor
+            .apply_inline_markdown(&caret)
+            .or_else(|| self.editor.apply_inline_code(&caret));
+        if let Some((op, offset)) = applied {
             self.record(&op);
             self.caret = Cursor {
                 block_id: caret.block_id,
@@ -3246,7 +3250,7 @@ fn url_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
     {
         return Some(url);
     }
-    link_ranges(&block.text)
+    bare_link_ranges(block)
         .into_iter()
         .find(|(start, end)| cursor.offset >= *start && cursor.offset < *end)
         .map(|(start, end)| block.text[start..end].to_string())
@@ -7969,7 +7973,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
         let note = note.expect("the import is announced");
         assert!(note.contains("notes.md"), "{note}");
-        assert!(note.contains("1 inline code"), "{note}");
         assert!(note.contains("1 image not found"), "{note}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -10829,5 +10832,110 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         session.paste("a\n\tb");
         select(&mut session, (0, 0), (0, 4));
         assert_eq!(session.selected_text(), Some("a\n\tb".to_string()));
+    }
+
+    fn code_spans(session: &Session) -> Vec<(usize, usize)> {
+        session.document().blocks[0]
+            .spans
+            .iter()
+            .filter(|span| span.style == SpanStyle::Code)
+            .map(|span| (span.start, span.end))
+            .collect()
+    }
+
+    #[test]
+    fn typed_backticks_make_inline_code() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "run `make`");
+        assert_eq!(session.document().blocks[0].text, "run make");
+        assert_eq!(code_spans(&session), vec![(4, 8)]);
+        type_marked(&mut session, " now");
+        assert_eq!(session.document().blocks[0].text, "run make now");
+        assert_eq!(
+            code_spans(&session),
+            vec![(4, 8)],
+            "what follows isn't code"
+        );
+        for _ in " now".chars() {
+            session.undo();
+        }
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "run `make`");
+        assert!(code_spans(&session).is_empty());
+    }
+
+    #[test]
+    fn markup_inside_open_backticks_stays_literal() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "`a_b_c *d* [e](f) [[g]]`");
+        assert_eq!(session.document().blocks[0].text, "a_b_c *d* [e](f) [[g]]");
+        assert_eq!(session.document().blocks[0].spans.len(), 1);
+    }
+
+    #[test]
+    fn typing_inside_inline_code_stays_literal() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "`abcd`");
+        session.caret.offset = 2;
+        type_marked(&mut session, "*x*");
+        assert_eq!(session.document().blocks[0].text, "ab*x*cd");
+        assert_eq!(code_spans(&session), vec![(0, 7)]);
+    }
+
+    #[test]
+    fn emphasis_around_inline_code_still_works() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "*use `it` now*");
+        assert_eq!(session.document().blocks[0].text, "use it now");
+        assert!(session.document().blocks[0]
+            .spans
+            .iter()
+            .any(|span| span.style == SpanStyle::Italic));
+    }
+
+    #[test]
+    fn empty_or_unfinished_backticks_stay_as_typed() {
+        for typed_text in ["``", "`a", "a`", "``a`"] {
+            let mut session = Session::anonymous().unwrap();
+            type_marked(&mut session, typed_text);
+            assert_eq!(session.document().blocks[0].text, typed_text);
+            assert!(code_spans(&session).is_empty(), "{typed_text}");
+        }
+    }
+
+    #[test]
+    fn a_fence_still_starts_a_code_block() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "```rust");
+        session.split();
+        assert_eq!(
+            session.document().blocks[0].kind,
+            BlockKind::Code {
+                language: Some("rust".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn backticks_stay_literal_in_code_and_prose_blocks() {
+        let mut code = code_session();
+        type_marked(&mut code, "`a`");
+        assert_eq!(code.document().blocks[0].text, "`a`");
+        let mut prose = Session::anonymous().unwrap();
+        typed(&mut prose, "| ");
+        type_marked(&mut prose, "`a`");
+        assert_eq!(prose.document().blocks[0].text, "`a`");
+    }
+
+    #[test]
+    fn a_click_on_a_url_in_inline_code_opens_nothing() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "`https://a.b`");
+        let block_id = session.document().blocks[0].id;
+        let at = Cursor {
+            block_id,
+            offset: 3,
+        };
+        assert_eq!(url_at(&session.document().blocks, &at), None);
     }
 }

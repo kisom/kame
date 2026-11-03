@@ -7,7 +7,7 @@
 
 use crate::model::{
     is_script_url, Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind, Document,
-    Metadata,
+    Metadata, MAX_LIST_DEPTH,
 };
 use crate::model::{Span, SpanStyle};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -23,7 +23,6 @@ pub struct ImportReport {
     pub script_links: usize,
     pub tables: usize,
     pub raw_html: usize,
-    pub nested_list_items: usize,
     pub image_alt_text: usize,
     pub unanchored_footnotes: usize,
 }
@@ -42,11 +41,6 @@ impl ImportReport {
             self.raw_html,
             "raw HTML fragment as plain text",
             "raw HTML fragments as plain text",
-        );
-        count(
-            self.nested_list_items,
-            "nested list item flattened",
-            "nested list items flattened",
         );
         count(
             self.image_alt_text,
@@ -411,12 +405,7 @@ impl<'a> Builder<'a> {
                 self.flush();
                 self.lists.push(first_number.is_some());
             }
-            Tag::Item => {
-                self.flush();
-                if self.lists.len() > 1 {
-                    self.report.nested_list_items += 1;
-                }
-            }
+            Tag::Item => self.flush(),
             Tag::TableCell => {
                 if !self.text.is_empty() {
                     self.push_text(" | ");
@@ -574,7 +563,10 @@ impl<'a> Builder<'a> {
         } else if let Some(level) = self.heading {
             BlockKind::Heading { level }
         } else if let Some(ordered) = self.lists.last() {
-            BlockKind::ListItem { ordered: *ordered }
+            BlockKind::ListItem {
+                ordered: *ordered,
+                depth: (self.lists.len() - 1).min(usize::from(MAX_LIST_DEPTH)) as u8,
+            }
         } else if self.quote_depth > 0 {
             BlockKind::BlockQuote
         } else {
@@ -683,9 +675,27 @@ mod tests {
                 paragraph("Body text."),
                 (BlockKind::Heading { level: 2 }, "Two".to_string()),
                 (BlockKind::BlockQuote, "Quoted.".to_string()),
-                (BlockKind::ListItem { ordered: false }, "a".to_string()),
-                (BlockKind::ListItem { ordered: false }, "b".to_string()),
-                (BlockKind::ListItem { ordered: true }, "c".to_string()),
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0
+                    },
+                    "a".to_string()
+                ),
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0
+                    },
+                    "b".to_string()
+                ),
+                (
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0
+                    },
+                    "c".to_string()
+                ),
             ]
         );
     }
@@ -888,21 +898,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_lists_flatten_and_are_reported() {
-        let imported = import("- outer\n  - inner\n- next\n");
-        let bullet = BlockKind::ListItem { ordered: false };
-        assert_eq!(
-            outline(&imported.document),
-            vec![
-                (bullet.clone(), "outer".to_string()),
-                (bullet.clone(), "inner".to_string()),
-                (bullet, "next".to_string()),
-            ]
-        );
-        assert_eq!(imported.report.nested_list_items, 1);
-    }
-
-    #[test]
     fn pelican_metadata_names_the_document_instead_of_reaching_the_prose() {
         let imported = import(
             "Title: On Burnout\nDate: 2019-01-02\nTags: life, work\nSummary: A long\n    summary.\n\nBody.\n",
@@ -1065,7 +1060,10 @@ mod tests {
     fn line_breaks_in_a_quote_and_a_list_item_stay_in_the_block() {
         for kind in [
             BlockKind::BlockQuote,
-            BlockKind::ListItem { ordered: false },
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
         ] {
             let mut doc = Document::new("t");
             doc.blocks[0].kind = kind.clone();
@@ -1523,5 +1521,47 @@ mod tests {
     fn inline_code_survives_export_and_import_exactly() {
         let source = "Run `a_b*c` and ``d`e`` and `` `f ``, **then `g`**.\n";
         assert_eq!(to_markdown(&import(source).document), source);
+    }
+
+    fn levels(source: &str) -> Vec<(u8, bool, String)> {
+        import(source)
+            .document
+            .blocks
+            .iter()
+            .filter_map(|block| match block.kind {
+                BlockKind::ListItem { ordered, depth } => {
+                    Some((depth, ordered, block.text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nested_lists_import_at_their_depth() {
+        assert_eq!(
+            levels("- outer\n  - inner\n    1. deep\n- next\n"),
+            vec![
+                (0, false, "outer".to_string()),
+                (1, false, "inner".to_string()),
+                (2, true, "deep".to_string()),
+                (0, false, "next".to_string()),
+            ]
+        );
+        assert_eq!(import("- a\n  - b\n").report.summary(), None);
+    }
+
+    #[test]
+    fn nested_lists_survive_export_and_import() {
+        let source = "- a\n\n  - b\n\n    1. c\n\n    2. d\n\n  - e\n\n- f\n";
+        assert_eq!(to_markdown(&import(source).document), source);
+    }
+
+    #[test]
+    fn lists_nested_past_the_limit_stay_at_it() {
+        let source =
+            "- a\n  - b\n    - c\n      - d\n        - e\n          - f\n            - g\n";
+        let deepest = levels(source).into_iter().map(|(depth, _, _)| depth).max();
+        assert_eq!(deepest, Some(crate::model::MAX_LIST_DEPTH));
     }
 }

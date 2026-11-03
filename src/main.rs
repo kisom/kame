@@ -33,8 +33,8 @@ use crate::layout::{
     FOOTNOTE_LINE_HEIGHT, FOOTNOTE_MARK_EM,
 };
 use crate::model::{
-    is_script_url, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
-    Document, Metadata, SpanStyle,
+    is_script_url, list_positions, Anchor, Annotation, AnnotationId, AnnotationKind, Block,
+    BlockId, BlockKind, Document, Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
     adjacent_line, caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word,
@@ -252,6 +252,28 @@ impl LastDocument {
     }
 }
 
+/// The Tab presses in `events`, in order: true for Tab and false for Shift-Tab.
+fn tab_presses(events: &[egui::Event]) -> Vec<bool> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.any() => Some(true),
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.shift_only() => Some(false),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Removes the keys egui moves the focus on, for when there is nowhere useful to move it.
 fn drop_tabs(events: &mut Vec<egui::Event>) {
     events.retain(|event| {
@@ -296,6 +318,8 @@ const POSITION_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_se
 const RULE_WIDTH: f32 = 0.25;
 /// Gap between a list marker's right edge and its item's text.
 const LIST_MARKER_GAP: f32 = 6.0;
+/// The bullet at each level of nesting, starting over past the last.
+const LIST_BULLETS: [&str; 3] = ["•", "◦", "▪"];
 /// Font-size step for the Ctrl + / Ctrl - chords, and the clamp bounds (body
 /// size in px). Everything else scales off the body size.
 const FONT_SIZE_STEP: f32 = 1.0;
@@ -2471,6 +2495,21 @@ impl Session {
         Some(lines.join("\n"))
     }
 
+    /// Moves the caret's list item a level in or out, if it can go there.
+    fn indent_list_item(&mut self, indent: bool) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let caret = self.valid_caret();
+        match self.editor.indent_list_item(caret.block_id, indent) {
+            Some(op) => {
+                self.record(&op);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The start of the first heading with exactly `text`.
     fn heading_cursor(&self, text: &str) -> Option<Cursor> {
         self.document()
@@ -2729,6 +2768,19 @@ impl Session {
         if self.save_failed {
             return false;
         }
+        // Changing what kind of list an item is in leaves it at its level.
+        let existing =
+            self.block_index(block_id)
+                .and_then(|index| match self.document().blocks[index].kind {
+                    BlockKind::ListItem { depth, .. } => Some(depth),
+                    _ => None,
+                });
+        let kind = match (kind, existing) {
+            (BlockKind::ListItem { ordered, .. }, Some(depth)) => {
+                BlockKind::ListItem { ordered, depth }
+            }
+            (kind, _) => kind,
+        };
         let result = self.editor.set_block_kind(block_id, kind);
         self.commit(result)
     }
@@ -3930,16 +3982,22 @@ impl KameApp {
 
     /// Decides what Tab does this frame. A dialog keeps it, for moving between its
     /// fields. Anywhere else it would only walk the focus through the menu bar, so it
-    /// types a tab in a block that takes one and otherwise does nothing.
-    fn claim_tabs(&self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+    /// types a tab in a block that takes one, moves a list item in or out, and otherwise
+    /// does nothing.
+    fn claim_tabs(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
         if self.dialog_open() || self.close_flow.prompting {
             return;
         }
         if self.prose_takes_tabs(ctx) {
             tabs_to_text(events);
-        } else {
-            drop_tabs(events);
+            return;
         }
+        if self.page_has_keyboard(ctx) {
+            for indent in tab_presses(events) {
+                self.session.indent_list_item(indent);
+            }
+        }
+        drop_tabs(events);
     }
 
     /// Whether Tab goes to the page: the caret is in a verbatim block and nothing else
@@ -3950,8 +4008,12 @@ impl KameApp {
             .session
             .block_index(caret.block_id)
             .is_some_and(|index| self.session.document().blocks[index].kind.is_verbatim());
-        verbatim
-            && !self.dialog_open()
+        verbatim && self.page_has_keyboard(ctx)
+    }
+
+    /// Whether keys go to the page rather than a dialog, a menu or a field.
+    fn page_has_keyboard(&self, ctx: &egui::Context) -> bool {
+        !self.dialog_open()
             && !self.close_flow.prompting
             && !egui::Popup::is_any_open(ctx)
             && !ctx.memory(|memory| {
@@ -4824,24 +4886,16 @@ impl KameApp {
         let blocks = &document.blocks;
         let caret = self.session.caret;
 
-        // List markers: a bullet for unordered items, a 1-based number for a
-        // run of ordered items. The counter restarts when a run is interrupted.
-        let mut ordered = 0usize;
-        let list_markers: Vec<Option<String>> = blocks
-            .iter()
-            .map(|block| match block.kind {
-                BlockKind::ListItem { ordered: true } => {
-                    ordered += 1;
-                    Some(format!("{ordered}."))
-                }
-                BlockKind::ListItem { ordered: false } => {
-                    ordered = 0;
-                    Some("•".to_string())
-                }
-                _ => {
-                    ordered = 0;
-                    None
-                }
+        // List markers: a bullet that changes with the level, or a number.
+        let list_markers: Vec<Option<String>> = list_positions(blocks, false)
+            .into_iter()
+            .map(|position| {
+                position.map(|position| match position.number {
+                    Some(number) => format!("{number}."),
+                    None => {
+                        LIST_BULLETS[usize::from(position.depth) % LIST_BULLETS.len()].to_string()
+                    }
+                })
             })
             .collect();
 
@@ -5443,8 +5497,20 @@ impl KameApp {
                 ("Heading 1", BlockKind::Heading { level: 1 }),
                 ("Heading 2", BlockKind::Heading { level: 2 }),
                 ("Heading 3", BlockKind::Heading { level: 3 }),
-                ("Bulleted list", BlockKind::ListItem { ordered: false }),
-                ("Numbered list", BlockKind::ListItem { ordered: true }),
+                (
+                    "Bulleted list",
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                    },
+                ),
+                (
+                    "Numbered list",
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                ),
                 ("Block quote", BlockKind::BlockQuote),
                 ("Code block", BlockKind::Code { language: None }),
                 ("Prose block", BlockKind::Prose),
@@ -10937,5 +11003,123 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             offset: 3,
         };
         assert_eq!(url_at(&session.document().blocks, &at), None);
+    }
+
+    fn list_kind(session: &Session, index: usize) -> (bool, u8) {
+        match session.document().blocks[index].kind {
+            BlockKind::ListItem { ordered, depth } => (ordered, depth),
+            ref other => panic!("not a list item: {other:?}"),
+        }
+    }
+
+    fn three_items() -> Session {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "- one");
+        session.split();
+        typed(&mut session, "two");
+        session.split();
+        typed(&mut session, "three");
+        session
+    }
+
+    #[test]
+    fn tab_indents_a_list_item_and_shift_tab_brings_it_back() {
+        let mut session = three_items();
+        assert!(session.indent_list_item(true));
+        assert_eq!(list_kind(&session, 2), (false, 1));
+        assert!(session.indent_list_item(false));
+        assert_eq!(list_kind(&session, 2), (false, 0));
+        assert_eq!(session.caret.offset, "three".len());
+    }
+
+    #[test]
+    fn indenting_is_one_undo_step() {
+        let mut session = three_items();
+        session.indent_list_item(true);
+        session.undo();
+        assert_eq!(list_kind(&session, 2), (false, 0));
+    }
+
+    #[test]
+    fn an_item_can_only_go_one_level_below_the_one_before_it() {
+        let mut session = three_items();
+        assert!(session.indent_list_item(true));
+        assert!(!session.indent_list_item(true), "that would skip a level");
+        assert_eq!(list_kind(&session, 2), (false, 1));
+    }
+
+    #[test]
+    fn the_first_item_of_a_list_cant_indent_or_outdent() {
+        let mut session = three_items();
+        let first = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        assert!(!session.indent_list_item(true));
+        assert!(!session.indent_list_item(false));
+        assert_eq!(list_kind(&session, 0), (false, 0));
+    }
+
+    #[test]
+    fn body_text_doesnt_indent() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("words");
+        assert!(!session.indent_list_item(true));
+    }
+
+    #[test]
+    fn enter_on_a_nested_item_makes_another_at_that_level() {
+        let mut session = three_items();
+        session.indent_list_item(true);
+        session.split();
+        assert_eq!(list_kind(&session, 3), (false, 1));
+    }
+
+    #[test]
+    fn enter_on_an_empty_nested_item_comes_out_a_level_at_a_time() {
+        let mut session = three_items();
+        session.indent_list_item(true);
+        session.split();
+        session.split();
+        assert_eq!(session.document().blocks.len(), 4);
+        assert_eq!(list_kind(&session, 3), (false, 0));
+        session.split();
+        assert_eq!(session.document().blocks.len(), 4);
+        assert_eq!(session.document().blocks[3].kind, BlockKind::Paragraph);
+    }
+
+    #[test]
+    fn changing_a_nested_items_kind_keeps_its_level() {
+        let mut session = three_items();
+        session.indent_list_item(true);
+        let id = session.caret.block_id;
+        session.set_block_kind(
+            id,
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+            },
+        );
+        assert_eq!(list_kind(&session, 2), (true, 1));
+    }
+
+    #[test]
+    fn tab_presses_read_in_order_and_ignore_the_rest() {
+        let key = |pressed, modifiers| egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        let events = [
+            key(true, egui::Modifiers::NONE),
+            key(false, egui::Modifiers::NONE),
+            key(true, egui::Modifiers::SHIFT),
+            key(true, egui::Modifiers::COMMAND),
+            egui::Event::Text("x".to_string()),
+        ];
+        assert_eq!(tab_presses(&events), vec![true, false]);
     }
 }

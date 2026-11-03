@@ -24,8 +24,7 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Markdown import
 
-- [ ] **Richer Markdown elements (deferred).** Tables and nested lists are simplified
-  on import because the model has no equivalent.
+- [ ] **Tables (deferred).** Simplified on import because the model has no equivalent.
   Tables are wanted but too complex for now, and a code block is the stopgap.
 
 ## From earlier feedback

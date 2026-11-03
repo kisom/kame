@@ -8,7 +8,8 @@
 //! the HTML export keeps them. Notes are the author's own and never publish.
 
 use crate::model::{
-    is_script_url, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
+    is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata,
+    SpanStyle,
 };
 use std::collections::HashMap;
 
@@ -45,12 +46,13 @@ pub fn to_markdown(doc: &Document) -> String {
     }
 
     let mut parts: Vec<String> = Vec::new();
-    let mut ordered_index = 0usize;
-    for block in &doc.blocks {
+    let positions = list_positions(&doc.blocks, true);
+    // The width of each open list's marker, for indenting what is nested inside it.
+    let mut marker_widths: Vec<usize> = Vec::new();
+    for (index, block) in doc.blocks.iter().enumerate() {
         // An image is a block with no text: emit it as a Markdown image before
         // the empty-text skip drops it.
         if let BlockKind::Image { path, link } = &block.kind {
-            ordered_index = 0;
             let image = format!("![]({})", link_destination(path));
             parts.push(match link.as_deref().filter(|url| !is_script_url(url)) {
                 Some(url) => format!("[{image}]({})", link_destination(url)),
@@ -59,12 +61,10 @@ pub fn to_markdown(doc: &Document) -> String {
             continue;
         }
         if block.kind == BlockKind::Rule {
-            ordered_index = 0;
             parts.push("---".to_string());
             continue;
         }
         if let (BlockKind::Code { language }, false) = (&block.kind, block.text.is_empty()) {
-            ordered_index = 0;
             parts.push(code_fence(language.as_deref(), &block.text));
             continue;
         }
@@ -75,27 +75,27 @@ pub fn to_markdown(doc: &Document) -> String {
         if block.text.is_empty() {
             continue;
         }
+        let mut continuation = None;
         let prefix = match block.kind {
             BlockKind::Heading { level } => {
-                ordered_index = 0;
                 format!("{} ", "#".repeat(level.clamp(1, 6) as usize))
             }
-            BlockKind::ListItem { ordered: false } => {
-                ordered_index = 0;
-                "- ".to_string()
+            BlockKind::ListItem { .. } => {
+                let position = positions[index].expect("a list item has a position");
+                let marker = position
+                    .number
+                    .map_or("- ".to_string(), |number| format!("{number}. "));
+                // A nested item has to start past its parents' markers, whose width
+                // depends on what they are.
+                let level = usize::from(position.depth);
+                marker_widths.truncate(level);
+                let indent = " ".repeat(marker_widths.iter().sum());
+                marker_widths.push(marker.len());
+                continuation = (level > 0).then(|| " ".repeat(marker_widths.iter().sum()));
+                format!("{indent}{marker}")
             }
-            BlockKind::ListItem { ordered: true } => {
-                ordered_index += 1;
-                format!("{ordered_index}. ")
-            }
-            BlockKind::Paragraph => {
-                ordered_index = 0;
-                String::new()
-            }
-            BlockKind::BlockQuote | BlockKind::Prose => {
-                ordered_index = 0;
-                "> ".to_string()
-            }
+            BlockKind::Paragraph => String::new(),
+            BlockKind::BlockQuote | BlockKind::Prose => "> ".to_string(),
             BlockKind::Image { .. } | BlockKind::Rule | BlockKind::Code { .. } => {
                 unreachable!("these are emitted before the prefix match, or empty")
             }
@@ -111,6 +111,9 @@ pub fn to_markdown(doc: &Document) -> String {
         // multi-line quote still exports as one block quote.
         if matches!(block.kind, BlockKind::BlockQuote | BlockKind::Prose) {
             body = body.replace('\n', "\n> ");
+        }
+        if let Some(continuation) = continuation.take() {
+            body = body.replace('\n', &format!("\n{continuation}"));
         }
         parts.push(format!("{prefix}{body}"));
     }
@@ -619,8 +622,20 @@ mod tests {
                 style: SpanStyle::Italic,
             },
         ];
-        let bullet = block(BlockKind::ListItem { ordered: false }, "Bullet");
-        let ordered = block(BlockKind::ListItem { ordered: true }, "First");
+        let bullet = block(
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
+            "Bullet",
+        );
+        let ordered = block(
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+            },
+            "First",
+        );
         let note_block = paragraph("Anchored text");
         let note_id = note_block.id;
         document(
@@ -731,11 +746,41 @@ mod tests {
     fn lists_export_with_bullets_and_numbers() {
         let doc = document(
             vec![
-                block(BlockKind::ListItem { ordered: false }, "One"),
-                block(BlockKind::ListItem { ordered: false }, "Two"),
-                block(BlockKind::ListItem { ordered: true }, "First"),
-                block(BlockKind::ListItem { ordered: true }, "Second"),
-                block(BlockKind::ListItem { ordered: false }, "Back"),
+                block(
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                    },
+                    "One",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                    },
+                    "Two",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "First",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "Second",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                    },
+                    "Back",
+                ),
             ],
             Vec::new(),
         );
@@ -893,9 +938,27 @@ mod tests {
         // not consume a number (nor reset the run) that no line shows.
         let doc = document(
             vec![
-                block(BlockKind::ListItem { ordered: true }, "First"),
-                block(BlockKind::ListItem { ordered: true }, ""),
-                block(BlockKind::ListItem { ordered: true }, "Second"),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "First",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "Second",
+                ),
             ],
             Vec::new(),
         );
@@ -904,9 +967,21 @@ mod tests {
         // An emptied paragraph is likewise not allowed to reset the counter.
         let doc = document(
             vec![
-                block(BlockKind::ListItem { ordered: true }, "First"),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "First",
+                ),
                 paragraph(""),
-                block(BlockKind::ListItem { ordered: true }, "Second"),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "Second",
+                ),
             ],
             Vec::new(),
         );
@@ -1443,5 +1518,56 @@ mod tests {
             },
         });
         assert_eq!(to_markdown(&doc), "use [`it`](https://a.b) now\n");
+    }
+
+    fn list(items: &[(bool, u8, &str)]) -> Document {
+        let mut doc = Document::new("t");
+        doc.blocks = items
+            .iter()
+            .map(|(ordered, depth, text)| {
+                block(
+                    BlockKind::ListItem {
+                        ordered: *ordered,
+                        depth: *depth,
+                    },
+                    text,
+                )
+            })
+            .collect();
+        doc
+    }
+
+    #[test]
+    fn a_nested_bullet_is_indented_past_its_parents_marker() {
+        assert_eq!(
+            to_markdown(&list(&[
+                (false, 0, "a"),
+                (false, 1, "b"),
+                (false, 2, "c"),
+                (false, 0, "d")
+            ])),
+            "- a\n\n  - b\n\n    - c\n\n- d\n"
+        );
+    }
+
+    #[test]
+    fn a_list_nested_in_a_numbered_one_is_indented_past_the_number() {
+        assert_eq!(
+            to_markdown(&list(&[
+                (true, 0, "a"),
+                (false, 1, "b"),
+                (true, 0, "c"),
+                (true, 1, "d")
+            ])),
+            "1. a\n\n   - b\n\n2. c\n\n   1. d\n"
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_nested_item_stays_in_the_item() {
+        assert_eq!(
+            to_markdown(&list(&[(false, 0, "a"), (false, 1, "b\nc")])),
+            "- a\n\n  - b\\\n    c\n"
+        );
     }
 }

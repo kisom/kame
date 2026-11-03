@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::edit::ops::{anchor_wholly_inside, apply, apply_inverse, invert, normalize, Op};
 use crate::model::{
     link_style, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
-    Document, Span, SpanStyle,
+    Document, Span, SpanStyle, MAX_LIST_DEPTH,
 };
 
 /// A caret position: the block it sits in and a **byte** offset into that
@@ -338,8 +338,18 @@ impl Editor {
         let block = self.block(cursor.block_id)?;
         self.check_offset(block, cursor.offset)?;
         let text = block.text.clone();
-        // Enter on an empty list item exits the list: the item becomes body
-        // text instead of spawning another empty bullet.
+        // Enter on an empty nested item comes out a level, and on an empty top-level
+        // one exits the list: the item becomes body text instead of spawning another
+        // empty bullet.
+        if let (true, BlockKind::ListItem { ordered, depth }) = (text.is_empty(), &block.kind) {
+            if *depth > 0 {
+                let kind = BlockKind::ListItem {
+                    ordered: *ordered,
+                    depth: depth - 1,
+                };
+                return self.set_block_kind(cursor.block_id, kind);
+            }
+        }
         if text.is_empty()
             && (block.kind.is_verbatim()
                 || matches!(
@@ -675,6 +685,34 @@ impl Editor {
         ];
         let op = self.apply_edit(strip_markup(&self.doc, cursor.block_id, deletions, spans));
         Some((op, close_bracket - 1))
+    }
+
+    /// Moves a list item a level in or out, as one edit. `None` if it isn't a list item
+    /// or can't go there: going in, an item can only be one level below the item before
+    /// it, so the first item of a list stays put.
+    pub fn indent_list_item(&mut self, block_id: BlockId, indent: bool) -> Option<Op> {
+        let index = self
+            .doc
+            .blocks
+            .iter()
+            .position(|block| block.id == block_id)?;
+        let BlockKind::ListItem { ordered, depth } = self.doc.blocks[index].kind else {
+            return None;
+        };
+        let depth = if indent {
+            let previous = index.checked_sub(1).map(|at| &self.doc.blocks[at].kind);
+            let Some(BlockKind::ListItem { depth: above, .. }) = previous else {
+                return None;
+            };
+            if depth > *above || depth >= MAX_LIST_DEPTH {
+                return None;
+            }
+            depth + 1
+        } else {
+            depth.checked_sub(1)?
+        };
+        let kind = BlockKind::ListItem { ordered, depth };
+        Some(self.apply_edit(Op::set_block_kind(&self.doc, block_id, kind)))
     }
 
     /// Turns a `` `code` `` the caret just closed into inline code, as one edit, returning
@@ -1080,10 +1118,22 @@ fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
         }
     }
     if text.starts_with("- ") || text.starts_with("* ") {
-        return Some((BlockKind::ListItem { ordered: false }, 2));
+        return Some((
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
+            2,
+        ));
     }
     if text.starts_with("1. ") {
-        return Some((BlockKind::ListItem { ordered: true }, 3));
+        return Some((
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+            },
+            3,
+        ));
     }
     if text.starts_with("> ") {
         return Some((BlockKind::BlockQuote, 2));
@@ -1914,7 +1964,10 @@ mod tests {
     #[test]
     fn enter_on_an_empty_list_item_turns_it_into_body_text() {
         let mut doc = doc_with("");
-        doc.blocks[0].kind = BlockKind::ListItem { ordered: false };
+        doc.blocks[0].kind = BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+        };
         let id = doc.blocks[0].id;
         let mut e = Editor::new(doc);
 
@@ -1932,7 +1985,10 @@ mod tests {
         e.undo().expect("undo the exit");
         assert_eq!(
             e.document().blocks[0].kind,
-            BlockKind::ListItem { ordered: false }
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0
+            }
         );
     }
 
@@ -1953,11 +2009,23 @@ mod tests {
         );
         assert_eq!(
             markdown_prefix("- Hi", &paragraph),
-            Some((BlockKind::ListItem { ordered: false }, 2))
+            Some((
+                BlockKind::ListItem {
+                    ordered: false,
+                    depth: 0
+                },
+                2
+            ))
         );
         assert_eq!(
             markdown_prefix("1. Hi", &paragraph),
-            Some((BlockKind::ListItem { ordered: true }, 3))
+            Some((
+                BlockKind::ListItem {
+                    ordered: true,
+                    depth: 0
+                },
+                3
+            ))
         );
         assert_eq!(
             markdown_prefix("> A quote", &paragraph),

@@ -1670,9 +1670,22 @@ mod tests {
         let id = d.blocks[0].id;
         d.blocks[0].kind = BlockKind::Heading { level: 3 };
 
-        let op = Op::set_block_kind(&d, id, BlockKind::ListItem { ordered: true });
+        let op = Op::set_block_kind(
+            &d,
+            id,
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+            },
+        );
         apply(&mut d, &op);
-        assert_eq!(d.blocks[0].kind, BlockKind::ListItem { ordered: true });
+        assert_eq!(
+            d.blocks[0].kind,
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0
+            }
+        );
 
         apply_inverse(&mut d, &op);
         assert_eq!(d.blocks[0].kind, BlockKind::Heading { level: 3 });
@@ -1784,7 +1797,10 @@ mod tests {
             Op::SetBlockKind {
                 block_id,
                 old_kind: BlockKind::Heading { level: 3 },
-                kind: BlockKind::ListItem { ordered: false },
+                kind: BlockKind::ListItem {
+                    ordered: false,
+                    depth: 0,
+                },
             },
             Op::AddAnnotation {
                 annotation: annotation.clone(),

@@ -35,6 +35,12 @@ macOS (`Modifiers::command`).
 
 Esc counts as a prefix when it has nothing to close, and for two seconds.
 
+## Nested lists
+
+In a list item, Tab moves it a level in and Shift-Tab a level out. An item can only go one
+level below the item before it, so a list's first item stays put. Enter on an empty nested
+item comes out a level, and on an empty top-level item returns to body text.
+
 ## Typed markdown
 
 Formatting is also applied as you type, at the start of a line or around a
@@ -105,7 +111,7 @@ Opening a `.md` or `.markdown` file imports it: with Ctrl-O, File > Import
 Markdown, or `kame notes.md`. The file is only read, and the result is a new
 document with no file, so the first save asks where to put it. Front matter
 names the document and becomes its opening heading. Tables and raw HTML become
-plain text, nested lists flatten, and image descriptions are dropped; the status line reports what was simplified and any images it could
+plain text, and image descriptions are dropped; the status line reports what was simplified and any images it could
 not find. Replacing a document that has no file, or whose last save failed,
 asks first.
 

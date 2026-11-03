@@ -15,7 +15,9 @@
 //! document twice — or after a serde round trip — produces identical bytes.
 
 use crate::layout::bare_link_ranges;
-use crate::model::{is_script_url, AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle};
+use crate::model::{
+    is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle,
+};
 use std::collections::HashMap;
 
 /// The embedded stylesheet.
@@ -80,6 +82,9 @@ strong {
 }
 em {
   font-style: italic;
+}
+li > ul, li > ol {
+  margin: 0;
 }
 ul, ol {
   margin: 0 0 1.1em;
@@ -211,7 +216,8 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
     let collected = collect_apparatus(doc);
 
     let mut body = String::new();
-    let mut open_list: Option<bool> = None;
+    let mut open_list: Vec<bool> = Vec::new();
+    let positions = list_positions(&doc.blocks, true);
     for (index, block) in doc.blocks.iter().enumerate() {
         if block.kind == BlockKind::Rule {
             close_list(&mut body, &mut open_list);
@@ -272,13 +278,25 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
                 body.push_str(&after);
                 body.push_str(&format!("<blockquote>{inner}</blockquote>\n"));
             }
-            BlockKind::ListItem { ordered } => {
-                if open_list != Some(ordered) {
-                    close_list(&mut body, &mut open_list);
-                    body.push_str(if ordered { "<ol>\n" } else { "<ul>\n" });
-                    open_list = Some(ordered);
+            BlockKind::ListItem { ordered, .. } => {
+                let level =
+                    usize::from(positions[index].expect("a list item has a position").depth);
+                while open_list.len() > level + 1 {
+                    close_one_list(&mut body, &mut open_list);
                 }
-                body.push_str(&format!("<li>{after}{inner}</li>\n"));
+                match open_list.get(level) {
+                    Some(open) if *open == ordered => body.push_str("</li>\n"),
+                    Some(_) => close_one_list(&mut body, &mut open_list),
+                    // A list opening inside an item, whose <li> is still open.
+                    None if level > 0 => body.push('\n'),
+                    None => {}
+                }
+                if open_list.len() == level {
+                    body.push_str(if ordered { "<ol>\n" } else { "<ul>\n" });
+                    open_list.push(ordered);
+                }
+                // Left open, since a nested list goes inside it.
+                body.push_str(&format!("<li>{after}{inner}"));
             }
             BlockKind::Code { ref language } => {
                 close_list(&mut body, &mut open_list);
@@ -361,10 +379,17 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
 }
 
 /// Close a list still open from the previous block, if any.
-fn close_list(out: &mut String, open_list: &mut Option<bool>) {
-    match open_list.take() {
-        Some(true) => out.push_str("</ol>\n"),
-        Some(false) => out.push_str("</ul>\n"),
+fn close_list(out: &mut String, open_list: &mut Vec<bool>) {
+    while !open_list.is_empty() {
+        close_one_list(out, open_list);
+    }
+}
+
+/// Closes the innermost open list and the item left open in it.
+fn close_one_list(out: &mut String, open_list: &mut Vec<bool>) {
+    match open_list.pop() {
+        Some(true) => out.push_str("</li>\n</ol>\n"),
+        Some(false) => out.push_str("</li>\n</ul>\n"),
         None => {}
     }
 }
@@ -838,8 +863,20 @@ mod tests {
         ];
         let annotated = paragraph("Anchored text");
         let annotated_id = annotated.id;
-        let bullet = block(BlockKind::ListItem { ordered: false }, "Bullet");
-        let ordered = block(BlockKind::ListItem { ordered: true }, "First");
+        let bullet = block(
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
+            "Bullet",
+        );
+        let ordered = block(
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+            },
+            "First",
+        );
         document(
             vec![
                 block(BlockKind::Heading { level: 1 }, "A Title"),
@@ -963,10 +1000,34 @@ mod tests {
     fn consecutive_list_items_share_one_list() {
         let doc = document(
             vec![
-                block(BlockKind::ListItem { ordered: false }, "One"),
-                block(BlockKind::ListItem { ordered: false }, "Two"),
-                block(BlockKind::ListItem { ordered: true }, "First"),
-                block(BlockKind::ListItem { ordered: true }, "Second"),
+                block(
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                    },
+                    "One",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                    },
+                    "Two",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "First",
+                ),
+                block(
+                    BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
+                    "Second",
+                ),
             ],
             Vec::new(),
         );
@@ -1362,7 +1423,10 @@ mod tests {
             BlockKind::Paragraph,
             BlockKind::Heading { level: 2 },
             BlockKind::BlockQuote,
-            BlockKind::ListItem { ordered: false },
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
         ] {
             let mut doc = Document::new("t");
             let target = block(kind.clone(), "Words");
@@ -1513,5 +1577,60 @@ mod tests {
         doc.blocks = vec![block];
         let html = to_html(&doc);
         assert!(!html.contains("<a href"), "{html}");
+    }
+
+    fn list(items: &[(bool, u8, &str)]) -> Document {
+        let mut doc = Document::new("t");
+        doc.blocks = items
+            .iter()
+            .map(|(ordered, depth, text)| {
+                block(
+                    BlockKind::ListItem {
+                        ordered: *ordered,
+                        depth: *depth,
+                    },
+                    text,
+                )
+            })
+            .collect();
+        doc
+    }
+
+    #[test]
+    fn a_nested_list_sits_inside_its_parent_item() {
+        let html = to_html(&list(&[
+            (false, 0, "a"),
+            (false, 1, "b"),
+            (false, 1, "c"),
+            (false, 0, "d"),
+        ]));
+        assert!(
+            html.contains(
+                "<ul>\n<li>a\n<ul>\n<li>b</li>\n<li>c</li>\n</ul>\n</li>\n<li>d</li>\n</ul>\n"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_list_ending_several_levels_deep_closes_them_all() {
+        let html = to_html(&list(&[(true, 0, "a"), (false, 1, "b"), (true, 2, "c")]));
+        assert!(
+            html.contains(
+                "<ol>\n<li>a\n<ul>\n<li>b\n<ol>\n<li>c</li>\n</ol>\n</li>\n</ul>\n</li>\n</ol>\n"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_change_of_list_kind_at_one_level_stays_inside_the_parent() {
+        let html = to_html(&list(&[(false, 0, "a"), (false, 1, "b"), (true, 1, "c")]));
+        assert!(
+            html.contains(
+                "<ul>\n<li>a\n<ul>\n<li>b</li>\n</ul>\n<ol>\n<li>c</li>\n</ol>\n</li>\n</ul>\n"
+            ),
+            "{html}"
+        );
     }
 }

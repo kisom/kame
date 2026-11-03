@@ -242,7 +242,7 @@ pub fn layout_block_marked_with_align(
     // rather than under the marker. A block quote is indented with no marker:
     // its whole column shifts right and wraps in the remaining width.
     let left_indent = match block.kind {
-        BlockKind::ListItem { .. } => config.list_indent,
+        BlockKind::ListItem { depth, .. } => config.list_indent * f32::from(depth + 1),
         BlockKind::BlockQuote | BlockKind::Code { .. } | BlockKind::Prose => {
             config.body_size * QUOTE_INDENT_RATIO
         }
@@ -1085,7 +1085,10 @@ dance, on a page, of pen, eye and hand.";
         load_fonts(&mut fs);
         let block = Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::ListItem { ordered: true },
+            kind: BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+            },
             text: "A short list item.".to_string(),
             spans: Vec::new(),
         };
@@ -1119,7 +1122,10 @@ dance, on a page, of pen, eye and hand.";
         let config = config();
         let list = Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::ListItem { ordered: false },
+            kind: BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
             text: "item".to_string(),
             spans: Vec::new(),
         };
@@ -1475,7 +1481,10 @@ dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
     fn a_quote_starting_a_heading_or_a_list_item_hangs_too() {
         for kind in [
             BlockKind::Heading { level: 2 },
-            BlockKind::ListItem { ordered: false },
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
         ] {
             let (_, layout, _) = hanging_layout("\u{201c}Words\u{201d}", kind, 400.0);
             assert!(layout.runs[0].glyphs[0].x < -0.5);
@@ -1627,5 +1636,46 @@ dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
         let run = layout.buffer.layout_runs().next().unwrap();
         let code = run.glyphs.iter().find(|g| g.start == 2).unwrap();
         assert_eq!(code.font_id, mono);
+    }
+
+    #[test]
+    fn a_nested_item_is_set_in_a_level_at_a_time() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let indent = |fs: &mut FontSystem, depth| {
+            let kind = BlockKind::ListItem {
+                ordered: false,
+                depth,
+            };
+            layout_block(fs, &kind_block(kind, "a"), &config).left_indent
+        };
+        assert_eq!(indent(&mut fs, 0), config.list_indent);
+        assert_eq!(indent(&mut fs, 1), config.list_indent * 2.0);
+        assert_eq!(indent(&mut fs, 2), config.list_indent * 3.0);
+    }
+
+    #[test]
+    fn a_nested_item_wraps_within_the_measure() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut config = LayoutConfig::with_body_size(16.0);
+        config.body_width = 240.0;
+        let kind = BlockKind::ListItem {
+            ordered: false,
+            depth: 2,
+        };
+        let layout = layout_block(
+            &mut fs,
+            &kind_block(
+                kind,
+                "several words that have to wrap inside what is left of the measure",
+            ),
+            &config,
+        );
+        for run in &layout.runs {
+            let last = run.glyphs.last().unwrap();
+            assert!(layout.left_indent + last.x + last.w <= 240.5);
+        }
     }
 }

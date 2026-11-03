@@ -12,6 +12,9 @@ pub enum BlockKind {
     },
     ListItem {
         ordered: bool,
+        /// How many lists this one is nested inside.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        depth: u8,
     },
     /// An indented, italicized quotation.
     BlockQuote,
@@ -58,6 +61,57 @@ pub enum SpanStyle {
     DocumentLink {
         target: String,
     },
+}
+
+fn is_zero(depth: &u8) -> bool {
+    *depth == 0
+}
+
+/// How deeply lists can nest.
+pub const MAX_LIST_DEPTH: u8 = 5;
+
+/// Where a list item sits: how deep it really is, and its number if it is ordered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ListPosition {
+    pub depth: u8,
+    pub number: Option<usize>,
+}
+
+/// Where each block sits in a list, the one place the page and the exports read this
+/// from. A block that isn't a list item ends the list.
+///
+/// An item is never more than one level below the one before it, whatever it stores:
+/// Markdown can't express that, and outdenting a parent can leave its children so. A
+/// number counts its level, carries on after a nested list, and restarts after a bullet.
+///
+/// With `skip_empty`, as for an export, which leaves empty blocks out, those neither end
+/// a list nor take a number. Rules and images have no text but do appear, so they count.
+pub fn list_positions(blocks: &[Block], skip_empty: bool) -> Vec<Option<ListPosition>> {
+    let mut counts: Vec<usize> = Vec::new();
+    blocks
+        .iter()
+        .map(|block| {
+            let appears = !block.text.is_empty()
+                || matches!(block.kind, BlockKind::Rule | BlockKind::Image { .. });
+            if skip_empty && !appears {
+                return None;
+            }
+            let BlockKind::ListItem { ordered, depth } = block.kind else {
+                counts.clear();
+                return None;
+            };
+            let level = usize::from(depth.min(MAX_LIST_DEPTH)).min(counts.len());
+            counts.truncate(level + 1);
+            if counts.len() == level {
+                counts.push(0);
+            }
+            counts[level] = if ordered { counts[level] + 1 } else { 0 };
+            Some(ListPosition {
+                depth: level as u8,
+                number: ordered.then_some(counts[level]),
+            })
+        })
+        .collect()
 }
 
 /// The style for a link entered as `url`: a document link if it names a `.kame` file or
@@ -230,7 +284,10 @@ mod tests {
                 },
                 Block {
                     id: Uuid::new_v4(),
-                    kind: BlockKind::ListItem { ordered: true },
+                    kind: BlockKind::ListItem {
+                        ordered: true,
+                        depth: 0,
+                    },
                     text: "First".to_string(),
                     spans: Vec::new(),
                 },
@@ -337,6 +394,126 @@ mod script_url_tests {
             SpanStyle::DocumentLink {
                 target: " a b.kame#C d".to_string()
             }
+        );
+    }
+
+    use super::{list_positions, Block, BlockKind, ListPosition, MAX_LIST_DEPTH};
+
+    fn item(ordered: bool, depth: u8, text: &str) -> Block {
+        Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::ListItem { ordered, depth },
+            text: text.to_string(),
+            spans: Vec::new(),
+        }
+    }
+
+    fn para(text: &str) -> Block {
+        Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: text.to_string(),
+            spans: Vec::new(),
+        }
+    }
+
+    fn at(depth: u8, number: Option<usize>) -> Option<ListPosition> {
+        Some(ListPosition { depth, number })
+    }
+
+    #[test]
+    fn numbers_count_within_a_level_and_carry_on_after_a_nested_list() {
+        let blocks = [
+            item(true, 0, "a"),
+            item(true, 1, "b"),
+            item(true, 1, "c"),
+            item(true, 0, "d"),
+            item(true, 1, "e"),
+        ];
+        assert_eq!(
+            list_positions(&blocks, false),
+            vec![
+                at(0, Some(1)),
+                at(1, Some(1)),
+                at(1, Some(2)),
+                at(0, Some(2)),
+                at(1, Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn bullets_have_no_number_and_restart_the_count_at_their_level() {
+        let blocks = [item(true, 0, "a"), item(false, 0, "b"), item(true, 0, "c")];
+        assert_eq!(
+            list_positions(&blocks, false),
+            vec![at(0, Some(1)), at(0, None), at(0, Some(1))]
+        );
+    }
+
+    #[test]
+    fn anything_else_ends_the_list() {
+        let blocks = [item(true, 0, "a"), para("x"), item(true, 2, "b")];
+        assert_eq!(
+            list_positions(&blocks, false),
+            vec![at(0, Some(1)), None, at(0, Some(1))]
+        );
+    }
+
+    /// Markdown can't express an item two levels below its parent, and Outdent can leave
+    /// one, so it reads as just one level down.
+    #[test]
+    fn an_item_is_never_more_than_one_level_below_the_one_before() {
+        let blocks = [
+            item(false, 3, "a"),
+            item(false, 3, "b"),
+            item(false, 0, "c"),
+            item(false, 4, "d"),
+        ];
+        assert_eq!(
+            list_positions(&blocks, false),
+            vec![at(0, None), at(1, None), at(0, None), at(1, None)]
+        );
+    }
+
+    #[test]
+    fn depth_stops_at_the_limit() {
+        let blocks: Vec<Block> = (0..9).map(|depth| item(false, depth, "a")).collect();
+        let last = list_positions(&blocks, false)[8].unwrap();
+        assert_eq!(last.depth, MAX_LIST_DEPTH);
+    }
+
+    #[test]
+    fn exports_see_past_empty_blocks_and_the_page_does_not() {
+        let blocks = [
+            item(true, 0, "a"),
+            item(true, 0, ""),
+            para(""),
+            item(true, 0, "b"),
+        ];
+        assert_eq!(
+            list_positions(&blocks, true),
+            vec![at(0, Some(1)), None, None, at(0, Some(2))]
+        );
+        assert_eq!(
+            list_positions(&blocks, false),
+            vec![at(0, Some(1)), at(0, Some(2)), None, at(0, Some(1))]
+        );
+    }
+
+    #[test]
+    fn an_older_list_item_reads_as_top_level_and_a_top_level_one_writes_as_before() {
+        let kind: BlockKind = serde_json::from_str(r#"{"ListItem":{"ordered":true}}"#).unwrap();
+        assert_eq!(
+            kind,
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&kind).unwrap(),
+            r#"{"ListItem":{"ordered":true}}"#
         );
     }
 }

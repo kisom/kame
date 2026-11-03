@@ -598,14 +598,16 @@ pub fn caret_x(layout: &BlockLayout, offset: usize) -> f32 {
         let (Some(first), Some(last)) = (run.glyphs.first(), run.glyphs.last()) else {
             continue;
         };
-        if offset < first.start || offset > last.end {
+        // Glyph offsets count from the start of their own line.
+        let base = layout.line_start(run.line_i);
+        if offset < base + first.start || offset > base + last.end {
             continue;
         }
-        if offset == last.end {
+        if offset == base + last.end {
             return last.x + last.w;
         }
         for glyph in run.glyphs.iter() {
-            if offset >= glyph.start && offset < glyph.end {
+            if offset >= base + glyph.start && offset < base + glyph.end {
                 return glyph.x;
             }
         }
@@ -618,10 +620,28 @@ pub fn caret_x(layout: &BlockLayout, offset: usize) -> f32 {
 /// The visual line covering `offset` (block-relative), falling forward to the
 /// next line and back to the last one at the end of the block.
 pub fn caret_line(layout: &BlockLayout, offset: usize) -> Option<crate::layout::LayoutLine> {
+    let inside = |line: &&crate::layout::LayoutLine| offset >= line.start && offset < line.end;
+    // At a line's end only if the next line does not start there, as it does where a
+    // line wraps. The end of a line before a break, and a blank line, are their own.
+    let at_end = |index: usize, line: &crate::layout::LayoutLine| {
+        line.end == offset
+            && layout
+                .lines
+                .get(index + 1)
+                .is_none_or(|next| next.start > offset)
+    };
     layout
         .lines
         .iter()
-        .find(|line| offset >= line.start && offset < line.end)
+        .find(inside)
+        .or_else(|| {
+            layout
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(index, line)| at_end(*index, line))
+                .map(|(_, line)| line)
+        })
         .or_else(|| layout.lines.iter().find(|line| line.start > offset))
         .or_else(|| layout.lines.last())
         .copied()
@@ -638,28 +658,40 @@ pub fn caret_line(layout: &BlockLayout, offset: usize) -> Option<crate::layout::
 pub fn offset_at(layout: &BlockLayout, x: f32, y: f32, text_len: usize) -> usize {
     let mut best: Option<(f32, usize)> = None;
     for run in layout.buffer.layout_runs() {
-        let Some(first) = run.glyphs.first() else {
-            continue;
-        };
         let centre = run.line_top + run.line_height * 0.5;
         let distance = (y - centre).abs();
         if best.is_some_and(|(best_distance, _)| best_distance <= distance) {
             continue;
         }
 
+        // Glyph offsets count from the start of their own line, and a blank line has
+        // only that start.
+        let base = layout.line_start(run.line_i);
+        let Some(first) = run.glyphs.first() else {
+            best = Some((distance, base));
+            continue;
+        };
+
         // The caret belongs to the glyph under the pointer: walk the run and
         // stop at the first glyph whose right edge is past `x`. That glyph's
         // start is the boundary the caret precedes. Falling off the end means
         // the click is past the line, so the caret goes to the line's end.
-        let mut offset = first.start;
+        let mut offset = base + first.start;
         for glyph in run.glyphs.iter() {
             if x < glyph.x + glyph.w {
-                offset = glyph.start;
+                offset = base + glyph.start;
                 break;
             }
-            offset = glyph.end;
+            offset = base + glyph.end;
         }
         best = Some((distance, offset));
+    }
+    // The line after a trailing break exists only in `lines`.
+    if let Some(last) = layout.lines.last().filter(|line| line.start == line.end) {
+        let distance = (y - (last.y + last.height * 0.5)).abs();
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, last.start));
+        }
     }
     best.map_or(0, |(_, offset)| offset.min(text_len))
 }
@@ -1866,5 +1898,83 @@ visual form, and thus with an independent existence.";
                 assert!(text.contains("SIL OPEN FONT LICENSE"), "{name}");
             }
         }
+    }
+
+    /// A block's offsets count across its line breaks, whatever the text engine does
+    /// with the lines underneath.
+    #[test]
+    fn caret_geometry_counts_offsets_across_line_breaks() {
+        let mut renderer = GlyphRenderer::new(config());
+        let layout = renderer.layout(&paragraph("abc\ndef\n\nxyz"));
+        assert_eq!(
+            layout.lines.len(),
+            4,
+            "the blank line is a line: {:?}",
+            layout.lines
+        );
+        let (first, second, blank, fourth) = (
+            layout.lines[0],
+            layout.lines[1],
+            layout.lines[2],
+            layout.lines[3],
+        );
+        assert_eq!((first.start, first.end), (0, 3));
+        assert_eq!((second.start, second.end), (4, 7));
+        assert_eq!((blank.start, blank.end), (8, 8));
+        assert_eq!((fourth.start, fourth.end), (9, 12));
+        assert!(second.y > first.y && blank.y > second.y && fourth.y > blank.y);
+
+        // The same column on different lines is the same pen, in a mono-free way:
+        // the start of each line is flush left and its end past it.
+        for start in [0, 4, 9] {
+            assert_eq!(caret_x(&layout, start), 0.0, "offset {start}");
+            assert!(caret_x(&layout, start + 3) > 0.0, "offset {}", start + 3);
+        }
+        assert_eq!(caret_x(&layout, 8), 0.0, "the blank line");
+
+        // Each offset's caret sits on its own line, including at a line's end.
+        for (offset, line) in [
+            (0, first),
+            (3, first),
+            (4, second),
+            (7, second),
+            (8, blank),
+            (9, fourth),
+            (12, fourth),
+        ] {
+            assert_eq!(caret_line(&layout, offset), Some(line), "offset {offset}");
+        }
+
+        // A click maps back to the offset on the line it hit.
+        let len = "abc
+def
+
+xyz"
+        .len();
+        assert_eq!(offset_at(&layout, 0.0, second.y + 1.0, len), 4);
+        assert_eq!(offset_at(&layout, 500.0, second.y + 1.0, len), 7);
+        assert_eq!(offset_at(&layout, 0.0, blank.y + 1.0, len), 8);
+        assert_eq!(offset_at(&layout, 0.0, fourth.y + 1.0, len), 9);
+    }
+
+    /// Enter at the end of a code block leaves the caret on a new, empty last line.
+    #[test]
+    fn a_trailing_line_break_makes_a_line_for_the_caret() {
+        let mut renderer = GlyphRenderer::new(config());
+        let layout = renderer.layout(&paragraph("abc\n"));
+        assert_eq!(layout.lines.len(), 2, "{:?}", layout.lines);
+        assert_eq!((layout.lines[1].start, layout.lines[1].end), (4, 4));
+        assert_eq!(caret_line(&layout, 4), Some(layout.lines[1]));
+        assert_eq!(caret_x(&layout, 4), 0.0);
+        assert!(layout.height > layout.lines[0].height);
+    }
+
+    #[test]
+    fn a_highlight_lands_on_the_right_line_after_a_break() {
+        let mut renderer = GlyphRenderer::new(config());
+        let layout = renderer.layout(&paragraph("abc\ndef"));
+        let rects = range_rects(&layout, 4, 7);
+        assert_eq!(rects.len(), 1, "{rects:?}");
+        assert_eq!(rects[0].min.y, layout.lines[1].y);
     }
 }

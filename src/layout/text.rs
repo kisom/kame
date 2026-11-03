@@ -87,6 +87,44 @@ pub struct BlockLayout {
     /// How far the text is indented from the block's left edge, to leave room
     /// for a list marker. Zero for paragraphs and headings.
     pub left_indent: f32,
+    /// The block offset each of the text engine's lines starts at. Its glyphs count
+    /// from the start of their own line, so a line break would otherwise restart
+    /// the offsets; see [`BlockLayout::line_start`].
+    line_starts: Vec<usize>,
+}
+
+impl BlockLayout {
+    /// The block offset of the start of the text engine's line `line_i`, to add to
+    /// the offsets of the glyphs on it.
+    pub fn line_start(&self, line_i: usize) -> usize {
+        self.line_starts
+            .get(line_i)
+            .or(self.line_starts.last())
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// Where each line of `text` starts, splitting where the text engine does.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        let next = match c {
+            '\r' => match chars.peek() {
+                Some((newline, '\n')) => {
+                    let newline = *newline;
+                    chars.next();
+                    newline + 1
+                }
+                _ => at + 1,
+            },
+            '\n' | '\u{1c}'..='\u{1e}' | '\u{85}' | '\u{2029}' => at + c.len_utf8(),
+            _ => continue,
+        };
+        starts.push(next);
+    }
+    starts
 }
 
 /// Lay out one block, shaping it with cosmic-text at the configured column
@@ -191,20 +229,36 @@ pub fn layout_block_marked_with_align(
     buffer.set_wrap(Wrap::Word);
     buffer.shape_until_scroll(font_system, false);
 
+    let line_starts = line_starts(&block.text);
     let mut lines = Vec::new();
     for run in buffer.layout_runs() {
-        // A run with no glyphs is the placeholder cosmic-text emits for an
-        // empty visual line; it carries no byte range to anchor against.
-        let (first, last) = match (run.glyphs.first(), run.glyphs.last()) {
-            (Some(first), Some(last)) if first.start < last.end => (first, last),
-            _ => continue,
+        let base = line_starts.get(run.line_i).copied().unwrap_or(0);
+        let (start, end) = match (run.glyphs.first(), run.glyphs.last()) {
+            (Some(first), Some(last)) if first.start < last.end => {
+                (base + first.start, base + last.end)
+            }
+            // A blank line between line breaks still holds a caret. The placeholder
+            // for a wholly empty block carries nothing to anchor against.
+            _ if block.text.is_empty() => continue,
+            _ => (base, base),
         };
         lines.push(LayoutLine {
             y: run.line_top,
             height: run.line_height,
-            start: first.start,
-            end: last.end,
+            start,
+            end,
         });
+    }
+    // The text engine makes no line for a trailing break, but the caret goes there.
+    if block.text.ends_with('\n') {
+        if let Some(last) = lines.last().copied() {
+            lines.push(LayoutLine {
+                y: last.y + last.height,
+                height: last.height,
+                start: block.text.len(),
+                end: block.text.len(),
+            });
+        }
     }
     let height = lines.last().map_or(0.0, |line| line.y + line.height);
 
@@ -213,6 +267,7 @@ pub fn layout_block_marked_with_align(
         lines,
         height,
         left_indent,
+        line_starts,
     }
 }
 

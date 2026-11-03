@@ -200,9 +200,10 @@ impl GlyphAtlas {
                 let glyph_ink = glyph.color_opt.map_or(ink, |c| [c.r(), c.g(), c.b()]);
                 // A note/marginal/footnote wash behind this glyph becomes the
                 // background the subpixel coverage is baked against.
+                let base = layout.line_start(run.line_i);
                 let glyph_background = highlights
                     .iter()
-                    .find(|(start, end, _)| glyph.start < *end && *start < glyph.end)
+                    .find(|(start, end, _)| base + glyph.start < *end && *start < base + glyph.end)
                     .map(|(_, _, color)| *color)
                     .unwrap_or(background);
 

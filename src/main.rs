@@ -1132,6 +1132,8 @@ struct MetadataPrompt {
     created: String,
     published: String,
     tags: String,
+    /// Make this author the one new documents start with.
+    default_author: bool,
     /// Set for the frame the dialog opens on, so the first field takes the
     /// keyboard.
     focus: bool,
@@ -1212,6 +1214,9 @@ struct KameConfig {
     /// The document open when kame last ran, to reopen on a launch that names none.
     #[serde(default)]
     last_document: Option<PathBuf>,
+    /// The author new documents start with.
+    #[serde(default)]
+    author: String,
 }
 
 fn default_body_size() -> f32 {
@@ -1224,6 +1229,7 @@ impl Default for KameConfig {
             body_size: DEFAULT_BODY_SIZE,
             dark: false,
             last_document: None,
+            author: String::new(),
         }
     }
 }
@@ -1300,6 +1306,8 @@ fn main() -> eframe::Result {
         hold_instance_lock(&dir.join("instance.lock"))
     });
     let mut last_document = config.last_document;
+    let default_author = config.author;
+    let config_author = default_author.clone();
     let last = last_document.clone().filter(|_| first);
 
     // With an argument, open that file, and with none go back to the last document.
@@ -1330,6 +1338,7 @@ fn main() -> eframe::Result {
                                 body_size,
                                 dark,
                                 last_document: None,
+                                author: config_author.clone(),
                             });
                         }
                         opened
@@ -1363,6 +1372,7 @@ fn main() -> eframe::Result {
             body_size,
             dark,
             last_document,
+            default_author,
         )))
     });
 
@@ -1730,6 +1740,8 @@ struct KameApp {
     saved_position: Option<(Cursor, f32)>,
     position_saved_at: std::time::Instant,
     last_document: LastDocument,
+    /// The author new documents start with.
+    default_author: String,
     /// The "Snapshot Now" label prompt, when it is open.
     snapshot_prompt: Option<SnapshotPrompt>,
     /// The "Open" path prompt (Ctrl-O), when it is open.
@@ -1774,6 +1786,7 @@ impl KameApp {
         body_size: f32,
         dark: bool,
         last_document: Option<PathBuf>,
+        default_author: String,
     ) -> KameApp {
         cc.egui_ctx.set_visuals(if dark {
             egui::Visuals::dark()
@@ -1782,6 +1795,8 @@ impl KameApp {
         });
         install_fonts(&cc.egui_ctx);
         external::set_waker(cc.egui_ctx.clone());
+        let mut session = session;
+        session.apply_default_author(&default_author);
         KameApp {
             session,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
@@ -1806,6 +1821,7 @@ impl KameApp {
             saved_position: None,
             position_saved_at: std::time::Instant::now(),
             last_document: LastDocument::new(last_document),
+            default_author,
             snapshot_prompt: None,
             open_prompt: None,
             image_prompt: None,
@@ -2029,6 +2045,7 @@ impl KameApp {
             body_size: self.body_size,
             dark: self.dark,
             last_document: self.last_document.path.clone(),
+            author: self.default_author.clone(),
         });
     }
 
@@ -2151,6 +2168,7 @@ impl KameApp {
     /// document (open note, find bar, typewriter anchor, caches).
     fn adopt_session(&mut self, session: Session) {
         self.session = session;
+        self.session.apply_default_author(&self.default_author);
         self.layouts = LayoutCache::new();
         self.textures = TextureCache::new();
         self.annotation_textures = AnnotationTextureCache::new();
@@ -4068,6 +4086,7 @@ impl KameApp {
             created: metadata.created.clone(),
             published: metadata.published.clone(),
             tags: metadata.tags.join(", "),
+            default_author: false,
             focus: true,
         });
     }
@@ -4117,6 +4136,10 @@ impl KameApp {
                             ui.end_row();
                         }
                     });
+                ui.checkbox(
+                    &mut prompt.default_author,
+                    "Use this author for new documents",
+                );
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -4131,6 +4154,10 @@ impl KameApp {
             self.metadata_prompt = None;
         } else if save {
             if let Some(prompt) = self.metadata_prompt.take() {
+                if prompt.default_author {
+                    self.default_author = prompt.author.trim().to_string();
+                    self.persist();
+                }
                 self.session.set_metadata(Metadata {
                     title: prompt.title.trim().to_string(),
                     author: prompt.author.trim().to_string(),
@@ -5103,12 +5130,14 @@ mod tests {
             body_size: 21.0,
             dark: true,
             last_document: Some(PathBuf::from("/notes/essay.kame")),
+            author: "K. Isom".to_string(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let read = serde_json::from_str::<KameConfig>(&json).unwrap();
         assert_eq!(read.body_size, 21.0);
         assert!(read.dark);
         assert_eq!(read.last_document, config.last_document);
+        assert_eq!(read.author, "K. Isom");
 
         // A config written by an older build (no body_size, no dark) still
         // parses and defaults to light, body-size 16.
@@ -6688,5 +6717,11 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
                 assert!(style.contains(&color), "{color} isn't in the stylesheet");
             }
         }
+    }
+
+    #[test]
+    fn an_older_config_has_no_default_author() {
+        let config: KameConfig = serde_json::from_str(r#"{"body_size":18.0}"#).unwrap();
+        assert_eq!(config.author, "");
     }
 }

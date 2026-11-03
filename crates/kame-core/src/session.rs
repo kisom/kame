@@ -34,6 +34,8 @@ pub struct Session {
     pub source_path: Option<PathBuf>,
     /// Where the page was scrolled when this document was last left.
     pub restored_scroll: Option<f32>,
+    /// A document just begun, not yet given the default author.
+    pub is_new: bool,
     /// What the document says about itself. Saved directly, not an undo step.
     pub metadata: Metadata,
     /// The file this session is persisted to, or `None` for an anonymous
@@ -58,6 +60,7 @@ impl Session {
         // Set when the degrade path could not reset the database, which leaves
         // it unable to write rather than merely historyless.
         let mut reset_error: Option<DbError> = None;
+        let mut fresh = false;
         let editor = match db.load_document() {
             Ok(document) => match db.load_ops() {
                 Ok(ops) => {
@@ -91,6 +94,7 @@ impl Session {
                 }
             },
             Err(DbError::NoDocument) => {
+                fresh = true;
                 let title = path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
@@ -147,6 +151,7 @@ impl Session {
             }
         };
         Ok(Session {
+            is_new: fresh,
             editor,
             db,
             caret,
@@ -181,6 +186,7 @@ impl Session {
             })
             .ok_or("document has no blocks")?;
         Ok(Session {
+            is_new: false,
             editor,
             db,
             caret,
@@ -213,6 +219,7 @@ impl Session {
             })
             .ok_or("document has no blocks")?;
         Ok(Session {
+            is_new: true,
             editor,
             db,
             caret,
@@ -289,6 +296,7 @@ impl Session {
             })
             .ok_or("document has no blocks")?;
         let session = Session {
+            is_new: true,
             editor,
             db,
             caret,
@@ -324,6 +332,20 @@ impl Session {
 
     /// Replaces the metadata and saves it at once. It is not an edit: it takes no
     /// part in undo, and a failure to write costs nothing but the report.
+    /// Gives a document just begun the default author, unless it came with one. A document
+    /// that already exists keeps what it has, even if that is nothing.
+    pub fn apply_default_author(&mut self, author: &str) {
+        if !std::mem::take(&mut self.is_new)
+            || author.is_empty()
+            || !self.metadata.author.is_empty()
+        {
+            return;
+        }
+        let mut metadata = self.metadata.clone();
+        metadata.author = author.to_string();
+        self.set_metadata(metadata);
+    }
+
     pub fn set_metadata(&mut self, metadata: Metadata) {
         self.metadata = metadata;
         if let Err(err) = self.db.save_metadata(&self.metadata) {
@@ -5020,5 +5042,76 @@ mod tests {
             };
             assert_eq!(texts(session.document()), texts(&head), "seed {seed}");
         }
+    }
+
+    #[test]
+    fn a_new_file_takes_the_default_author_and_keeps_it() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.apply_default_author("K. Isom");
+        assert_eq!(session.metadata.author, "K. Isom");
+        drop(session);
+        assert_eq!(open(&path).metadata.author, "K. Isom");
+    }
+
+    #[test]
+    fn an_existing_document_with_no_author_is_left_alone() {
+        let path = temp_db_path();
+        drop(open(&path));
+        let mut session = open(&path);
+        session.apply_default_author("K. Isom");
+        assert_eq!(session.metadata.author, "");
+        drop(session);
+        assert_eq!(open(&path).metadata.author, "");
+    }
+
+    #[test]
+    fn an_empty_document_takes_the_default_author() {
+        let mut session = Session::anonymous().unwrap();
+        session.apply_default_author("K. Isom");
+        assert_eq!(session.metadata.author, "K. Isom");
+    }
+
+    #[test]
+    fn a_new_documents_author_survives_its_first_save() {
+        let mut session = Session::anonymous().unwrap();
+        session.apply_default_author("K. Isom");
+        session.insert("Words");
+        let path = temp_db_path();
+        session.save_as(&path).unwrap();
+        drop(session);
+        assert_eq!(open(&path).metadata.author, "K. Isom");
+    }
+
+    fn imported(source: &str) -> Session {
+        let dir = scratch_dir("author");
+        let path = dir.join("post.md");
+        std::fs::write(&path, source).unwrap();
+        Session::import(&path).unwrap().0
+    }
+
+    #[test]
+    fn an_import_naming_its_author_keeps_them() {
+        let mut session = imported("---\ntitle: T\nauthor: Someone Else\n---\n\nWords.\n");
+        session.apply_default_author("K. Isom");
+        assert_eq!(session.metadata.author, "Someone Else");
+    }
+
+    #[test]
+    fn an_import_naming_no_author_takes_the_default() {
+        let mut session = imported("Words.\n");
+        session.apply_default_author("K. Isom");
+        assert_eq!(session.metadata.author, "K. Isom");
+    }
+
+    #[test]
+    fn the_default_is_only_applied_once() {
+        let mut session = Session::anonymous().unwrap();
+        session.apply_default_author("K. Isom");
+        let mut metadata = session.metadata.clone();
+        metadata.author = String::new();
+        session.set_metadata(metadata);
+        session.apply_default_author("K. Isom");
+        assert_eq!(session.metadata.author, "");
     }
 }

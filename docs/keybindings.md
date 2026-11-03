@@ -184,6 +184,13 @@ tried. `#The Intro` goes to the first heading with exactly that text, and on its
 means a heading in this document. If a link has rotted, the status row says so and nothing
 opens.
 
+## The default author
+
+A new document starts with the author you have chosen, as does an import that doesn't name one.
+Set it with "Use this author for new documents" in Document Properties, or as `"author"` in kame's
+`config.json`. Documents that already exist keep what they have. On a site, a document with no
+author takes `author` from `site.yaml`.
+
 ## History
 
 Everything you type is kept in the document's history, joined up a word at a time, so that undo

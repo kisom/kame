@@ -183,7 +183,7 @@ Each stage is its own commit on one branch, tried in the app before it lands, on
 ## 11. Decisions made on your behalf
 
 - **One line ahead, not two.** With spaces closing to 80% and no hyphens, two lines is a little better
-  (8.3% against 12% over 1.5x on one essay, 6.1% against 7.5% on the other) but moved a line above for
+  (8.3% against 12% over 1.5x on one essay, 5.6% against 6.9% on the other) but moved a line above for
   about 6% of removed words against about 1%. It's one constant, so try the other if the page feels too
   loose.
 - **A 90% closing limit,** because hyphens make tighter spacing unnecessary. With hyphens off, 90% leaves

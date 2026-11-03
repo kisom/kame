@@ -22,13 +22,14 @@ Background notes are in `~/data/writing/MultiKame.kame`.
 4. Keep published URLs stable: adding or renaming anything must not move what is published.
 5. Never change a document. Publishing only ever reads.
 6. Share drafts for early feedback, without listing them.
+7. Offer an RSS feed of the latest published documents.
 
 ## 3. Non-goals (v1)
 
 - A development server. `python3 -m http.server -d output` is enough.
 - Deployment. The output is a directory.
 - Incremental builds. The sites are small, so every build is a whole build.
-- RSS or Atom feeds, sitemaps and search. Worth adding later, and nothing here prevents them.
+- Atom feeds, sitemaps and search. Worth adding later, and nothing here prevents them.
 - Heading anchors. See §7.
 - Copying files that ordinary links point at, such as a linked PDF. Put those in `static/`.
 - Deploying under a sub-path. A site lives at the root of its domain.
@@ -96,7 +97,7 @@ site:
   directory.
 - Slugs are lowercase letters, digits and hyphens, and a slug appears once across `publish` and
   `drafts`. The same file can't be listed twice.
-- `name` and `publish` are required, and an unknown key is an error, so a typo like `publsh`
+- `name`, `url` and `publish` are required, and an unknown key is an error, so a typo like `publsh`
   can't silently publish nothing.
 
 **A duplicate slug must be an error.** Parsed into a plain map, YAML's last duplicate silently
@@ -113,7 +114,8 @@ therefore reads these two maps through its own deserializer, which rejects a rep
 | `pages/index.md` | `/` |
 | `pages/about.md` | `/about/` |
 | `pages/a/b.md` | `/a/b/` |
-| Each tag | `/tags/<tag>/` |
+| Each tag | `/tags/<tag>/`, normalized: lowercase, with spaces and punctuation as hyphens. Two tags reducing to one are an error. |
+| The RSS feed | `/feed.xml` |
 | `static/**` | The same path from the site root |
 | The theme's `static/**` | The same path from the site root |
 
@@ -126,13 +128,30 @@ own static files on purpose, since that is how a site adjusts a theme.
 Each is read with `Db::open_read_only` and rendered with `html_body`.
 
 - **Title:** the metadata title, then the document's own, then the file name.
-- **Date:** `published`, or `created` if that is empty. Documents with neither sort last.
+- **Date:** `published`, or `created` if that is empty. See Dates below. Documents with neither sort
+  last and stay out of the feed.
 - **Notes:** never publish, as in every export. Marginalia and footnotes do.
 - **Repeated title:** a first heading repeating the title is left out of the body, as the
   Markdown export already does, because the theme prints the title. This needs moving somewhere
   `html_body` can share it.
 - A file too old to read without migrating is an error telling you to open it in kame once, since
   a read-only open can't migrate it.
+
+### Dates
+
+kame stores dates as free text today, with `YYYY-MM-DD` as a hint in the Properties dialog. RSS
+needs real dates, and sorting should use them, so `kame-core` gains a small `Date` type with no new
+dependency, building on the date arithmetic `iso_date` already has.
+
+- **Accepted:** `YYYY-MM-DD`, and also `YYYY-MM-DD HH:MM` or `YYYY-MM-DD HH:MM:SS`, which is what
+  Markdown imported from Pelican carries. The time is ignored.
+- **Rejected:** anything else, including impossible dates like `2026-02-30`.
+- **In a build:** a date that won't parse is an error naming the document, because a typo would
+  otherwise quietly misplace it in the listings and the feed.
+- **In kame:** the Properties dialog says so when a date won't parse, but saves it anyway. It is
+  your text, and only publishing depends on it.
+
+Themes get the date as `YYYY-MM-DD`.
 
 ### Images
 
@@ -227,7 +246,25 @@ The default theme carries EB Garamond, Crimson Pro and IBM Plex Mono with `@font
 licences go with them. `kame-site` embeds them from `crates/kame-typeset/fonts/` by path, with no
 dependency on the crate.
 
-## 10. Command line
+## 10. RSS
+
+An RSS 2.0 feed at `/feed.xml`, with the 10 most recent documents from `publish`. Drafts and
+Markdown pages are never in it.
+
+- **Items:** the title, link, author, date and tags as categories, with the link as a permanent
+  `guid`, so that a reader only sees an item as new once. A slug never changes, so neither does it.
+- **Content:** the whole document, so that an essay can be read in a feed reader.
+- **Absolute URLs:** feed readers don't reliably resolve relative links, so the body is rendered a
+  second time for the feed, with `Publish` hooks giving `site.url`-based URLs for images and document
+  links.
+- **Marginalia:** a feed reader won't apply `kame_css`, so these appear inline where they are
+  anchored. The text stays readable, if without the margin.
+- **Deterministic:** no `lastBuildDate`, which would change on every build. `pubDate` on each item
+  comes from the document, at midnight UTC.
+- **XML:** written by hand with careful escaping, without a new dependency. It is a small, fixed
+  format.
+
+## 11. Command line
 
 ```
 kame-site build [--no-drafts] [DIR]
@@ -249,14 +286,15 @@ The same input gives byte-identical output, which keeps kame's export rule and m
 diffable. There is no build timestamp, everything is sorted, and the output's file times aren't
 relied on.
 
-## 11. Changes needed in `kame-core`
+## 12. Changes needed in `kame-core`
 
 Most of this landed already: `Db::open_read_only`, `html_body`, `Publish`, `links`. Remaining:
 
 1. Share the repeated-title rule with `html_body`.
 2. Make `split_front_matter`, and what it returns, public.
+3. Add `Date`, with parsing and RFC 822 formatting for RSS.
 
-## 12. Testing
+## 13. Testing
 
 The crate separates working out the site from writing it:
 
@@ -265,11 +303,15 @@ The crate separates working out the site from writing it:
 - **End to end:** a small site in a temporary directory with real `.kame` files, checking the output
   tree and key markup. Built twice to confirm byte-identical output, and a failed build must leave
   the previous `output/` in place.
+- **Dates:** each accepted form, impossible dates, and leap years, with weekdays checked for RFC
+  822.
+- **RSS:** the newest 10 only, no drafts or pages, escaping, and absolute URLs. The output is parsed
+  back in the end-to-end test to confirm it is well-formed.
 - **Read-only:** each source document is byte-for-byte unchanged after a build.
 - **By eye:** build a site from real writing, including `CommandingHeights.kame`, and look at it in a
   browser, with marginalia at both wide and narrow widths.
 
-## 13. Acceptance criteria
+## 14. Acceptance criteria
 
 1. `kame-site build` turns a site directory with no `theme/` into a browsable site.
 2. A published document shows its marginalia, footnotes, images and nested numbering.
@@ -280,11 +322,7 @@ The crate separates working out the site from writing it:
 6. A draft is reachable at its URL, absent from the index and tags, and absent altogether with
    `--no-drafts`.
 7. Building twice gives identical output, and no source document changes.
-8. `cargo build` and `cargo test` at the root pass, and `kame-core` still has no GUI dependency.
-
-## 14. Open questions
-
-1. **Slugs for tags.** Proposed: lowercase, with spaces and punctuation becoming hyphens, and two
-   tags that reduce to one slug being an error.
-2. **Date format.** `published` is a free string today. Proposed: show it as written, and sort as
-   text, which works for `YYYY-MM-DD` as kame writes it.
+8. `/feed.xml` validates as RSS 2.0, holds the 10 newest published documents, and its links and
+   images work from outside the site.
+9. A date that won't parse fails the build, naming the document.
+10. `cargo build` and `cargo test` at the root pass, and `kame-core` still has no GUI dependency.

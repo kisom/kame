@@ -132,8 +132,7 @@ own static files on purpose, since that is how a site adjusts a theme.
 Each is read with `Db::open_read_only` and rendered with `html_body`.
 
 - **Title:** the metadata title, then the document's own, then the file name.
-- **Date:** `published`, or `created` if that is empty. See Dates below. Documents with neither sort
-  last and stay out of the feed.
+- **Date:** `published`, then `created`, then the file's ctime. See Dates below.
 - **Notes:** never publish, as in every export. Marginalia and footnotes do.
 - **Repeated title:** a first heading repeating the title is left out of the body, as the
   Markdown export already does, because the theme prints the title. This needs moving somewhere
@@ -154,6 +153,12 @@ dependency, building on the date arithmetic `iso_date` already has.
   otherwise quietly misplace it in the listings and the feed.
 - **In kame:** the Properties dialog says so when a date won't parse, but saves it anyway. It is
   your text, and only publishing depends on it.
+
+Every document therefore has a date, in the listings and the feed alike. Falling back to the file's
+ctime gets a warning in the build, because it is the one date that isn't part of the document: it
+moves with any change to the file, and a copy synced to another machine has its own. kame writes
+`created` into every document it saves, so this should only happen with older files, and setting a
+date in the document fixes it.
 
 Themes get the date as `YYYY-MM-DD`.
 
@@ -266,7 +271,7 @@ of this, with its paragraph there to replace and its list keeping to the latest 
 <h2>Latest</h2>
 <ul>
 {% for document in documents[:5] %}
-  <li><a href="{{ document.url }}">{{ document.title }}</a>{% if document.date %} ({{ document.date }}){% endif %}</li>
+  <li><a href="{{ document.url }}">{{ document.title }}</a> ({{ document.date }})</li>
 {% endfor %}
 </ul>
 <p><a href="/archive/">All posts</a></p>
@@ -274,8 +279,8 @@ of this, with its paragraph there to replace and its list keeping to the latest 
 ```
 
 `/archive/` lists every document in the same form. `/tags/` lists the tags with their counts, and each
-tag's page lists its documents. All of these are plain lists on one page, with no pagination, which
-suits a site of essays. A document with no date simply shows none.
+tag's page lists its documents. All of these are plain lists on one page, with no pagination and no
+summaries, which suits a site of essays.
 
 ### Fonts
 
@@ -320,8 +325,9 @@ Like `pelican-quickstart`, this sets up a site that builds and browses straight 
 - `README.md`, saying how to build and preview it, and a `.gitignore` for `output/`
 
 It asks no questions: the placeholders are in one short file you edit next. It refuses to run in a
-directory that already has anything in it, so it can't overwrite a site. Nothing updates a theme after
-this, because once written, the theme is yours.
+directory that already has anything in it, so it can't overwrite a site. Once written, the theme is
+yours. A later subcommand could regenerate it from the embedded copy, and the design leaves room for
+that without it being part of v1.
 
 ### `kame-site build`
 
@@ -339,7 +345,7 @@ this, because once written, the theme is yours.
 
 The same input gives byte-identical output, which keeps kame's export rule and makes the output
 diffable. There is no build timestamp, everything is sorted, and the output's file times aren't
-relied on.
+relied on. The one input outside the documents is a ctime fallback, which is why that warns.
 
 ## 12. Changes needed in `kame-core`
 
@@ -361,7 +367,7 @@ The crate separates working out the site from writing it:
   tree and key markup. Built twice to confirm byte-identical output, and a failed build must leave
   the previous `output/` in place.
 - **Dates:** each accepted form, impossible dates, and leap years, with weekdays checked for RFC
-  822.
+  822. The order of `published`, `created` and ctime, and the warning for ctime.
 - **RSS:** the newest 10 only, no drafts or pages, escaping, and absolute URLs. The output is parsed
   back in the end-to-end test to confirm it is well-formed.
 - **Read-only:** each source document is byte-for-byte unchanged after a build.

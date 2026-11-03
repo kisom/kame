@@ -30,6 +30,10 @@ Open work, most pressing first. Tick items off or delete them as they land.
   in the app. The study left out the room footnote marks take. Designed in
   `docs/superpowers/specs/2026-11-03-word-spacing-design.md`. Built and landed, so what's left
   is to adjust the numbers in `layout/breaks.rs` with use.
+  Kyle writes at type 20 on the Mac, where the same measure holds fewer words, so there's less to work with.
+  At width 640 the essays go from 43% to 20% and 43% to 18% over 1.5x, and 5.1% to 1.3% and 13% to 0.7% over 2x.
+  At width 800 they're the same as type 16 at 640. Measure with `cargo run --release -p kame-typeset --example
+  spacing -- ESSAY.kame 20 WIDTH`.
 
   Tuned on the two essays, which are the writing this is for, with the devlog only as a check. Best so
   far at type 16: look one line ahead, let spaces close to no less than 90%, and charge a high cost for

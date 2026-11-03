@@ -295,7 +295,7 @@ mod tests {
         let dir = temp_dir("rot");
         let a = make(&dir, "a", false, plain());
         std::fs::write(dir.join("unlisted.md"), "").unwrap();
-        let index = SiteIndex::new(&[a.clone()]);
+        let index = SiteIndex::new(std::slice::from_ref(&a));
         assert_eq!(index.link_url("gone.kame", &a), None);
         assert_eq!(index.link_url("unlisted", &a), None);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -313,7 +313,7 @@ mod tests {
             },
         }];
         let a = make(&dir, "a", false, doc);
-        let index = SiteIndex::new(&[a.clone()]);
+        let index = SiteIndex::new(std::slice::from_ref(&a));
         let mut problems = Problems::default();
         note_unpublished_links(&a, &index, &mut problems);
         assert_eq!(problems.warnings.len(), 1);

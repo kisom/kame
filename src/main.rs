@@ -1543,11 +1543,13 @@ fn main() -> eframe::Result {
             cc,
             session,
             notice,
-            body_size,
-            dark,
-            last_document,
-            default_author,
-            config_hyphenate,
+            KameConfig {
+                body_size,
+                dark,
+                last_document,
+                author: default_author,
+                hyphenate: config_hyphenate,
+            },
         )))
     });
 
@@ -1599,7 +1601,7 @@ fn hit_test(
         } else {
             0.0
         };
-        if nearest.map_or(true, |(_, best)| distance < best) {
+        if nearest.is_none_or(|(_, best)| distance < best) {
             nearest = Some((index, distance));
         }
     }
@@ -1981,12 +1983,15 @@ impl KameApp {
         cc: &eframe::CreationContext<'_>,
         session: Session,
         notice: Option<String>,
-        body_size: f32,
-        dark: bool,
-        last_document: Option<PathBuf>,
-        default_author: String,
-        hyphenate: bool,
+        preferences: KameConfig,
     ) -> KameApp {
+        let KameConfig {
+            body_size,
+            dark,
+            last_document,
+            author: default_author,
+            hyphenate,
+        } = preferences;
         cc.egui_ctx.set_visuals(if dark {
             egui::Visuals::dark()
         } else {
@@ -3242,7 +3247,7 @@ impl KameApp {
             self.palette.background.g(),
             self.palette.background.b(),
         ];
-        let highlights = highlight_map(&self.session.document(), &self.palette);
+        let highlights = highlight_map(self.session.document(), &self.palette);
         self.textures.sync(
             ui.ctx(),
             &mut self.renderer,
@@ -3838,7 +3843,7 @@ impl KameApp {
                 continue;
             };
             let Some(origin) = superscript_origin(
-                &layouts[index],
+                layouts[index],
                 &annotation.anchor,
                 body_left,
                 tops[index],

@@ -790,14 +790,14 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
     }
 }
 
-fn block<'a>(doc: &'a Document, block_id: BlockId) -> &'a Block {
+fn block(doc: &Document, block_id: BlockId) -> &Block {
     doc.blocks
         .iter()
         .find(|block| block.id == block_id)
         .unwrap_or_else(|| panic!("op references unknown block {block_id}"))
 }
 
-fn block_mut<'a>(doc: &'a mut Document, block_id: BlockId) -> &'a mut Block {
+fn block_mut(doc: &mut Document, block_id: BlockId) -> &mut Block {
     doc.blocks
         .iter_mut()
         .find(|block| block.id == block_id)
@@ -1974,7 +1974,7 @@ mod tests {
         let original = d.annotations[0].clone();
         let moved = Annotation {
             id: original.id,
-            kind: original.kind.clone(),
+            kind: original.kind,
             anchor: Anchor::range(
                 first,
                 d.blocks[0].text.len(),

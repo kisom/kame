@@ -314,7 +314,14 @@ dance, on a page, of pen, eye and hand.";
         assert!(layouts[0].lines.len() >= 3, "paragraph should wrap");
 
         let ann = marginal(blocks[0].id, offset_in(&layouts, 1));
-        let placed = place_marginalia(&[ann.clone()], &blocks, &layouts, &[], &[0.0], &config);
+        let placed = place_marginalia(
+            std::slice::from_ref(&ann),
+            &blocks,
+            &layouts,
+            &[],
+            &[0.0],
+            &config,
+        );
 
         assert_eq!(placed.len(), 1);
         assert_eq!(placed[0].annotation_id, ann.id);
@@ -502,7 +509,14 @@ dance, on a page, of pen, eye and hand.";
         let config = config();
         let n = note(blocks[0].id, offset_in(&layouts, 0));
 
-        let placed = place_marginalia(&[n.clone()], &blocks, &layouts, &[], &[0.0], &config);
+        let placed = place_marginalia(
+            std::slice::from_ref(&n),
+            &blocks,
+            &layouts,
+            &[],
+            &[0.0],
+            &config,
+        );
         assert_eq!(placed.len(), 1, "a Note also marks the margin");
         assert_eq!(placed[0].annotation_id, n.id);
         assert_eq!(placed[0].x, config.body_width + config.margin_size);

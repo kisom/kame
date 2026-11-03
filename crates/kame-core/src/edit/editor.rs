@@ -1233,7 +1233,7 @@ fn inline_emphasis(text: &str, caret: usize) -> Option<(SpanStyle, usize, usize,
     if text[..content_end]
         .chars()
         .next_back()
-        .map_or(true, |c| c.is_whitespace() || c == marker)
+        .is_none_or(|c| c.is_whitespace() || c == marker)
     {
         return None;
     }
@@ -1249,7 +1249,7 @@ fn inline_emphasis(text: &str, caret: usize) -> Option<(SpanStyle, usize, usize,
             continue;
         }
         let mut run_start = i;
-        while run_start > 0 && text[..run_start].chars().next_back() == Some(marker) {
+        while run_start > 0 && text[..run_start].ends_with(marker) {
             run_start -= marker.len_utf8();
         }
         if i - run_start == closer_len {
@@ -1257,11 +1257,11 @@ fn inline_emphasis(text: &str, caret: usize) -> Option<(SpanStyle, usize, usize,
                 || text[..run_start]
                     .chars()
                     .next_back()
-                    .map_or(false, |c| c.is_whitespace());
+                    .is_some_and(|c| c.is_whitespace());
             let right_ok = text[i..content_end]
                 .chars()
                 .next()
-                .map_or(false, |c| !c.is_whitespace() && c != marker);
+                .is_some_and(|c| !c.is_whitespace() && c != marker);
             if left_ok && right_ok {
                 let opener_start = run_start;
                 let content_start = opener_start + closer_len;

@@ -170,6 +170,8 @@ impl GlyphAtlas {
     /// Paint every glyph mask onto `canvas`, whose top-left corner sits at
     /// block-relative `(origin_x, origin_y)`. Glyphs whose byte range falls in
     /// a highlight are painted over that wash colour instead of the paper.
+    // What it takes to draw is simply this many things; a struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     fn blit(
         &mut self,
         fs: &mut FontSystem,

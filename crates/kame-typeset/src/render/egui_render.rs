@@ -127,6 +127,9 @@ fn pixel_aligned_quad(origin: Pos2, (left, top): (i32, i32), size: [usize; 2], s
     )
 }
 
+/// A byte range of a block and the colour behind it.
+pub type Highlight = (usize, usize, [u8; 3]);
+
 /// Per-block texture cache, rebuilt only when a block's content changes.
 ///
 /// The key is a hash of the block kind, text, and spans: any edit invalidates
@@ -166,6 +169,8 @@ impl TextureCache {
     /// The scale is part of what makes a texture current: a window's first frame
     /// runs before the compositor reports its scale, and a window can move
     /// between monitors.
+    // What it takes to draw is simply this many things; a struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     pub fn sync(
         &mut self,
         ctx: &Context,
@@ -174,7 +179,7 @@ impl TextureCache {
         layouts: &[&BlockLayout],
         ink: [u8; 3],
         background: [u8; 3],
-        highlights: &HashMap<BlockId, Vec<(usize, usize, [u8; 3])>>,
+        highlights: &HashMap<BlockId, Vec<Highlight>>,
     ) {
         let scale = ctx.pixels_per_point();
         let mut live = HashSet::with_capacity(blocks.len());
@@ -225,7 +230,7 @@ impl TextureCache {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 }
@@ -310,7 +315,7 @@ impl LayoutCache {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 }
@@ -353,6 +358,8 @@ impl AnnotationTextureCache {
     /// Shapes, rasterizes and uploads `text` for `annotation_id` when its
     /// content or metrics changed. Empty text is skipped: there is nothing to
     /// paint, and an empty raster has no ink rectangle to place.
+    // What it takes to draw is simply this many things; a struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     pub fn sync(
         &mut self,
         ctx: &Context,
@@ -435,7 +442,7 @@ impl AnnotationTextureCache {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 }
@@ -921,9 +928,7 @@ pub fn command_for_event(event: &Event) -> Option<Command> {
                 return None;
             }
             let physical = (*physical_key)?;
-            if block_kind_for_key(physical).is_none() {
-                return None;
-            }
+            block_kind_for_key(physical)?;
             command_for_key(physical, *modifiers)
         }),
         _ => None,

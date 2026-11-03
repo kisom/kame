@@ -2181,6 +2181,14 @@ pub fn iso_date(when: std::time::SystemTime) -> String {
 }
 
 #[cfg(test)]
+impl Session {
+    fn insert_then_saved(&mut self, text: &str) -> bool {
+        self.insert(text);
+        !self.save_failed
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5746,13 +5754,5 @@ mod tests {
         session.save_failed = true;
         assert!(!session.replace_document(new));
         assert_eq!(session.document().blocks[0].text, "before");
-    }
-}
-
-#[cfg(test)]
-impl Session {
-    fn insert_then_saved(&mut self, text: &str) -> bool {
-        self.insert(text);
-        !self.save_failed
     }
 }

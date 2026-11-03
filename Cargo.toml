@@ -9,6 +9,7 @@ members = ["crates/*"]
 default-members = [".", "crates/*"]
 
 [dependencies]
+kame-check = { path = "crates/kame-check" }
 kame-core = { path = "crates/kame-core" }
 kame-sync = { path = "crates/kame-sync" }
 kame-typeset = { path = "crates/kame-typeset" }

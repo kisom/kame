@@ -54,6 +54,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies; `revlog` is still a proof of concept. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
+`crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
+
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 
 The layering is one-way: core knows nothing of typeset or the app. Keep logic out of the app where it can go in a library. Keybindings are documented in `docs/keybindings.md`.

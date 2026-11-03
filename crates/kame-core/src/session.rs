@@ -854,6 +854,43 @@ impl Session {
         saved
     }
 
+    /// Replaces a range of a block's text as one undo step. Annotations move as they do for any
+    /// edit. Returns whether it happened.
+    pub fn replace_text(
+        &mut self,
+        block_id: BlockId,
+        start: usize,
+        end: usize,
+        text: &str,
+    ) -> bool {
+        let Some(index) = self.block_index(block_id) else {
+            return false;
+        };
+        let current = &self.document().blocks[index].text;
+        if start > end || !current.is_char_boundary(start) || !current.is_char_boundary(end) {
+            return false;
+        }
+        let at = |offset| Cursor { block_id, offset };
+        // Worked out on a copy, so that the whole of it is one step.
+        let mut draft = Editor::new(self.document().clone());
+        if start < end
+            && draft
+                .delete_selection(&Selection {
+                    start: at(start),
+                    end: at(end),
+                })
+                .is_err()
+        {
+            return false;
+        }
+        if !text.is_empty() && draft.insert_text(&at(start), text).is_err() {
+            return false;
+        }
+        let saved = self.replace_document(draft.document().clone());
+        self.set_caret(at(start + text.len()));
+        saved
+    }
+
     pub fn select_word_at(&mut self, at: Cursor) {
         let at = clamp_cursor(self.editor.document(), at);
         let Some(index) = self.block_index(at.block_id) else {
@@ -2185,6 +2222,67 @@ impl Session {
     fn insert_then_saved(&mut self, text: &str) -> bool {
         self.insert(text);
         !self.save_failed
+    }
+}
+
+#[cfg(test)]
+mod replace_text_tests {
+    use super::*;
+
+    fn session_with(text: &str) -> (Session, BlockId) {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(text);
+        let id = session.document().blocks[0].id;
+        (session, id)
+    }
+
+    #[test]
+    fn a_replacement_changes_the_text_and_is_one_undo() {
+        let (mut session, id) = session_with("An indispensible tool.");
+        let before = session.document().clone();
+        assert!(session.replace_text(id, 3, 16, "indispensable"));
+        assert_eq!(session.document().blocks[0].text, "An indispensable tool.");
+        assert_eq!(session.caret.offset, 16);
+        session.undo();
+        assert_eq!(session.document(), &before);
+    }
+
+    #[test]
+    fn a_removal_replaces_with_nothing() {
+        let (mut session, id) = session_with("The the end.");
+        assert!(session.replace_text(id, 0, 4, ""));
+        assert_eq!(session.document().blocks[0].text, "the end.");
+    }
+
+    #[test]
+    fn a_replacement_of_a_different_length_keeps_anchors_on_their_words() {
+        let (mut session, id) = session_with("Bad wrod here.");
+        session.set_caret(Cursor {
+            block_id: id,
+            offset: 9,
+        });
+        session.select_to(Cursor {
+            block_id: id,
+            offset: 13,
+        });
+        session.add_annotation(AnnotationKind::Note).unwrap();
+        assert!(session.replace_text(id, 4, 8, "longerword"));
+        let text = session.document().blocks[0].text.clone();
+        let (start, end) = session.document().annotations[0]
+            .anchor
+            .byte_range()
+            .unwrap();
+        assert_eq!(&text[start..end], "here");
+    }
+
+    #[test]
+    fn a_range_that_doesnt_fit_changes_nothing() {
+        let (mut session, id) = session_with("caf\u{e9}");
+        let before = session.document().clone();
+        assert!(!session.replace_text(id, 0, 99, "x"));
+        assert!(!session.replace_text(id, 4, 5, "x"), "inside a character");
+        assert!(!session.replace_text(uuid::Uuid::new_v4(), 0, 1, "x"));
+        assert_eq!(session.document(), &before);
     }
 }
 

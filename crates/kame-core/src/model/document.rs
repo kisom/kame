@@ -308,6 +308,77 @@ pub struct Metadata {
     pub created: String,
     pub published: String,
     pub tags: Vec<String>,
+    /// Words the spell checker should take as right in this document.
+    pub words: Vec<String>,
+    /// Marks the writer has said the checker is wrong about, in this document.
+    pub accepted: Vec<AcceptedMark>,
+}
+
+impl Metadata {
+    /// Takes in the checker's exceptions from another copy of this document, keeping both.
+    pub fn take_exceptions_from(&mut self, other: &Metadata) {
+        for word in &other.words {
+            if !self.words.contains(word) {
+                self.words.push(word.clone());
+            }
+        }
+        for mark in &other.accepted {
+            if !self.accepted.contains(mark) {
+                self.accepted.push(mark.clone());
+            }
+        }
+    }
+}
+
+/// The checker's rule and the text it marked, which it shouldn't mark again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcceptedMark {
+    pub rule: String,
+    pub text: String,
+}
+
+#[cfg(test)]
+mod exception_tests {
+    use super::*;
+
+    fn accepted(text: &str) -> AcceptedMark {
+        AcceptedMark {
+            rule: "Rule".to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn exceptions_from_another_copy_are_added_once() {
+        let mut ours = Metadata {
+            words: vec!["kame".to_string(), "both".to_string()],
+            accepted: vec![accepted("ours"), accepted("shared")],
+            title: "Ours".to_string(),
+            ..Metadata::default()
+        };
+        let theirs = Metadata {
+            words: vec!["both".to_string(), "theirs".to_string()],
+            accepted: vec![accepted("shared"), accepted("theirs")],
+            title: "Theirs".to_string(),
+            ..Metadata::default()
+        };
+        ours.take_exceptions_from(&theirs);
+        assert_eq!(ours.words, vec!["kame", "both", "theirs"]);
+        assert_eq!(
+            ours.accepted,
+            vec![accepted("ours"), accepted("shared"), accepted("theirs")]
+        );
+        assert_eq!(ours.title, "Ours", "only the exceptions");
+    }
+
+    #[test]
+    fn a_file_from_before_these_fields_still_opens() {
+        let old = r#"{"title":"T","author":"A","created":"","published":"","tags":[]}"#;
+        let metadata: Metadata = serde_json::from_str(old).unwrap();
+        assert!(metadata.words.is_empty());
+        assert!(metadata.accepted.is_empty());
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -57,6 +57,7 @@ pub fn metadata(title: &str, published: &str, tags: &[&str]) -> Metadata {
         created: String::new(),
         published: published.to_string(),
         tags: tags.iter().map(|tag| tag.to_string()).collect(),
+        ..Metadata::default()
     }
 }
 

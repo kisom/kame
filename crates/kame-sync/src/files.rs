@@ -208,6 +208,14 @@ pub fn merge_copy_into(session: &mut Session, copy: &Path) -> Result<MergedIn> {
             return Err("could not save the merge".into());
         }
     }
+    // Words and accepted marks live beside the text, and neither copy's should be lost.
+    if let Some(theirs) = Db::open_read_only(copy)?.load_metadata()? {
+        let mut metadata = session.metadata.clone();
+        metadata.take_exceptions_from(&theirs);
+        if metadata != session.metadata {
+            session.set_metadata(metadata);
+        }
+    }
     let mut retired = copy.as_os_str().to_owned();
     retired.push(".merged");
     std::fs::rename(copy, retired)?;
@@ -244,6 +252,11 @@ pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
         if !session.replace_document(merged.doc) {
             return Err("could not save the merge".into());
         }
+    }
+    let mut metadata = session.metadata.clone();
+    metadata.take_exceptions_from(&old.metadata);
+    if metadata != session.metadata {
+        session.set_metadata(metadata);
     }
     Ok((
         session,

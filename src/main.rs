@@ -15,10 +15,13 @@ use kame_core::session::{is_markdown_path, Session};
 use kame_core::{edit, model, storage};
 use kame_typeset::{layout, render};
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use egui::{Align2, Color32, FontId, Id, Order, Pos2, Rect, Sense, TextureHandle, Vec2};
+
+use kame_check::{Background, Exceptions, Finding, FindingKind};
 
 use crate::edit::Cursor;
 use crate::layout::reading_order;
@@ -28,8 +31,8 @@ use crate::layout::{
     FOOTNOTE_MARK_EM,
 };
 use crate::model::{
-    bare_link_ranges, is_script_url, list_labels, list_positions, Anchor, Annotation, AnnotationId,
-    AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
+    bare_link_ranges, is_script_url, list_labels, list_positions, AcceptedMark, Anchor, Annotation,
+    AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
     adjacent_line, caret_line, caret_x, command_for_event, install_fonts, offset_at, range_rects,
@@ -48,6 +51,9 @@ struct Palette {
     apparatus_ink: [u8; 3],
     caret_ink: Color32,
     selection_fill: Color32,
+    /// The wavy lines under a likely misspelling, and under anything else the checker marks.
+    spelling_mark: Color32,
+    grammar_mark: Color32,
     note_highlight: Color32,
     footnote_highlight: Color32,
     footnote_mark: Color32,
@@ -65,6 +71,8 @@ impl Palette {
     const LIGHT: Palette = Palette {
         background: Color32::from_rgb(247, 243, 235),
         body_ink: [32, 29, 25],
+        spelling_mark: Color32::from_rgb(190, 66, 56),
+        grammar_mark: Color32::from_rgb(64, 110, 180),
         apparatus_ink: [86, 79, 69],
         caret_ink: Color32::from_rgb(176, 58, 46),
         selection_fill: Color32::from_rgba_unmultiplied_const(58, 78, 112, 62),
@@ -84,6 +92,8 @@ impl Palette {
     const DARK: Palette = Palette {
         background: Color32::from_rgb(30, 28, 25),
         body_ink: [222, 216, 205],
+        spelling_mark: Color32::from_rgb(226, 112, 98),
+        grammar_mark: Color32::from_rgb(120, 162, 224),
         apparatus_ink: [168, 160, 148],
         caret_ink: Color32::from_rgb(226, 92, 70),
         selection_fill: Color32::from_rgba_unmultiplied_const(92, 112, 150, 66),
@@ -397,6 +407,11 @@ const STATUS_MESSAGE_SHARE: f32 = 0.65;
 const CARET_ROOM: f32 = 48.0;
 /// How much of a code line to keep in view past the caret when scrolling it sideways.
 const CODE_CARET_ROOM: f32 = 24.0;
+/// The shape of a mark's wavy underline.
+const WAVE_STEP: f32 = 2.0;
+const WAVE_HEIGHT: f32 = 1.0;
+/// How far up from the bottom of its line a mark sits, as a share of the line's height.
+const MARK_LIFT: f32 = 0.16;
 /// How far outside a code block's column to draw the edge that says it carries on.
 const CODE_EDGE_GAP: f32 = 4.0;
 /// The least time between writes of the caret and scroll to the document.
@@ -934,6 +949,72 @@ fn code_overflow_edges(scroll: f32, column: f32, content: f32) -> (bool, bool) {
     (scroll > 0.5, content - column - scroll > 0.5)
 }
 
+/// What the checker has said about the document, and what it's been asked.
+#[derive(Default)]
+struct Marks {
+    worker: Option<Background>,
+    /// Each block as it was checked, and what was found in it.
+    checked: HashMap<BlockId, (Block, Vec<Finding>)>,
+    asked: HashMap<BlockId, Block>,
+    /// What's waiting to be asked about, and since when, to wait until typing stops.
+    waiting: Option<(u64, std::time::Instant)>,
+}
+
+/// How long after typing stops to check what changed.
+const CHECK_AFTER_SECONDS: f32 = 0.5;
+
+/// The findings to draw for `block`. None while the block has changed since it was checked, whose
+/// offsets would be wrong, and none for a word that the caret is at the end of, which may
+/// not be finished.
+fn visible_marks(
+    marks: &Marks,
+    exceptions: &Exceptions,
+    block: &Block,
+    caret: Option<usize>,
+) -> Vec<Finding> {
+    let Some((checked, findings)) = marks.checked.get(&block.id) else {
+        return Vec::new();
+    };
+    if checked.text != block.text {
+        return Vec::new();
+    }
+    findings
+        .iter()
+        .filter(|finding| exceptions.allows(finding, &block.text))
+        .filter(|finding| caret != Some(finding.end))
+        .cloned()
+        .collect()
+}
+
+/// The finding that `offset` falls in.
+fn mark_at(findings: &[Finding], offset: usize) -> Option<&Finding> {
+    findings
+        .iter()
+        .find(|finding| finding.start <= offset && offset <= finding.end)
+}
+
+/// The next mark after a caret, going round to the first, as (place in the list).
+fn next_mark(marks: &[(usize, usize)], caret: (usize, usize)) -> Option<usize> {
+    marks
+        .iter()
+        .position(|mark| *mark > caret)
+        .or((!marks.is_empty()).then_some(0))
+}
+
+/// The points of a wavy underline from `left` to `right`.
+fn wavy_line(left: f32, right: f32, y: f32) -> Vec<Pos2> {
+    let mut points = vec![Pos2::new(left, y)];
+    let mut x = left;
+    let mut up = true;
+    while x < right {
+        x = (x + WAVE_STEP).min(right);
+        let height = if up { -WAVE_HEIGHT } else { WAVE_HEIGHT };
+        points.push(Pos2::new(x, y + height));
+        up = !up;
+    }
+    points
+}
+
 /// How far a page key moves: a window's height, less two lines so the eye keeps its place.
 fn page_step(viewport_height: f32, line_height: f32) -> f32 {
     (viewport_height - 2.0 * line_height).max(line_height)
@@ -1224,6 +1305,15 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
 }
 
 /// Something chosen from the menu bar, applied once the panel closes.
+/// What a mark's right-click menu can do.
+enum MarkAction {
+    Replace(String),
+    Accept,
+    AddToDocument,
+    AddToMine,
+    TurnOffRule,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
     MergeConflictCopies,
@@ -1242,6 +1332,7 @@ enum MenuAction {
     TypeSize(f32),
     ToggleDark,
     ToggleHyphenate,
+    ToggleCheck,
     Mode(ModeCommand),
     Help,
 }
@@ -1384,6 +1475,15 @@ struct KameConfig {
     /// Whether justified paragraphs can hyphenate words.
     #[serde(default = "default_hyphenate")]
     hyphenate: bool,
+    /// Whether to mark likely mistakes on the page.
+    #[serde(default)]
+    check_spelling: bool,
+    /// Words that are right in any document.
+    #[serde(default)]
+    words: Vec<String>,
+    /// The checker's rules to leave out.
+    #[serde(default)]
+    rules_off: Vec<String>,
 }
 
 fn default_body_size() -> f32 {
@@ -1402,6 +1502,9 @@ impl Default for KameConfig {
             last_document: None,
             author: String::new(),
             hyphenate: true,
+            check_spelling: false,
+            words: Vec::new(),
+            rules_off: Vec::new(),
         }
     }
 }
@@ -1472,6 +1575,9 @@ fn main() -> eframe::Result {
     let body_size = config.body_size;
     let dark = config.dark;
     let config_hyphenate = config.hyphenate;
+    let config_check = config.check_spelling;
+    let config_words = config.words.clone();
+    let config_rules_off = config.rules_off.clone();
     // Two windows on one file would overwrite each other's edits, so only the first
     // running kame goes back to the last document.
     let first = config_dir().is_none_or(|dir| {
@@ -1513,6 +1619,9 @@ fn main() -> eframe::Result {
                                 last_document: None,
                                 author: config_author.clone(),
                                 hyphenate: config_hyphenate,
+                                check_spelling: config_check,
+                                words: config_words.clone(),
+                                rules_off: config_rules_off.clone(),
                             });
                         }
                         opened
@@ -1549,6 +1658,9 @@ fn main() -> eframe::Result {
                 last_document,
                 author: default_author,
                 hyphenate: config_hyphenate,
+                check_spelling: config_check,
+                words: config_words,
+                rules_off: config_rules_off,
             },
         )))
     });
@@ -1872,6 +1984,13 @@ fn superscript_origin(
 
 struct KameApp {
     session: Session,
+    /// Whether to mark likely mistakes, and what's been said not to mark.
+    check_spelling: bool,
+    my_words: Vec<String>,
+    rules_off: Vec<String>,
+    marks: Marks,
+    /// The mark the page's right-click menu is about, while it's open.
+    mark_menu: Option<(BlockId, Finding)>,
     /// Whether justified paragraphs can hyphenate words.
     hyphenate: bool,
     renderer: GlyphRenderer,
@@ -1991,6 +2110,9 @@ impl KameApp {
             last_document,
             author: default_author,
             hyphenate,
+            check_spelling,
+            words,
+            rules_off,
         } = preferences;
         cc.egui_ctx.set_visuals(if dark {
             egui::Visuals::dark()
@@ -2005,6 +2127,11 @@ impl KameApp {
             session,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
             hyphenate,
+            check_spelling,
+            my_words: words,
+            rules_off,
+            marks: Marks::default(),
+            mark_menu: None,
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
             annotation_textures: AnnotationTextureCache::new(),
@@ -2263,6 +2390,9 @@ impl KameApp {
             last_document: self.last_document.path.clone(),
             author: self.default_author.clone(),
             hyphenate: self.hyphenate,
+            check_spelling: self.check_spelling,
+            words: self.my_words.clone(),
+            rules_off: self.rules_off.clone(),
         });
     }
 
@@ -2654,6 +2784,9 @@ impl KameApp {
         // F1 toggles the help dialog (the usage and keybinding reference).
         if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
             self.show_help = !self.show_help;
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::F7)) && self.check_spelling {
+            self.go_to_next_mark();
         }
         // Ctrl + / Ctrl - / Ctrl 0 step the body font size (every other size is
         // a ratio of it). `+` is Shift+= on most layouts, so both are accepted.
@@ -3095,6 +3228,9 @@ impl KameApp {
                     if menu_item(ui, "Hyphenate", None, self.hyphenate) {
                         action = Some(MenuAction::ToggleHyphenate);
                     }
+                    if menu_item(ui, "Check spelling", None, self.check_spelling) {
+                        action = Some(MenuAction::ToggleCheck);
+                    }
                     ui.separator();
                     for (label, mode, shortcut) in [
                         ("Fullscreen", ModeCommand::Fullscreen, "F11"),
@@ -3202,6 +3338,10 @@ impl KameApp {
             }
             MenuAction::TypeSize(step) => self.adjust_font_size(step),
             MenuAction::ToggleDark => self.apply_dark_toggle(ctx),
+            MenuAction::ToggleCheck => {
+                self.check_spelling = !self.check_spelling;
+                self.persist();
+            }
             MenuAction::ToggleHyphenate => {
                 // The next frame's config differs, which drops everything shaped.
                 self.hyphenate = !self.hyphenate;
@@ -3212,7 +3352,138 @@ impl KameApp {
         }
     }
 
+    /// Brings in what the checker has found, and asks about whatever has changed once typing stops.
+    fn update_marks(&mut self, ctx: &egui::Context) {
+        if !self.check_spelling {
+            return;
+        }
+        let worker = self.marks.worker.get_or_insert_with(|| {
+            let ctx = ctx.clone();
+            Background::new(move || ctx.request_repaint())
+        });
+        for (block, findings) in worker.answers() {
+            if self.marks.asked.get(&block.id) == Some(&block) {
+                self.marks.asked.remove(&block.id);
+            }
+            self.marks.checked.insert(block.id, (block, findings));
+        }
+        let blocks = &self.session.document().blocks;
+        self.marks
+            .checked
+            .retain(|id, _| blocks.iter().any(|block| block.id == *id));
+        let stale: Vec<&Block> = blocks
+            .iter()
+            .filter(|block| {
+                self.marks.checked.get(&block.id).map(|(seen, _)| seen) != Some(*block)
+                    && self.marks.asked.get(&block.id) != Some(*block)
+            })
+            .collect();
+        if stale.is_empty() {
+            self.marks.waiting = None;
+            return;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for block in &stale {
+            block.text.hash(&mut hasher);
+            block.spans.len().hash(&mut hasher);
+        }
+        let key = hasher.finish();
+        let since = match self.marks.waiting {
+            Some((waiting, since)) if waiting == key => since,
+            _ => std::time::Instant::now(),
+        };
+        self.marks.waiting = Some((key, since));
+        let waited = since.elapsed().as_secs_f32();
+        if waited < CHECK_AFTER_SECONDS {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(
+                CHECK_AFTER_SECONDS - waited,
+            ));
+            return;
+        }
+        for block in stale {
+            worker.ask(block.clone());
+            self.marks.asked.insert(block.id, block.clone());
+        }
+        self.marks.waiting = None;
+    }
+
+    /// Selects the next mark after the caret, going round to the first.
+    fn go_to_next_mark(&mut self) {
+        let metadata = self.session.metadata.clone();
+        let exceptions = Exceptions {
+            words: &self.my_words,
+            document_words: &metadata.words,
+            accepted: &metadata.accepted,
+            rules_off: &self.rules_off,
+        };
+        let blocks = &self.session.document().blocks;
+        let mut places = Vec::new();
+        let mut targets = Vec::new();
+        for (index, block) in blocks.iter().enumerate() {
+            for finding in visible_marks(&self.marks, &exceptions, block, None) {
+                places.push((index, finding.start));
+                targets.push((block.id, finding.start, finding.end));
+            }
+        }
+        let caret = self.session.valid_caret();
+        let here = self.session.block_index(caret.block_id).unwrap_or(0);
+        let Some(next) = next_mark(&places, (here, caret.offset)) else {
+            self.notice = Some("nothing marked".to_string());
+            return;
+        };
+        let (block_id, start, end) = targets[next];
+        self.session.set_caret(Cursor {
+            block_id,
+            offset: start,
+        });
+        self.session.select_to(Cursor {
+            block_id,
+            offset: end,
+        });
+        self.reveal_caret = true;
+    }
+
+    /// Does what the mark's menu was asked for.
+    fn apply_mark_action(&mut self, action: MarkAction, block_id: BlockId, finding: &Finding) {
+        let shown = self
+            .session
+            .block_index(block_id)
+            .and_then(|index| {
+                let text = &self.session.document().blocks[index].text;
+                text.get(finding.start..finding.end).map(str::to_string)
+            })
+            .unwrap_or_default();
+        match action {
+            MarkAction::Replace(with) => {
+                self.session
+                    .replace_text(block_id, finding.start, finding.end, &with);
+            }
+            MarkAction::Accept => {
+                let mut metadata = self.session.metadata.clone();
+                metadata.accepted.push(AcceptedMark {
+                    rule: finding.rule.clone(),
+                    text: shown,
+                });
+                self.session.set_metadata(metadata);
+            }
+            MarkAction::AddToDocument => {
+                let mut metadata = self.session.metadata.clone();
+                metadata.words.push(shown);
+                self.session.set_metadata(metadata);
+            }
+            MarkAction::AddToMine => {
+                self.my_words.push(shown);
+                self.persist();
+            }
+            MarkAction::TurnOffRule => {
+                self.rules_off.push(finding.rule.clone());
+                self.persist();
+            }
+        }
+    }
+
     fn draw_surface(&mut self, ui: &mut egui::Ui) {
+        self.update_marks(ui.ctx());
         let dialog_open = self.dialog_open();
         let config = self.renderer.config();
         let focus = self.modes.paragraph_focus;
@@ -3589,6 +3860,36 @@ impl KameApp {
             }
         }
 
+        // --- likely mistakes ---------------------------------------------------
+        if self.check_spelling {
+            let exceptions = Exceptions {
+                words: &self.my_words,
+                document_words: &self.session.metadata.words,
+                accepted: &self.session.metadata.accepted,
+                rules_off: &self.rules_off,
+            };
+            for (index, block) in blocks.iter().enumerate() {
+                let at_caret = (block.id == caret.block_id).then_some(caret.offset);
+                for finding in visible_marks(&self.marks, &exceptions, block, at_caret) {
+                    let color = match finding.kind {
+                        FindingKind::Spelling => self.palette.spelling_mark,
+                        FindingKind::Grammar => self.palette.grammar_mark,
+                    };
+                    for rect in range_rects(layouts[index], finding.start, finding.end) {
+                        let rect = rect.translate(Vec2::new(
+                            body_left + layouts[index].left_indent - sideways[index],
+                            tops[index],
+                        ));
+                        let y = rect.bottom() - rect.height() * MARK_LIFT;
+                        block_painter(index).add(egui::Shape::line(
+                            wavy_line(rect.left(), rect.right(), y),
+                            egui::Stroke::new(1.0, color),
+                        ));
+                    }
+                }
+            }
+        }
+
         // --- selection -------------------------------------------------------
         if let Some((start, end)) = self.session.ordered_selection() {
             let start_index = blocks.iter().position(|block| block.id == start.block_id);
@@ -3893,6 +4194,29 @@ impl KameApp {
                 }
             }
         }
+        // --- a mark's menu -----------------------------------------------------
+        if response.secondary_clicked() {
+            self.mark_menu = None;
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some(cursor) =
+                    hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
+                {
+                    let exceptions = Exceptions {
+                        words: &self.my_words,
+                        document_words: &self.session.metadata.words,
+                        accepted: &self.session.metadata.accepted,
+                        rules_off: &self.rules_off,
+                    };
+                    if let Some(block) = blocks.iter().find(|block| block.id == cursor.block_id) {
+                        let shown = visible_marks(&self.marks, &exceptions, block, None);
+                        if let Some(finding) = mark_at(&shown, cursor.offset) {
+                            self.mark_menu = Some((block.id, finding.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
         // --- the wheel ---------------------------------------------------------
         // Scrolling brings the caret along, so that it's on the page you're looking at. Typing
         // then happens there, and a selection stays what was selected. The typewriter keeps
@@ -4034,8 +4358,36 @@ impl KameApp {
         // Block formatting and annotation actions live here, on the page's
         // right-click, rather than as rows of buttons in the status bar.
         let mut link_document = false;
+        let mut mark_action = None;
+        let mark_menu = self.mark_menu.clone();
         response.context_menu(|ui| {
             ui.set_min_width(180.0);
+            if let Some((_, finding)) = &mark_menu {
+                ui.label(egui::RichText::new(&finding.message).weak());
+                for suggestion in &finding.suggestions {
+                    let label = if suggestion.is_empty() {
+                        "Remove it"
+                    } else {
+                        suggestion
+                    };
+                    if ui.button(label).clicked() {
+                        mark_action = Some(MarkAction::Replace(suggestion.clone()));
+                        ui.close();
+                    }
+                }
+                for (label, action) in [
+                    ("Accept this", MarkAction::Accept),
+                    ("Add to this document's words", MarkAction::AddToDocument),
+                    ("Add to my words", MarkAction::AddToMine),
+                    ("Turn off this rule", MarkAction::TurnOffRule),
+                ] {
+                    if ui.button(label).clicked() {
+                        mark_action = Some(action);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+            }
             // The caret's block, since that is the one these rows change.
             let caret = self.session.valid_caret();
             let current = self
@@ -4104,6 +4456,9 @@ impl KameApp {
         });
         if link_document {
             self.link_document_with_dialog();
+        }
+        if let (Some(action), Some((block_id, finding))) = (mark_action, mark_menu) {
+            self.apply_mark_action(action, block_id, &finding);
         }
 
         self.show_note_popover(ui.ctx());
@@ -4589,6 +4944,8 @@ impl KameApp {
                     created: prompt.created.trim().to_string(),
                     published: prompt.published.trim().to_string(),
                     tags: parse_tags(&prompt.tags),
+                    // The dialog doesn't show the word list or accepted marks, and keeps them.
+                    ..self.session.metadata.clone()
                 });
                 if let Some(warning) = kame_core::session::date_warning(&self.session.metadata) {
                     self.notice = Some(warning);
@@ -5746,6 +6103,9 @@ mod tests {
             last_document: Some(PathBuf::from("/notes/essay.kame")),
             author: "K. Isom".to_string(),
             hyphenate: false,
+            check_spelling: true,
+            words: vec!["kame".to_string()],
+            rules_off: vec!["Rule".to_string()],
         };
         let json = serde_json::to_string(&config).unwrap();
         let read = serde_json::from_str::<KameConfig>(&json).unwrap();
@@ -5754,6 +6114,9 @@ mod tests {
         assert_eq!(read.last_document, config.last_document);
         assert_eq!(read.author, "K. Isom");
         assert!(!read.hyphenate);
+        assert!(read.check_spelling);
+        assert_eq!(read.words, vec!["kame"]);
+        assert_eq!(read.rules_off, vec!["Rule"]);
 
         // A config written by an older build (no body_size, no dark) still
         // parses and defaults to light, body-size 16, hyphenating.
@@ -5761,6 +6124,8 @@ mod tests {
         assert_eq!(old.body_size, DEFAULT_BODY_SIZE);
         assert!(!old.dark);
         assert!(old.hyphenate);
+        assert!(!old.check_spelling);
+        assert!(old.words.is_empty());
         assert!(KameConfig::default().hyphenate);
     }
 
@@ -7311,6 +7676,90 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(code_overflow_edges(0.0, 400.0, 1000.0), (false, true));
         assert_eq!(code_overflow_edges(200.0, 400.0, 1000.0), (true, true));
         assert_eq!(code_overflow_edges(600.0, 400.0, 1000.0), (true, false));
+    }
+
+    fn finding_at(start: usize, end: usize) -> Finding {
+        Finding {
+            start,
+            end,
+            kind: kame_check::FindingKind::Spelling,
+            rule: "Rule".to_string(),
+            message: String::new(),
+            suggestions: Vec::new(),
+        }
+    }
+
+    fn checked_block(text: &str) -> (Marks, Block) {
+        let block = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: text.to_string(),
+            spans: Vec::new(),
+        };
+        let mut marks = Marks::default();
+        marks
+            .checked
+            .insert(block.id, (block.clone(), vec![finding_at(3, 7)]));
+        (marks, block)
+    }
+
+    #[test]
+    fn a_checked_block_shows_its_marks() {
+        let (marks, block) = checked_block("An wrod here.");
+        let shown = visible_marks(&marks, &Exceptions::default(), &block, None);
+        assert_eq!(shown.len(), 1);
+    }
+
+    #[test]
+    fn a_block_changed_since_it_was_checked_shows_none() {
+        let (marks, mut block) = checked_block("An wrod here.");
+        block.text.insert(0, 'X');
+        assert!(visible_marks(&marks, &Exceptions::default(), &block, None).is_empty());
+    }
+
+    #[test]
+    fn a_word_the_caret_is_at_the_end_of_isnt_marked_yet() {
+        let (marks, block) = checked_block("An wrod here.");
+        let exceptions = Exceptions::default();
+        assert!(visible_marks(&marks, &exceptions, &block, Some(7)).is_empty());
+        assert_eq!(visible_marks(&marks, &exceptions, &block, Some(5)).len(), 1);
+    }
+
+    #[test]
+    fn a_listed_word_isnt_marked() {
+        let (marks, block) = checked_block("An wrod here.");
+        let words = vec!["wrod".to_string()];
+        let exceptions = Exceptions {
+            words: &words,
+            ..Exceptions::default()
+        };
+        assert!(visible_marks(&marks, &exceptions, &block, None).is_empty());
+    }
+
+    #[test]
+    fn a_right_click_finds_the_mark_under_it() {
+        let findings = [finding_at(3, 7), finding_at(10, 12)];
+        assert_eq!(mark_at(&findings, 5).unwrap().start, 3);
+        assert_eq!(mark_at(&findings, 12).unwrap().start, 10);
+        assert!(mark_at(&findings, 8).is_none());
+    }
+
+    #[test]
+    fn the_next_mark_goes_round() {
+        let marks = [(0, 5), (0, 20), (3, 1)];
+        assert_eq!(next_mark(&marks, (0, 0)), Some(0));
+        assert_eq!(next_mark(&marks, (0, 5)), Some(1));
+        assert_eq!(next_mark(&marks, (1, 0)), Some(2));
+        assert_eq!(next_mark(&marks, (3, 1)), Some(0), "back to the first");
+        assert_eq!(next_mark(&[], (0, 0)), None);
+    }
+
+    #[test]
+    fn a_wavy_line_runs_its_whole_length() {
+        let points = wavy_line(10.0, 21.0, 100.0);
+        assert_eq!(points.first().unwrap().x, 10.0);
+        assert_eq!(points.last().unwrap().x, 21.0);
+        assert!(points.iter().any(|p| p.y < 100.0) && points.iter().any(|p| p.y > 100.0));
     }
 
     #[test]

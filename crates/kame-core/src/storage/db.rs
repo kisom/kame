@@ -1257,6 +1257,7 @@ mod tests {
             created: "2026-11-02".to_string(),
             published: String::new(),
             tags: vec!["lisp".to_string(), "hacks".to_string()],
+            ..crate::model::Metadata::default()
         };
         db.save_metadata(&metadata).unwrap();
         assert_eq!(db.load_metadata().unwrap(), Some(metadata.clone()));

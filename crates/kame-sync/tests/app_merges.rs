@@ -207,3 +207,40 @@ fn a_file_gone_altogether_cannot_be_merged_with() {
         "and opening it must not have made a new one"
     );
 }
+
+fn word_list_on(path: &Path, word: &str) {
+    let mut session = Session::open(path).unwrap();
+    let mut metadata = session.metadata.clone();
+    metadata.words.push(word.to_string());
+    session.set_metadata(metadata);
+}
+
+#[test]
+fn merging_a_copy_keeps_the_word_lists_of_both() {
+    let (path, copy) = with_copy();
+    word_list_on(&path, "ours");
+    word_list_on(&copy, "theirs");
+    let mut session = Session::open(&path).unwrap();
+    merge_copy_into(&mut session, &copy).unwrap();
+    assert_eq!(session.metadata.words, vec!["ours", "theirs"]);
+    drop(session);
+    // It reached the file, and didn't need a change to the text to get there.
+    assert_eq!(
+        Session::open(&path).unwrap().metadata.words,
+        vec!["ours", "theirs"]
+    );
+}
+
+#[test]
+fn merging_with_a_replaced_file_keeps_the_word_lists_of_both() {
+    let (path, copy) = with_copy();
+    let mut old = Session::open(&path).unwrap();
+    let mut metadata = old.metadata.clone();
+    metadata.words.push("ours".to_string());
+    old.set_metadata(metadata);
+    word_list_on(&copy, "theirs");
+    std::fs::rename(&copy, &path).unwrap();
+    old.check_file();
+    let (session, _) = merge_replaced(&old).unwrap();
+    assert_eq!(session.metadata.words, vec!["theirs", "ours"]);
+}

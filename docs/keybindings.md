@@ -109,6 +109,10 @@ typewriter. Hovering one names it.
 
 Held keys do not auto-repeat a toggle: one press is one flip.
 
+View > Check spelling marks likely mistakes as you write, in red for spelling and blue for anything else, without
+changing a word. Right-click a mark to take a suggestion, accept it for this document, add the word to this document's
+list or your own, or turn off the rule. F7 selects the next mark. Code, links, quotes and prose blocks aren't checked.
+
 View > Hyphenate turns off the hyphens kame draws to even out justified paragraphs. They are only
 drawn, so they never reach your text, copies or exports.
 

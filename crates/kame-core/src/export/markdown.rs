@@ -1094,6 +1094,7 @@ mod tests {
             created: "2019-01-01".to_string(),
             published: "2019-01-02".to_string(),
             tags: vec!["life".to_string(), "work".to_string()],
+            ..crate::model::Metadata::default()
         }
     }
 

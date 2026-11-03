@@ -1,0 +1,12 @@
+[package]
+name = "kame-check"
+version = "0.1.0"
+edition = "2021"
+description = "Spelling and some grammar for kame documents, offline. See docs/superpowers/specs/2026-11-03-spelling-grammar-design.md."
+
+[dependencies]
+kame-core = { path = "../kame-core" }
+harper-core = "3.0.0"
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }

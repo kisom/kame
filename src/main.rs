@@ -480,14 +480,50 @@ fn missing_images(document: &Document) -> usize {
         .count()
 }
 
+/// A native file dialog starting in `directory`, if there is one.
+fn file_dialog(title: &str, directory: Option<&Path>) -> rfd::FileDialog {
+    let dialog = rfd::FileDialog::new().set_title(title);
+    match directory {
+        Some(directory) => dialog.set_directory(directory),
+        None => dialog,
+    }
+}
+
 /// The native file browser for a Markdown file to import, or `None` when the
 /// author cancels it. Blocks the frame like [`pick_save_path`], which is correct
 /// for a modal dialog.
-fn pick_markdown_path() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Import Markdown")
+fn pick_markdown_path(directory: Option<&Path>) -> Option<PathBuf> {
+    file_dialog("Import Markdown", directory)
         .add_filter("Markdown", &["md", "markdown"])
         .pick_file()
+}
+
+/// The native file browser for a document to open, or `None` when the author
+/// cancels it.
+fn pick_open_path(directory: Option<&Path>) -> Option<PathBuf> {
+    file_dialog("Open", directory)
+        .add_filter("kame or Markdown", &["kame", "md", "markdown"])
+        .add_filter("kame document", &["kame"])
+        .add_filter("Markdown", &["md", "markdown"])
+        .pick_file()
+}
+
+/// The native "save as" browser for an export, starting at `suggestion`, or `None`
+/// when the author cancels it.
+fn pick_export_path(
+    title: &str,
+    kind: &str,
+    extension: &str,
+    suggestion: &Path,
+) -> Option<PathBuf> {
+    let directory = suggestion
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty());
+    let mut dialog = file_dialog(title, directory).add_filter(kind, &[extension]);
+    if let Some(name) = suggestion.file_name().and_then(|name| name.to_str()) {
+        dialog = dialog.set_file_name(name);
+    }
+    dialog.save_file()
 }
 
 /// The native "save as" file browser, or `None` when the author cancels it.
@@ -497,9 +533,8 @@ fn pick_markdown_path() -> Option<PathBuf> {
 /// is a full file browser: directories, navigation and a file-name field, the
 /// same dialog a GTK application shows. The synchronous API blocks the frame
 /// thread while the (modal) dialog is up, which is correct for a save prompt.
-fn pick_save_path(suggested_name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title("Save kame document")
+fn pick_save_path(suggested_name: &str, directory: Option<&Path>) -> Option<PathBuf> {
+    file_dialog("Save kame document", directory)
         .add_filter("kame document", &["kame"])
         .set_file_name(suggested_name)
         .save_file()
@@ -923,7 +958,9 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
     Open,
+    OpenPath,
     Save,
+    SaveAs,
     ImportMarkdown,
     Properties,
     File(FileCommand),
@@ -1262,8 +1299,8 @@ struct Session {
     /// Set when a write failed. Further mutations are refused until a write
     /// succeeds, so the in-memory undo cursor cannot drift from the DB cursor.
     save_failed: bool,
-    /// The name of the file this document was imported from.
-    source_stem: Option<String>,
+    /// The file this document was imported from.
+    source_path: Option<PathBuf>,
     /// What the document says about itself. Saved directly, not an undo step.
     metadata: Metadata,
     /// The file this session is persisted to, or `None` for an anonymous
@@ -1366,7 +1403,7 @@ impl Session {
             selection: None,
             last_error,
             save_failed,
-            source_stem: None,
+            source_path: None,
             metadata,
             path: Some(path.to_path_buf()),
         })
@@ -1399,7 +1436,7 @@ impl Session {
             selection: None,
             last_error: Some(error),
             save_failed: false,
-            source_stem: None,
+            source_path: None,
             metadata: Metadata {
                 created: today(),
                 ..Metadata::default()
@@ -1430,7 +1467,7 @@ impl Session {
             selection: None,
             last_error: None,
             save_failed: false,
-            source_stem: None,
+            source_path: None,
             metadata: Metadata {
                 created: today(),
                 ..Metadata::default()
@@ -1505,7 +1542,7 @@ impl Session {
             selection: None,
             last_error: None,
             save_failed: false,
-            source_stem: Some(title.to_string()),
+            source_path: Some(path.clone()),
             metadata,
             path: None,
         };
@@ -1553,10 +1590,34 @@ impl Session {
         }
     }
 
+    /// Where an export dialog starts: beside the document, or an unsaved import's
+    /// source, under the same name.
+    fn export_suggestion(&self, extension: &str) -> PathBuf {
+        export_path(&self.export_base(), extension)
+    }
+
+    /// The directory a file dialog starts in: the document's, or an unsaved
+    /// import's source's. A new document leaves it to the system.
+    fn dialog_directory(&self) -> Option<PathBuf> {
+        self.path
+            .as_deref()
+            .or(self.source_path.as_deref())
+            .and_then(Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    }
+
     /// What the first save suggests calling the file: the source's name for an
     /// import, whatever title its front matter gave the document.
     fn suggested_file_name(&self) -> String {
-        format!("{}.kame", self.source_stem.as_deref().unwrap_or("Untitled"))
+        let stem = self
+            .path
+            .as_deref()
+            .or(self.source_path.as_deref())
+            .and_then(Path::file_stem)
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Untitled");
+        format!("{stem}.kame")
     }
 
     fn document(&self) -> &Document {
@@ -1595,7 +1656,8 @@ impl Session {
     fn export_base(&self) -> PathBuf {
         self.path
             .clone()
-            .unwrap_or_else(|| PathBuf::from("document.kame"))
+            .or_else(|| self.source_path.clone())
+            .unwrap_or_else(|| PathBuf::from("Untitled.kame"))
     }
 
     /// Writes the document as Markdown beside the `.kame` file and returns the
@@ -1604,35 +1666,64 @@ impl Session {
     /// A failed export is reported through `last_error` but never sets
     /// `save_failed`: the document itself is still stored, so the author can
     /// keep writing and take the export again.
+    #[cfg(test)]
     fn export_markdown(&mut self) -> Option<PathBuf> {
-        let path = export_path(&self.export_base(), "md");
+        let path = self.export_suggestion("md");
+        self.export_markdown_to(&path)
+    }
+
+    /// Writes the document as Markdown to `path` and returns the path written.
+    fn export_markdown_to(&mut self, path: &Path) -> Option<PathBuf> {
         let markdown =
             crate::export::to_markdown_with(self.editor.document(), &self.published_metadata());
-        self.write_export(&path, &markdown)
+        self.write_export(path, &markdown)
     }
 
-    /// Writes the document as a standalone HTML page beside the `.kame` file
-    /// and returns the path written.
+    #[cfg(test)]
     fn export_html(&mut self) -> Option<PathBuf> {
-        let path = export_path(&self.export_base(), "html");
-        let html = crate::export::to_html_with(self.editor.document(), &self.published_metadata());
-        self.write_export(&path, &html)
+        let path = self.export_suggestion("html");
+        self.export_html_to(&path)
     }
 
-    /// Persists an anonymous document to `path` for the first time, carrying
-    /// the full edit history with it, and switches the session to that file so
-    /// subsequent edits land on disk.
+    /// Writes the document as a standalone HTML page to `path` and returns the
+    /// path written.
+    fn export_html_to(&mut self, path: &Path) -> Option<PathBuf> {
+        let html = crate::export::to_html_with(self.editor.document(), &self.published_metadata());
+        self.write_export(path, &html)
+    }
+
+    /// Saves the document to `path`, carrying its history, snapshots and metadata,
+    /// and switches the session to that file so later edits land there.
+    ///
+    /// Anything already at `path` is replaced whole: the file dialog has confirmed
+    /// that. The copy is written beside it and renamed into place, so a failure
+    /// leaves both the old file and this session as they were.
     fn save_as(&mut self, path: &Path) -> AppResult<()> {
-        let doc = self.editor.document().clone();
-        let cursor = self.editor.cursor();
-        let ops = self.db.load_ops()?;
-        let mut db = Db::open(path)?;
-        for (_, op) in ops {
-            db.append_op(&op)?;
+        if self.path.as_deref() == Some(path) {
+            self.clear_save_error();
+            return Ok(());
         }
-        db.save_state(&doc, cursor)?;
-        db.save_metadata(&self.metadata)?;
-        self.db = db;
+        let doc = self.editor.document().clone();
+        self.db.save_state(&doc, self.editor.cursor())?;
+        self.db.save_metadata(&self.metadata)?;
+
+        let name = path
+            .file_name()
+            .ok_or("the path does not name a file")?
+            .to_string_lossy();
+        let partial = path.with_file_name(format!(".{name}.saving-{}", uuid::Uuid::new_v4()));
+        self.db.save_copy(&partial)?;
+        for suffix in ["-wal", "-shm"] {
+            let mut stale = path.as_os_str().to_owned();
+            stale.push(suffix);
+            let _ = std::fs::remove_file(stale);
+        }
+        if let Err(err) = std::fs::rename(&partial, path) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(err.into());
+        }
+
+        self.db = Db::open(path)?;
         self.path = Some(path.to_path_buf());
         self.clear_save_error();
         Ok(())
@@ -3081,15 +3172,25 @@ impl KameApp {
     fn run_file_command(&mut self, command: FileCommand) {
         match command {
             FileCommand::ExportMarkdown => {
+                let suggestion = self.session.export_suggestion("md");
+                let Some(path) = pick_export_path("Export Markdown", "Markdown", "md", &suggestion)
+                else {
+                    return;
+                };
                 self.notice = self
                     .session
-                    .export_markdown()
+                    .export_markdown_to(&path)
                     .map(|path| format!("exported Markdown to {}", path.display()));
             }
             FileCommand::ExportHtml => {
+                let suggestion = self.session.export_suggestion("html");
+                let Some(path) = pick_export_path("Export HTML", "HTML", "html", &suggestion)
+                else {
+                    return;
+                };
                 self.notice = self
                     .session
-                    .export_html()
+                    .export_html_to(&path)
                     .map(|path| format!("exported HTML to {}", path.display()));
             }
             FileCommand::SnapshotNow => {
@@ -3356,7 +3457,7 @@ impl KameApp {
             })
         });
         if open_chord {
-            self.begin_open();
+            self.open_with_dialog();
         }
         // Ctrl-K opens the link prompt on the current selection (or the link
         // under the caret), so a link can be added or edited from the keyboard.
@@ -3722,11 +3823,6 @@ impl KameApp {
         let not_saved = self.session.is_anonymous() && self.session.has_content();
         let error = self.session.last_error.clone();
         let notice = self.notice.clone();
-        // Where the two exports would land, named on hover so the author knows
-        // the file name before clicking.
-        let export_base = self.session.export_base();
-        let markdown_path = export_path(&export_base, "md").display().to_string();
-        let html_path = export_path(&export_base, "html").display().to_string();
         // Applied after the panel closes: some of these block on a native dialog
         // or replace the session the panel is reading.
         let mut action: Option<MenuAction> = None;
@@ -3739,23 +3835,23 @@ impl KameApp {
                     if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
                         action = Some(MenuAction::Open);
                     }
+                    if menu_item(ui, "Open Path…", None, false) {
+                        action = Some(MenuAction::OpenPath);
+                    }
                     if menu_item(ui, "Save", Some("Ctrl-S"), false) {
                         action = Some(MenuAction::Save);
+                    }
+                    if menu_item(ui, "Save As…", None, false) {
+                        action = Some(MenuAction::SaveAs);
                     }
                     ui.separator();
                     if menu_item(ui, "Import Markdown…", None, false) {
                         action = Some(MenuAction::ImportMarkdown);
                     }
-                    if menu_entry(ui, "Export Markdown", Some("Ctrl-Shift-E"), false)
-                        .on_hover_text(format!("write {markdown_path}"))
-                        .clicked()
-                    {
+                    if menu_item(ui, "Export Markdown…", Some("Ctrl-Shift-E"), false) {
                         action = Some(MenuAction::File(FileCommand::ExportMarkdown));
                     }
-                    if menu_entry(ui, "Export HTML", Some("Ctrl-Shift-B"), false)
-                        .on_hover_text(format!("write {html_path}"))
-                        .clicked()
-                    {
+                    if menu_item(ui, "Export HTML…", Some("Ctrl-Shift-B"), false) {
                         action = Some(MenuAction::File(FileCommand::ExportHtml));
                     }
                     ui.separator();
@@ -3885,8 +3981,10 @@ impl KameApp {
     /// Carries out a menu choice through the same path its shortcut uses.
     fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
         match action {
-            MenuAction::Open => self.begin_open(),
+            MenuAction::Open => self.open_with_dialog(),
+            MenuAction::OpenPath => self.begin_open(),
             MenuAction::Save => self.save_action(ctx, false),
+            MenuAction::SaveAs => self.save_with_dialog(ctx, false),
             MenuAction::ImportMarkdown => self.import_markdown(),
             MenuAction::Properties => self.begin_properties(),
             MenuAction::File(command) => self.run_file_command(command),
@@ -5039,12 +5137,28 @@ impl KameApp {
         });
     }
 
-    /// File > Import Markdown: asks for a file, then opens it the way the
-    /// Open prompt does, holding at the same confirmation if work would be lost.
+    /// File > Import Markdown: asks for a Markdown file and opens it.
     fn import_markdown(&mut self) {
-        let Some(path) = pick_markdown_path() else {
-            return;
-        };
+        let directory = self.session.dialog_directory();
+        if let Some(path) = pick_markdown_path(directory.as_deref()) {
+            self.open_picked(path);
+        }
+    }
+
+    /// File > Open: asks for a document in the system's file browser and opens it.
+    fn open_with_dialog(&mut self) {
+        self.snapshot_prompt = None;
+        self.restore_picker = None;
+        self.open_prompt = None;
+        let directory = self.session.dialog_directory();
+        if let Some(path) = pick_open_path(directory.as_deref()) {
+            self.open_picked(path);
+        }
+    }
+
+    /// Opens a file chosen in a dialog, holding at the Open prompt's confirmation
+    /// if work would be lost.
+    fn open_picked(&mut self, path: PathBuf) {
         let path = path.display().to_string();
         if self.session.would_lose_work() {
             self.open_prompt = Some(OpenPrompt {
@@ -5123,7 +5237,15 @@ impl KameApp {
             self.notice = Some("saved".to_string());
             return;
         }
-        let Some(path) = pick_save_path(&self.session.suggested_file_name()) else {
+        self.save_with_dialog(ctx, close_after);
+    }
+
+    /// Asks where to save the document, then saves it there. Cancelling changes
+    /// nothing, and leaves the close prompt up if it was what asked.
+    fn save_with_dialog(&mut self, ctx: &egui::Context, close_after: bool) {
+        let directory = self.session.dialog_directory();
+        let name = self.session.suggested_file_name();
+        let Some(path) = pick_save_path(&name, directory.as_deref()) else {
             // The author cancelled the save; the close prompt stays open so
             // they can still discard or cancel explicitly.
             return;
@@ -6395,6 +6517,135 @@ mod tests {
         )];
         assert_eq!(footnote_mark_at(&marks, Pos2::new(8.0, 8.0)), Some(500.0));
         assert_eq!(footnote_mark_at(&marks, Pos2::new(30.0, 15.0)), None);
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_export_suggests_a_name_beside_the_document() {
+        let dir = scratch_dir("suggest");
+        let session = open(&dir.join("essay.kame"));
+        assert_eq!(session.export_suggestion("md"), dir.join("essay.md"));
+        assert_eq!(session.export_suggestion("html"), dir.join("essay.html"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unsaved_import_exports_beside_its_source() {
+        let dir = scratch_dir("suggest");
+        let source = dir.join("notes.md");
+        std::fs::write(&source, "Words.\n").unwrap();
+        let (session, _) = Session::open_any(&source).unwrap();
+        assert_eq!(session.export_suggestion("html"), dir.join("notes.html"));
+        assert_eq!(session.dialog_directory(), Some(dir.clone()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_document_suggests_a_bare_name_and_no_directory() {
+        let session = Session::anonymous().unwrap();
+        assert_eq!(
+            session.export_suggestion("md"),
+            PathBuf::from("Untitled.md")
+        );
+        assert_eq!(session.dialog_directory(), None);
+    }
+
+    #[test]
+    fn an_export_writes_where_it_is_told() {
+        let dir = scratch_dir("export");
+        let mut session = open(&dir.join("essay.kame"));
+        session.insert("Words");
+        let target = dir.join("elsewhere.md");
+        assert_eq!(session.export_markdown_to(&target), Some(target.clone()));
+        assert!(std::fs::read_to_string(&target).unwrap().contains("Words"));
+        assert!(!dir.join("essay.md").exists());
+        let html = dir.join("page.html");
+        assert_eq!(session.export_html_to(&html), Some(html.clone()));
+        assert!(std::fs::read_to_string(&html).unwrap().contains("Words"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The native dialog has already confirmed the overwrite, so nothing of the old
+    /// file may survive into the new one.
+    #[test]
+    fn saving_over_a_file_replaces_it_entirely() {
+        let dir = scratch_dir("over");
+        let target = dir.join("target.kame");
+        let mut old = open(&target);
+        old.insert("Old words");
+        old.snapshot(None).expect("a snapshot");
+        drop(old);
+
+        let mut session = Session::anonymous().unwrap();
+        session.insert("New");
+        session.save_as(&target).unwrap();
+        assert_eq!(session.history(), (1, 0));
+        drop(session);
+
+        let reopened = open(&target);
+        assert_eq!(reopened.document().blocks[0].text, "New");
+        assert_eq!(reopened.history(), (1, 0), "the old history is gone");
+        assert!(reopened.db.list_snapshots().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_as_from_a_file_keeps_history_and_snapshots_and_the_original() {
+        let dir = scratch_dir("copy");
+        let first = dir.join("first.kame");
+        let second = dir.join("second.kame");
+        let mut session = open(&first);
+        session.insert("Words");
+        session.snapshot(None).expect("a snapshot");
+        session.save_as(&second).unwrap();
+        assert_eq!(session.path(), Some(second.as_path()));
+        session.insert(" more");
+        drop(session);
+
+        let copy = open(&second);
+        assert_eq!(copy.document().blocks[0].text, "Words more");
+        assert_eq!(copy.history(), (2, 0));
+        assert_eq!(copy.db.list_snapshots().unwrap().len(), 1);
+        drop(copy);
+        let original = open(&first);
+        assert_eq!(
+            original.document().blocks[0].text,
+            "Words",
+            "edits went to the copy"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saving_onto_the_same_file_loses_nothing() {
+        let dir = scratch_dir("same");
+        let path = dir.join("doc.kame");
+        let mut session = open(&path);
+        session.insert("Words");
+        session.save_as(&path).unwrap();
+        session.insert(" more");
+        drop(session);
+        let reopened = open(&path);
+        assert_eq!(reopened.document().blocks[0].text, "Words more");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_session_and_the_target_as_they_were() {
+        let dir = scratch_dir("fail");
+        let target = dir.join("no-such-directory").join("doc.kame");
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        assert!(session.save_as(&target).is_err());
+        assert!(session.is_anonymous());
+        session.insert(" more");
+        assert_eq!(session.document().blocks[0].text, "Words more");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

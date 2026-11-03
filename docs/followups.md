@@ -30,8 +30,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Markdown import
 
-- [ ] **An unsaved document exports to `document.md` in the working directory.** An
-  import could use its source's name and directory instead.
 - [ ] **A linked image loses its link.** `[![](a.png)](b.png)` imports as just the
   image, because image blocks have no link.
 - [ ] **Site-root images show as missing.** `/files/images/...` cannot be found

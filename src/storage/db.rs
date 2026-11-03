@@ -204,6 +204,16 @@ impl Db {
         Ok(Db { conn })
     }
 
+    /// Writes a complete copy of the database to `path`, which must not exist:
+    /// the head, the op log, snapshots and metadata alike.
+    pub fn save_copy(&self, path: &Path) -> Result<(), DbError> {
+        let target = path
+            .to_str()
+            .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+        self.conn.execute("VACUUM INTO ?1", [target])?;
+        Ok(())
+    }
+
     /// Reads the document's metadata, or `None` if it has none stored yet.
     pub fn load_metadata(&self) -> Result<Option<crate::model::Metadata>, DbError> {
         let json = self
@@ -262,6 +272,7 @@ impl Db {
     /// Sequence numbers are strictly increasing; they are what
     /// [`Db::truncate_ops_after`] cuts at. A failed insert leaves the log
     /// unchanged (single-statement transaction).
+    #[cfg(test)]
     pub fn append_op(&mut self, op: &Op) -> Result<i64, DbError> {
         let json = serde_json::to_string(op)?;
         self.conn

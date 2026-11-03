@@ -80,11 +80,17 @@ dropped; the status line reports what was simplified and any images it could
 not find. Replacing a document that has no file, or whose last save failed,
 asks first.
 
-The exports write beside the document you opened: `<stem>.md` and `<stem>.html`
-in the same directory as the `.kame` file (in the working directory when the
-path has no directory part). They read the document as it stands, so nothing
-has to be saved first, and a failed write says so in the status panel without
-making the document read-only.
+Each export asks where to write in the system's save dialog, suggesting
+`<stem>.md` or `<stem>.html` beside the document, or beside an unsaved import's
+source. Cancelling writes nothing. Exports read the document as it stands, so
+nothing has to be saved first, and a failed write says so in the status panel
+without making the document read-only.
+
+Open and Save As use the system's file browser. File > Open Path takes a typed path
+instead, with `~` expanded and relative paths resolved beside the current document.
+Save As carries the history, snapshots and properties to the new file and continues
+there, leaving the old file as it was. Saving over an existing file replaces it
+whole.
 
 A snapshot is a complete copy of the document stored in the `.kame` file,
 outside the undo history. Restoring one is the only command here that changes
@@ -97,10 +103,10 @@ the text, and it is deliberately **not** an undo step:
 
 | Key | Action | Effect |
 | --- | --- | --- |
-| Ctrl-O | open | prompt for a path, replacing the current document |
+| Ctrl-O | open | the system's file browser, replacing the current document |
 | Ctrl-S | save | a document already on disk is saved continuously, so this is a no-op; an anonymous document opens the system save-as browser |
-| Ctrl-Shift-E | export Markdown | writes `<stem>.md` beside the `.kame` file |
-| Ctrl-Shift-B | export HTML | writes `<stem>.html`, a standalone page |
+| Ctrl-Shift-E | export Markdown | asks where, suggesting `<stem>.md` |
+| Ctrl-Shift-B | export HTML | asks where, suggesting `<stem>.html`, a standalone page |
 | Ctrl-Shift-S | snapshot now | prompts for an optional label, then stores the document |
 | Ctrl-Shift-R | restore snapshot | lists the snapshots (newest first); choose one, then confirm |
 

@@ -151,6 +151,21 @@ pub struct Position {
     pub scroll: f32,
 }
 
+/// `path` as a URI's path, with whatever a URI would read differently escaped.
+fn uri_path(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::new();
+    for byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Metadata for one stored snapshot: enough to list snapshots without loading
 /// their (potentially large) document JSON.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,8 +192,31 @@ impl Db {
     /// Opens an existing file for reading only, for publishing what is written without
     /// any chance of changing it: no migration runs and nothing can be saved. An older
     /// file that needs migrating fails on whichever read needs what it lacks.
+    ///
+    /// Reading a WAL database ordinarily creates `-wal` and `-shm` files beside it and leaves
+    /// them there, which matters in a synced folder. With no `-wal` there, nothing is
+    /// waiting to be read from one, so the file is opened as immutable, which creates
+    /// neither. With a `-wal` there, a writer may have newer text in it, so it is read as usual.
     pub fn open_read_only(path: &Path) -> Result<Db, DbError> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push("-wal");
+        let conn = if Path::new(&wal).exists() {
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?
+        } else {
+            if !path.is_file() {
+                // An immutable open reports a missing file only when it first reads.
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                    Some(format!("no file at {}", path.display())),
+                )
+                .into());
+            }
+            let uri = format!("file:{}?immutable=1", uri_path(path));
+            Connection::open_with_flags(
+                uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )?
+        };
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Db { conn })
     }
@@ -1217,5 +1255,49 @@ mod tests {
         let path = std::env::temp_dir().join(format!("kame-gone-{}.kame", uuid::Uuid::new_v4()));
         assert!(Db::open_read_only(&path).is_err());
         assert!(!path.exists());
+    }
+
+    fn sidecars(path: &Path) -> Vec<String> {
+        ["-wal", "-shm"]
+            .into_iter()
+            .map(|suffix| format!("{}{suffix}", path.display()))
+            .filter(|sidecar| Path::new(sidecar).exists())
+            .collect()
+    }
+
+    /// Reading must leave nothing behind: documents live in synced folders, and files
+    /// appearing beside them would spread.
+    #[test]
+    fn a_read_only_open_leaves_nothing_beside_the_file() {
+        let path = saved_file("sidecars");
+        assert!(sidecars(&path).is_empty(), "the fixture closed cleanly");
+        let db = Db::open_read_only(&path).unwrap();
+        db.load_document().unwrap();
+        let _ = db.load_metadata();
+        drop(db);
+        assert!(sidecars(&path).is_empty(), "{:?}", sidecars(&path));
+    }
+
+    #[test]
+    fn a_read_only_open_sees_what_a_writer_hasnt_checkpointed() {
+        let path = saved_file("writer");
+        let mut writer = Db::open(&path).unwrap();
+        writer.save_document(&Document::new("Newer")).unwrap();
+        let reader = Db::open_read_only(&path).unwrap();
+        assert_eq!(reader.load_document().unwrap().title, "Newer");
+    }
+
+    #[test]
+    fn a_read_only_open_copes_with_an_awkward_file_name() {
+        let dir = std::env::temp_dir().join(format!("kame-awkward-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("été 100% ok?#1.kame");
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&Document::new("Awkward")).unwrap();
+        drop(db);
+        let reader = Db::open_read_only(&path).unwrap();
+        assert_eq!(reader.load_document().unwrap().title, "Awkward");
+        drop(reader);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

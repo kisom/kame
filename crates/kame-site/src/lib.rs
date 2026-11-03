@@ -1,6 +1,7 @@
 //! Builds a static site from `.kame` documents and Markdown pages.
 
 pub mod config;
+pub mod feed;
 pub mod pages;
 pub mod refs;
 pub mod source;

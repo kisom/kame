@@ -57,7 +57,7 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Code blocks
 
-- [ ] **Scroll long code lines sideways instead of wrapping.** Wrapping misleads in code. Feasible, and
+- [x] **Scroll long code lines sideways instead of wrapping.** Wrapping misleads in code. Feasible, and
   planned after word spacing: stop wrapping code blocks, keep a sideways offset for each, add it wherever
   the block's text, caret and selection are drawn and clicks are mapped, clip at the column, and let
   the caret pull a long line into view. Each block is one image, so a very long pasted line could

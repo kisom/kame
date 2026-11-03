@@ -395,6 +395,8 @@ const DOCUMENT_LINK_INK: Color32 = Color32::from_rgb(59, 130, 246);
 const STATUS_MESSAGE_SHARE: f32 = 0.65;
 /// How much of the page to keep in view past the caret when following it.
 const CARET_ROOM: f32 = 48.0;
+/// How much of a code line to keep in view past the caret when scrolling it sideways.
+const CODE_CARET_ROOM: f32 = 24.0;
 /// The least time between writes of the caret and scroll to the document.
 const POSITION_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// A horizontal rule's width, as a share of the measure.
@@ -905,6 +907,23 @@ fn caret_aim_after_scroll(
     } else {
         None
     }
+}
+
+/// The sideways scroll that keeps `x` in a code block's column, moving no further than needed.
+fn code_scroll_to_show(scroll: f32, x: f32, column: f32) -> f32 {
+    let room = CODE_CARET_ROOM.min(column * 0.25);
+    if x < scroll + room {
+        (x - room).max(0.0)
+    } else if x > scroll + column - room {
+        x + room - column
+    } else {
+        scroll
+    }
+}
+
+/// A code block's sideways scroll, kept to what it can actually scroll.
+fn clamp_code_scroll(scroll: f32, column: f32, content: f32) -> f32 {
+    scroll.clamp(0.0, (content - column).max(0.0))
 }
 
 /// How far a page key moves: a window's height, less two lines so the eye keeps its place.
@@ -1552,6 +1571,7 @@ fn hit_test(
     layouts: &[&BlockLayout],
     tops: &[f32],
     heights: &[f32],
+    sideways: &[f32],
     body_left: f32,
     pos: Pos2,
 ) -> Option<Cursor> {
@@ -1577,7 +1597,8 @@ fn hit_test(
     }
     let (index, _) = nearest?;
     let block = &blocks[index];
-    let x = (pos.x - body_left - layouts[index].left_indent).max(0.0);
+    let scrolled = sideways.get(index).copied().unwrap_or(0.0);
+    let x = (pos.x - body_left - layouts[index].left_indent + scrolled).max(0.0);
     let y = (pos.y - tops[index]).clamp(0.0, heights[index]);
     let offset = offset_at(layouts[index], x, y, block.text.len());
     Some(Cursor {
@@ -1881,6 +1902,10 @@ struct KameApp {
     pending_scroll: Option<f32>,
     /// A key moved the caret or changed the text, so the page should keep it in view.
     follow_caret: bool,
+    /// How far each code block is scrolled sideways.
+    code_scroll: HashMap<BlockId, f32>,
+    /// Where the caret was last frame, to tell when it has moved.
+    code_caret_seen: Option<Cursor>,
     /// A page key waiting for the page's geometry, as (down, select).
     page_key: Option<(bool, bool)>,
     /// The heading a followed document link named, until its document opens.
@@ -1982,6 +2007,8 @@ impl KameApp {
             typewriter_anchor: None,
             pending_scroll: None,
             follow_caret: false,
+            code_scroll: HashMap::new(),
+            code_caret_seen: None,
             page_key: None,
             pending_heading: None,
             escape_prefix: EscapePrefix::default(),
@@ -3323,6 +3350,44 @@ impl KameApp {
             y += height + gap_below(index);
         }
 
+        // --- code blocks scroll sideways ---------------------------------------
+        // The wheel scrolls the block under the pointer, and a caret that has moved brings its
+        // block along. Shift and the wheel, or a trackpad, is what makes horizontal scrolling.
+        let wheel_x = ui.input(|input| input.smooth_scroll_delta().x);
+        let hovered = ui.input(|input| input.pointer.hover_pos());
+        let moved_caret = self.code_caret_seen != Some(caret);
+        self.code_caret_seen = Some(caret);
+        let mut sideways = vec![0.0_f32; blocks.len()];
+        for (index, block) in blocks.iter().enumerate() {
+            if !matches!(block.kind, BlockKind::Code { .. }) {
+                continue;
+            }
+            let column = (config.body_width - layouts[index].left_indent).max(1.0);
+            let mut scroll = self.code_scroll.get(&block.id).copied().unwrap_or(0.0);
+            let under_pointer = hovered
+                .is_some_and(|at| (tops[index]..=tops[index] + heights[index]).contains(&at.y));
+            if wheel_x != 0.0 && under_pointer {
+                scroll -= wheel_x;
+            }
+            if moved_caret && block.id == caret.block_id {
+                let x = caret_x(layouts[index], caret.offset);
+                scroll = code_scroll_to_show(scroll, x, column);
+            }
+            scroll = clamp_code_scroll(scroll, column, layouts[index].content_width());
+            sideways[index] = scroll;
+            self.code_scroll.insert(block.id, scroll);
+        }
+        let block_painter = |index: usize| {
+            if matches!(blocks[index].kind, BlockKind::Code { .. }) {
+                let left = body_left + layouts[index].left_indent;
+                let edge = |x: f32| Pos2::new(x, ui.clip_rect().top());
+                let far = Pos2::new(body_left + config.body_width + 1.0, ui.clip_rect().bottom());
+                painter.with_clip_rect(Rect::from_min_max(edge(left - 1.0), far))
+            } else {
+                painter.clone()
+            }
+        };
+
         // --- annotation text -------------------------------------------------
         // Margin bodies sit in the gutter right of the measure. Footnotes were
         // shaped before the page was sized (they span the measure, so they
@@ -3375,9 +3440,9 @@ impl KameApp {
                 AnnotationKind::Footnote => self.palette.footnote_highlight,
             };
             for rect in range_rects(layouts[index], start, end) {
-                painter.rect_filled(
+                block_painter(index).rect_filled(
                     rect.translate(Vec2::new(
-                        body_left + layouts[index].left_indent,
+                        body_left + layouts[index].left_indent - sideways[index],
                         tops[index],
                     )),
                     1.0,
@@ -3395,11 +3460,11 @@ impl KameApp {
                 }
                 for rect in range_rects(layouts[index], span.start, span.end) {
                     let rect = rect.translate(Vec2::new(
-                        body_left + layouts[index].left_indent,
+                        body_left + layouts[index].left_indent - sideways[index],
                         tops[index],
                     ));
                     let y = rect.bottom() - rect.height() * DOCUMENT_LINK_UNDERLINE;
-                    painter.line_segment(
+                    block_painter(index).line_segment(
                         [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
                         egui::Stroke::new(1.0, DOCUMENT_LINK_INK),
                     );
@@ -3471,11 +3536,24 @@ impl KameApp {
                 );
             }
             if let Some(texture) = self.textures.get(block.id) {
-                let origin = Pos2::new(body_left + indent, tops[index]);
+                let origin = Pos2::new(body_left + indent - sideways[index], tops[index]);
                 let rect = texture.rect(origin);
-                painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
+                let clipped = block_painter(index);
+                clipped.image(texture.texture.id(), rect, uv, Color32::WHITE);
                 if let Some(veil) = dim_veil(self.palette.dim_veil, focus, index, caret_index) {
-                    painter.rect_filled(rect, 0.0, veil);
+                    clipped.rect_filled(rect, 0.0, veil);
+                }
+                // A thin mark under a block that scrolls says how much there is, and where.
+                let column = (config.body_width - indent).max(1.0);
+                let content = layouts[index].content_width();
+                if matches!(block.kind, BlockKind::Code { .. }) && content > column {
+                    let y = tops[index] + heights[index] + 2.0;
+                    let left = body_left + indent + column * sideways[index] / content;
+                    let length = column * column / content;
+                    painter.line_segment(
+                        [Pos2::new(left, y), Pos2::new(left + length, y)],
+                        egui::Stroke::new(1.5, self.palette.rule_ink),
+                    );
                 }
             }
         }
@@ -3500,9 +3578,9 @@ impl KameApp {
                         continue;
                     }
                     for rect in range_rects(layouts[index], lo, hi) {
-                        painter.rect_filled(
+                        block_painter(index).rect_filled(
                             rect.translate(Vec2::new(
-                                body_left + layouts[index].left_indent,
+                                body_left + layouts[index].left_indent - sideways[index],
                                 tops[index],
                             )),
                             0.0,
@@ -3522,10 +3600,13 @@ impl KameApp {
             let x = caret_x(layouts[index], caret.offset);
             let top = tops[index] + line_y;
             let rect = Rect::from_min_size(
-                Pos2::new(body_left + layouts[index].left_indent + x, top),
+                Pos2::new(
+                    body_left + layouts[index].left_indent + x - sideways[index],
+                    top,
+                ),
                 Vec2::new(1.5, line_height),
             );
-            painter.rect_filled(rect, 0.0, self.palette.caret_ink);
+            block_painter(index).rect_filled(rect, 0.0, self.palette.caret_ink);
             caret_rect = Some(rect);
         }
 
@@ -3770,7 +3851,9 @@ impl KameApp {
                 .is_some_and(|at| is_second_press(self.last_click, std::time::Instant::now(), at));
             self.word_drag_start = None;
             if let Some(pos) = origin {
-                if let Some(cursor) = hit_test(blocks, &layouts, &tops, &heights, body_left, pos) {
+                if let Some(cursor) =
+                    hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
+                {
                     if second_press && !shift {
                         self.word_drag_start = Some(cursor);
                     } else {
@@ -3797,7 +3880,7 @@ impl KameApp {
                 if let Some(y) = aim {
                     let aim = Pos2::new(rect.left(), y);
                     if let Some(cursor) =
-                        hit_test(blocks, &layouts, &tops, &heights, body_left, aim)
+                        hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, aim)
                     {
                         caret_action = Some((cursor, false));
                     }
@@ -3812,7 +3895,7 @@ impl KameApp {
             let distance = page_step(ui.clip_rect().height(), config.body_line_height);
             let step = if down { distance } else { -distance };
             let aim = Pos2::new(rect.left(), rect.center().y + step);
-            let found = hit_test(blocks, &layouts, &tops, &heights, body_left, aim);
+            let found = hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, aim);
             let target = found.filter(|cursor| *cursor != caret).or_else(|| {
                 let edge = if down { blocks.last() } else { blocks.first() }?;
                 Some(Cursor {
@@ -3842,7 +3925,9 @@ impl KameApp {
         }
         if response.dragged() {
             if let Some(pos) = pointer {
-                if let Some(cursor) = hit_test(blocks, &layouts, &tops, &heights, body_left, pos) {
+                if let Some(cursor) =
+                    hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
+                {
                     if self.word_drag_start.is_some() {
                         word_drag_to = Some(cursor);
                     } else {
@@ -3869,7 +3954,7 @@ impl KameApp {
                 {
                     marker_click = Some(hit);
                 } else if let Some(cursor) =
-                    hit_test(blocks, &layouts, &tops, &heights, body_left, pos)
+                    hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
                 {
                     // A double click selects a word, even in a link: its first click has
                     // already opened the link. A click on a link opens it instead of moving
@@ -6366,6 +6451,7 @@ mod tests {
             &layout_refs,
             &tops,
             &heights,
+            &[],
             body_left,
             Pos2::new(body_left, 1.0),
         )
@@ -6381,6 +6467,7 @@ mod tests {
             &layout_refs,
             &tops,
             &heights,
+            &[],
             body_left,
             Pos2::new(body_left, gap_y),
         )
@@ -7152,6 +7239,34 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             caret_aim_after_scroll(aim - 12.0, aim + 12.0, 100.0, 700.0),
             None
         );
+    }
+
+    #[test]
+    fn a_caret_in_the_column_leaves_a_code_block_alone() {
+        assert_eq!(code_scroll_to_show(100.0, 300.0, 400.0), 100.0);
+    }
+
+    #[test]
+    fn a_caret_past_the_column_scrolls_only_far_enough() {
+        // Past the right edge, with a little room beyond it.
+        let scroll = code_scroll_to_show(0.0, 700.0, 400.0);
+        assert!(scroll > 300.0 && scroll < 400.0, "{scroll}");
+        assert!(700.0 - scroll < 400.0);
+        // Before the left edge.
+        let scroll = code_scroll_to_show(500.0, 300.0, 400.0);
+        assert!(scroll < 300.0 && scroll > 200.0, "{scroll}");
+    }
+
+    #[test]
+    fn the_start_of_a_code_line_scrolls_all_the_way_back() {
+        assert_eq!(code_scroll_to_show(500.0, 0.0, 400.0), 0.0);
+    }
+
+    #[test]
+    fn a_code_block_scrolls_no_further_than_its_widest_line() {
+        assert_eq!(clamp_code_scroll(5000.0, 400.0, 1000.0), 600.0);
+        assert_eq!(clamp_code_scroll(-20.0, 400.0, 1000.0), 0.0);
+        assert_eq!(clamp_code_scroll(50.0, 400.0, 300.0), 0.0);
     }
 
     #[test]

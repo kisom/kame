@@ -26,6 +26,10 @@ const CODE_FAMILY: &str = "IBM Plex Mono";
 /// invalidating the layout cache.
 pub const LINK_COLOR: Color = Color::rgb(59, 130, 246);
 
+/// The widest a code line can be before it wraps after all. A block is drawn as one image, and
+/// this at 3x stays within what graphics cards allow.
+const CODE_WIDEST: f32 = 2400.0;
+
 /// Metrics and column widths for headless layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutConfig {
@@ -128,6 +132,15 @@ pub struct BlockLayout {
 }
 
 impl BlockLayout {
+    /// How wide the widest line is.
+    pub fn content_width(&self) -> f32 {
+        self.runs
+            .iter()
+            .filter_map(|run| run.glyphs.last())
+            .map(|last| last.x + last.w)
+            .fold(0.0, f32::max)
+    }
+
     /// The block offset of the start of the text engine's line `line_i`, to add to
     /// the offsets of the glyphs on it.
     pub fn line_start(&self, line_i: usize) -> usize {
@@ -304,8 +317,18 @@ pub fn layout_block_marked_with_align(
         None => {
             buffer.set_size(Some(width), None);
             buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
-            buffer.set_wrap(Wrap::Word);
+            // Code keeps each line whole, and the page scrolls it sideways.
+            let whole_lines = matches!(block.kind, BlockKind::Code { .. });
+            buffer.set_wrap(if whole_lines { Wrap::None } else { Wrap::Word });
             buffer.shape_until_scroll(font_system, false);
+            let widest = buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0, f32::max);
+            if whole_lines && widest > CODE_WIDEST {
+                buffer.set_wrap(Wrap::WordOrGlyph);
+                buffer.shape_until_scroll(font_system, false);
+            }
             (
                 drawn_runs(&buffer, block, width, align),
                 engine_lines(&buffer, block),
@@ -1449,6 +1472,50 @@ around at this measure.\n\nAnd one after a blank line."
                 assert!(hyphens(&layout).is_empty());
             }
         }
+    }
+
+    #[test]
+    fn a_code_block_keeps_each_line_whole() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let text = format!("short\n{}\nend", "long_identifier(".repeat(30));
+        let config = at_width(300.0);
+        let block = kind_block(BlockKind::Code { language: None }, &text);
+        let layout = layout_block(&mut fs, &block, &config);
+        assert_eq!(layout.lines.len(), 3, "a line wrapped");
+        assert!(layout.content_width() > config.body_width);
+    }
+
+    #[test]
+    fn a_short_code_block_reports_its_width() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = kind_block(BlockKind::Code { language: None }, "fn main()");
+        let layout = layout_block(&mut fs, &block, &at_width(300.0));
+        assert!(layout.content_width() > 0.0 && layout.content_width() < 300.0);
+    }
+
+    #[test]
+    fn a_code_line_too_long_for_one_image_wraps_after_all() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = kind_block(BlockKind::Code { language: None }, &"x".repeat(5000));
+        let layout = layout_block(&mut fs, &block, &at_width(300.0));
+        assert!(
+            layout.content_width() <= CODE_WIDEST,
+            "{}",
+            layout.content_width()
+        );
+    }
+
+    #[test]
+    fn a_prose_block_still_wraps() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let text = "words and more words ".repeat(30);
+        let block = kind_block(BlockKind::Prose, &text);
+        let layout = layout_block(&mut fs, &block, &at_width(300.0));
+        assert!(layout.lines.len() > 1);
     }
 
     #[test]

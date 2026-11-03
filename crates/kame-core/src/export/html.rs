@@ -160,7 +160,8 @@ li {
 }
 pre {
   margin: 1.225em 0 1.225em 1.5em;
-  white-space: pre-wrap;
+  white-space: pre;
+  overflow-x: auto;
 }
 code {
   font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -172,6 +173,7 @@ pre code {
 }
 pre.prose {
   font-family: inherit;
+  white-space: pre-wrap;
 }
 hr {
   width: 25%;
@@ -240,6 +242,7 @@ a.footnote-backref {
     --mark: #eee;
   }
   body { font-size: 11pt; }
+  pre { white-space: pre-wrap; }
   main.document { padding: 0; }
   nav.site { display: none; }
   aside.marginalia {
@@ -1660,6 +1663,19 @@ mod tests {
         let style = STYLE;
         assert!(rule_for("code", style).contains("font-size: 0.84em"));
         assert!(rule_for("pre code", style).contains("font-size: 0.7em"));
+    }
+
+    #[test]
+    fn long_code_lines_scroll_sideways_and_prose_wraps() {
+        let code = rule_for("pre", STYLE);
+        assert!(code.contains("white-space: pre;"), "{code}");
+        assert!(code.contains("overflow-x: auto"), "{code}");
+        assert!(rule_for("pre.prose", STYLE).contains("white-space: pre-wrap"));
+        let print = &STYLE[STYLE.find("@media print").unwrap()..];
+        assert!(
+            print.contains("white-space: pre-wrap"),
+            "paper can't scroll"
+        );
     }
 
     #[test]

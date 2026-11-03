@@ -168,8 +168,9 @@ struct BlockApparatus {
 /// - headings become `<h1>`–`<h6>` (level clamped to 1–6), paragraphs `<p>`,
 ///   and consecutive list items of the same kind share one `<ul>`/`<ol>`,
 /// - inline spans become `<em>`/`<strong>`, nesting innermost-first,
-/// - marginalia become `<aside class="marginalia">` immediately after the block
-///   they annotate (inside the `<li>` for list items), in reading order; a
+/// - marginalia become `<aside class="marginalia">` immediately before the block
+///   they annotate (inside the `<li>` for list items), in reading order, since a
+///   float cannot rise above where it is written and has to line up with its block; a
 ///   margin note whose block is gone or empty is emitted unanchored after the
 ///   last block, so its body survives,
 /// - footnotes leave a `<sup class="footnote-ref"><a href="#fnN">N</a></sup>`
@@ -223,17 +224,18 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
             BlockKind::Heading { level } => {
                 close_list(&mut body, &mut open_list);
                 let level = level.clamp(1, 6);
-                body.push_str(&format!("<h{level}>{inner}</h{level}>\n"));
                 body.push_str(&after);
+                body.push_str(&format!("<h{level}>{inner}</h{level}>\n"));
             }
             BlockKind::Paragraph => {
                 close_list(&mut body, &mut open_list);
-                body.push_str(&format!("<p>{inner}</p>\n"));
                 body.push_str(&after);
+                body.push_str(&format!("<p>{inner}</p>\n"));
             }
             BlockKind::BlockQuote => {
                 close_list(&mut body, &mut open_list);
-                body.push_str(&format!("<blockquote>{inner}{after}</blockquote>\n"));
+                body.push_str(&after);
+                body.push_str(&format!("<blockquote>{inner}</blockquote>\n"));
             }
             BlockKind::ListItem { ordered } => {
                 if open_list != Some(ordered) {
@@ -241,7 +243,7 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
                     body.push_str(if ordered { "<ol>\n" } else { "<ul>\n" });
                     open_list = Some(ordered);
                 }
-                body.push_str(&format!("<li>{inner}{after}</li>\n"));
+                body.push_str(&format!("<li>{after}{inner}</li>\n"));
             }
             BlockKind::Image { .. } => {
                 unreachable!("images are emitted before the empty-text skip")
@@ -918,11 +920,15 @@ mod tests {
     }
 
     #[test]
-    fn marginalia_sits_after_the_annotated_block() {
+    fn marginalia_sits_before_the_annotated_block() {
         let html = to_html(&rich_document());
-        let paragraph_end = html.find("</p>").expect("paragraph closes");
         let aside = html.find("<aside class=\"marginalia\">").expect("aside");
-        assert!(aside > paragraph_end);
+        let after_aside = &html[aside..];
+        let close = after_aside.find("</aside>").expect("aside closes");
+        assert!(
+            after_aside[close..].contains("<p>"),
+            "its block follows: {html}"
+        );
         assert!(html.contains("<aside class=\"marginalia\"><p>margin</p></aside>"));
     }
 
@@ -1285,5 +1291,32 @@ mod tests {
     fn marginals_and_footnotes_still_publish() {
         assert!(to_html(&with_annotations(AnnotationKind::Marginal)).contains("SECRET BODY"));
         assert!(to_html(&with_annotations(AnnotationKind::Footnote)).contains("SECRET BODY"));
+    }
+
+    /// The aside floats into the margin, and a float cannot rise above where it is
+    /// written, so it has to come first to line up with its block.
+    #[test]
+    fn a_marginal_comes_before_its_block_of_every_kind() {
+        for kind in [
+            BlockKind::Paragraph,
+            BlockKind::Heading { level: 2 },
+            BlockKind::BlockQuote,
+            BlockKind::ListItem { ordered: false },
+        ] {
+            let mut doc = Document::new("t");
+            let target = block(kind.clone(), "Words");
+            doc.annotations = vec![annotation(
+                AnnotationKind::Marginal,
+                target.id,
+                0,
+                0,
+                "SIDE",
+            )];
+            doc.blocks = vec![target];
+            let html = to_html(&doc);
+            let side = html.find("SIDE").expect("the marginal publishes");
+            let words = html.find("Words").expect("the block publishes");
+            assert!(side < words, "{kind:?}: {html}");
+        }
     }
 }

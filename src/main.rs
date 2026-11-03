@@ -69,7 +69,7 @@ impl Palette {
         body_ink: [32, 29, 25],
         apparatus_ink: [86, 79, 69],
         caret_ink: Color32::from_rgb(176, 58, 46),
-        selection_fill: Color32::from_rgba_premultiplied(58, 78, 112, 62),
+        selection_fill: Color32::from_rgba_unmultiplied_const(58, 78, 112, 62),
         note_highlight: Color32::from_rgba_unmultiplied_const(255, 170, 60, 70),
         footnote_highlight: Color32::from_rgba_unmultiplied_const(54, 96, 132, 44),
         footnote_mark: Color32::from_rgb(54, 96, 132),
@@ -88,7 +88,7 @@ impl Palette {
         body_ink: [222, 216, 205],
         apparatus_ink: [168, 160, 148],
         caret_ink: Color32::from_rgb(226, 92, 70),
-        selection_fill: Color32::from_rgba_premultiplied(92, 112, 150, 66),
+        selection_fill: Color32::from_rgba_unmultiplied_const(92, 112, 150, 66),
         note_highlight: Color32::from_rgba_unmultiplied_const(196, 128, 40, 80),
         footnote_highlight: Color32::from_rgba_unmultiplied_const(92, 132, 168, 60),
         footnote_mark: Color32::from_rgb(120, 160, 190),
@@ -6255,6 +6255,7 @@ mod tests {
                 palette.note_highlight,
                 palette.footnote_highlight,
                 palette.marginal_highlight,
+                palette.selection_fill,
             ] {
                 let a = wash.a();
                 assert!(
@@ -6269,7 +6270,11 @@ mod tests {
     fn a_wash_tints_the_paper_rather_than_whitening_it() {
         let palette = Palette::for_mode(false);
         let paper = palette.background;
-        for wash in [palette.footnote_highlight, palette.marginal_highlight] {
+        for wash in [
+            palette.footnote_highlight,
+            palette.marginal_highlight,
+            palette.selection_fill,
+        ] {
             let [r, g, b] = overlay_on(paper, wash);
             assert!(
                 r <= paper.r() && g <= paper.g() && b <= paper.b(),

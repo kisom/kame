@@ -18,10 +18,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
 - [ ] **A static site generator for blog posts.** Working from `.kame` files, and the
   occasional Markdown file, so marginals can be laid out properly. Markdown export
   drops them.
-- [ ] **Marginals may float beside the wrong block in the HTML export.** The aside is
-  written after its block and floats right, so its top should line up with the next
-  block. Writing it before its block should fix that. From reading the CSS; check a
-  rendered page.
 - [ ] **Decide on raw HTML in Markdown export.** `<` is not escaped, so a literal
   `<script>` in prose or a footnote exports as live HTML. Escaping it would also stop
   deliberate inline HTML rendering.
@@ -38,8 +34,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
   stretch. About 24 call sites read cosmic-text's lines directly, so prototype it
   outside the repo first, then write a spec.
 - [ ] **Hanging punctuation in the margins.** Not started.
-- [ ] **Selection colour.** `selection_fill` is built like the washes were, with
-  channels above alpha, so a selection lightens the page rather than tinting it.
 
 ## Markdown import
 

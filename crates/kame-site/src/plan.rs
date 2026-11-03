@@ -717,4 +717,22 @@ mod tests {
         assert!(home.contains("id=\"theme-toggle\""), "{home}");
         assert!(plan.files.contains_key(Path::new("js/theme.js")));
     }
+
+    #[test]
+    fn a_page_and_its_feed_item_name_the_sites_author_if_it_has_none() {
+        let site = Site::new("planauthor");
+        let mut meta = metadata("A", "2026-01-01", &[]);
+        meta.author = String::new();
+        let a = site.add("a.kame", &meta, "x");
+        site.config(&[("a", &a)], &[]);
+        let yaml = std::fs::read_to_string(site.dir.join("site.yaml")).unwrap();
+        std::fs::write(
+            site.dir.join("site.yaml"),
+            yaml.replace("  url:", "  author: The Site\n  url:"),
+        )
+        .unwrap();
+        let plan = site.plan();
+        assert!(text(&plan, "k/a/index.html").contains("content=\"The Site\""));
+        assert!(text(&plan, "feed.xml").contains("<dc:creator>The Site</dc:creator>"));
+    }
 }

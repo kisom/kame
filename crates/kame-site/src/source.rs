@@ -154,10 +154,17 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
 /// same order.
 pub fn read_all(config: &Config, include_drafts: bool, problems: &mut Problems) -> Vec<Source> {
     let order = |a: &Source, b: &Source| b.date.cmp(&a.date).then_with(|| a.slug.cmp(&b.slug));
+    let with_author = |mut source: Source| {
+        if source.author.is_empty() {
+            source.author = config.author.clone();
+        }
+        source
+    };
     let mut published: Vec<Source> = config
         .publish
         .iter()
         .filter_map(|entry| read(entry, false, problems))
+        .map(with_author)
         .collect();
     published.sort_by(order);
     if include_drafts {
@@ -165,6 +172,7 @@ pub fn read_all(config: &Config, include_drafts: bool, problems: &mut Problems) 
             .drafts
             .iter()
             .filter_map(|entry| read(entry, true, problems))
+            .map(with_author)
             .collect();
         drafts.sort_by(order);
         published.extend(drafts);
@@ -447,6 +455,32 @@ mod tests {
             read(&entry("a", path), true, &mut problems).unwrap().url(),
             "/drafts/a/"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_document_with_no_author_takes_the_sites() {
+        let dir = temp_dir("siteauthor");
+        let mut anonymous = metadata("A", "2026-01-02", &[]);
+        anonymous.author = String::new();
+        let a = dir.join("a.kame");
+        write_kame(&a, &doc("A"), Some(&anonymous));
+        let mut named = metadata("B", "2026-01-01", &[]);
+        named.author = "Someone Else".to_string();
+        let b = dir.join("b.kame");
+        write_kame(&b, &doc("B"), Some(&named));
+        let config = Config {
+            name: "S".to_string(),
+            url: "https://e.com".to_string(),
+            description: String::new(),
+            author: "The Site".to_string(),
+            publish: vec![entry("a", a), entry("b", b)],
+            drafts: Vec::new(),
+        };
+        let mut problems = Problems::default();
+        let found = read_all(&config, true, &mut problems);
+        assert_eq!(found[0].author, "The Site");
+        assert_eq!(found[1].author, "Someone Else");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

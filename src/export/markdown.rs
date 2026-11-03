@@ -260,8 +260,10 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
     let spans: Vec<(usize, usize, SpanStyle)> = block
         .spans
         .iter()
-        // A script link publishes as its text.
+        // A script link publishes as its text, as does a link to a kame document, which
+        // can't lead anywhere outside kame.
         .filter(|span| !matches!(&span.style, SpanStyle::Link { url } if is_script_url(url)))
+        .filter(|span| !matches!(span.style, SpanStyle::DocumentLink { .. }))
         .filter_map(|span| {
             let start = snap_up(text, span.start);
             let end = snap_down(text, span.end);
@@ -433,6 +435,7 @@ fn open_delimiter(style: &SpanStyle) -> String {
         SpanStyle::Bold => "**".to_string(),
         SpanStyle::Italic => "*".to_string(),
         SpanStyle::Link { .. } => "[".to_string(),
+        SpanStyle::DocumentLink { .. } => unreachable!("document links are dropped"),
     }
 }
 
@@ -442,6 +445,7 @@ fn close_delimiter(style: &SpanStyle) -> String {
         SpanStyle::Bold => "**".to_string(),
         SpanStyle::Italic => "*".to_string(),
         SpanStyle::Link { url } => format!("]({})", link_destination(url)),
+        SpanStyle::DocumentLink { .. } => unreachable!("document links are dropped"),
     }
 }
 
@@ -1326,5 +1330,20 @@ mod tests {
         }];
         doc.blocks = vec![prose];
         assert_eq!(to_markdown(&doc), "> *one*\\\n> two\n");
+    }
+
+    #[test]
+    fn a_document_link_publishes_as_its_text() {
+        let mut doc = Document::new("t");
+        let mut linked = paragraph("See the intro now.");
+        linked.spans = vec![Span {
+            start: 4,
+            end: 13,
+            style: SpanStyle::DocumentLink {
+                target: "notes/a.kame#Intro".to_string(),
+            },
+        }];
+        doc.blocks = vec![linked];
+        assert_eq!(to_markdown(&doc), "See the intro now.\n");
     }
 }

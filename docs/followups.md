@@ -4,14 +4,15 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Publishing
 
-- [ ] **A static site generator for blog posts.** Working from `.kame` files, and the
+- [ ] **A static site generator for blog posts.** A separate tool from the kame GUI,
+  most likely a command line one. Working from `.kame` files, and the
   occasional Markdown file, so marginals can be laid out properly. Markdown export
   drops them. It would also settle site-root images, like `/files/images/...`, which
   cannot be found from the file alone and show the missing-image placeholder.
 
 ## Typography
 
-- [ ] **Word spacing (low priority).** Justified text without hyphenation leaves
+- [ ] **Word spacing (on hold).** Justified text without hyphenation leaves
   wide gaps. cosmic-text picks each break on its own and only widens spaces.
   Soft hyphens from `hypher` are not enough: on 378 devlog paragraphs at type 18,
   lines with a space over 2x normal fell from 17.1% to 10.3%, but the widest 1% got
@@ -26,18 +27,13 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 - [ ] **Richer Markdown elements (deferred).** Tables, nested lists and inline code
   are simplified on import because the model has no equivalent.
-
-## Linking
-
-- [ ] **Links to other kame documents.** Link from one document to another, and open it
-  in kame on a click rather than handing it to the system. Decided so far:
-  - **Storage:** the target is kept exactly as it was entered. Like a web link, it can
-    rot and may need maintenance, and kame doesn't try to prevent that.
-  - **Target:** a path, optionally with `#header-text`, which looks for a heading with
-    exactly that text. Obsidian's `[[path/to/Node#Header|the link text]]` is the model.
-  - **Export:** the link can't lead anywhere outside kame, and it's unreasonable to
-    expect otherwise. In the editor it may just be underlined.
+  Tables are wanted but too complex for now, and a code block is the stopgap.
 
 ## From earlier feedback
 
-- [ ] **PDF export.** Still open in `feedback2.txt`; not required for v1.
+- [ ] **PDF export (on hold).** Still open in `feedback2.txt`; not required for v1.
+
+## Ideas
+
+- [ ] **A kame notebook.** Under consideration: an extended kame app for collections of
+  kame and Markdown documents.

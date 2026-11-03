@@ -154,11 +154,28 @@ windows on one file would overwrite each other's edits.
 Each document keeps its caret and scroll position in its own file, and returns to them
 whenever it is opened.
 
+## Links between documents
+
+Type `[[essay]]`, `[[notes/essay#The Intro]]` or `[[notes/essay#The Intro|the intro]]`. The
+text after `|` is what shows, or the target if there is none. A link entered as an
+ordinary link, with Ctrl-K or `[text](url)`, is a document link too if it names a `.kame`
+file or starts with `#`. Document links are underlined, and clicking one opens the
+document in kame.
+
+The target is kept exactly as you entered it, and a relative path starts from the folder
+of the document holding the link. An extension can be left off: `.kame` and then `.md` are
+tried. `#The Intro` goes to the first heading with exactly that text, and on its own it
+means a heading in this document. If a link has rotted, the status row says so and nothing
+opens.
+
 ## What exports publish
 
 Code exports as a fence and as `<pre><code>`, keeping its language. Prose exports to
 HTML exactly, and to Markdown as a block quote with hard line breaks, which keeps its
 lines but not extra spacing.
+
+A link to a kame document publishes as its text, since it can't lead anywhere outside
+kame.
 
 Footnotes publish in both formats and marginalia in HTML. Markdown has no form for a
 marginal, so they stay out of it. Notes are private and never publish, in either

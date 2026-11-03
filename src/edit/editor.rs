@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::edit::ops::{anchor_wholly_inside, apply, apply_inverse, invert, normalize, Op};
 use crate::model::{
-    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, Span,
-    SpanStyle,
+    link_style, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
+    Document, Span, SpanStyle,
 };
 
 /// A caret position: the block it sits in and a **byte** offset into that
@@ -591,6 +591,14 @@ impl Editor {
         }
         let (style, opener_start, closer_start, marker_len) = {
             let block = self.block(cursor.block_id).ok()?;
+            // A file name in a document link being typed isn't emphasis.
+            let head = &block.text[..cursor.offset];
+            if head
+                .rfind("[[")
+                .is_some_and(|open| !head[open..].contains("]]"))
+            {
+                return None;
+            }
             inline_emphasis(&block.text, cursor.offset)?
         };
         // Delete the closing marker, then the opening marker. The wrapped text
@@ -660,7 +668,7 @@ impl Editor {
             .chain(std::iter::once(Span {
                 start: open_bracket,
                 end: close_bracket - 1,
-                style: SpanStyle::Link { url },
+                style: link_style(url),
             }))
             .collect();
         let ops = vec![
@@ -670,6 +678,43 @@ impl Editor {
         ];
         let op = self.apply_edit(Op::Batch { ops });
         Some((op, close_bracket - 1))
+    }
+
+    /// Turns a `[[target]]` or `[[target|text]]` the caret just closed into a document
+    /// link, as one edit, returning it and where the caret goes.
+    pub fn apply_document_link(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
+        if self.block(cursor.block_id).ok()?.kind.is_verbatim() {
+            return None;
+        }
+        let (open, text_start, target) = {
+            let block = self.block(cursor.block_id).ok()?;
+            document_link(&block.text, cursor.offset)?
+        };
+        let close = cursor.offset - 2;
+        let removed = text_start - open;
+        let rebase = |span: &Span| {
+            shift_span_on_delete(span, close, cursor.offset)
+                .and_then(|span| shift_span_on_delete(&span, open, text_start))
+        };
+        let spans: Vec<Span> = self
+            .block(cursor.block_id)
+            .ok()?
+            .spans
+            .iter()
+            .filter_map(rebase)
+            .chain(std::iter::once(Span {
+                start: open,
+                end: close - removed,
+                style: SpanStyle::DocumentLink { target },
+            }))
+            .collect();
+        let ops = vec![
+            Op::delete_text(&self.doc, cursor.block_id, close, cursor.offset),
+            Op::delete_text(&self.doc, cursor.block_id, open, text_start),
+            Op::set_spans(&self.doc, cursor.block_id, spans),
+        ];
+        let op = self.apply_edit(Op::Batch { ops });
+        Some((op, close - removed))
     }
 
     /// Sets a link span over `start..end` in `block_id`, replacing any link
@@ -692,15 +737,17 @@ impl Editor {
             .spans
             .iter()
             .filter(|span| {
-                !(matches!(span.style, SpanStyle::Link { .. })
-                    && span.start < end
+                !(matches!(
+                    span.style,
+                    SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
+                ) && span.start < end
                     && start < span.end)
             })
             .cloned()
             .chain((!url.is_empty()).then(|| Span {
                 start,
                 end,
-                style: SpanStyle::Link { url },
+                style: link_style(url),
             }))
             .collect();
         Ok(self.apply_edit(Op::set_spans(&self.doc, block_id, spans)))
@@ -826,6 +873,28 @@ impl Editor {
 /// The kind of block a split creates: a heading's successor is body text, and
 /// everything else keeps its kind (paragraphs stay paragraphs, list items stay
 /// list items).
+/// A `[[target]]` or `[[target|text]]` ending at `caret`: where it opens, where its
+/// text starts, and its target. Without a `|`, the target is also the text.
+fn document_link(text: &str, caret: usize) -> Option<(usize, usize, String)> {
+    let inner_end = caret.checked_sub(2)?;
+    if !text[..caret].ends_with("]]") {
+        return None;
+    }
+    let open = text[..inner_end].rfind("[[")?;
+    let inner = &text[open + 2..inner_end];
+    if inner.contains(']') || inner.contains('\n') {
+        return None;
+    }
+    match inner.split_once('|') {
+        Some((target, shown)) if !target.is_empty() && !shown.is_empty() => {
+            Some((open, open + 2 + target.len() + 1, target.to_string()))
+        }
+        Some(_) => None,
+        None if !inner.is_empty() => Some((open, open + 2, inner.to_string())),
+        None => None,
+    }
+}
+
 /// The language a line naming a code fence opens, if it is one: `Some(None)` for a
 /// bare fence.
 fn fence_language(line: &str) -> Option<Option<String>> {

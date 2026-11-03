@@ -51,6 +51,24 @@ pub enum SpanStyle {
     Link {
         url: String,
     },
+    /// A link to another kame document, or to a heading in this one. `target` is kept
+    /// exactly as it was entered, so like a web link it can rot.
+    DocumentLink {
+        target: String,
+    },
+}
+
+/// The style for a link entered as `url`: a document link if it names a `.kame` file or
+/// a heading, and an ordinary link otherwise.
+pub fn link_style(url: String) -> SpanStyle {
+    let path = url.split('#').next().unwrap_or("");
+    let names_kame = path.to_lowercase().ends_with(".kame") && !path.contains("://");
+    let names_heading = path.is_empty() && url.len() > 1;
+    if names_kame || names_heading {
+        SpanStyle::DocumentLink { target: url }
+    } else {
+        SpanStyle::Link { url }
+    }
 }
 
 /// Whether `url` runs script when followed. Browsers ignore control characters
@@ -286,5 +304,37 @@ mod script_url_tests {
         ] {
             assert!(!is_script_url(url), "{url:?}");
         }
+    }
+
+    use super::{link_style, SpanStyle};
+
+    fn is_document_link(url: &str) -> bool {
+        matches!(link_style(url.to_string()), SpanStyle::DocumentLink { .. })
+    }
+
+    #[test]
+    fn a_link_to_a_kame_file_or_a_heading_is_a_document_link() {
+        assert!(is_document_link("notes/essay.kame"));
+        assert!(is_document_link("notes/essay.kame#Intro"));
+        assert!(is_document_link("~/essay.KAME"));
+        assert!(is_document_link("#Intro"));
+    }
+
+    #[test]
+    fn any_other_link_stays_a_link() {
+        assert!(!is_document_link("https://example.com/essay.kame"));
+        assert!(!is_document_link("notes/paper.pdf"));
+        assert!(!is_document_link("notes/essay"));
+        assert!(!is_document_link("#"));
+    }
+
+    #[test]
+    fn a_document_link_keeps_its_target_exactly() {
+        assert_eq!(
+            link_style(" a b.kame#C d".to_string()),
+            SpanStyle::DocumentLink {
+                target: " a b.kame#C d".to_string()
+            }
+        );
     }
 }

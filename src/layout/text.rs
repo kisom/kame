@@ -416,8 +416,10 @@ fn styled_spans<'a>(
             // A stored hyperlink or a bare URL both read as a link, coloured the
             // same way so the two forms are indistinguishable on the page.
             let is_stored_link = block.spans.iter().any(|span| {
-                matches!(span.style, SpanStyle::Link { .. })
-                    && span.start <= start
+                matches!(
+                    span.style,
+                    SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
+                ) && span.start <= start
                     && span.end >= end
             });
             if is_stored_link || links.iter().any(|(ls, le)| *ls <= start && end <= *le) {
@@ -1188,5 +1190,24 @@ twenty-four twenty-five twenty-six twenty-seven";
         );
         let run = layout.buffer.layout_runs().next().unwrap();
         assert!(run.glyphs.iter().all(|glyph| glyph.color_opt.is_none()));
+    }
+
+    #[test]
+    fn a_document_link_is_coloured_as_a_link() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut block = kind_block(BlockKind::Paragraph, "See it");
+        block.spans = vec![Span {
+            start: 4,
+            end: 6,
+            style: SpanStyle::DocumentLink {
+                target: "a.kame".to_string(),
+            },
+        }];
+        let layout = layout_block(&mut fs, &block, &LayoutConfig::with_body_size(16.0));
+        let run = layout.buffer.layout_runs().next().unwrap();
+        let last = run.glyphs.last().unwrap();
+        assert_eq!(last.color_opt, Some(LINK_COLOR));
+        assert_eq!(run.glyphs[0].color_opt, None);
     }
 }

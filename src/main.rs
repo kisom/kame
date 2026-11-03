@@ -281,6 +281,11 @@ fn is_new_chord(event: &egui::Event) -> bool {
     )
 }
 
+/// How far up from the bottom of its line a document link's underline sits, as a share
+/// of the line's height.
+const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
+/// The colour of [`LINK_COLOR`] as egui takes it.
+const DOCUMENT_LINK_INK: Color32 = Color32::from_rgb(59, 130, 246);
 /// The least time between writes of the caret and scroll to the document.
 const POSITION_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// A horizontal rule's width, as a share of the measure.
@@ -2333,13 +2338,38 @@ impl Session {
     /// lands after the anchor.
     fn apply_markdown_link(&mut self) {
         let caret = self.valid_caret();
-        if let Some((op, offset)) = self.editor.apply_markdown_link(&caret) {
+        let applied = self
+            .editor
+            .apply_document_link(&caret)
+            .or_else(|| self.editor.apply_markdown_link(&caret));
+        if let Some((op, offset)) = applied {
             self.record(&op);
             self.caret = Cursor {
                 block_id: caret.block_id,
                 offset,
             };
         }
+    }
+
+    /// The start of the first heading with exactly `text`.
+    fn heading_cursor(&self, text: &str) -> Option<Cursor> {
+        self.document()
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::Heading { .. }) && block.text == text)
+            .map(|block| Cursor {
+                block_id: block.id,
+                offset: 0,
+            })
+    }
+
+    /// What a relative link in this document is relative to: its file, or the Markdown
+    /// file it was imported from.
+    fn link_base(&self) -> PathBuf {
+        self.path()
+            .or(self.source_path.as_deref())
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
     }
 
     /// Deletes `selection` and parks the caret at `caret_after`.
@@ -2561,7 +2591,9 @@ impl Session {
             .spans
             .iter()
             .filter_map(|span| match &span.style {
-                SpanStyle::Link { url } if span.start <= lo && hi <= span.end => {
+                SpanStyle::Link { url } | SpanStyle::DocumentLink { target: url }
+                    if span.start <= lo && hi <= span.end =>
+                {
                     Some((span.start, span.end, url.clone()))
                 }
                 _ => None,
@@ -3104,6 +3136,43 @@ fn url_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
         .map(|(start, end)| block.text[start..end].to_string())
 }
 
+/// The target of the document link under `cursor`, if there is one.
+fn document_link_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
+    let block = blocks.iter().find(|block| block.id == cursor.block_id)?;
+    block.spans.iter().find_map(|span| match &span.style {
+        SpanStyle::DocumentLink { target }
+            if span.start <= cursor.offset && cursor.offset < span.end =>
+        {
+            Some(target.clone())
+        }
+        _ => None,
+    })
+}
+
+/// A document link's target as its path and the heading it names, if any.
+fn split_document_target(target: &str) -> (&str, Option<&str>) {
+    match target.split_once('#') {
+        Some((path, heading)) => (path, (!heading.is_empty()).then_some(heading)),
+        None => (target, None),
+    }
+}
+
+/// The file a document link's path names, relative to the document at `base`. A link can
+/// leave off the extension, so `.kame` and then `.md` are tried after what was entered.
+/// Only an existing file counts: opening a missing path would create it.
+fn find_document(path: &str, base: &Path) -> Option<PathBuf> {
+    let entered = resolve_open_path(path, base);
+    if entered.is_file() {
+        return Some(entered);
+    }
+    [".kame", ".md"].into_iter().find_map(|extension| {
+        let mut candidate = entered.clone().into_os_string();
+        candidate.push(extension);
+        let candidate = PathBuf::from(candidate);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
 /// Whether a clicked link may be handed to the system's opener. Local files stay
 /// openable, so a link can reach a PDF or an image. A leading dash would be read as
 /// an option to the opener rather than as the link.
@@ -3359,6 +3428,8 @@ struct KameApp {
     /// Scroll offset requested by last frame's typewriter centring. Applied to
     /// the scroll area on the next frame, when its geometry is known.
     pending_scroll: Option<f32>,
+    /// The heading a followed document link named, until its document opens.
+    pending_heading: Option<String>,
     escape_prefix: EscapePrefix,
     /// How far the page was scrolled on the last frame.
     page_scroll: f32,
@@ -3435,6 +3506,7 @@ impl KameApp {
             palette: Palette::for_mode(dark),
             typewriter_anchor: None,
             pending_scroll: None,
+            pending_heading: None,
             escape_prefix: EscapePrefix::default(),
             page_scroll: 0.0,
             saved_position: None,
@@ -4755,6 +4827,27 @@ impl KameApp {
             }
         }
 
+        // --- document links --------------------------------------------------
+        // Underlined, which sets them apart from a link that leaves kame.
+        for (index, block) in blocks.iter().enumerate() {
+            for span in &block.spans {
+                if !matches!(span.style, SpanStyle::DocumentLink { .. }) {
+                    continue;
+                }
+                for rect in range_rects(layouts[index], span.start, span.end) {
+                    let rect = rect.translate(Vec2::new(
+                        body_left + layouts[index].left_indent,
+                        tops[index],
+                    ));
+                    let y = rect.bottom() - rect.height() * DOCUMENT_LINK_UNDERLINE;
+                    painter.line_segment(
+                        [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                        egui::Stroke::new(1.0, DOCUMENT_LINK_INK),
+                    );
+                }
+            }
+        }
+
         // --- prose -----------------------------------------------------------
         // Paragraph-focus mode veils every block but the caret's: the veil is
         // paper at partial alpha, so dimmed prose fades and the margins stay
@@ -5082,6 +5175,7 @@ impl KameApp {
         // --- pointer ---------------------------------------------------------
         let shift = ui.input(|input| input.modifiers.shift);
         let mut caret_action: Option<(Cursor, bool)> = None;
+        let mut followed_link = None;
         let mut marker_click: Option<(AnnotationId, Rect)> = None;
         let pointer = response.interact_pointer_pos();
         if response.drag_started() {
@@ -5118,7 +5212,9 @@ impl KameApp {
                     hit_test(blocks, &layouts, &tops, &heights, body_left, pos)
                 {
                     // A click on a link opens it instead of moving the caret.
-                    if let Some(url) = url_at(blocks, &cursor) {
+                    if let Some(target) = document_link_at(blocks, &cursor) {
+                        followed_link = Some(target);
+                    } else if let Some(url) = url_at(blocks, &cursor) {
                         open_in_browser(&url);
                     } else {
                         caret_action = Some((cursor, shift));
@@ -5129,7 +5225,9 @@ impl KameApp {
 
         // `blocks` borrows the document; every caret move is applied after the
         // borrow's last use.
-        if let Some((id, rect)) = marker_click {
+        if let Some(target) = followed_link {
+            self.follow_document_link(&target);
+        } else if let Some((id, rect)) = marker_click {
             let open = if self.open_note == Some(id) {
                 None
             } else {
@@ -5673,6 +5771,7 @@ impl KameApp {
     /// Opens the path prompt, clearing any other file dialog so it is the one
     /// thing on screen.
     fn begin_open(&mut self) {
+        self.pending_heading = None;
         self.snapshot_prompt = None;
         self.restore_picker = None;
         self.open_prompt = Some(OpenPrompt {
@@ -5701,9 +5800,57 @@ impl KameApp {
         }
     }
 
+    /// Goes where a document link leads. A link that has rotted says so and opens
+    /// nothing. Leaving unsaved work holds at the Open prompt's confirmation, and the
+    /// heading waits for the open.
+    fn follow_document_link(&mut self, target: &str) {
+        let (path, heading) = split_document_target(target);
+        if path.is_empty() {
+            self.go_to_heading(heading);
+            return;
+        }
+        let Some(found) = find_document(path, &self.session.link_base()) else {
+            self.notice = Some(format!("no document at {path}"));
+            return;
+        };
+        let same = self
+            .session
+            .path()
+            .and_then(|current| current.canonicalize().ok())
+            .is_some_and(|current| found.canonicalize().is_ok_and(|found| found == current));
+        if same {
+            self.go_to_heading(heading);
+            return;
+        }
+        self.pending_heading = heading.map(str::to_string);
+        self.open_or_confirm(found);
+    }
+
+    /// Moves to the heading a document link named, and says so if it isn't there.
+    fn go_to_heading(&mut self, heading: Option<&str>) {
+        let Some(heading) = heading else {
+            return;
+        };
+        match self.session.heading_cursor(heading) {
+            Some(cursor) => {
+                self.session.set_caret(cursor);
+                self.notice = None;
+                // The place this document was left doesn't apply when a link names one.
+                self.session.restored_scroll = None;
+                self.reveal_caret = true;
+            }
+            None => self.notice = Some(format!("no heading \"{heading}\" in this document")),
+        }
+    }
+
     /// Opens a file chosen in a dialog, holding at the Open prompt's confirmation
     /// if work would be lost.
     fn open_picked(&mut self, path: PathBuf) {
+        self.pending_heading = None;
+        self.open_or_confirm(path);
+    }
+
+    fn open_or_confirm(&mut self, path: PathBuf) {
         let path = path.display().to_string();
         if self.session.would_lose_work() {
             self.open_prompt = Some(OpenPrompt {
@@ -5721,6 +5868,7 @@ impl KameApp {
     /// typewriter anchor, caches). A failed open keeps the current document and
     /// surfaces the reason through `Session::last_error`.
     fn open_document(&mut self, typed: String) {
+        let heading = self.pending_heading.take();
         if typed.is_empty() {
             self.notice = None;
             self.session.last_error = Some("no path given".to_string());
@@ -5743,6 +5891,7 @@ impl KameApp {
                     self.persist();
                 }
                 self.notice = Some(note.unwrap_or_else(|| format!("opened {}", path.display())));
+                self.go_to_heading(heading.as_deref());
             }
             Err(err) => {
                 self.notice = None;
@@ -9769,5 +9918,196 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let mut last = LastDocument::new(None);
         last.note(Path::new("essay.kame"));
         assert!(last.path.unwrap().is_absolute());
+    }
+
+    fn document_link_spans(session: &Session) -> Vec<(usize, usize, String)> {
+        session.document().blocks[0]
+            .spans
+            .iter()
+            .filter_map(|span| match &span.style {
+                SpanStyle::DocumentLink { target } => Some((span.start, span.end, target.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_typed_document_link_shows_its_text_and_keeps_its_target() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "see [[notes/my_a_b#The Intro|the intro]] now");
+        assert_eq!(session.document().blocks[0].text, "see the intro now");
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(4, 13, "notes/my_a_b#The Intro".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_typed_document_link_without_text_shows_its_target() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "[[essay]]");
+        assert_eq!(session.document().blocks[0].text, "essay");
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(0, 5, "essay".to_string())]
+        );
+        assert_eq!(session.caret.offset, 5);
+    }
+
+    #[test]
+    fn a_typed_document_link_counts_bytes() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "é [[été|été]]");
+        assert_eq!(session.document().blocks[0].text, "é été");
+        let start = "é ".len();
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(start, start + "été".len(), "été".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_typed_document_link_is_one_undo_step_back_to_what_was_typed() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "[[a|b]]");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "[[a|b]]");
+        assert!(session.document().blocks[0].spans.is_empty());
+    }
+
+    #[test]
+    fn incomplete_document_links_stay_as_typed() {
+        for typed in ["[[]]", "[[|x]]", "[[x|]]", "[a]]", "a]]"] {
+            let mut session = Session::anonymous().unwrap();
+            type_marked(&mut session, typed);
+            assert_eq!(session.document().blocks[0].text, typed);
+            assert!(session.document().blocks[0].spans.is_empty(), "{typed}");
+        }
+    }
+
+    #[test]
+    fn a_document_link_stays_literal_in_code_and_prose() {
+        let mut code = code_session();
+        type_marked(&mut code, "[[a|b]]");
+        assert_eq!(code.document().blocks[0].text, "[[a|b]]");
+        let mut prose = Session::anonymous().unwrap();
+        typed(&mut prose, "| ");
+        type_marked(&mut prose, "[[a|b]]");
+        assert_eq!(prose.document().blocks[0].text, "[[a|b]]");
+    }
+
+    #[test]
+    fn an_ordinary_link_to_a_kame_file_becomes_a_document_link() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "[essay](notes/a.kame#Intro)");
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(0, 5, "notes/a.kame#Intro".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_link_prompt_edits_and_removes_a_document_link() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("essay");
+        let id = session.document().blocks[0].id;
+        session.set_link(id, 0, 5, "a.kame".into());
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(0, 5, "a.kame".to_string())]
+        );
+        session.set_caret(Cursor {
+            block_id: id,
+            offset: 2,
+        });
+        assert_eq!(
+            session.link_target(),
+            Some((id, 0, 5, Some("a.kame".to_string())))
+        );
+        session.set_link(id, 0, 5, "https://example.com".into());
+        assert!(document_link_spans(&session).is_empty());
+        assert_eq!(session.document().blocks[0].spans.len(), 1);
+        session.set_link(id, 0, 5, "b.kame".into());
+        assert_eq!(session.document().blocks[0].spans.len(), 1);
+        session.set_link(id, 0, 5, String::new());
+        assert!(session.document().blocks[0].spans.is_empty());
+    }
+
+    #[test]
+    fn a_click_finds_a_document_link_and_not_a_url() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "see [[a.kame|it]] now");
+        let block_id = session.document().blocks[0].id;
+        let at = |offset| Cursor { block_id, offset };
+        let blocks = &session.document().blocks;
+        assert_eq!(document_link_at(blocks, &at(4)), Some("a.kame".to_string()));
+        assert_eq!(document_link_at(blocks, &at(3)), None);
+        assert_eq!(document_link_at(blocks, &at(6)), None);
+        assert_eq!(url_at(blocks, &at(4)), None);
+    }
+
+    #[test]
+    fn a_document_target_splits_at_its_first_hash() {
+        assert_eq!(split_document_target("a.kame"), ("a.kame", None));
+        assert_eq!(split_document_target("a#B c"), ("a", Some("B c")));
+        assert_eq!(split_document_target("#B"), ("", Some("B")));
+        assert_eq!(split_document_target("a#C#"), ("a", Some("C#")));
+        assert_eq!(split_document_target("a#"), ("a", None));
+    }
+
+    #[test]
+    fn a_document_is_found_from_the_linking_documents_folder() {
+        let dir = scratch_dir("links");
+        let base = dir.join("from.kame");
+        std::fs::create_dir(dir.join("notes")).unwrap();
+        std::fs::write(dir.join("notes/a.kame"), "").unwrap();
+        std::fs::write(dir.join("notes/v1.2.kame"), "").unwrap();
+        std::fs::write(dir.join("notes/b.md"), "").unwrap();
+        std::fs::write(dir.join("notes/plain"), "").unwrap();
+        let notes = dir.join("notes");
+        assert_eq!(
+            find_document("notes/a.kame", &base),
+            Some(notes.join("a.kame"))
+        );
+        assert_eq!(find_document("notes/a", &base), Some(notes.join("a.kame")));
+        assert_eq!(
+            find_document("notes/v1.2", &base),
+            Some(notes.join("v1.2.kame"))
+        );
+        assert_eq!(find_document("notes/b", &base), Some(notes.join("b.md")));
+        assert_eq!(
+            find_document("notes/plain", &base),
+            Some(notes.join("plain"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opening a missing path creates it, which a rotted link must not do.
+    #[test]
+    fn a_rotted_link_finds_nothing_and_creates_nothing() {
+        let dir = scratch_dir("rot");
+        let base = dir.join("from.kame");
+        assert_eq!(find_document("gone", &base), None);
+        assert_eq!(find_document("gone.kame", &base), None);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_heading_is_found_by_exactly_its_text() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("The Intro");
+        session.split();
+        typed(&mut session, "# The Intro");
+        let heading = session.document().blocks[1].id;
+        assert_eq!(
+            session.heading_cursor("The Intro"),
+            Some(Cursor {
+                block_id: heading,
+                offset: 0
+            })
+        );
+        assert_eq!(session.heading_cursor("the intro"), None);
+        assert_eq!(session.heading_cursor("The"), None);
     }
 }

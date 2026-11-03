@@ -594,8 +594,10 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
     let spans: Vec<(usize, usize, SpanStyle)> = block
         .spans
         .iter()
-        // A script link publishes as its text.
+        // A script link publishes as its text, as does a link to a kame document, which
+        // can't lead anywhere outside kame.
         .filter(|span| !matches!(&span.style, SpanStyle::Link { url } if is_script_url(url)))
+        .filter(|span| !matches!(span.style, SpanStyle::DocumentLink { .. }))
         .filter_map(|span| {
             let start = snap_up(text, span.start);
             let end = snap_down(text, span.end);
@@ -644,7 +646,9 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
                 wanted.push(match style {
                     SpanStyle::Bold => InlineTag::Bold,
                     SpanStyle::Italic => InlineTag::Italic,
-                    SpanStyle::Link { .. } => unreachable!("links are handled separately"),
+                    SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. } => {
+                        unreachable!("links are handled separately")
+                    }
                 });
             }
         }
@@ -1461,5 +1465,22 @@ mod tests {
             html.contains("<pre class=\"prose\">one\n  <strong>two</strong></pre>"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn a_document_link_publishes_as_its_text() {
+        let mut doc = Document::new("t");
+        let mut linked = paragraph("See the intro now.");
+        linked.spans = vec![Span {
+            start: 4,
+            end: 13,
+            style: SpanStyle::DocumentLink {
+                target: "notes/a.kame#Intro".to_string(),
+            },
+        }];
+        doc.blocks = vec![linked];
+        let html = to_html(&doc);
+        assert!(html.contains("<p>See the intro now.</p>"), "{html}");
+        assert!(!html.contains("a.kame"), "{html}");
     }
 }

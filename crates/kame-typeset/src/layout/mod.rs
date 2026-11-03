@@ -8,7 +8,7 @@ pub use annotations::{
 };
 pub use text::{
     heading_size_for, layout_block_marked, layout_block_with_align, BlockLayout, LayoutConfig,
-    LayoutLine, DEFAULT_BODY_SIZE, FOOTNOTE_MARK_EM,
+    LayoutLine, LayoutRun, DEFAULT_BODY_SIZE, FOOTNOTE_MARK_EM,
 };
 
 #[cfg(test)]

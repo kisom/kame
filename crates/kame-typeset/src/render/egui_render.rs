@@ -597,7 +597,7 @@ impl GlyphRenderer {
 /// a run sits after the last advance. Offsets that fall inside a multi-byte
 /// cluster resolve to the cluster's start. Empty layouts report `0.0`.
 pub fn caret_x(layout: &BlockLayout, offset: usize) -> f32 {
-    for run in &layout.runs {
+    for (index, run) in layout.runs.iter().enumerate() {
         let (Some(first), Some(last)) = (run.glyphs.first(), run.glyphs.last()) else {
             continue;
         };
@@ -606,18 +606,47 @@ pub fn caret_x(layout: &BlockLayout, offset: usize) -> f32 {
         if offset < base + first.start || offset > base + last.end {
             continue;
         }
-        if offset == base + last.end {
-            return last.x + last.w;
+        // Where a line wraps with no space between, the same offset ends this line and
+        // starts the next, and `caret_line` says the caret belongs to the next.
+        let next_starts_here = layout.runs.get(index + 1).is_some_and(|next| {
+            next.line_i == run.line_i
+                && next
+                    .glyphs
+                    .first()
+                    .is_some_and(|glyph| base + glyph.start == offset)
+        });
+        if next_starts_here {
+            continue;
         }
-        for glyph in run.glyphs.iter() {
-            if offset >= base + glyph.start && offset < base + glyph.end {
-                return glyph.x;
-            }
-        }
-        // Inside a cluster that has no exact start/end match (e.g. a ligature
-        // boundary): fall back to the next glyph's pen, then the run end.
+        return x_in_run(run, base, offset);
     }
     0.0
+}
+
+/// Where `offset` falls on `line`, even if it's the end of a line that the next carries on from.
+pub fn x_on_line(layout: &BlockLayout, line: &crate::layout::LayoutLine, offset: usize) -> f32 {
+    layout
+        .runs
+        .iter()
+        .find(|run| !run.glyphs.is_empty() && run.line_top == line.y)
+        .map_or_else(
+            || caret_x(layout, offset),
+            |run| x_in_run(run, layout.line_start(run.line_i), offset),
+        )
+}
+
+/// The x of `offset` within one run: on a glyph's pen, or after the last glyph's advance.
+fn x_in_run(run: &crate::layout::LayoutRun, base: usize, offset: usize) -> f32 {
+    let Some(last) = run.glyphs.last() else {
+        return 0.0;
+    };
+    if offset == base + last.end {
+        return last.x + last.w;
+    }
+    run.glyphs
+        .iter()
+        .find(|glyph| offset >= base + glyph.start && offset < base + glyph.end)
+        .map_or(0.0, |glyph| glyph.x)
 }
 
 /// The visual line covering `offset` (block-relative), falling forward to the
@@ -723,8 +752,8 @@ pub fn range_rects(layout: &BlockLayout, start: usize, end: usize) -> Vec<Rect> 
         if lo >= hi {
             continue;
         }
-        let x0 = caret_x(layout, lo);
-        let x1 = caret_x(layout, hi);
+        let x0 = x_on_line(layout, line, lo);
+        let x1 = x_on_line(layout, line, hi);
         if x1 <= x0 {
             continue;
         }
@@ -989,6 +1018,7 @@ mod tests {
             margin_width: 120.0,
             margin_size: 12.0,
             list_indent: 28.0,
+            hyphenate: false,
         }
     }
 
@@ -1331,6 +1361,80 @@ mod tests {
             1,
             "the removed block's cached layout is dropped"
         );
+    }
+
+    /// A paragraph and a measure where a line ends in a drawn hyphen, and that line's index.
+    fn hyphenated() -> (Block, BlockLayout, usize) {
+        let text = "Characteristically unexceptionable compositions accommodate extraordinarily \
+disproportionate considerations notwithstanding misunderstandings about internationalization \
+while straightforward arrangements occasionally demonstrate remarkably counterintuitive properties.";
+        let block = paragraph(text);
+        for width in (200..500).step_by(5) {
+            let mut renderer = GlyphRenderer::new(LayoutConfig {
+                body_width: width as f32,
+                hyphenate: true,
+                ..config()
+            });
+            let layout = renderer.layout(&block);
+            let found = layout
+                .runs
+                .iter()
+                .position(|run| run.glyphs.last().is_some_and(|g| g.start == g.end));
+            if let Some(index) = found {
+                return (block, layout, index);
+            }
+        }
+        panic!("no width gave a hyphen");
+    }
+
+    #[test]
+    fn a_caret_at_a_hyphen_sits_at_the_start_of_the_next_line() {
+        let (_, layout, index) = hyphenated();
+        let offset = layout.lines[index].end;
+        assert_eq!(layout.lines[index + 1].start, offset);
+        let line = caret_line(&layout, offset).unwrap();
+        assert_eq!(line.y, layout.lines[index + 1].y);
+        assert_eq!(caret_x(&layout, offset), layout.runs[index + 1].glyphs[0].x);
+    }
+
+    #[test]
+    fn a_selection_across_a_hyphen_covers_it() {
+        let (_, layout, index) = hyphenated();
+        let offset = layout.lines[index].end;
+        let rects = range_rects(&layout, offset - 2, offset + 2);
+        assert_eq!(rects.len(), 2, "{rects:?}");
+        let hyphen = layout.runs[index].glyphs.last().unwrap();
+        assert!((rects[0].right() - (hyphen.x + hyphen.w)).abs() < 0.01);
+        assert_eq!(rects[0].top(), layout.lines[index].y);
+        assert_eq!(rects[1].top(), layout.lines[index + 1].y);
+    }
+
+    #[test]
+    fn a_click_on_a_hyphen_lands_at_the_break() {
+        let (block, layout, index) = hyphenated();
+        let hyphen = layout.runs[index].glyphs.last().unwrap();
+        let offset = offset_at(
+            &layout,
+            hyphen.x + hyphen.w * 0.5,
+            layout.lines[index].y + 1.0,
+            block.text.len(),
+        );
+        assert_eq!(offset, layout.lines[index].end);
+    }
+
+    #[test]
+    fn a_line_wrapped_after_a_typed_hyphen_keeps_the_caret_on_the_next_line() {
+        let block = paragraph("aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff-gggggggg");
+        let mut renderer = GlyphRenderer::new(LayoutConfig {
+            body_width: 150.0,
+            ..config()
+        });
+        let layout = renderer.layout(&block);
+        assert!(layout.lines.len() >= 2);
+        let offset = layout.lines[0].end;
+        assert_eq!(layout.lines[1].start, offset);
+        assert_eq!(caret_line(&layout, offset).unwrap().y, layout.lines[1].y);
+        assert_eq!(caret_x(&layout, offset), layout.runs[1].glyphs[0].x);
     }
 
     #[test]

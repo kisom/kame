@@ -27,7 +27,7 @@ Both `cargo build` and `cargo test` must pass. The test suite is headless (no di
 
 ## Typography
 
-Headings = Crimson Pro; body = EB Garamond; code = IBM Plex Mono. Fonts are `include_bytes!`-embedded from `crates/kame-typeset/fonts/` (10 faces: CrimsonPro Regular/Bold/Italic, EBGaramond Regular/Bold/Italic/SemiBold, IBMPlexMono Regular/Bold/Italic) — never system font paths. Body shapes with `Shaping::Advanced` + `Align::Justified`. Punctuation hangs outside the measure (`hang_line`), except in code and prose blocks, so paint and hit-test from `BlockLayout::runs`, not `buffer.layout_runs()`.
+Headings = Crimson Pro; body = EB Garamond; code = IBM Plex Mono. Fonts are `include_bytes!`-embedded from `crates/kame-typeset/fonts/` (10 faces: CrimsonPro Regular/Bold/Italic, EBGaramond Regular/Bold/Italic/SemiBold, IBMPlexMono Regular/Bold/Italic) — never system font paths. Body shapes with `Shaping::Advanced` + `Align::Justified`. Punctuation hangs outside the measure (`hang_line`), except in code and prose blocks, so paint and hit-test from `BlockLayout::runs`, not `buffer.layout_runs()`. Justified left-to-right paragraphs are set by kame itself (`layout/breaks.rs`), with any hyphens drawn as glyphs with `start == end` that stand for no text.
 
 ## Module map
 
@@ -46,7 +46,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-typeset` — how a document looks, reading it and never changing it:
 
-- `layout/` — cosmic-text block shaping, anchor→Y mapping, marginalia placement
+- `layout/` — cosmic-text block shaping, choosing justified lines, anchor→Y mapping, marginalia placement
 - `render/` — swash glyph-atlas rasterization + egui texture upload
 - `fonts/` — the embedded faces
 

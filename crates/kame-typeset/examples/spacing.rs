@@ -2,8 +2,10 @@
 //! `layout/breaks.rs` can be checked against new writing:
 //!
 //! ```sh
-//! cargo run --release -p kame-typeset --example spacing -- ESSAY.kame [BODY_SIZE]
+//! cargo run --release -p kame-typeset --example spacing -- ESSAY.kame [BODY_SIZE [WIDTH]]
 //! ```
+//!
+//! The width follows the window in the app, and 565 is the width at its first window size.
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -20,6 +22,7 @@ struct Tally {
     spaces: Vec<f32>,
     lone_words: usize,
     lines: usize,
+    hyphens: usize,
 }
 
 impl Tally {
@@ -42,11 +45,12 @@ impl Tally {
         let least = self.spaces.iter().fold(9.0_f32, |m, s| m.min(*s));
         println!(
             "  {name:<6} {:>4} lines  over 1.5x {:>5.1}%  over 2x {:>4.1}%  widest {widest:.2}x  \
-             tightest {least:.2}x  under 0.9x {tight:>4.1}%  words alone {}",
+             tightest {least:.2}x  under 0.9x {tight:>4.1}%  words alone {}  hyphens {}",
             self.lines,
             over(1.5),
             over(2.0),
             self.lone_words,
+            self.hyphens,
         );
     }
 }
@@ -65,10 +69,11 @@ fn tally_set(tally: &mut Tally, block: &Block, layout: &BlockLayout, natural: f3
             continue;
         }
         let base = layout.line_start(run.line_i);
+        tally.hyphens += run.glyphs.iter().filter(|g| g.start == g.end).count();
         let shares: Vec<f32> = run
             .glyphs
             .iter()
-            .filter(|g| is_space(block, base, g.start, g.end))
+            .filter(|g| g.start < g.end && is_space(block, base, g.start, g.end))
             .map(|g| g.w / natural)
             .collect();
         let last = run.glyphs.last().unwrap();
@@ -127,7 +132,10 @@ fn main() {
         fs.db_mut()
             .load_font_data(std::fs::read(font.unwrap().path()).unwrap());
     }
-    let config = LayoutConfig::with_body_size(size);
+    let mut config = LayoutConfig::with_body_size(size);
+    if let Some(width) = args.get(3) {
+        config.body_width = width.parse().expect("a width");
+    }
     let width = config.body_width;
 
     let mut marks: HashMap<_, Vec<usize>> = HashMap::new();
@@ -164,7 +172,7 @@ fn main() {
         .map(|b| b.text.split_whitespace().count())
         .sum();
     println!(
-        "{} paragraphs, {words} words, type {size}",
+        "{} paragraphs, {words} words, type {size}, width {width}",
         paragraphs.len()
     );
 

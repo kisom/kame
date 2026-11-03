@@ -408,6 +408,7 @@ mod tests {
             margin_width: 120.0,
             margin_size: 12.0,
             list_indent: 28.0,
+            hyphenate: false,
         }
     }
 

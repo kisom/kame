@@ -10,6 +10,10 @@ use super::breaks::{set_lines, Break, Item, Run};
 use crate::model::bare_link_ranges;
 use crate::model::{Block, BlockId, BlockKind, SpanStyle};
 
+/// The shortest word that can take a hyphen, and the fewest letters on either side of one.
+const HYPHEN_SHORTEST_WORD: usize = 6;
+const HYPHEN_SHORTEST_PART: usize = 3;
+
 /// Body face (paragraphs, list items); loaded by the caller into the
 /// `FontSystem`.
 const BODY_FAMILY: &str = "EB Garamond";
@@ -31,6 +35,8 @@ pub struct LayoutConfig {
     pub heading_size: f32,
     pub margin_width: f32,
     pub margin_size: f32,
+    /// Whether justified paragraphs can break a word with a drawn hyphen.
+    pub hyphenate: bool,
     pub list_indent: f32,
 }
 
@@ -68,6 +74,7 @@ impl LayoutConfig {
             margin_width: DEFAULT_MARGIN_WIDTH,
             margin_size: body_size * MARGIN_RATIO,
             list_indent: body_size * LIST_INDENT_RATIO,
+            hyphenate: true,
         }
     }
 }
@@ -283,7 +290,12 @@ pub fn layout_block_marked_with_align(
         buffer.set_rich_text(spans.clone(), &attrs, Shaping::Advanced, Some(Align::Left));
         buffer.set_wrap(Wrap::None);
         buffer.shape_until_scroll(font_system, false);
-        set_own_lines(&buffer, block, width)
+        let hyphens = config.hyphenate.then_some(Hyphens {
+            attrs: &attrs,
+            metrics: Metrics::new(size, line_height),
+            shaped: [None, None, None, None],
+        });
+        set_own_lines(font_system, &buffer, block, width, hyphens)
     } else {
         None
     };
@@ -364,6 +376,8 @@ fn measured_run(
     glyphs: &[cosmic_text::LayoutGlyph],
     text: &str,
     exact: impl Fn(&cosmic_text::LayoutGlyph) -> bool,
+    hyphen_points: &[usize],
+    hyphen_width: f32,
 ) -> Run {
     let items = glyphs
         .iter()
@@ -387,27 +401,40 @@ fn measured_run(
         .collect();
     // The same opportunities the engine wraps at. The last is the end of the text, which is
     // no glyph's start and needs no candidate.
-    let candidates = unicode_linebreak::linebreaks(text)
-        .filter_map(|(offset, _)| {
-            let at = glyphs.partition_point(|glyph| glyph.start < offset);
-            let starts_here = at > 0 && glyphs.get(at).is_some_and(|glyph| glyph.start == offset);
-            starts_here.then_some(Break { at, hyphen: false })
-        })
+    let glyph_at = |offset: usize| {
+        let at = glyphs.partition_point(|glyph| glyph.start < offset);
+        // A point inside a ligature is no glyph's start, so a ligature is never split.
+        (at > 0 && glyphs.get(at).is_some_and(|glyph| glyph.start == offset)).then_some(at)
+    };
+    let mut candidates: Vec<Break> = unicode_linebreak::linebreaks(text)
+        .filter_map(|(offset, _)| glyph_at(offset))
+        .map(|at| Break { at, hyphen: false })
         .collect();
+    candidates.extend(
+        hyphen_points
+            .iter()
+            .filter_map(|offset| glyph_at(*offset))
+            .map(|at| Break { at, hyphen: true }),
+    );
+    // A whole break sorts first, so it wins where the two coincide.
+    candidates.sort_by_key(|candidate| (candidate.at, candidate.hyphen));
+    candidates.dedup_by_key(|candidate| candidate.at);
     Run {
         items,
         candidates,
-        hyphen_width: 0.0,
-        hyphen_hang: 0.0,
+        hyphen_width: f64::from(hyphen_width),
+        hyphen_hang: f64::from(right_hang('-') * hyphen_width),
     }
 }
 
 /// Chooses the lines of text shaped on one long line and builds what is drawn. Right-to-left text
 /// stays with the engine, so this answers `None` for any.
 fn set_own_lines(
+    font_system: &mut FontSystem,
     buffer: &Buffer,
     block: &Block,
     width: f32,
+    mut hyphens: Option<Hyphens>,
 ) -> Option<(Vec<LayoutRun>, Vec<LayoutLine>)> {
     let shaped: Vec<_> = buffer.layout_runs().collect();
     if shaped
@@ -443,7 +470,17 @@ fn set_own_lines(
             continue;
         }
         let exact = |glyph: &cosmic_text::LayoutGlyph| in_code_span(block, base, glyph);
-        let measured = measured_run(run.glyphs, run.text, exact);
+        let (points, plain_hyphen) = match &mut hyphens {
+            Some(hyphens) => (
+                hyphen_points(run.text)
+                    .into_iter()
+                    .filter(|point| !keeps_words_whole(block, base + point))
+                    .collect(),
+                hyphens.glyph(font_system, false, false).w,
+            ),
+            None => (Vec::new(), 0.0),
+        };
+        let measured = measured_run(run.glyphs, run.text, exact, &points, plain_hyphen);
         let breaks = set_lines(&measured, f64::from(width));
         let mut start = 0;
         for (index, line_break) in breaks.iter().enumerate() {
@@ -461,9 +498,37 @@ fn set_own_lines(
             for glyph in &mut glyphs {
                 glyph.x -= origin;
             }
+            // A hyphen is in the word's style, and stands for no text.
+            let hyphen = hyphens
+                .as_mut()
+                .filter(|_| line_break.hyphen)
+                .map(|hyphens| {
+                    let word = &glyphs[glyphs.len() - 1];
+                    let (from, to) = (base + word.start, base + word.end);
+                    let covered = |style: SpanStyle| {
+                        block
+                            .spans
+                            .iter()
+                            .any(|span| span.style == style && span.start <= from && to <= span.end)
+                    };
+                    let mut hyphen = hyphens.glyph(
+                        font_system,
+                        covered(SpanStyle::Bold),
+                        covered(SpanStyle::Italic),
+                    );
+                    hyphen.start = word.end;
+                    hyphen.end = word.end;
+                    hyphen
+                });
             let natural: f32 = glyphs.iter().map(|glyph| glyph.w).sum();
             let justified = !last_of_run || natural > width;
-            hang_line(&mut glyphs, run.text, width, justified, exact);
+            let hyphen_width = hyphen.as_ref().map_or(0.0, |hyphen| hyphen.w);
+            hang_line(&mut glyphs, run.text, width, justified, exact, hyphen_width);
+            if let Some(mut hyphen) = hyphen {
+                let word = &glyphs[glyphs.len() - 1];
+                hyphen.x = word.x + word.w;
+                glyphs.push(hyphen);
+            }
             lines.push(LayoutLine {
                 y: top,
                 height,
@@ -503,7 +568,7 @@ fn drawn_runs(buffer: &Buffer, block: &Block, width: f32, align: Align) -> Vec<L
                 let justified = align == Align::Justified && !last_of_paragraph;
                 let base = starts.get(run.line_i).copied().unwrap_or(0);
                 let exact = |glyph: &cosmic_text::LayoutGlyph| in_code_span(block, base, glyph);
-                hang_line(&mut glyphs, run.text, width, justified, exact);
+                hang_line(&mut glyphs, run.text, width, justified, exact, 0.0);
             }
             LayoutRun {
                 line_i: run.line_i,
@@ -529,7 +594,7 @@ fn measured_first_fit(
     };
     let layout = layout_block_with_align(font_system, block, &unbounded, Align::Left);
     let glyphs = &layout.runs[0].glyphs;
-    let run = measured_run(glyphs, &block.text, |_| false);
+    let run = measured_run(glyphs, &block.text, |_| false, &[], 0.0);
     let mut starts: Vec<usize> = super::breaks::first_fit(&run, f64::from(config.body_width))
         .iter()
         .map(|line_break| {
@@ -541,6 +606,86 @@ fn measured_first_fit(
     starts.pop();
     starts
 }
+
+/// Where the words of `text` can take a hyphen, by byte offset. Only words of lowercase letters
+/// qualify, which leaves out names, acronyms and anything with a digit or an apostrophe.
+fn hyphen_points(text: &str) -> Vec<usize> {
+    let mut points = Vec::new();
+    let mut word_start = 0;
+    for word in text.split_inclusive(char::is_whitespace) {
+        let letters = word.trim_matches(|c: char| !c.is_alphabetic());
+        let lead = word.len() - word.trim_start_matches(|c: char| !c.is_alphabetic()).len();
+        let count = letters.chars().count();
+        if count >= HYPHEN_SHORTEST_WORD && letters.chars().all(char::is_lowercase) {
+            let mut at = word_start + lead;
+            let mut before = 0;
+            let syllables: Vec<&str> = hypher::hyphenate(letters, hypher::Lang::English).collect();
+            for syllable in &syllables[..syllables.len() - 1] {
+                at += syllable.len();
+                before += syllable.chars().count();
+                if before >= HYPHEN_SHORTEST_PART && count - before >= HYPHEN_SHORTEST_PART {
+                    points.push(at);
+                }
+            }
+        }
+        word_start += word.len();
+    }
+    points
+}
+
+/// Whether `offset` in a block is in code or a link, whose words stay whole.
+fn keeps_words_whole(block: &Block, offset: usize) -> bool {
+    block.spans.iter().any(|span| {
+        matches!(
+            span.style,
+            SpanStyle::Code | SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
+        ) && span.start <= offset
+            && offset <= span.end
+    }) || bare_link_ranges(block)
+        .iter()
+        .any(|(start, end)| *start <= offset && offset <= *end)
+}
+
+/// A hyphen in each style, shaped when first needed.
+struct Hyphens<'a> {
+    attrs: &'a Attrs<'a>,
+    metrics: Metrics,
+    shaped: [Option<cosmic_text::LayoutGlyph>; 4],
+}
+
+impl Hyphens<'_> {
+    fn glyph(&mut self, fs: &mut FontSystem, bold: bool, italic: bool) -> cosmic_text::LayoutGlyph {
+        let index = usize::from(bold) + 2 * usize::from(italic);
+        if let Some(glyph) = &self.shaped[index] {
+            return glyph.clone();
+        }
+        let mut attrs = self.attrs.clone();
+        if bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        if italic {
+            attrs = attrs.style(Style::Italic);
+        }
+        let mut buffer = Buffer::new(fs, self.metrics);
+        buffer.set_size(None, None);
+        buffer.set_rich_text(
+            [("-", attrs.clone())],
+            &attrs,
+            Shaping::Advanced,
+            Some(Align::Left),
+        );
+        buffer.shape_until_scroll(fs, false);
+        let glyph = buffer
+            .layout_runs()
+            .next()
+            .and_then(|run| run.glyphs.first().cloned())
+            .expect("a hyphen shapes to a glyph");
+        self.shaped[index] = Some(glyph.clone());
+        glyph
+    }
+}
+
+/// How much of an opening mark's width hangs left of the measure.
 
 /// How much of an opening mark's width hangs left of the measure.
 fn left_hang(mark: char) -> f32 {
@@ -565,13 +710,15 @@ fn right_hang(mark: char) -> f32 {
 
 /// Moves a line's glyphs so its punctuation hangs outside the measure, which keeps the
 /// edge of the text looking straight. A justified line is stretched by what was hung, so
-/// that its words still reach both edges.
+/// that its words still reach both edges, and closes up if it starts out too wide. A line
+/// that will end in a drawn hyphen allows for its width, and the caller adds it after.
 fn hang_line(
     glyphs: &mut [cosmic_text::LayoutGlyph],
     text: &str,
     width: f32,
     justified: bool,
     exact: impl Fn(&cosmic_text::LayoutGlyph) -> bool,
+    hyphen_width: f32,
 ) {
     let glyph_text = |glyph: &cosmic_text::LayoutGlyph| &text[glyph.start..glyph.end];
     let Some(last) = glyphs
@@ -589,7 +736,9 @@ fn hang_line(
         glyph_text(&glyphs[0]).chars().next().map_or(0.0, left_hang) * glyphs[0].w
     };
     // Two marks can end a line together, as in a period and a closing quote.
-    let right: f32 = if justified {
+    let right: f32 = if hyphen_width > 0.0 {
+        right_hang('-') * hyphen_width
+    } else if justified {
         glyphs[..=last]
             .iter()
             .rev()
@@ -622,7 +771,7 @@ fn hang_line(
     // What the line has to grow by, shared between its spaces. A single word has none,
     // and keeps its right edge. A ragged line has no need to grow.
     let spread = if justified && spaces > 0 {
-        let end = glyphs[last].x + glyphs[last].w;
+        let end = glyphs[last].x + glyphs[last].w + hyphen_width;
         (width - end + left + right) / spaces as f32
     } else {
         0.0
@@ -886,6 +1035,7 @@ dance, on a page, of pen, eye and hand.";
             margin_width: 120.0,
             margin_size: 12.0,
             list_indent: 28.0,
+            hyphenate: false,
         }
     }
 
@@ -1147,6 +1297,159 @@ around at this measure.\n\nAnd one after a blank line."
             let wrapped: Vec<usize> = engine.lines.iter().skip(1).map(|l| l.start).collect();
             let starts = measured_first_fit(&mut fs, &block, &config);
             assert_eq!(starts, wrapped, "at width {width}");
+        }
+    }
+
+    /// The hyphens kame has drawn: glyphs that stand for no text.
+    fn hyphens(layout: &BlockLayout) -> Vec<(usize, cosmic_text::LayoutGlyph)> {
+        let mut found = Vec::new();
+        for (index, run) in layout.runs.iter().enumerate() {
+            for glyph in run.glyphs.iter().filter(|g| g.start == g.end) {
+                found.push((index, glyph.clone()));
+            }
+        }
+        found
+    }
+
+    fn at_width(width: f32) -> LayoutConfig {
+        LayoutConfig {
+            body_width: width,
+            ..LayoutConfig::with_body_size(16.0)
+        }
+    }
+
+    #[test]
+    fn hyphens_are_for_long_lowercase_words_only() {
+        assert!(hyphen_points("word").is_empty());
+        assert!(hyphen_points("Extraordinary").is_empty(), "a name");
+        assert!(hyphen_points("NATIONALIZATION").is_empty());
+        assert!(hyphen_points("shouldn't've").is_empty());
+        assert!(hyphen_points("abcd1234abcd").is_empty());
+        let points = hyphen_points("an extraordinary, word");
+        assert!(!points.is_empty());
+        for point in points {
+            let before = point - 3;
+            assert!(before >= 3, "under three letters before {point}");
+            assert!(
+                point <= 3 + "extraordinary".len() - 3,
+                "under three after {point}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_start_or_end_is_never_split_off() {
+        // English patterns allow be-tween, al-ways and an-other.
+        for word in ["between", "always", "another", "about", "taking"] {
+            for point in hyphen_points(word) {
+                assert!(point >= 3 && word.len() - point >= 3, "{word} at {point}");
+            }
+        }
+        assert!(hyphen_points("between").is_empty() || hyphen_points("between")[0] >= 3);
+    }
+
+    #[test]
+    fn long_words_are_hyphenated_when_lines_would_be_loose() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(LONG);
+        let found: usize = [240.0, 280.0, 320.0, 360.0]
+            .into_iter()
+            .map(|width| hyphens(&layout_block(&mut fs, &block, &at_width(width))).len())
+            .sum();
+        assert!(found > 0, "no hyphen at any width");
+    }
+
+    #[test]
+    fn hyphens_can_be_turned_off() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(LONG);
+        for width in [240.0, 280.0, 320.0, 360.0] {
+            let config = LayoutConfig {
+                hyphenate: false,
+                ..at_width(width)
+            };
+            assert!(hyphens(&layout_block(&mut fs, &block, &config)).is_empty());
+        }
+    }
+
+    /// A width where `block` gets a hyphen.
+    fn hyphenating(fs: &mut FontSystem, block: &Block) -> (BlockLayout, LayoutConfig) {
+        for width in (200..500).step_by(5) {
+            let config = at_width(width as f32);
+            let layout = layout_block(fs, block, &config);
+            if !hyphens(&layout).is_empty() {
+                return (layout, config);
+            }
+        }
+        panic!("no width gave a hyphen");
+    }
+
+    #[test]
+    fn a_hyphen_stands_where_its_word_breaks_and_hangs() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(LONG);
+        let (layout, config) = hyphenating(&mut fs, &block);
+        for (index, hyphen) in hyphens(&layout) {
+            let run = &layout.runs[index];
+            assert_eq!(run.glyphs.last().unwrap().start, hyphen.start, "not last");
+            let word = &run.glyphs[run.glyphs.len() - 2];
+            assert_eq!(word.end, hyphen.start);
+            assert!((word.x + word.w - hyphen.x).abs() < 0.01);
+            // Most of it hangs past the measure, with the word reaching it nearly.
+            let end = hyphen.x + hyphen.w;
+            let hang = end - config.body_width;
+            assert!((hang - 0.7 * hyphen.w).abs() < 0.5, "hangs by {hang}");
+            // The next line carries on from the same offset.
+            let next = layout.runs[index + 1].glyphs.first().unwrap();
+            assert_eq!(next.start, hyphen.start);
+            assert_eq!(layout.lines[index].end, layout.lines[index + 1].start);
+        }
+    }
+
+    #[test]
+    fn a_hyphen_takes_the_style_of_its_word() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut block = paragraph(LONG);
+        block.spans.push(Span {
+            start: 0,
+            end: LONG.len(),
+            style: SpanStyle::Italic,
+        });
+        let (layout, _) = hyphenating(&mut fs, &block);
+        for (index, hyphen) in hyphens(&layout) {
+            let run = &layout.runs[index];
+            let word = &run.glyphs[run.glyphs.len() - 2];
+            assert_eq!(hyphen.font_id, word.font_id, "an upright hyphen");
+        }
+    }
+
+    #[test]
+    fn nothing_in_code_or_a_link_is_hyphenated() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        for style in [
+            SpanStyle::Code,
+            SpanStyle::Link {
+                url: "https://a.b".to_string(),
+            },
+            SpanStyle::DocumentLink {
+                target: "other".to_string(),
+            },
+        ] {
+            let mut block = paragraph(LONG);
+            block.spans.push(Span {
+                start: 0,
+                end: LONG.len(),
+                style,
+            });
+            for width in [240.0, 280.0, 320.0, 360.0] {
+                let layout = layout_block(&mut fs, &block, &at_width(width));
+                assert!(hyphens(&layout).is_empty());
+            }
         }
     }
 
@@ -1794,6 +2097,7 @@ twenty-four twenty-five twenty-six twenty-seven";
         load_fonts(&mut fs);
         let mut config = LayoutConfig::with_body_size(16.0);
         config.body_width = width;
+        config.hyphenate = false;
         let block = kind_block(kind, text);
         let layout = layout_block_marked(&mut fs, &block, &config, &[]);
         (block, layout, width)

@@ -107,6 +107,9 @@ typewriter. Hovering one names it.
 
 Held keys do not auto-repeat a toggle: one press is one flip.
 
+View > Hyphenate turns off the hyphens kame draws to even out justified paragraphs. They are only
+drawn, so they never reach your text, copies or exports.
+
 Dark mode (`Ctrl-Shift-D`) is separate from these: a persisted preference
 (saved to the config and surviving a restart), not a transient view mode.
 

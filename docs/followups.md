@@ -28,7 +28,7 @@ Open work, most pressing first. Tick items off or delete them as they land.
   text, so they wouldn't touch byte offsets, but need `hypher` and a language; a word too long to fit
   is the case only they fix, so judge them after the rest. How the movement feels can only be judged
   in the app. The study left out the room footnote marks take. Designed in
-  `docs/superpowers/specs/2026-11-03-word-spacing-design.md`.
+  `docs/superpowers/specs/2026-11-03-word-spacing-design.md`, and built on `word-spacing`.
 
   Tuned on the two essays, which are the writing this is for, with the devlog only as a check. Best so
   far at type 16: look one line ahead, let spaces close to no less than 90%, and charge a high cost for

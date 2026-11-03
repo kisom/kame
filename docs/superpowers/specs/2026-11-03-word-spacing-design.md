@@ -106,9 +106,14 @@ Added to that:
 
 The last line of a paragraph costs nothing unless it has to close up.
 
-To set a line: run first fit two lines forward from `i` to find a stopping point, find the cheapest way
-to reach it, keep only the first break, and carry on from there. These numbers come from a search over
-look-ahead, closing limit and hyphen cost. They should live as named constants in one place.
+To set a line: run first fit three lines forward from `i` to find a stopping point, whose own line costs
+nothing, find the cheapest way to reach it, keep only the first break, and carry on from there. These
+numbers come from a search over look-ahead, closing limit and hyphen cost. They live as named constants in
+`layout/breaks.rs`.
+
+A line with no spaces that falls short costs 10^12. The study charged it 10^9 and never counted such lines,
+and in building this that stranded a single word on a short line to avoid a loose neighbour, so the figures
+in section 4 predate this correction. Section 13 has them measured on the finished layout.
 
 ## 7. Hyphens
 
@@ -197,7 +202,30 @@ Each stage is its own commit on one branch, tried in the app before it lands, on
 
 - **The sample is small.** About 130 lines chose these numbers, and one line is nearly 1%. The devlog
   improving too is reassuring, but the numbers may want adjusting with use.
-- **How it feels.** The movement figures are counts, and nobody has typed with this yet. Stage 1 is the
-  first chance to find out.
-- **Footnote marks.** Spacing was measured on text without the room those marks take, so paragraphs with
-  footnotes may break slightly differently.
+- **How it feels.** The movement figures are counts, and only a probe has typed with this so far.
+- **The End key at a hyphen.** The line's end is the same offset as the next line's start, so End lands
+  at the start of the next line. A line wrapped after a typed hyphen has always done this.
+- **Footnote marks.** The figures in section 4 left out the room those marks take. Section 13 includes it.
+
+## 13. Measured on the finished layout
+
+From `cargo run --release -p kame-typeset --example spacing`, at type 16 with footnote marks and the
+final costs. Each cell reads today, then now, as `CommandingHeights` / `AgainstBrainrot`. The measure
+follows the window in the app, and 565 is the width at its first window size.
+
+| Width | Spaces over 1.5x | Spaces over 2x | Hyphens |
+|---|---|---|---|
+| 480 | 41 to 34% / 47 to 20% | 16 to 4.9% / 15 to 1.3% | 9 / 21 |
+| 565 | 29 to 7.2% / 35 to 12% | 13% to none / 13 to 0.8% | 4 / 13 |
+| 640 | 30 to 6.6% / 23 to 6.4% | 6.6% to none / 4.5% to none | 4 / 9 |
+| 720 | 17 to 5.7% / 24 to 7.2% | 1.9% to none / 3.0% to none | 3 / 5 |
+
+No word was left alone on a line at any width, and no space went under 90%. Across these runs no word
+typed moved an earlier line, and at most 7 of 2290 removed words moved a line above, again skipping the
+nearest lines. A counter check at a look-ahead of four moved a line for 171 of 1190 removed words, so the
+tool does see movement. The narrower the measure, the less there is to gain, so a narrow window will still
+show loose lines.
+
+Layout of the slowest paragraph takes about 2 ms in a release build, about the same as the engine, and
+34 ms against 12 ms in a debug build. Only the edited paragraph is laid out again. At type 18 and width 640,
+`AgainstBrainrot` goes from 39% to 14% over 1.5x and from 13% to 0.8% over 2x.

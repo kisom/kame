@@ -33,7 +33,8 @@ use crate::model::{
 };
 use crate::render::egui_render::{
     adjacent_line, caret_line, caret_x, command_for_event, install_fonts, offset_at, range_rects,
-    AnnotationTextureCache, Command, EscapePrefix, GlyphRenderer, LayoutCache, TextureCache,
+    x_on_line, AnnotationTextureCache, Command, EscapePrefix, GlyphRenderer, LayoutCache,
+    TextureCache,
 };
 use crate::storage::{Db, SnapshotMeta};
 
@@ -1195,6 +1196,7 @@ enum MenuAction {
     Annotate(AnnotationKind),
     TypeSize(f32),
     ToggleDark,
+    ToggleHyphenate,
     Mode(ModeCommand),
     Help,
 }
@@ -1334,10 +1336,17 @@ struct KameConfig {
     /// The author new documents start with.
     #[serde(default)]
     author: String,
+    /// Whether justified paragraphs can hyphenate words.
+    #[serde(default = "default_hyphenate")]
+    hyphenate: bool,
 }
 
 fn default_body_size() -> f32 {
     DEFAULT_BODY_SIZE
+}
+
+fn default_hyphenate() -> bool {
+    true
 }
 
 impl Default for KameConfig {
@@ -1347,6 +1356,7 @@ impl Default for KameConfig {
             dark: false,
             last_document: None,
             author: String::new(),
+            hyphenate: true,
         }
     }
 }
@@ -1416,6 +1426,7 @@ fn main() -> eframe::Result {
     let config = load_config();
     let body_size = config.body_size;
     let dark = config.dark;
+    let config_hyphenate = config.hyphenate;
     // Two windows on one file would overwrite each other's edits, so only the first
     // running kame goes back to the last document.
     let first = config_dir().is_none_or(|dir| {
@@ -1456,6 +1467,7 @@ fn main() -> eframe::Result {
                                 dark,
                                 last_document: None,
                                 author: config_author.clone(),
+                                hyphenate: config_hyphenate,
                             });
                         }
                         opened
@@ -1490,6 +1502,7 @@ fn main() -> eframe::Result {
             dark,
             last_document,
             default_author,
+            config_hyphenate,
         )))
     });
 
@@ -1794,7 +1807,7 @@ fn superscript_origin(
         .iter()
         .find(|line| end >= line.start && end <= line.end);
     let (line, x) = match end_line {
-        Some(line) => (*line, caret_x(layout, end)),
+        Some(line) => (*line, x_on_line(layout, line, end)),
         None => (
             caret_line(layout, anchor_start)?,
             caret_x(layout, anchor_start),
@@ -1810,6 +1823,8 @@ fn superscript_origin(
 
 struct KameApp {
     session: Session,
+    /// Whether justified paragraphs can hyphenate words.
+    hyphenate: bool,
     renderer: GlyphRenderer,
     layouts: LayoutCache,
     textures: TextureCache,
@@ -1919,6 +1934,7 @@ impl KameApp {
         dark: bool,
         last_document: Option<PathBuf>,
         default_author: String,
+        hyphenate: bool,
     ) -> KameApp {
         cc.egui_ctx.set_visuals(if dark {
             egui::Visuals::dark()
@@ -1932,6 +1948,7 @@ impl KameApp {
         KameApp {
             session,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
+            hyphenate,
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
             annotation_textures: AnnotationTextureCache::new(),
@@ -2187,6 +2204,7 @@ impl KameApp {
             dark: self.dark,
             last_document: self.last_document.path.clone(),
             author: self.default_author.clone(),
+            hyphenate: self.hyphenate,
         });
     }
 
@@ -3016,6 +3034,9 @@ impl KameApp {
                     if menu_item(ui, "Dark mode", Some("Ctrl-Shift-D"), self.dark) {
                         action = Some(MenuAction::ToggleDark);
                     }
+                    if menu_item(ui, "Hyphenate", None, self.hyphenate) {
+                        action = Some(MenuAction::ToggleHyphenate);
+                    }
                     ui.separator();
                     for (label, mode, shortcut) in [
                         ("Fullscreen", ModeCommand::Fullscreen, "F11"),
@@ -3123,6 +3144,11 @@ impl KameApp {
             }
             MenuAction::TypeSize(step) => self.adjust_font_size(step),
             MenuAction::ToggleDark => self.apply_dark_toggle(ctx),
+            MenuAction::ToggleHyphenate => {
+                // The next frame's config differs, which drops everything shaped.
+                self.hyphenate = !self.hyphenate;
+                self.persist();
+            }
             MenuAction::Mode(mode) => self.apply_mode(ctx, mode),
             MenuAction::Help => self.show_help = true,
         }
@@ -5145,6 +5171,7 @@ impl eframe::App for KameApp {
         let config = LayoutConfig {
             body_width,
             margin_width,
+            hyphenate: self.hyphenate,
             ..base
         };
         if self.renderer.set_config(config) {
@@ -5557,6 +5584,7 @@ mod tests {
             dark: true,
             last_document: Some(PathBuf::from("/notes/essay.kame")),
             author: "K. Isom".to_string(),
+            hyphenate: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         let read = serde_json::from_str::<KameConfig>(&json).unwrap();
@@ -5564,12 +5592,15 @@ mod tests {
         assert!(read.dark);
         assert_eq!(read.last_document, config.last_document);
         assert_eq!(read.author, "K. Isom");
+        assert!(!read.hyphenate);
 
         // A config written by an older build (no body_size, no dark) still
-        // parses and defaults to light, body-size 16.
+        // parses and defaults to light, body-size 16, hyphenating.
         let old = serde_json::from_str::<KameConfig>("{}").unwrap();
         assert_eq!(old.body_size, DEFAULT_BODY_SIZE);
         assert!(!old.dark);
+        assert!(old.hyphenate);
+        assert!(KameConfig::default().hyphenate);
     }
 
     #[test]
@@ -6340,7 +6371,11 @@ mod tests {
 
     #[test]
     fn a_footnote_superscript_clears_the_anchored_word() {
-        let mut renderer = GlyphRenderer::new(LayoutConfig::default());
+        // A wrapped word's end, so no hyphen comes into it.
+        let mut renderer = GlyphRenderer::new(LayoutConfig {
+            hyphenate: false,
+            ..LayoutConfig::default()
+        });
         let body_width = renderer.config().body_width;
         let block = Block {
             id: uuid::Uuid::new_v4(),

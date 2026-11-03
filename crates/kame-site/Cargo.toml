@@ -1,0 +1,22 @@
+[package]
+name = "kame-site"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "kame-site"
+path = "src/main.rs"
+
+[dependencies]
+kame-core = { path = "../kame-core" }
+yaml_serde = "0.10"
+minijinja = "3"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }
+roxmltree = "0.21"

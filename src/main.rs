@@ -222,6 +222,36 @@ fn tabs_to_text(events: &mut Vec<egui::Event>) {
     });
 }
 
+/// The document to reopen on the next launch that names none.
+struct LastDocument {
+    path: Option<PathBuf>,
+    /// The session path `path` was last taken from.
+    seen: Option<PathBuf>,
+}
+
+impl LastDocument {
+    fn new(path: Option<PathBuf>) -> LastDocument {
+        LastDocument { path, seen: None }
+    }
+
+    /// Notes the file behind the session. Returns whether that changed anything to save.
+    fn note(&mut self, current: &Path) -> bool {
+        if self.seen.as_deref() == Some(current) {
+            return false;
+        }
+        // A launch can name a relative path, which means nothing to the next one.
+        self.path = Some(std::path::absolute(current).unwrap_or_else(|_| current.to_path_buf()));
+        self.seen = Some(current.to_path_buf());
+        true
+    }
+
+    /// A new document has no file to come back to, so the next launch starts empty.
+    fn forget(&mut self) {
+        self.path = None;
+        self.seen = None;
+    }
+}
+
 /// Removes the keys egui moves the focus on, for when there is nowhere useful to move it.
 fn drop_tabs(events: &mut Vec<egui::Event>) {
     events.retain(|event| {
@@ -3324,10 +3354,7 @@ struct KameApp {
     /// The caret and scroll last written to the document.
     saved_position: Option<(Cursor, f32)>,
     position_saved_at: std::time::Instant,
-    /// The document to reopen on the next launch that names none.
-    last_document: Option<PathBuf>,
-    /// The session path `last_document` was last taken from.
-    remembered_path: Option<PathBuf>,
+    last_document: LastDocument,
     /// The "Snapshot Now" label prompt, when it is open.
     snapshot_prompt: Option<SnapshotPrompt>,
     /// The "Open" path prompt (Ctrl-O), when it is open.
@@ -3401,8 +3428,7 @@ impl KameApp {
             page_scroll: 0.0,
             saved_position: None,
             position_saved_at: std::time::Instant::now(),
-            last_document,
-            remembered_path: None,
+            last_document: LastDocument::new(last_document),
             snapshot_prompt: None,
             open_prompt: None,
             image_prompt: None,
@@ -3625,7 +3651,7 @@ impl KameApp {
         save_config(&KameConfig {
             body_size: self.body_size,
             dark: self.dark,
-            last_document: self.last_document.clone(),
+            last_document: self.last_document.path.clone(),
         });
     }
 
@@ -3636,14 +3662,9 @@ impl KameApp {
         let Some(path) = self.session.path() else {
             return;
         };
-        if self.remembered_path.as_deref() == Some(path) {
-            return;
+        if self.last_document.note(path) {
+            self.persist();
         }
-        let path = path.to_path_buf();
-        // A launch can name a relative path, which means nothing to the next one.
-        self.last_document = Some(std::path::absolute(&path).unwrap_or_else(|_| path.clone()));
-        self.remembered_path = Some(path);
-        self.persist();
     }
 
     /// Writes the caret and scroll to the document once they have changed, at most
@@ -3721,6 +3742,8 @@ impl KameApp {
             Ok(session) => {
                 self.adopt_session(session);
                 self.notice = None;
+                self.last_document.forget();
+                self.persist();
             }
             Err(err) => {
                 self.session.last_error = Some(format!("could not start a document — {err}"));
@@ -9705,5 +9728,30 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
                 egui::Event::Text("x".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn a_new_document_forgets_the_last_one() {
+        let mut last = LastDocument::new(Some(PathBuf::from("/notes/essay.kame")));
+        last.forget();
+        assert_eq!(last.path, None);
+    }
+
+    #[test]
+    fn the_same_file_is_remembered_again_after_a_new_document() {
+        let mut last = LastDocument::new(None);
+        let file = Path::new("/notes/essay.kame");
+        assert!(last.note(file));
+        assert!(!last.note(file), "nothing to save the second time");
+        last.forget();
+        assert!(last.note(file), "reopening it has to count");
+        assert_eq!(last.path.as_deref(), Some(file));
+    }
+
+    #[test]
+    fn a_noted_path_is_made_absolute() {
+        let mut last = LastDocument::new(None);
+        last.note(Path::new("essay.kame"));
+        assert!(last.path.unwrap().is_absolute());
     }
 }

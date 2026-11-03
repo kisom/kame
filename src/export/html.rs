@@ -1,12 +1,11 @@
 //! HTML export.
 //!
 //! `to_html` renders a [`Document`] as one self-contained HTML file: the page
-//! keeps everything the editor knows about the draft. Blocks become headings,
-//! paragraphs and lists; spans become `<em>`/`<strong>`; marginalia become
-//! floating `<aside>`s beside the passage they annotate, notes become a
-//! `<mark>` over the highlighted range with an expandable `<details>` beneath
-//! it, and footnotes become superscript links into a numbered footnote list at
-//! the foot of the document. The embedded stylesheet carries the house
+//! is what the draft publishes as. Blocks become headings, paragraphs and lists;
+//! spans become `<em>`/`<strong>`; marginalia become floating `<aside>`s beside
+//! the passage they annotate, and footnotes become superscript links into a
+//! numbered footnote list at the foot of the document. Notes are the author's own
+//! and never publish. The embedded stylesheet carries the house
 //! typography — Crimson Pro for headings, EB Garamond for body text,
 //! justified prose, old-style figures.
 //!
@@ -17,7 +16,7 @@
 
 use crate::layout::link_ranges;
 use crate::model::{is_script_url, AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// The embedded stylesheet.
 ///
@@ -31,7 +30,6 @@ const STYLE: &str = r#"
   --ink: #1c1a17;
   --muted: #6f675c;
   --rule: #d9d2c5;
-  --highlight: #f4e6a8;
 }
 html {
   font-size: 100%;
@@ -90,12 +88,6 @@ ul, ol {
 li {
   margin: 0.2em 0;
 }
-mark {
-  background: var(--highlight);
-  color: inherit;
-  padding: 0 0.1em;
-  border-radius: 0.15em;
-}
 aside.marginalia {
   float: right;
   clear: right;
@@ -110,29 +102,6 @@ aside.marginalia {
 }
 aside.marginalia p {
   margin: 0 0 0.6em;
-}
-details.note {
-  margin: 0 0 1.2em;
-  font-size: 0.92rem;
-  line-height: 1.5;
-  color: var(--muted);
-  text-align: left;
-}
-details.note summary {
-  cursor: pointer;
-  font-variant-caps: small-caps;
-  letter-spacing: 0.04em;
-}
-details.note summary a.note-ref {
-  color: inherit;
-  text-decoration: none;
-  border-bottom: 1px dotted var(--rule);
-}
-details.note summary a.note-ref:hover {
-  border-bottom-style: solid;
-}
-details.note p {
-  margin: 0.4em 0 0;
 }
 sup.footnote-ref {
   font-size: 0.7em;
@@ -184,23 +153,11 @@ a.footnote-backref {
 }
 "#;
 
-/// A note in inline position: the numbered highlight over `start..end` and the
-/// body that `render_apparatus` expands beneath the block.
-#[derive(Clone)]
-struct NoteMark {
-    number: usize,
-    start: usize,
-    end: usize,
-    body: String,
-}
-
 /// The apparatus anchored to one block, already in reading order.
 #[derive(Default, Clone)]
 struct BlockApparatus {
     /// Marginal bodies, in reading order.
     marginalia: Vec<String>,
-    /// Numbered notes (inline highlight plus expandable body).
-    notes: Vec<NoteMark>,
     /// `(anchor end offset, footnote number)` pairs, in reading order.
     footnotes: Vec<(usize, usize)>,
 }
@@ -215,13 +172,11 @@ struct BlockApparatus {
 ///   they annotate (inside the `<li>` for list items), in reading order; a
 ///   margin note whose block is gone or empty is emitted unanchored after the
 ///   last block, so its body survives,
-/// - notes wrap their anchored range in `<mark id="noteN">` and add a
-///   `<details class="note" id="noteN-body">` beneath the block, whose summary
-///   links back to the mark,
 /// - footnotes leave a `<sup class="footnote-ref"><a href="#fnN">N</a></sup>`
 ///   marker at the end of their anchored range and collect in one
 ///   `<ol class="footnotes">` at the foot, numbered in reading order,
-/// - empty blocks are skipped; a note, footnote or margin note that has lost
+/// - notes do not publish,
+/// - empty blocks are skipped; a footnote or margin note that has lost
 ///   its anchor loses only its marker — the body is still emitted, unanchored,
 /// - text is escaped (`&`, `<`, `>`); the output carries no document or
 ///   annotation ids, so it is stable across runs and serde round trips.
@@ -255,7 +210,7 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
             continue;
         }
         let apparatus = &collected.blocks[index];
-        let inner = render_inline(block, &apparatus.notes, &apparatus.footnotes);
+        let inner = render_inline(block, &apparatus.footnotes);
         // A bare newline renders as a space. A heading is one line by definition.
         let inner = inner.trim_end_matches('\n');
         let inner = if matches!(block.kind, BlockKind::Heading { .. }) {
@@ -295,15 +250,8 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
     }
     close_list(&mut body, &mut open_list);
 
-    // Notes whose anchor block no longer exists: the highlight is gone, the
-    // body is not. A bodyless highlight has nothing left to emit.
-    for note in &collected.unanchored_notes {
-        if !note.body.trim().is_empty() {
-            body.push_str(&note_details(note));
-        }
-    }
-
-    // Margin notes in the same position, for the same reason.
+    // Margin notes whose anchor block no longer exists: the anchor is gone, the
+    // authored text is not.
     for marginal in &collected.unanchored_marginalia {
         body.push_str(&marginalia_aside(marginal));
     }
@@ -378,12 +326,10 @@ struct FootnoteBody {
 }
 
 /// Everything the annotation list contributes to the page: apparatus grouped by
-/// block, the footnote list in number order, notes with no block left to sit
-/// after, and marginalia whose block is gone.
+/// block, the footnote list in number order, and marginalia whose block is gone.
 struct Collected {
     blocks: Vec<BlockApparatus>,
     footnotes: Vec<FootnoteBody>,
-    unanchored_notes: Vec<NoteMark>,
     /// Margin-note bodies that lost their block (or whose block is empty), in
     /// reading order. They are emitted as plain asides after the last block:
     /// the anchor is gone, the authored text is not.
@@ -402,18 +348,17 @@ struct Placed<'a> {
 }
 
 /// Group every live annotation by block, in reading order, and number the
-/// footnotes and notes.
+/// footnotes. A note is not collected: notes never publish.
 ///
 /// Reading order is block order, then anchor start, then anchor end, then
 /// annotation id — storage order never shows through, so numbering is stable.
-/// An annotation's body is never thrown away for want of a marker: a note whose
-/// range covers no glyphs loses the highlight but keeps its `<details>` after
-/// the block, and a note, footnote or margin note whose block is missing or
-/// empty is emitted unanchored (a footnote with its number but no marker or
-/// back-link, a note as `<details>`, a margin note as a bare aside).
+/// A published annotation's body is never thrown away for want of a marker: a
+/// footnote or margin note whose block is missing or empty is emitted unanchored
+/// (a footnote with its number but no marker or back-link, a margin note as a
+/// bare aside).
 ///
 /// Returns the per-block apparatus, the footnote bodies in number order, and
-/// the unanchored notes and marginalia.
+/// the unanchored marginalia.
 fn collect_apparatus(doc: &Document) -> Collected {
     let block_order: HashMap<BlockId, usize> = doc
         .blocks
@@ -428,7 +373,7 @@ fn collect_apparatus(doc: &Document) -> Collected {
         .filter(|annotation| {
             matches!(
                 annotation.kind,
-                AnnotationKind::Marginal | AnnotationKind::Note | AnnotationKind::Footnote
+                AnnotationKind::Marginal | AnnotationKind::Footnote
             )
         })
         .filter_map(|annotation| {
@@ -454,29 +399,7 @@ fn collect_apparatus(doc: &Document) -> Collected {
                         annotation,
                     }),
                 },
-                AnnotationKind::Note => match index {
-                    Some(index) if !text.is_empty() => {
-                        let (anchor_start, anchor_end) =
-                            annotation.anchor.byte_range().unwrap_or((0, 0));
-                        let (start, end) = note_range(text, anchor_start, anchor_end);
-                        Some(Placed {
-                            index: Some(index),
-                            attached: true,
-                            start,
-                            end,
-                            annotation,
-                        })
-                    }
-                    // No block (or nothing in it) to hang a marker on: the body
-                    // still belongs in the export.
-                    _ => Some(Placed {
-                        index: None,
-                        attached: false,
-                        start: 0,
-                        end: 0,
-                        annotation,
-                    }),
-                },
+                AnnotationKind::Note => None,
                 AnnotationKind::Footnote => match index {
                     Some(index) if !text.is_empty() => {
                         let (anchor_start, anchor_end) =
@@ -512,10 +435,8 @@ fn collect_apparatus(doc: &Document) -> Collected {
     let mut collected = Collected {
         blocks: vec![BlockApparatus::default(); doc.blocks.len()],
         footnotes: Vec::new(),
-        unanchored_notes: Vec::new(),
         unanchored_marginalia: Vec::new(),
     };
-    let mut note_number = 0usize;
     let mut footnote_number = 0usize;
     for placed in ordered {
         let annotation = placed.annotation;
@@ -532,21 +453,7 @@ fn collect_apparatus(doc: &Document) -> Collected {
                         .push(annotation.body.clone());
                 }
             }
-            AnnotationKind::Note => {
-                note_number += 1;
-                let note = NoteMark {
-                    number: note_number,
-                    start: placed.start,
-                    end: placed.end,
-                    body: annotation.body.clone(),
-                };
-                if placed.attached {
-                    let index = placed.index.expect("an attached note has a block");
-                    collected.blocks[index].notes.push(note);
-                } else {
-                    collected.unanchored_notes.push(note);
-                }
-            }
+            AnnotationKind::Note => {}
             AnnotationKind::Footnote => {
                 footnote_number += 1;
                 if placed.attached {
@@ -571,54 +478,29 @@ fn collect_apparatus(doc: &Document) -> Collected {
     collected
 }
 
-/// Render the apparatus that follows a block: marginalia asides, then note
-/// details. Footnotes are collected at the foot of the document instead.
+/// Render the apparatus that follows a block: marginalia asides. Footnotes are
+/// collected at the foot of the document instead.
 fn render_apparatus(apparatus: &BlockApparatus) -> String {
-    let mut out = String::new();
-    for body in &apparatus.marginalia {
-        out.push_str(&marginalia_aside(body));
-    }
-    for note in &apparatus.notes {
-        // A highlight with nothing written yet has no body to expand.
-        if !note.body.trim().is_empty() {
-            out.push_str(&note_details(note));
-        }
-    }
-    out
+    apparatus
+        .marginalia
+        .iter()
+        .map(|body| marginalia_aside(body))
+        .collect()
 }
 
 /// The margin note's body. The `<aside>` is where a marginal is read, whether
-/// it kept its block or lost it.
-fn marginalia_aside(body: &str) -> String {
+/// it kept its block or lost it. Line breaks become `<br>` so a blank line cannot
+/// end the block when this is embedded in Markdown.
+pub(super) fn marginalia_aside(body: &str) -> String {
     format!(
         "<aside class=\"marginalia\"><p>{}</p></aside>\n",
-        escape(body)
+        escape(body).replace('\n', "<br>\n")
     )
 }
 
-/// The expandable note body.
-///
-/// An anchored note names the `<mark>` it belongs to in its summary and carries
-/// `id="noteN-body"`, so mark and details reach each other in both directions.
-/// A note with no highlight to point at keeps a plain summary — and no id, so
-/// nothing links to a mark that was never written.
-fn note_details(note: &NoteMark) -> String {
-    let number = note.number;
-    let body = escape(&note.body);
-    if note.start < note.end {
-        format!(
-            "<details class=\"note\" id=\"note{number}-body\"><summary><a class=\"note-ref\" \
-             href=\"#note{number}\">Note {number}</a></summary><p>{body}</p></details>\n"
-        )
-    } else {
-        format!("<details class=\"note\"><summary>Note {number}</summary><p>{body}</p></details>\n")
-    }
-}
-
-/// Inline tags the segment renderer can open, outermost first.
+/// One open inline element, compared by identity when deciding what to close.
 #[derive(Clone, PartialEq)]
 enum InlineTag {
-    Note(usize),
     Bold,
     Italic,
     Link { url: String },
@@ -627,7 +509,6 @@ enum InlineTag {
 impl InlineTag {
     fn open(&self) -> String {
         match self {
-            InlineTag::Note(number) => format!("<mark id=\"note{number}\">"),
             InlineTag::Bold => "<strong>".to_string(),
             InlineTag::Italic => "<em>".to_string(),
             InlineTag::Link { url } => format!("<a href=\"{}\">", escape_attribute(url)),
@@ -636,7 +517,6 @@ impl InlineTag {
 
     fn close(&self) -> &'static str {
         match self {
-            InlineTag::Note(_) => "</mark>",
             InlineTag::Bold => "</strong>",
             InlineTag::Italic => "</em>",
             InlineTag::Link { .. } => "</a>",
@@ -644,7 +524,7 @@ impl InlineTag {
     }
 }
 
-/// Render one block's text with spans, note marks and footnote markers applied.
+/// Render one block's text with spans and footnote markers applied.
 ///
 /// The text is cut at every span edge, note edge and footnote offset, and the
 /// active tag set is taken per segment — the same segmentation the Markdown
@@ -656,7 +536,7 @@ impl InlineTag {
 /// both tags at 10 and reopen bold, or the italic would silently cover 10..15.
 /// Notes open outside spans, so a highlighted phrase can carry emphasis without
 /// producing crossed tags.
-fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]) -> String {
+fn render_inline(block: &Block, footnotes: &[(usize, usize)]) -> String {
     let text = block.text.as_str();
 
     let spans: Vec<(usize, usize, SpanStyle)> = block
@@ -673,9 +553,8 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
         .collect();
     let links = link_ranges(text);
 
-    let mut boundaries = Vec::with_capacity(
-        spans.len() * 2 + links.len() * 2 + notes.len() * 2 + footnotes.len() + 2,
-    );
+    let mut boundaries =
+        Vec::with_capacity(spans.len() * 2 + links.len() * 2 + footnotes.len() + 2);
     boundaries.push(0);
     boundaries.push(text.len());
     for (start, end, _) in &spans {
@@ -686,10 +565,6 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
         boundaries.push(*start);
         boundaries.push(*end);
     }
-    for note in notes {
-        boundaries.push(note.start);
-        boundaries.push(note.end);
-    }
     for (offset, _) in footnotes {
         boundaries.push(*offset);
     }
@@ -698,21 +573,12 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
 
     let mut out = String::with_capacity(text.len() + boundaries.len() * 4);
     let mut open: Vec<InlineTag> = Vec::new();
-    // Note numbers whose `<mark id>` has already been written. A highlight
-    // split by a crossing note reopens without the id, because ids must stay
-    // unique in the document.
-    let mut opened_notes: HashSet<usize> = HashSet::new();
     for window in boundaries.windows(2) {
         let (start, end) = (window[0], window[1]);
         if start >= end {
             continue;
         }
         let mut wanted: Vec<InlineTag> = Vec::new();
-        for note in notes {
-            if note.start <= start && note.end >= end {
-                wanted.push(InlineTag::Note(note.number));
-            }
-        }
         for style in [SpanStyle::Bold, SpanStyle::Italic] {
             let covered = spans
                 .iter()
@@ -773,14 +639,7 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
             out.push_str(&footnote_marker(*number));
         }
         for tag in &target[keep..] {
-            let opening = match tag {
-                InlineTag::Note(number) if opened_notes.insert(*number) => {
-                    format!("<mark id=\"note{number}\">")
-                }
-                InlineTag::Note(_) => "<mark>".to_string(),
-                other => other.open(),
-            };
-            out.push_str(&opening);
+            out.push_str(&tag.open());
             open.push(tag.clone());
         }
         out.push_str(&escape(&text[start..end]));
@@ -820,14 +679,6 @@ fn escape(text: &str) -> String {
 /// Text content leaves quotes alone, so prose keeps the characters as typed.
 fn escape_attribute(text: &str) -> String {
     escape(text).replace('"', "&quot;").replace('\'', "&#39;")
-}
-
-/// Snap a note's anchor to char boundaries, then pull it in past whitespace so
-/// the highlight sits against glyphs. Returns an empty range if nothing is left.
-fn note_range(text: &str, start: usize, end: usize) -> (usize, usize) {
-    let start = snap_up(text, start);
-    let end = snap_down(text, end);
-    trim_whitespace_edges(text, start, end)
 }
 
 /// Pull a snapped `(start, end)` range in past leading and trailing whitespace.
@@ -1068,38 +919,6 @@ mod tests {
     }
 
     #[test]
-    fn notes_become_marks_and_details() {
-        let html = to_html(&rich_document());
-        assert!(html.contains("<mark id=\"note1\">text</mark>"));
-        // The details carries a counterpart id and a summary link back to the
-        // mark, so the highlight and its note are two-way navigable.
-        assert!(html.contains("<details class=\"note\" id=\"note1-body\">"));
-        assert!(
-            html.contains("<summary><a class=\"note-ref\" href=\"#note1\">Note 1</a></summary>")
-        );
-        assert!(html.contains("<p>note body</p>"));
-    }
-
-    #[test]
-    fn a_bodyless_note_is_a_bare_highlight_without_details() {
-        let block = block(BlockKind::Paragraph, "highlighted");
-        let block_id = block.id;
-        let doc = document(
-            vec![block],
-            vec![annotation(AnnotationKind::Note, block_id, 0, 11, "")],
-        );
-        let html = to_html(&doc);
-        assert!(
-            html.contains("<mark id=\"note1\">"),
-            "the highlight still marks the range"
-        );
-        assert!(
-            !html.contains("<details"),
-            "no body, so there is nothing to expand"
-        );
-    }
-
-    #[test]
     fn marginalia_sits_after_the_annotated_block() {
         let html = to_html(&rich_document());
         let paragraph_end = html.find("</p>").expect("paragraph closes");
@@ -1200,28 +1019,6 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_notes_do_not_extend_the_outer_highlight() {
-        let p = paragraph("abcdefghijklmnop");
-        let id = p.id;
-        let doc = document(
-            vec![p],
-            vec![
-                annotation(AnnotationKind::Note, id, 0, 10, "outer"),
-                annotation(AnnotationKind::Note, id, 5, 15, "inner"),
-            ],
-        );
-        let html = to_html(&doc);
-        // Note 1 stops at 10 and note 2 carries on: the highlight is split
-        // rather than stretched over text that was never marked.
-        assert!(html.contains(
-            "<mark id=\"note1\">abcde<mark id=\"note2\">fghij</mark></mark><mark>klmno</mark>p"
-        ));
-        // The reopened piece must not repeat the id.
-        assert_eq!(html.matches("id=\"note2\"").count(), 1);
-        assert!(html.contains("<details class=\"note\" id=\"note2-body\">"));
-    }
-
-    #[test]
     fn span_edges_are_trimmed_past_whitespace() {
         let mut trailing = paragraph("Hello world");
         trailing.spans = vec![Span {
@@ -1281,42 +1078,6 @@ mod tests {
     }
 
     #[test]
-    fn note_with_empty_anchor_keeps_its_body() {
-        // A note anchored on the trailing space has no glyphs to highlight, but
-        // dropping the body would lose the author's text: only the marker goes.
-        let p = paragraph("Hello world");
-        let id = p.id;
-        let doc = document(
-            vec![p],
-            vec![annotation(AnnotationKind::Note, id, 5, 6, "spaces only")],
-        );
-        let html = to_html(&doc);
-        assert!(!html.contains("<mark"));
-        assert!(html.contains("<details class=\"note\">"));
-        assert!(html.contains("<summary>Note 1</summary>"));
-        assert!(html.contains("<p>spaces only</p>"));
-    }
-
-    #[test]
-    fn note_with_missing_anchor_keeps_its_body() {
-        let doc = document(
-            vec![paragraph("Body")],
-            vec![annotation(
-                AnnotationKind::Note,
-                Uuid::new_v4(),
-                0,
-                4,
-                "detached",
-            )],
-        );
-        let html = to_html(&doc);
-        assert!(!html.contains("<mark"));
-        assert!(html.contains(
-            "<details class=\"note\"><summary>Note 1</summary><p>detached</p></details>"
-        ));
-    }
-
-    #[test]
     fn emoji_and_multibyte_anchors_do_not_panic() {
         let mut p = paragraph("Ünïcode 😀 text");
         p.spans = vec![Span {
@@ -1333,7 +1094,7 @@ mod tests {
             ],
         );
         let html = to_html(&doc);
-        assert!(html.contains("<mark id=\"note1\">"));
+        assert!(!html.contains("wide"), "{html}");
         assert!(html.contains("<li id=\"fn1\">snapped"));
     }
 
@@ -1480,5 +1241,50 @@ mod tests {
         let mut doc = Document::new("t");
         doc.blocks = vec![linked("paper.pdf")];
         assert!(to_html(&doc).contains(r#"<a href="paper.pdf">the demo</a>"#));
+    }
+
+    fn with_annotations(kind: AnnotationKind) -> Document {
+        let mut doc = Document::new("t");
+        let prose = block(BlockKind::Paragraph, "Some prose here.");
+        doc.annotations = vec![annotation(kind, prose.id, 5, 10, "SECRET BODY")];
+        doc.blocks = vec![prose];
+        doc
+    }
+
+    /// A note is the author's own: neither its words nor any sign of it publishes.
+    #[test]
+    fn a_note_leaves_no_trace_in_the_page() {
+        let html = to_html(&with_annotations(AnnotationKind::Note));
+        assert!(!html.contains("SECRET BODY"), "{html}");
+        assert!(!html.contains("<mark"), "{html}");
+        assert!(!html.contains("<details"), "{html}");
+        assert!(html.contains("<p>Some prose here.</p>"), "{html}");
+    }
+
+    #[test]
+    fn a_note_whose_block_is_gone_leaves_no_trace_either() {
+        let mut doc = with_annotations(AnnotationKind::Note);
+        doc.annotations[0].anchor = Anchor::range(Uuid::new_v4(), 0, 1);
+        assert!(!to_html(&doc).contains("SECRET BODY"));
+    }
+
+    #[test]
+    fn a_note_does_not_disturb_footnote_numbers() {
+        let mut doc = Document::new("t");
+        let prose = block(BlockKind::Paragraph, "Some prose here.");
+        doc.annotations = vec![
+            annotation(AnnotationKind::Note, prose.id, 0, 4, "private"),
+            annotation(AnnotationKind::Footnote, prose.id, 5, 10, "public"),
+        ];
+        doc.blocks = vec![prose];
+        let html = to_html(&doc);
+        assert!(html.contains(r#"id="fn1""#), "{html}");
+        assert!(html.contains("public"), "{html}");
+    }
+
+    #[test]
+    fn marginals_and_footnotes_still_publish() {
+        assert!(to_html(&with_annotations(AnnotationKind::Marginal)).contains("SECRET BODY"));
+        assert!(to_html(&with_annotations(AnnotationKind::Footnote)).contains("SECRET BODY"));
     }
 }

@@ -3,10 +3,11 @@
 //! `to_markdown` renders a [`Document`] as CommonMark-flavoured Markdown so a
 //! draft can leave kame and live anywhere: Pandoc, a static site, a code
 //! review. The renderer is deliberately lossless in one direction only —
-//! Markdown keeps the text, the block structure, bold/italic runs and
-//! footnotes, and drops the apparatus that has no Markdown equivalent
-//! (marginalia and notes are v1-omitted).
+//! Markdown keeps the text, the block structure, bold/italic runs, footnotes and
+//! marginalia, which have no Markdown form and go as raw HTML. Notes are the
+//! author's own and never publish.
 
+use super::html::marginalia_aside;
 use crate::model::{
     is_script_url, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
 };
@@ -27,7 +28,9 @@ use std::collections::HashMap;
 /// - inline spans become `*italic*` / `**bold**`, nesting innermost-first,
 /// - footnotes get `[^n]` inline at the end of their anchored range and a
 ///   `[^n]: body` line after the body, numbered in document order,
-/// - marginalia and notes are omitted.
+/// - marginalia become `<aside class="marginalia">` after their block, or after the
+///   last block if theirs is gone,
+/// - notes do not publish.
 ///
 /// The output depends only on the document contents: footnote numbering follows
 /// block order rather than the order annotations happen to be stored in, so
@@ -43,6 +46,7 @@ pub fn to_markdown(doc: &Document) -> String {
             .push((end, *number));
     }
 
+    let mut marginalia = marginalia_by_block(doc);
     let mut parts: Vec<String> = Vec::new();
     let mut ordered_index = 0usize;
     for block in &doc.blocks {
@@ -98,6 +102,15 @@ pub fn to_markdown(doc: &Document) -> String {
             body = body.replace('\n', "\n> ");
         }
         parts.push(format!("{prefix}{body}"));
+        for marginal in marginalia.remove(&Some(block.id)).unwrap_or_default() {
+            parts.push(marginalia_aside(marginal).trim_end().to_string());
+        }
+    }
+    // Whatever is left has no exported block to follow, but its body still publishes.
+    let mut orphans: Vec<(Option<BlockId>, Vec<&str>)> = marginalia.into_iter().collect();
+    orphans.sort_by_key(|(block_id, _)| *block_id);
+    for marginal in orphans.into_iter().flat_map(|(_, bodies)| bodies) {
+        parts.push(marginalia_aside(marginal).trim_end().to_string());
     }
 
     let mut out = String::new();
@@ -121,6 +134,31 @@ pub fn to_markdown(doc: &Document) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Margin-note bodies grouped by the block that exports them, `None` for those
+/// whose block is gone or empty, each group in a stable order regardless of
+/// storage order.
+fn marginalia_by_block(doc: &Document) -> HashMap<Option<BlockId>, Vec<&str>> {
+    let mut marginals: Vec<&crate::model::Annotation> = doc
+        .annotations
+        .iter()
+        .filter(|annotation| annotation.kind == AnnotationKind::Marginal)
+        .collect();
+    marginals.sort_by_key(|annotation| annotation.id);
+    let mut grouped: HashMap<Option<BlockId>, Vec<&str>> = HashMap::new();
+    for annotation in marginals {
+        let block_id = annotation.anchor.block_id();
+        let exported = doc
+            .blocks
+            .iter()
+            .any(|block| block.id == block_id && !block.text.is_empty());
+        grouped
+            .entry(exported.then_some(block_id))
+            .or_default()
+            .push(&annotation.body);
+    }
+    grouped
 }
 
 /// Render `doc` for publishing: [`to_markdown`] under a `Key: value` header, the
@@ -150,10 +188,9 @@ pub fn to_markdown_with(doc: &Document, metadata: &Metadata) -> String {
     let repeats_title = doc.blocks.first().is_some_and(|first| {
         matches!(first.kind, BlockKind::Heading { .. })
             && first.text == metadata.title
-            && !doc
-                .annotations
-                .iter()
-                .any(|annotation| annotation.anchor.block_id() == first.id)
+            && !doc.annotations.iter().any(|annotation| {
+                annotation.kind != AnnotationKind::Note && annotation.anchor.block_id() == first.id
+            })
     });
     let body = if repeats_title {
         let mut rest = doc.clone();
@@ -630,22 +667,6 @@ mod tests {
         let doc = document(vec![body], vec![footnote(id, 0, 9, "The note body.")]);
         let md = to_markdown(&doc);
         assert_eq!(md, "Body text[^1]\n\n[^1]: The note body.\n");
-    }
-
-    #[test]
-    fn marginalia_and_notes_omitted() {
-        let body = paragraph("Body text");
-        let id = body.id;
-        let with = document(
-            vec![body.clone()],
-            vec![
-                annotation(AnnotationKind::Marginal, id, 0, 4, "margin"),
-                annotation(AnnotationKind::Note, id, 5, 9, "note"),
-            ],
-        );
-        let without = document(vec![body], Vec::new());
-        assert_eq!(to_markdown(&with), to_markdown(&without));
-        assert_eq!(to_markdown(&with), "Body text\n");
     }
 
     #[test]
@@ -1151,5 +1172,105 @@ mod tests {
             "",
         )];
         assert_eq!(to_markdown(&doc), "![](my%20pic.png)\n");
+    }
+
+    #[test]
+    fn a_marginal_publishes_after_its_block() {
+        let mut doc = Document::new("t");
+        let first = paragraph("First.");
+        let second = paragraph("Second.");
+        doc.annotations = vec![annotation(
+            AnnotationKind::Marginal,
+            first.id,
+            0,
+            0,
+            "A <side> note",
+        )];
+        doc.blocks = vec![first, second];
+        assert_eq!(
+            to_markdown(&doc),
+            "First.\n\n<aside class=\"marginalia\"><p>A &lt;side&gt; note</p></aside>\n\nSecond.\n"
+        );
+    }
+
+    #[test]
+    fn a_marginal_with_line_breaks_stays_one_html_block() {
+        let mut doc = Document::new("t");
+        let first = paragraph("First.");
+        doc.annotations = vec![annotation(
+            AnnotationKind::Marginal,
+            first.id,
+            0,
+            0,
+            "a\n\nb",
+        )];
+        doc.blocks = vec![first];
+        let out = to_markdown(&doc);
+        assert!(
+            !out.split("\n\n").any(|part| part == "b</p></aside>"),
+            "{out:?}"
+        );
+        assert!(out.contains("a<br>"), "{out:?}");
+    }
+
+    #[test]
+    fn a_marginal_whose_block_is_gone_still_publishes() {
+        let mut doc = Document::new("t");
+        let first = paragraph("First.");
+        doc.annotations = vec![annotation(
+            AnnotationKind::Marginal,
+            Uuid::new_v4(),
+            0,
+            0,
+            "Orphan",
+        )];
+        doc.blocks = vec![first];
+        assert!(to_markdown(&doc).contains("<p>Orphan</p>"));
+    }
+
+    #[test]
+    fn marginals_publish_in_a_stable_order() {
+        let mut doc = Document::new("t");
+        let first = paragraph("First.");
+        let (a, b) = (
+            annotation(AnnotationKind::Marginal, first.id, 0, 0, "one"),
+            annotation(AnnotationKind::Marginal, first.id, 0, 0, "two"),
+        );
+        doc.annotations = vec![a.clone(), b.clone()];
+        doc.blocks = vec![first];
+        let forward = to_markdown(&doc);
+        doc.annotations = vec![b, a];
+        assert_eq!(forward, to_markdown(&doc));
+    }
+
+    #[test]
+    fn a_note_leaves_no_trace_in_markdown() {
+        let mut doc = Document::new("t");
+        let first = paragraph("First.");
+        doc.annotations = vec![annotation(
+            AnnotationKind::Note,
+            first.id,
+            0,
+            5,
+            "SECRET BODY",
+        )];
+        doc.blocks = vec![first];
+        assert_eq!(to_markdown(&doc), "First.\n");
+    }
+
+    /// Only what publishes can pin a title heading in place.
+    #[test]
+    fn a_note_on_the_title_heading_does_not_print_the_title_twice() {
+        let mut doc = Document::new("t");
+        let heading = block(BlockKind::Heading { level: 1 }, "On Burnout");
+        doc.annotations = vec![annotation(
+            AnnotationKind::Note,
+            heading.id,
+            0,
+            2,
+            "private",
+        )];
+        doc.blocks = vec![heading, paragraph("Body.")];
+        assert!(!to_markdown_with(&doc, &metadata()).contains("# On Burnout"));
     }
 }

@@ -13,6 +13,14 @@ Open work, most pressing first. Tick items off or delete them as they land.
   types, and Finder sends the file by Apple event rather than as an argument, so
   kame needs code to receive it.
 
+## Publishing
+
+- [ ] **How marginals should publish.** Undecided. Markdown has no form for them, so
+  for now they export as raw `<aside class="marginalia">` after their block, which
+  keeps the text but needs a stylesheet to read as a marginal. A static site
+  generator working from `.kame` files, and the occasional Markdown file, may be the
+  better answer, since it could lay them out properly. Blog posts are the goal.
+
 ## Typography
 
 - [ ] **Word spacing (low priority).** Justified text without hyphenation leaves

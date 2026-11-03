@@ -2810,10 +2810,18 @@ fn url_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
         .map(|(start, end)| block.text[start..end].to_string())
 }
 
+/// Whether a clicked link may be handed to the system's opener. Local files stay
+/// openable, so a link can reach a PDF or an image. A leading dash would be read as
+/// an option to the opener rather than as the link.
+fn may_open(url: &str) -> bool {
+    let url = url.trim_start();
+    !url.is_empty() && !url.starts_with('-') && !is_script_url(url)
+}
+
 /// Opens `url` in the system browser, best-effort: a link that cannot launch is
 /// never worth an error dialog in the editor.
 fn open_in_browser(url: &str) {
-    if is_script_url(url) {
+    if !may_open(url) {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -6880,6 +6888,28 @@ mod tests {
             offset: 0,
         };
         assert_eq!(url_at(&[block], &cursor), Some("large.png".to_string()));
+    }
+
+    #[test]
+    fn a_click_opens_ordinary_links_and_local_files() {
+        for url in [
+            "https://example.com",
+            "mailto:k@example.com",
+            "paper.pdf",
+            "pics/a.png",
+            "/files/paper.pdf",
+            "file:///home/kyle/paper.pdf",
+        ] {
+            assert!(may_open(url), "{url}");
+        }
+    }
+
+    /// A leading dash reads as an option to the program that opens the link.
+    #[test]
+    fn a_click_refuses_what_would_be_read_as_an_option_or_run_script() {
+        for url in ["-a", "--help", "  -a", "\t-a", "javascript:alert(1)", ""] {
+            assert!(!may_open(url), "{url:?}");
+        }
     }
 
     #[test]

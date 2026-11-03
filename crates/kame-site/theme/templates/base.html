@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% block meta %}{% endblock %}
+<title>{% block title %}{{ site.name }}{% endblock %}</title>
+<link rel="alternate" type="application/rss+xml" title="{{ site.name }}" href="/feed.xml">
+<link rel="stylesheet" href="/css/fonts.css">
+<style>{{ kame_css }}</style>
+</head>
+<body>
+<header class="document">
+<a href="/">{{ site.name }}</a> ·
+<a href="/archive/">Archive</a> ·
+<a href="/tags/">Tags</a> ·
+<a href="/about/">About</a>
+</header>
+<main class="document">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

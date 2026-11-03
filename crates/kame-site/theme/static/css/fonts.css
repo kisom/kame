@@ -1,0 +1,9 @@
+@font-face { font-family: "EB Garamond"; src: url("/fonts/EBGaramond-Regular.otf"); font-display: swap; }
+@font-face { font-family: "EB Garamond"; font-weight: bold; src: url("/fonts/EBGaramond-Bold.otf"); font-display: swap; }
+@font-face { font-family: "EB Garamond"; font-style: italic; src: url("/fonts/EBGaramond-Italic.otf"); font-display: swap; }
+@font-face { font-family: "Crimson Pro"; src: url("/fonts/CrimsonPro-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "Crimson Pro"; font-weight: bold; src: url("/fonts/CrimsonPro-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "Crimson Pro"; font-style: italic; src: url("/fonts/CrimsonPro-Italic.ttf"); font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("/fonts/IBMPlexMono-Regular.ttf"); font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; font-weight: bold; src: url("/fonts/IBMPlexMono-Bold.ttf"); font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; font-style: italic; src: url("/fonts/IBMPlexMono-Italic.ttf"); font-display: swap; }

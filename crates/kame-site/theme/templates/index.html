@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<p>A paragraph about this site.</p>
+
+<h2>Latest</h2>
+<ul>
+{% for document in documents[:5] %}
+  <li><a href="{{ document.url }}">{{ document.title }}</a> ({{ document.date }})</li>
+{% endfor %}
+</ul>
+<p><a href="/archive/">All posts</a></p>
+{% endblock %}

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block meta %}{% if draft %}<meta name="robots" content="noindex">
+{% endif %}{% if author %}<meta name="author" content="{{ author }}">
+{% endif %}{% endblock %}
+{% block title %}{{ title }} · {{ site.name }}{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p class="meta">{% if draft %}Draft · {% endif %}{{ date }}{% for tag in tags %} · <a href="{{ tag.url }}">{{ tag.name }}</a>{% endfor %}</p>
+{{ body }}
+{% endblock %}

@@ -4,6 +4,7 @@ pub mod config;
 pub mod pages;
 pub mod refs;
 pub mod source;
+pub mod starter;
 
 #[cfg(test)]
 pub(crate) mod testing;

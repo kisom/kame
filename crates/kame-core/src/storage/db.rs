@@ -231,7 +231,9 @@ impl Db {
             let scratch = ScratchCopy(
                 std::env::temp_dir().join(format!("kame-read-{}", uuid::Uuid::new_v4())),
             );
-            std::fs::create_dir_all(&scratch.0).map_err(scratch_error)?;
+            std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+                .create(&scratch.0)
+                .map_err(scratch_error)?;
             let copy = scratch.0.join("document.kame");
             std::fs::copy(path, &copy).map_err(scratch_error)?;
             std::fs::copy(&wal, scratch.0.join("document.kame-wal")).map_err(scratch_error)?;
@@ -1402,6 +1404,16 @@ mod tests {
         let db = Db::open_read_only(&copy).unwrap();
         let scratch = db.scratch.as_ref().map(|scratch| scratch.0.clone());
         assert!(scratch.as_ref().is_some_and(|scratch| scratch.exists()));
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(scratch.as_ref().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "a copy of someone's writing stays private"
+        );
         drop(db);
         assert!(!scratch.unwrap().exists());
         std::fs::remove_dir_all(&dir).unwrap();

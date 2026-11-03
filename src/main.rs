@@ -1104,6 +1104,17 @@ fn menu_entry(
     response
 }
 
+/// Whether a block of kind `current` is in the right-click menu's `style`. A
+/// list item's depth and a code block's language are not styles of their own,
+/// so they don't take a block out of the row it belongs to.
+fn is_block_style(current: &BlockKind, style: &BlockKind) -> bool {
+    match (current, style) {
+        (BlockKind::Heading { level: a }, BlockKind::Heading { level: b }) => a == b,
+        (BlockKind::ListItem { ordered: a, .. }, BlockKind::ListItem { ordered: b, .. }) => a == b,
+        _ => std::mem::discriminant(current) == std::mem::discriminant(style),
+    }
+}
+
 /// The tags typed into the properties dialog.
 fn parse_tags(text: &str) -> Vec<String> {
     text.split(',')
@@ -3567,6 +3578,12 @@ impl KameApp {
         let mut link_document = false;
         response.context_menu(|ui| {
             ui.set_min_width(180.0);
+            // The caret's block, since that is the one these rows change.
+            let caret = self.session.valid_caret();
+            let current = self
+                .session
+                .block_index(caret.block_id)
+                .map(|index| self.session.document().blocks[index].kind.clone());
             for (label, kind) in [
                 ("Body", BlockKind::Paragraph),
                 ("Heading 1", BlockKind::Heading { level: 1 }),
@@ -3590,7 +3607,12 @@ impl KameApp {
                 ("Code block", BlockKind::Code { language: None }),
                 ("Prose block", BlockKind::Prose),
             ] {
-                if ui.button(label).clicked() {
+                let mut row = egui::Button::new(label);
+                if current.as_ref().is_some_and(|c| is_block_style(c, &kind)) {
+                    // U+2714: egui's default fonts have no U+2713.
+                    row = row.right_text("\u{2714}");
+                }
+                if ui.add(row).clicked() {
                     self.set_block_kind(kind);
                     ui.close();
                 }
@@ -5273,6 +5295,46 @@ mod tests {
 
     fn heading_kind(level: u8) -> BlockKind {
         BlockKind::Heading { level }
+    }
+
+    #[test]
+    fn a_menu_style_is_checked_only_for_its_own_kind() {
+        let body = BlockKind::Paragraph;
+        assert!(is_block_style(&body, &BlockKind::Paragraph));
+        assert!(!is_block_style(&body, &BlockKind::BlockQuote));
+        assert!(!is_block_style(&body, &BlockKind::Prose));
+    }
+
+    #[test]
+    fn a_heading_checks_only_the_style_of_its_level() {
+        assert!(is_block_style(&heading_kind(2), &heading_kind(2)));
+        assert!(!is_block_style(&heading_kind(2), &heading_kind(1)));
+    }
+
+    #[test]
+    fn a_nested_list_item_checks_the_style_of_its_list() {
+        let nested = BlockKind::ListItem {
+            ordered: true,
+            depth: 2,
+        };
+        let numbered = BlockKind::ListItem {
+            ordered: true,
+            depth: 0,
+        };
+        let bulleted = BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+        };
+        assert!(is_block_style(&nested, &numbered));
+        assert!(!is_block_style(&nested, &bulleted));
+    }
+
+    #[test]
+    fn a_code_block_in_a_named_language_checks_the_code_style() {
+        let rust = BlockKind::Code {
+            language: Some("rust".into()),
+        };
+        assert!(is_block_style(&rust, &BlockKind::Code { language: None }));
     }
 
     #[test]

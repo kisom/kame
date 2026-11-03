@@ -76,8 +76,8 @@ type. Enter finds the next match, Shift-Enter the previous one, and Escape
 closes the bar; the page scrolls to keep the current match in view.
 
 Block kind is also on the page's right-click menu — body, H1–H3 and both list
-kinds. Changing the kind is one undoable edit, and undo restores the previous
-kind (including a heading's level).
+kinds — with a check beside the caret's current kind. Changing the kind is one
+undoable edit, and undo restores the previous kind (including a heading's level).
 
 The digit chords are matched against the physical digit as well as the typed
 character: `Shift`+1 gives `!`, which egui names `Exclamationmark`, and a

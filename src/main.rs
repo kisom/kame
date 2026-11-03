@@ -889,6 +889,24 @@ fn scroll_to_show(
     Some(target.clamp(0.0, furthest)).filter(|target| (target - scroll).abs() > 0.5)
 }
 
+/// Where to look for a line for the caret once the wheel has taken it off the page: as far in
+/// as the keys would leave it. `None` if it's still on the page.
+fn caret_aim_after_scroll(
+    caret_top: f32,
+    caret_bottom: f32,
+    page_top: f32,
+    page_bottom: f32,
+) -> Option<f32> {
+    let room = CARET_ROOM.min((page_bottom - page_top) * 0.25);
+    if caret_top < page_top {
+        Some(page_top + room)
+    } else if caret_bottom > page_bottom {
+        Some(page_bottom - room)
+    } else {
+        None
+    }
+}
+
 /// How far a page key moves: a window's height, less two lines so the eye keeps its place.
 fn page_step(viewport_height: f32, line_height: f32) -> f32 {
     (viewport_height - 2.0 * line_height).max(line_height)
@@ -3155,6 +3173,7 @@ impl KameApp {
     }
 
     fn draw_surface(&mut self, ui: &mut egui::Ui) {
+        let dialog_open = self.dialog_open();
         let config = self.renderer.config();
         let focus = self.modes.paragraph_focus;
         let typewriter = self.modes.typewriter;
@@ -3760,6 +3779,32 @@ impl KameApp {
                 }
             }
         }
+        // --- the wheel ---------------------------------------------------------
+        // Scrolling brings the caret along, so that it's on the page you're looking at. Typing
+        // then happens there, and a selection stays what was selected. The typewriter keeps
+        // the caret where it was: there, the page can be scrolled while idle.
+        let wheeled = ui.input(|input| input.smooth_scroll_delta().y != 0.0);
+        if wheeled
+            && caret_action.is_none()
+            && !typewriter
+            && self.session.selection.is_none()
+            && !dialog_open
+        {
+            if let Some(rect) = caret_rect {
+                let page = ui.clip_rect();
+                let aim =
+                    caret_aim_after_scroll(rect.top(), rect.bottom(), page.top(), page.bottom());
+                if let Some(y) = aim {
+                    let aim = Pos2::new(rect.left(), y);
+                    if let Some(cursor) =
+                        hit_test(blocks, &layouts, &tops, &heights, body_left, aim)
+                    {
+                        caret_action = Some((cursor, false));
+                    }
+                }
+            }
+        }
+
         // --- page keys ---------------------------------------------------------
         // The caret goes a window up or down at the same column. When that finds nowhere new,
         // the caret is on the first or last line, so it goes to the very start or end.
@@ -7075,6 +7120,38 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             "only read"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_wheel_leaves_a_caret_on_the_page_alone() {
+        assert_eq!(caret_aim_after_scroll(300.0, 325.0, 100.0, 700.0), None);
+    }
+
+    #[test]
+    fn the_wheel_brings_a_caret_along_from_above_the_page() {
+        let aim = caret_aim_after_scroll(10.0, 35.0, 100.0, 700.0).unwrap();
+        assert!(aim > 100.0 && aim < 200.0, "{aim}");
+    }
+
+    #[test]
+    fn the_wheel_brings_a_caret_along_from_below_the_page() {
+        let aim = caret_aim_after_scroll(900.0, 925.0, 100.0, 700.0).unwrap();
+        assert!(aim < 700.0 && aim > 600.0, "{aim}");
+    }
+
+    #[test]
+    fn a_caret_the_wheel_has_placed_is_left_alone_after() {
+        // Aiming puts the caret's line around the aim, and the next frame must not move it.
+        let aim = caret_aim_after_scroll(900.0, 925.0, 100.0, 700.0).unwrap();
+        assert_eq!(
+            caret_aim_after_scroll(aim - 12.0, aim + 12.0, 100.0, 700.0),
+            None
+        );
+        let aim = caret_aim_after_scroll(10.0, 35.0, 100.0, 700.0).unwrap();
+        assert_eq!(
+            caret_aim_after_scroll(aim - 12.0, aim + 12.0, 100.0, 700.0),
+            None
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ macOS (`Modifiers::command`).
 | Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |
 | Page Up, Page Down | move the caret and the page a window at a time, or to the very start or end from the first or last line; with Shift, extend the selection |
 | Ctrl-Left / Ctrl-Right | move the caret a whole word at a time |
+| wheel or trackpad | scroll the page, bringing the caret along when it would leave the page, unless text is selected or typewriter mode is on |
 | Ctrl-Shift-Left / Ctrl-Shift-Right | extend the selection a whole word at a time |
 | Ctrl-A | select the caret's whole block (again for the whole document) |
 | Ctrl-F | find — open the find bar |

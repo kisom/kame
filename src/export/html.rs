@@ -16,7 +16,7 @@
 //! document twice — or after a serde round trip — produces identical bytes.
 
 use crate::layout::link_ranges;
-use crate::model::{AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle};
+use crate::model::{is_script_url, AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle};
 use std::collections::{HashMap, HashSet};
 
 /// The embedded stylesheet.
@@ -662,6 +662,8 @@ fn render_inline(block: &Block, notes: &[NoteMark], footnotes: &[(usize, usize)]
     let spans: Vec<(usize, usize, SpanStyle)> = block
         .spans
         .iter()
+        // A script link publishes as its text.
+        .filter(|span| !matches!(&span.style, SpanStyle::Link { url } if is_script_url(url)))
         .filter_map(|span| {
             let start = snap_up(text, span.start);
             let end = snap_down(text, span.end);
@@ -1450,5 +1452,33 @@ mod tests {
         let mut doc = Document::new("t");
         doc.blocks = vec![block(BlockKind::Paragraph, r#"She said "hello"."#)];
         assert!(to_html(&doc).contains(r#"<p>She said "hello".</p>"#));
+    }
+
+    fn linked(url: &str) -> Block {
+        let mut linked = block(BlockKind::Paragraph, "the demo");
+        linked.spans = vec![crate::model::Span {
+            start: 0,
+            end: 8,
+            style: crate::model::SpanStyle::Link {
+                url: url.to_string(),
+            },
+        }];
+        linked
+    }
+
+    #[test]
+    fn a_script_link_exports_as_its_text() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![linked("javascript:alert(1)")];
+        let html = to_html(&doc);
+        assert!(html.contains("<p>the demo</p>"), "{html}");
+        assert!(!html.contains("javascript:"), "{html}");
+    }
+
+    #[test]
+    fn a_pdf_link_still_exports() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![linked("paper.pdf")];
+        assert!(to_html(&doc).contains(r#"<a href="paper.pdf">the demo</a>"#));
     }
 }

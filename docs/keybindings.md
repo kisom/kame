@@ -118,6 +118,9 @@ A document with no title goes by its file's name.
 They come from an import's front matter, where `Date` is the published date. Other
 front matter fields are left out, and the status line counts them.
 
+A `javascript:` link keeps its words and loses its target when imported or
+exported, and clicking one does nothing.
+
 Exports publish them. Markdown opens with a `Title:`, `Date:`, `Author:` and
 `Tags:` header, in the form Pelican reads, leaving out empty fields, and drops a
 first heading repeating the title, since a blog renders the title itself. HTML puts

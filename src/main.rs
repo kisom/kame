@@ -30,8 +30,8 @@ use crate::layout::{
     FOOTNOTE_LINE_HEIGHT, FOOTNOTE_MARK_EM,
 };
 use crate::model::{
-    Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
-    Metadata, SpanStyle,
+    is_script_url, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
+    Document, Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
     caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word, offset_at,
@@ -2650,6 +2650,9 @@ fn url_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
 /// Opens `url` in the system browser, best-effort: a link that cannot launch is
 /// never worth an error dialog in the editor.
 fn open_in_browser(url: &str) {
+    if is_script_url(url) {
+        return;
+    }
     #[cfg(target_os = "macos")]
     let (program, arg) = ("open", url);
     #[cfg(not(target_os = "macos"))]

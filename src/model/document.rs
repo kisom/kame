@@ -32,6 +32,18 @@ pub enum SpanStyle {
     },
 }
 
+/// Whether `url` runs script when followed. Browsers ignore control characters
+/// and spaces when reading a scheme, and its case, so this does too.
+pub fn is_script_url(url: &str) -> bool {
+    let scheme: String = url
+        .chars()
+        .filter(|c| *c > ' ' && *c != '\u{7f}')
+        .take("javascript:".len())
+        .flat_map(char::to_lowercase)
+        .collect();
+    scheme == "javascript:"
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Span {
     pub start: usize,
@@ -219,5 +231,39 @@ mod tests {
         assert_eq!(block_json, format!(r#""{id}""#));
         let round: Anchor = serde_json::from_str(&block_json).unwrap();
         assert_eq!(round, Anchor::block(id));
+    }
+}
+
+#[cfg(test)]
+mod script_url_tests {
+    use super::is_script_url;
+
+    #[test]
+    fn script_urls_are_recognised_however_they_are_disguised() {
+        for url in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "  javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "java\nscript:alert(1)",
+            "\u{1}javascript:alert(1)",
+        ] {
+            assert!(is_script_url(url), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_links_are_not_script_urls() {
+        for url in [
+            "https://example.com/paper.pdf",
+            "paper.pdf",
+            "/files/paper.pdf",
+            "file:///home/kyle/paper.pdf",
+            "mailto:k@example.com",
+            "javascript.pdf",
+            "docs/javascript:notes.html",
+        ] {
+            assert!(!is_script_url(url), "{url:?}");
+        }
     }
 }

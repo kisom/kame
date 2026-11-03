@@ -7,7 +7,9 @@
 //! footnotes, and drops the apparatus that has no Markdown equivalent
 //! (marginalia and notes are v1-omitted).
 
-use crate::model::{AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle};
+use crate::model::{
+    is_script_url, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
+};
 use std::collections::HashMap;
 
 /// Render `doc` as Markdown.
@@ -241,6 +243,8 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
     let spans: Vec<(usize, usize, SpanStyle)> = block
         .spans
         .iter()
+        // A script link publishes as its text.
+        .filter(|span| !matches!(&span.style, SpanStyle::Link { url } if is_script_url(url)))
         .filter_map(|span| {
             let start = snap_up(text, span.start);
             let end = snap_down(text, span.end);
@@ -1062,5 +1066,31 @@ mod tests {
             1,
             "{out:?}"
         );
+    }
+
+    fn linked(url: &str) -> Block {
+        let mut linked = block(BlockKind::Paragraph, "the demo");
+        linked.spans = vec![crate::model::Span {
+            start: 0,
+            end: 8,
+            style: crate::model::SpanStyle::Link {
+                url: url.to_string(),
+            },
+        }];
+        linked
+    }
+
+    #[test]
+    fn a_script_link_exports_as_its_text() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![linked("javascript:alert(1)")];
+        assert_eq!(to_markdown(&doc), "the demo\n");
+    }
+
+    #[test]
+    fn a_pdf_link_still_exports() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![linked("paper.pdf")];
+        assert_eq!(to_markdown(&doc), "[the demo](paper.pdf)\n");
     }
 }

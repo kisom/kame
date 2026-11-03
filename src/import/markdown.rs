@@ -6,7 +6,8 @@
 //! [`ImportReport`] so the author can see what changed.
 
 use crate::model::{
-    Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata,
+    is_script_url, Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind, Document,
+    Metadata,
 };
 use crate::model::{Span, SpanStyle};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -19,6 +20,7 @@ use uuid::Uuid;
 pub struct ImportReport {
     pub front_matter: bool,
     pub dropped_front_matter: usize,
+    pub script_links: usize,
     pub code_blocks: usize,
     pub inline_code: usize,
     pub tables: usize,
@@ -73,6 +75,11 @@ impl ImportReport {
             self.rules,
             "horizontal rule dropped",
             "horizontal rules dropped",
+        );
+        count(
+            self.script_links,
+            "script link removed",
+            "script links removed",
         );
         count(
             self.dropped_front_matter,
@@ -393,9 +400,14 @@ impl<'a> Builder<'a> {
             }
             Tag::Emphasis => self.open_style(SpanStyle::Italic),
             Tag::Strong => self.open_style(SpanStyle::Bold),
-            Tag::Link { dest_url, .. } => self.open_style(SpanStyle::Link {
-                url: dest_url.to_string(),
-            }),
+            Tag::Link { dest_url, .. } => {
+                if is_script_url(&dest_url) {
+                    self.report.script_links += 1;
+                }
+                self.open_style(SpanStyle::Link {
+                    url: dest_url.to_string(),
+                });
+            }
             Tag::Image { dest_url, .. } => {
                 // An image block cannot sit inside a footnote body, so there
                 // its description stays as the text.
@@ -471,6 +483,10 @@ impl<'a> Builder<'a> {
     }
 
     fn push_span(&mut self, start: usize, end: usize, style: SpanStyle) {
+        // A script link keeps its words and loses its target.
+        if matches!(&style, SpanStyle::Link { url } if is_script_url(url)) {
+            return;
+        }
         if start < end {
             self.spans.push(Span { start, end, style });
         }
@@ -1251,5 +1267,28 @@ mod tests {
         let imported = import("Body.\n");
         assert_eq!(imported.metadata, crate::model::Metadata::default());
         assert_eq!(imported.report.summary(), None);
+    }
+
+    #[test]
+    fn a_script_link_imports_as_its_text() {
+        let imported = import("See [the demo](javascript:alert(1)) now.\n");
+        let block = &imported.document.blocks[0];
+        assert_eq!(block.text, "See the demo now.");
+        assert!(block.spans.is_empty(), "{:?}", block.spans);
+        assert_eq!(imported.report.script_links, 1);
+        assert_eq!(imported.report.summary().unwrap(), "1 script link removed");
+    }
+
+    #[test]
+    fn a_pdf_link_survives_import() {
+        let doc = import("See [paper](paper.pdf) and [local](file:///x/p.pdf).\n").document;
+        assert_eq!(doc.blocks[0].spans.len(), 2);
+    }
+
+    #[test]
+    fn a_style_around_a_script_link_survives() {
+        let doc = import("**[bold](javascript:x)**\n").document;
+        assert_eq!(doc.blocks[0].spans.len(), 1);
+        assert_eq!(doc.blocks[0].spans[0].style, SpanStyle::Bold);
     }
 }

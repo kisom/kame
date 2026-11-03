@@ -66,12 +66,11 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Ideas
 
-- [ ] **Spell check.** Typos in essays only get caught by rereading. Squiggles could use `range_rects`
-  and be drawn on the page without touching the text, with a personal word list in the config and code
-  skipped. It wouldn't catch mistakes made of real words, like "is has" or "what need", which is what
-  turned up in the essays. A check for doubled or odd word pairs, or a separate review pass, would be a
-  different tool.
-
+- [ ] **Spelling and grammar check.** Typos in essays only get caught by rereading. Marks could use
+  `range_rects` and be drawn on the page without touching the text, with a personal word list in the
+  config and code skipped. Spelling is a word list. Grammar is the harder half and what turned up in
+  the essays: "is has" and "what need" are made of real words, so it takes a language checker or a
+  review pass rather than a dictionary.
 
 - [ ] **Sync for drift between one person's machines.** Designed and prototyped: see
   `docs/superpowers/specs/2026-11-03-sync-design.md` and `crates/kame-sync`. It merges document

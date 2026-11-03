@@ -5,23 +5,29 @@ Open work, most pressing first. Tick items off or delete them as they land.
 ## Typography
 
 - [ ] **Word spacing.** Justified text leaves wide gaps because cosmic-text takes each line as it
-  comes and can only widen spaces. Studied on 586 devlog paragraphs through kame's own shaping, with a
-  model of first fit that matched the engine's line breaks on all 586 at type 16, width 640:
+  comes and can only widen spaces. Studied through kame's own shaping at type 16, width 640, on two
+  essays (68 and 83 lines) and 586 devlog paragraphs, with a model of first fit that matched the
+  engine's breaks on all but one paragraph. Each cell reads essay / essay / devlog:
 
-  | Spaces over | Today | Spaces may close to 80% | Best breaks over the paragraph | Same, with hyphens |
+  | Rule | Spaces over 1.5x | Spaces over 2x | Words typed that move an earlier line | Words removed that move a line above |
   |---|---|---|---|---|
-  | 1.5x | 28.8% | 13.1% | 12.2% | 3.4% |
-  | 2x | 5.7% | 2.2% | 1.5% | 0.6% |
-  | 3x | 0.5% | 0.3% | 0.1% | 0.1% |
+  | Today | 30 / 27 / 29% | 6.7 / 7.4 / 5.7% | none | none |
+  | Spaces may close to 80% | 15 / 14 / 13% | 3.3 / 1.5 / 2.2% | none | none |
+  | Look one line ahead | 12 / 7.5 / 13% | 0 / 1.5 / 1.7% | 0.3 / 0.8 / 0.3% | 1.2 / 0 / 0.2% |
+  | Look two lines ahead | 8.3 / 6.1 / 12% | 0 / 0 / 1.5% | 1.0 / 1.7 / 0.7% | 6.4 / 6.6 / 2.4% |
+  | Best breaks over the paragraph | 5 / 6.1 / 12% | 0 / 0 / 1.5% | 2.9 / 2.8 / 1.0% | 19 / 9.4 / 3.6% |
+  | Same, with hyphens | 1.7 / 0 / 3.4% | 0 / 0 / 0.6% | 5.2 / 3.9 / 1.9% | 11 / 8.9 / 4.8% |
 
-  Breaking over the paragraph moves lines further up: for 2.1% of words typed and 7.6% of words
-  removed in revising, against none for the two line-at-a-time rules. Hyphens land on about one line
-  in ten. Letting spaces close looks like the first step, since it gets most of the gain and keeps the
-  page still. Any of these needs kame to set its own lines: shape the paragraph once on a single line,
-  choose the breaks, and build `runs` and `lines` from it. Painting and hit-testing already read those
-  rather than cosmic-text's lines, and a fit took under a millisecond. Hyphens could be drawn without
-  entering the text, so they wouldn't touch byte offsets, but they would need `hypher` and a language.
-  Write a spec before building.
+  The last two columns skip the lines nearest the edit. On the essays one line is over 1%, so small
+  differences mean little. Looking one line ahead is the likely choice: it gets most of the gain, a
+  line depends only on the text up to a little past it, and the look-ahead is one constant to adjust.
+  Closing up alone can push a gap further down rather than remove it. All of these need kame to set
+  its own lines: shape the paragraph once on a single line, choose the breaks, and build `runs` and
+  `lines` from it. Production code reads the engine's lines only in `layout/text.rs`, though many
+  tests read them, and a fit took under a millisecond. Hyphens would be drawn without entering the
+  text, so they wouldn't touch byte offsets, but need `hypher` and a language; a word too long to fit
+  is the case only they fix, so judge them after the rest. How the movement feels can only be judged
+  in the app. The study left out the room footnote marks take. Write a spec before building.
 
 ## Markdown import
 

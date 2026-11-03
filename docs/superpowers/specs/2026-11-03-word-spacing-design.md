@@ -1,7 +1,7 @@
 # Word spacing — design
 
 Date: 2026-11-03
-Status: awaiting review. Section 11 lists the decisions made on your behalf.
+Status: accepted 2026-11-03. Section 11 lists the decisions made on your behalf.
 
 ## 1. Purpose
 

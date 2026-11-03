@@ -1386,6 +1386,19 @@ fn parse_tags(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The document's metadata as the dialog leaves it.
+fn metadata_from_prompt(prompt: &MetadataPrompt) -> Metadata {
+    Metadata {
+        title: prompt.title.trim().to_string(),
+        author: prompt.author.trim().to_string(),
+        created: prompt.created.trim().to_string(),
+        published: prompt.published.trim().to_string(),
+        tags: parse_tags(&prompt.tags),
+        words: parse_tags(&prompt.words),
+        accepted: prompt.accepted.clone(),
+    }
+}
+
 /// The Document Properties dialog: its fields as text until they are saved.
 struct MetadataPrompt {
     title: String,
@@ -1393,6 +1406,10 @@ struct MetadataPrompt {
     created: String,
     published: String,
     tags: String,
+    /// This document's words for the spell checker.
+    words: String,
+    /// The marks accepted in this document, which can be taken back here.
+    accepted: Vec<AcceptedMark>,
     /// Make this author the one new documents start with.
     default_author: bool,
     /// Set for the frame the dialog opens on, so the first field takes the
@@ -4891,6 +4908,8 @@ impl KameApp {
             created: metadata.created.clone(),
             published: metadata.published.clone(),
             tags: metadata.tags.join(", "),
+            words: metadata.words.join(", "),
+            accepted: metadata.accepted.clone(),
             default_author: false,
             focus: true,
         });
@@ -4925,6 +4944,11 @@ impl KameApp {
                             ("Created", &mut prompt.created, "YYYY-MM-DD"),
                             ("Published", &mut prompt.published, "YYYY-MM-DD"),
                             ("Tags", &mut prompt.tags, "separated by commas"),
+                            (
+                                "Words",
+                                &mut prompt.words,
+                                "right in this document, separated by commas",
+                            ),
                         ]
                         .into_iter()
                         .enumerate()
@@ -4941,6 +4965,28 @@ impl KameApp {
                             ui.end_row();
                         }
                     });
+                if !prompt.accepted.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label("Accepted marks");
+                    let mut forget = None;
+                    for (index, mark) in prompt.accepted.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("mark it again")
+                                .clicked()
+                            {
+                                forget = Some(index);
+                            }
+                            ui.label(&mark.text);
+                            ui.label(egui::RichText::new(&mark.rule).weak());
+                        });
+                    }
+                    if let Some(index) = forget {
+                        prompt.accepted.remove(index);
+                    }
+                    ui.add_space(4.0);
+                }
                 ui.checkbox(
                     &mut prompt.default_author,
                     "Use this author for new documents",
@@ -4963,15 +5009,7 @@ impl KameApp {
                     self.default_author = prompt.author.trim().to_string();
                     self.persist();
                 }
-                self.session.set_metadata(Metadata {
-                    title: prompt.title.trim().to_string(),
-                    author: prompt.author.trim().to_string(),
-                    created: prompt.created.trim().to_string(),
-                    published: prompt.published.trim().to_string(),
-                    tags: parse_tags(&prompt.tags),
-                    // The dialog doesn't show the word list or accepted marks, and keeps them.
-                    ..self.session.metadata.clone()
-                });
+                self.session.set_metadata(metadata_from_prompt(&prompt));
                 if let Some(warning) = kame_core::session::date_warning(&self.session.metadata) {
                     self.notice = Some(warning);
                 }
@@ -7805,6 +7843,48 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     #[test]
     fn switching_windows_keeps_the_find_bar_open() {
         assert!(!find_bar_closes(true, false, false));
+    }
+
+    fn prompt() -> MetadataPrompt {
+        MetadataPrompt {
+            title: " T ".to_string(),
+            author: " A ".to_string(),
+            created: "2026-01-01".to_string(),
+            published: String::new(),
+            tags: "one, two".to_string(),
+            words: "kame,  Udacity , ,nanodegrees".to_string(),
+            accepted: vec![AcceptedMark {
+                rule: "Rule".to_string(),
+                text: "key point".to_string(),
+            }],
+            default_author: false,
+            focus: false,
+        }
+    }
+
+    #[test]
+    fn the_properties_dialog_saves_the_documents_words() {
+        let metadata = metadata_from_prompt(&prompt());
+        assert_eq!(metadata.words, vec!["kame", "Udacity", "nanodegrees"]);
+        assert_eq!(metadata.title, "T");
+        assert_eq!(metadata.author, "A");
+        assert_eq!(metadata.tags, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn the_properties_dialog_keeps_accepted_marks_it_didnt_forget() {
+        let metadata = metadata_from_prompt(&prompt());
+        assert_eq!(metadata.accepted.len(), 1);
+        let mut forgetting = prompt();
+        forgetting.accepted.clear();
+        assert!(metadata_from_prompt(&forgetting).accepted.is_empty());
+    }
+
+    #[test]
+    fn clearing_the_words_field_clears_the_list() {
+        let mut cleared = prompt();
+        cleared.words = "  ".to_string();
+        assert!(metadata_from_prompt(&cleared).words.is_empty());
     }
 
     #[test]

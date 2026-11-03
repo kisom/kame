@@ -114,6 +114,9 @@ View > Check spelling marks likely mistakes as you write, in red for spelling an
 changing a word. Right-click a mark to take a suggestion, accept it for this document, add the word to this document's
 list or your own, or turn off the rule. F7 selects the next mark. Code, links, quotes and prose blocks aren't checked.
 
+File > Document Properties shows this document's words and accepted marks, to change or take back. Your own words and the rules
+you've turned off are in `config.json`, as `words` and `rules_off`.
+
 View > Hyphenate turns off the hyphens kame draws to even out justified paragraphs. They are only
 drawn, so they never reach your text, copies or exports.
 

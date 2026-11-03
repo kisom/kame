@@ -888,6 +888,33 @@ fn scroll_to_show(
     Some(target.clamp(0.0, furthest)).filter(|target| (target - scroll).abs() > 0.5)
 }
 
+/// How far a page key moves: a window's height, less two lines so the eye keeps its place.
+fn page_step(viewport_height: f32, line_height: f32) -> f32 {
+    (viewport_height - 2.0 * line_height).max(line_height)
+}
+
+/// The scroll offset after a page key: the page moves with the caret, so the caret stays
+/// where it was on screen, unless the caret was off the page or the page has run out.
+fn scroll_after_page_key(
+    scroll: f32,
+    step: f32,
+    caret_top: f32,
+    caret_bottom: f32,
+    viewport_height: f32,
+    content_height: f32,
+) -> f32 {
+    let furthest = (content_height - viewport_height).max(0.0);
+    let moved = (scroll + step).clamp(0.0, furthest);
+    scroll_to_show(
+        caret_top,
+        caret_bottom,
+        moved,
+        viewport_height,
+        content_height,
+    )
+    .unwrap_or(moved)
+}
+
 /// ASCII-fast, Unicode-correct case-insensitive character equality.
 fn char_eq_ignore_case(a: char, b: char) -> bool {
     if a.is_ascii() && b.is_ascii() {
@@ -1821,6 +1848,8 @@ struct KameApp {
     pending_scroll: Option<f32>,
     /// A key moved the caret or changed the text, so the page should keep it in view.
     follow_caret: bool,
+    /// A page key waiting for the page's geometry, as (down, select).
+    page_key: Option<(bool, bool)>,
     /// The heading a followed document link named, until its document opens.
     pending_heading: Option<String>,
     escape_prefix: EscapePrefix,
@@ -1918,6 +1947,7 @@ impl KameApp {
             typewriter_anchor: None,
             pending_scroll: None,
             follow_caret: false,
+            page_key: None,
             pending_heading: None,
             escape_prefix: EscapePrefix::default(),
             page_scroll: 0.0,
@@ -2709,6 +2739,10 @@ impl KameApp {
                 Command::SelectUp => self.move_vertically(false, true),
                 Command::MoveDown => self.move_vertically(true, false),
                 Command::SelectDown => self.move_vertically(true, true),
+                Command::MovePageUp => self.page_key = Some((false, false)),
+                Command::SelectPageUp => self.page_key = Some((false, true)),
+                Command::MovePageDown => self.page_key = Some((true, false)),
+                Command::SelectPageDown => self.page_key = Some((true, true)),
                 Command::MoveLineStart => self.move_to_line_edge(false, false),
                 Command::SelectLineStart => self.move_to_line_edge(false, true),
                 Command::MoveLineEnd => self.move_to_line_edge(true, false),
@@ -3698,6 +3732,41 @@ impl KameApp {
                         caret_action = Some((cursor, shift));
                     }
                 }
+            }
+        }
+        // --- page keys ---------------------------------------------------------
+        // The caret goes a window up or down at the same column. When that finds nowhere new,
+        // the caret is on the first or last line, so it goes to the very start or end.
+        if let (Some((down, select)), Some(rect)) = (self.page_key.take(), caret_rect) {
+            let distance = page_step(ui.clip_rect().height(), config.body_line_height);
+            let step = if down { distance } else { -distance };
+            let aim = Pos2::new(rect.left(), rect.center().y + step);
+            let found = hit_test(blocks, &layouts, &tops, &heights, body_left, aim);
+            let target = found.filter(|cursor| *cursor != caret).or_else(|| {
+                let edge = if down { blocks.last() } else { blocks.first() }?;
+                Some(Cursor {
+                    block_id: edge.id,
+                    offset: if down { edge.text.len() } else { 0 },
+                })
+            });
+            if let Some(target) = target {
+                caret_action = Some((target, select));
+                let place = blocks.iter().position(|block| block.id == target.block_id);
+                let line = place.and_then(|index| {
+                    let line = caret_line(layouts[index], target.offset)?;
+                    Some((tops[index] + line.y - response.rect.top(), line.height))
+                });
+                if let (Some((top, height)), false) = (line, typewriter) {
+                    self.pending_scroll = Some(scroll_after_page_key(
+                        self.page_scroll,
+                        step,
+                        top,
+                        top + height,
+                        ui.clip_rect().height(),
+                        content_height,
+                    ));
+                }
+                ui.ctx().request_repaint();
             }
         }
         if response.dragged() {
@@ -6971,6 +7040,52 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             "only read"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_page_key_moves_a_window_less_two_lines() {
+        assert_eq!(page_step(600.0, 25.0), 550.0);
+    }
+
+    #[test]
+    fn a_page_key_in_a_tiny_window_still_moves_a_line() {
+        assert_eq!(page_step(30.0, 25.0), 25.0);
+    }
+
+    #[test]
+    fn a_page_key_moves_the_page_with_the_caret() {
+        // The caret went from 300 to 850 with the page 550 further down.
+        assert_eq!(
+            scroll_after_page_key(100.0, 550.0, 850.0, 875.0, 600.0, 5000.0),
+            650.0
+        );
+        assert_eq!(
+            scroll_after_page_key(650.0, -550.0, 300.0, 325.0, 600.0, 5000.0),
+            100.0
+        );
+    }
+
+    #[test]
+    fn a_page_key_stops_at_the_edges_of_the_page() {
+        assert_eq!(
+            scroll_after_page_key(4300.0, 550.0, 4800.0, 4825.0, 600.0, 5000.0),
+            4400.0
+        );
+        assert_eq!(
+            scroll_after_page_key(100.0, -550.0, 10.0, 35.0, 600.0, 5000.0),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_page_key_brings_back_a_caret_scrolled_off_the_page() {
+        // The reader scrolled away with the wheel, then pressed the key.
+        let scroll = scroll_after_page_key(3000.0, 550.0, 700.0, 725.0, 600.0, 5000.0);
+        assert!(scroll <= 700.0, "the caret is on the page: {scroll}");
+        assert!(
+            scroll + 600.0 >= 725.0,
+            "the caret is on the page: {scroll}"
+        );
     }
 
     #[test]

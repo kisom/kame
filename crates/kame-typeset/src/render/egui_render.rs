@@ -756,6 +756,10 @@ pub enum Command {
     MoveRight,
     MoveUp,
     MoveDown,
+    MovePageUp,
+    MovePageDown,
+    SelectPageUp,
+    SelectPageDown,
     MoveLineStart,
     MoveLineEnd,
     /// Ctrl-arrow: move by whole word rather than by character.
@@ -955,6 +959,10 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::ArrowUp if !command => Some(Command::MoveUp),
         Key::ArrowDown if modifiers.shift && !command => Some(Command::SelectDown),
         Key::ArrowDown if !command => Some(Command::MoveDown),
+        Key::PageUp if modifiers.shift && !command => Some(Command::SelectPageUp),
+        Key::PageUp if !command => Some(Command::MovePageUp),
+        Key::PageDown if modifiers.shift && !command => Some(Command::SelectPageDown),
+        Key::PageDown if !command => Some(Command::MovePageDown),
         Key::Home if modifiers.shift && !command => Some(Command::SelectLineStart),
         Key::Home if !command => Some(Command::MoveLineStart),
         Key::End if modifiers.shift && !command => Some(Command::SelectLineEnd),
@@ -1687,6 +1695,14 @@ visual form, and thus with an independent existence.";
         );
         assert_eq!(command_for_key(Key::ArrowUp, none), Some(Command::MoveUp));
         assert_eq!(
+            command_for_key(Key::PageUp, none),
+            Some(Command::MovePageUp)
+        );
+        assert_eq!(
+            command_for_key(Key::PageDown, none),
+            Some(Command::MovePageDown)
+        );
+        assert_eq!(
             command_for_key(Key::ArrowDown, none),
             Some(Command::MoveDown)
         );
@@ -1702,6 +1718,14 @@ visual form, and thus with an independent existence.";
         assert_eq!(
             command_for_key(Key::ArrowRight, shift),
             Some(Command::SelectRight)
+        );
+        assert_eq!(
+            command_for_key(Key::PageUp, shift),
+            Some(Command::SelectPageUp)
+        );
+        assert_eq!(
+            command_for_key(Key::PageDown, shift),
+            Some(Command::SelectPageDown)
         );
         assert_eq!(
             command_for_key(Key::ArrowUp, shift),

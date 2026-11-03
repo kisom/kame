@@ -80,8 +80,9 @@ literal in both.
 ## Search
 
 Ctrl-F opens the find bar. Matches are case-insensitive and highlight as you
-type. Enter finds the next match, Shift-Enter the previous one, and Escape
-closes the bar; the page scrolls to keep the current match in view.
+type. Enter finds the next match, Shift-Enter the previous one, and Escape or
+clicking back in the text closes the bar; the page scrolls to keep the current
+match in view.
 
 Block kind is also on the page's right-click menu — body, H1–H3 and both list
 kinds — with a check beside the caret's current kind. Changing the kind is one

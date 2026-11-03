@@ -1015,6 +1015,12 @@ fn wavy_line(left: f32, right: f32, y: f32) -> Vec<Pos2> {
     points
 }
 
+/// Whether the find bar should close because its field lost the keyboard. Going back to the text
+/// closes it. Its own buttons don't, and nor does switching to another window.
+fn find_bar_closes(lost_focus: bool, window_focused: bool, pointer_in_bar: bool) -> bool {
+    lost_focus && window_focused && !pointer_in_bar
+}
+
 /// How far a page key moves: a window's height, less two lines so the eye keeps its place.
 fn page_step(viewport_height: f32, line_height: f32) -> f32 {
     (viewport_height - 2.0 * line_height).max(line_height)
@@ -2629,15 +2635,19 @@ impl KameApp {
         let mut next = false;
         let mut prev = false;
         let mut close = false;
-        egui::Panel::top("kame-find").show(ui, |ui| {
+        let mut lost_focus = false;
+        let bar = egui::Panel::top("kame-find").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut query)
                         .id(find_query_id())
+                        // Enter steps through matches, and shouldn't take the keyboard away.
+                        .return_key(None)
                         .hint_text("find")
                         .desired_width(220.0),
                 );
                 changed = field.changed();
+                lost_focus = field.lost_focus();
                 if focus {
                     field.request_focus();
                 }
@@ -2662,7 +2672,16 @@ impl KameApp {
         } else if let Some(find) = &mut self.find {
             find.focus = false;
         }
-        if close {
+        let (window_focused, pointer_in_bar) = ui.input(|input| {
+            (
+                input.viewport().focused.unwrap_or(true),
+                input
+                    .pointer
+                    .latest_pos()
+                    .is_some_and(|at| bar.response.rect.contains(at)),
+            )
+        });
+        if close || find_bar_closes(lost_focus, window_focused, pointer_in_bar) {
             self.find = None;
             return;
         }
@@ -2670,6 +2689,12 @@ impl KameApp {
             self.step_find(true);
         } else if prev {
             self.step_find(false);
+        }
+        // Its own controls take the keyboard from the field, and it should go straight back.
+        if lost_focus {
+            if let Some(find) = &mut self.find {
+                find.focus = true;
+            }
         }
     }
 
@@ -7760,6 +7785,26 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(points.first().unwrap().x, 10.0);
         assert_eq!(points.last().unwrap().x, 21.0);
         assert!(points.iter().any(|p| p.y < 100.0) && points.iter().any(|p| p.y > 100.0));
+    }
+
+    #[test]
+    fn going_back_to_the_text_closes_the_find_bar() {
+        assert!(find_bar_closes(true, true, false));
+    }
+
+    #[test]
+    fn the_find_bar_stays_while_its_field_has_the_keyboard() {
+        assert!(!find_bar_closes(false, true, false));
+    }
+
+    #[test]
+    fn the_find_bars_own_controls_keep_it_open() {
+        assert!(!find_bar_closes(true, true, true));
+    }
+
+    #[test]
+    fn switching_windows_keeps_the_find_bar_open() {
+        assert!(!find_bar_closes(true, false, false));
     }
 
     #[test]

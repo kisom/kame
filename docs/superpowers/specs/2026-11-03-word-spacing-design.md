@@ -48,8 +48,11 @@ line breaks on all but one paragraph.
 The movement rows skip the lines nearest the edit, which can shift under any rule, and were measured a
 word at a time. At type 18 the rule gains less on the essays: 10% and 0.7%.
 
-Choosing breaks over a whole paragraph, as TeX does, was only slightly better on the essays and moved
-far more: up to 19% of removed words moved a line above. Looking further ahead moves more too.
+Choosing breaks over a whole paragraph, as TeX does, spaces the essays better: about 5.5% over 1.5x
+without hyphens, with spaces closing to 80%, and under 1% with hyphens. But it moved far more, with 9%
+to 19% of removed words moving a line above and an earlier line moving for about 3% of words typed.
+That's the trade this design makes: some evenness for a page that stays still. Looking further ahead
+sits between the two.
 
 ## 5. How layout changes
 
@@ -179,9 +182,10 @@ Each stage is its own commit on one branch, tried in the app before it lands, on
 
 ## 11. Decisions made on your behalf
 
-- **One line ahead, not two.** Two lines is a little better on the essays (8.3% against 12% over 1.5x
-  without hyphens) but moved a line above for about 6% of removed words against about 1%. It's one
-  constant, so try the other if the page feels too loose.
+- **One line ahead, not two.** With spaces closing to 80% and no hyphens, two lines is a little better
+  (8.3% against 12% over 1.5x on one essay, 6.1% against 7.5% on the other) but moved a line above for
+  about 6% of removed words against about 1%. It's one constant, so try the other if the page feels too
+  loose.
 - **A 90% closing limit,** because hyphens make tighter spacing unnecessary. With hyphens off, 90% leaves
   more loose lines than 80% would; I kept one number rather than two.
 - **Hyphens on by default,** with a menu item, and a setting for the app rather than each document.
@@ -195,5 +199,5 @@ Each stage is its own commit on one branch, tried in the app before it lands, on
   improving too is reassuring, but the numbers may want adjusting with use.
 - **How it feels.** The movement figures are counts, and nobody has typed with this yet. Stage 1 is the
   first chance to find out.
-- **The picture is only part of it.** Spacing was measured with the study's copy of the rule, on text
-  without the room footnote marks take.
+- **Footnote marks.** Spacing was measured on text without the room those marks take, so paragraphs with
+  footnotes may break slightly differently.

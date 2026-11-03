@@ -339,7 +339,12 @@ fn step(folder: &str, device: &str, state: &str, words: Option<&str>) -> Result<
         Err(_) => (shared_start(), None),
     };
     if let Some(words) = words {
-        let block = &mut doc.blocks[0];
+        // BLOCK:WORDS picks a paragraph, and plain WORDS means the first.
+        let (at, words) = match words.split_once(':') {
+            Some((at, rest)) if at.parse::<usize>().is_ok() => (at.parse::<usize>()?, rest),
+            _ => (0, words),
+        };
+        let block = doc.blocks.get_mut(at).ok_or("no such paragraph")?;
         if !block.text.is_empty() {
             block.text.push(' ');
         }
@@ -358,22 +363,21 @@ fn step(folder: &str, device: &str, state: &str, words: Option<&str>) -> Result<
         serde_json::to_vec(&(&synced.doc, &synced.head))?,
     )?;
     let store = Store::load(Path::new(folder))?;
-    let notes = synced
-        .doc
-        .annotations
-        .iter()
-        .filter(|note| matches!(note.anchor, Anchor::Range { .. } | Anchor::Block(_)))
-        .count();
     println!(
-        "{device}: head {} heads {} revisions {} written {} notes {} digest {} text {:?}",
+        "{device}: head {} heads {} revisions {} written {} notes {} digest {}",
         &synced.head[..12],
         store.heads().len(),
         store.revision_count(),
         synced.written,
-        notes,
+        synced.doc.annotations.len(),
         &kame_sync::merge::document_digest(&synced.doc)[..12],
-        synced.doc.blocks[0].text
     );
+    for block in &synced.doc.blocks {
+        println!("  | {}", block.text);
+    }
+    for note in &synced.doc.annotations {
+        println!("  note: {}", note.body);
+    }
     Ok(())
 }
 
@@ -382,12 +386,14 @@ fn shared_start() -> Document {
     Document {
         id: uuid::Uuid::nil(),
         title: "Sync test".to_string(),
-        blocks: vec![Block {
-            id: uuid::Uuid::from_u128(1),
-            kind: BlockKind::Paragraph,
-            text: String::new(),
-            spans: Vec::new(),
-        }],
+        blocks: (1..=3)
+            .map(|id| Block {
+                id: uuid::Uuid::from_u128(id),
+                kind: BlockKind::Paragraph,
+                text: String::new(),
+                spans: Vec::new(),
+            })
+            .collect(),
         annotations: Vec::new(),
     }
 }

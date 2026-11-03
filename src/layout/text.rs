@@ -84,10 +84,26 @@ pub struct LayoutLine {
     pub end: usize,
 }
 
-/// A shaped block. `buffer` carries the glyphs; readers walk
-/// `buffer.layout_runs()` to paint or hit-test.
+/// One visual line as it is drawn. cosmic-text won't let a shaped line be changed, and
+/// hanging punctuation moves its glyphs, so painting and hit-testing read these.
+pub struct LayoutRun {
+    /// Index of the `\n`-separated line this belongs to.
+    pub line_i: usize,
+    pub glyphs: Vec<cosmic_text::LayoutGlyph>,
+    /// Y offset to the line's baseline.
+    pub line_y: f32,
+    /// Y offset to the top of the line.
+    pub line_top: f32,
+    pub line_height: f32,
+}
+
+/// A shaped block. `runs` carries the glyphs as drawn, which is what readers walk to
+/// paint or hit-test.
 pub struct BlockLayout {
+    /// The lines as the engine shaped them, which tests compare against.
+    #[cfg(test)]
     pub buffer: Buffer,
+    pub runs: Vec<LayoutRun>,
     pub lines: Vec<LayoutLine>,
     pub height: f32,
     /// How far the text is indented from the block's left edge, to leave room
@@ -140,7 +156,7 @@ fn line_starts(text: &str) -> Vec<usize> {
 /// attributes.
 ///
 /// The returned [`BlockLayout`] owns the cosmic-text [`Buffer`], so callers can
-/// walk `buffer.layout_runs()` for glyphs (remembering that a glyph's `y` is
+/// walk `runs` for glyphs (remembering that a glyph's `y` is
 /// line-relative — add `run.line_y`).
 #[cfg(test)]
 pub fn layout_block(
@@ -285,12 +301,128 @@ pub fn layout_block_marked_with_align(
     }
     let height = lines.last().map_or(0.0, |line| line.y + line.height);
 
+    let runs = drawn_runs(&buffer, width, align, !block.kind.is_verbatim());
+
     BlockLayout {
+        #[cfg(test)]
         buffer,
+        runs,
         lines,
         height,
         left_indent,
         line_starts,
+    }
+}
+
+/// The shaped lines as they are drawn, with their punctuation hung if `hang`.
+fn drawn_runs(buffer: &Buffer, width: f32, align: Align, hang: bool) -> Vec<LayoutRun> {
+    let shaped: Vec<_> = buffer.layout_runs().collect();
+    shaped
+        .iter()
+        .enumerate()
+        .map(|(index, run)| {
+            let mut glyphs = run.glyphs.to_vec();
+            if hang && !run.rtl {
+                // The engine stretches every line of a paragraph but its last, so only
+                // those have a right edge for punctuation to hang past.
+                let last_of_paragraph = shaped
+                    .get(index + 1)
+                    .is_none_or(|next| next.line_i != run.line_i);
+                let justified = align == Align::Justified && !last_of_paragraph;
+                hang_line(&mut glyphs, run.text, width, justified);
+            }
+            LayoutRun {
+                line_i: run.line_i,
+                glyphs,
+                line_y: run.line_y,
+                line_top: run.line_top,
+                line_height: run.line_height,
+            }
+        })
+        .collect()
+}
+
+/// How much of an opening mark's width hangs left of the measure.
+fn left_hang(mark: char) -> f32 {
+    match mark {
+        '\u{201c}' | '\u{2018}' | '"' | '\'' => 0.7,
+        '(' | '[' | '{' => 0.2,
+        _ => 0.0,
+    }
+}
+
+/// How much of a closing mark's width hangs right of the measure. The lightest marks
+/// leave the biggest bite out of the edge, so they hang furthest.
+fn right_hang(mark: char) -> f32 {
+    match mark {
+        '.' | ',' | '-' | '\u{2010}' | '\u{201d}' | '\u{2019}' | '"' | '\'' => 0.7,
+        ':' | ';' | '\u{2013}' => 0.4,
+        '!' | '?' | '\u{2014}' => 0.25,
+        ')' | ']' | '}' => 0.2,
+        _ => 0.0,
+    }
+}
+
+/// Moves a line's glyphs so its punctuation hangs outside the measure, which keeps the
+/// edge of the text looking straight. A justified line is stretched by what was hung, so
+/// that its words still reach both edges.
+fn hang_line(glyphs: &mut [cosmic_text::LayoutGlyph], text: &str, width: f32, justified: bool) {
+    let glyph_text = |glyph: &cosmic_text::LayoutGlyph| &text[glyph.start..glyph.end];
+    let Some(last) = glyphs
+        .iter()
+        .rposition(|glyph| !glyph_text(glyph).trim().is_empty())
+    else {
+        return;
+    };
+    if glyphs.iter().any(|glyph| glyph.level.is_rtl()) {
+        return;
+    }
+    let left = glyph_text(&glyphs[0]).chars().next().map_or(0.0, left_hang) * glyphs[0].w;
+    // Two marks can end a line together, as in a period and a closing quote.
+    let right: f32 = if justified {
+        glyphs[..=last]
+            .iter()
+            .rev()
+            .take(2)
+            .take_while(|glyph| {
+                glyph_text(glyph)
+                    .chars()
+                    .next_back()
+                    .is_some_and(|mark| right_hang(mark) > 0.0)
+            })
+            .map(|glyph| {
+                glyph_text(glyph)
+                    .chars()
+                    .next_back()
+                    .map_or(0.0, right_hang)
+                    * glyph.w
+            })
+            .sum()
+    } else {
+        0.0
+    };
+    if left == 0.0 && right == 0.0 {
+        return;
+    }
+    let spaces = glyphs[..last]
+        .iter()
+        .filter(|glyph| glyph_text(glyph).trim().is_empty())
+        .count();
+    // What the line has to grow by, shared between its spaces. A single word has none,
+    // and keeps its right edge. A ragged line has no need to grow.
+    let spread = if justified && spaces > 0 {
+        let end = glyphs[last].x + glyphs[last].w;
+        (width - end + left + right) / spaces as f32
+    } else {
+        0.0
+    };
+    let mut moved = -left;
+    for (index, glyph) in glyphs.iter_mut().enumerate() {
+        glyph.x += moved;
+        if index < last && glyph_text(glyph).trim().is_empty() {
+            glyph.w += spread;
+            moved += spread;
+        }
     }
 }
 
@@ -1209,5 +1341,149 @@ twenty-four twenty-five twenty-six twenty-seven";
         let last = run.glyphs.last().unwrap();
         assert_eq!(last.color_opt, Some(LINK_COLOR));
         assert_eq!(run.glyphs[0].color_opt, None);
+    }
+
+    /// The ink of a line: its glyphs without the spaces at its end.
+    fn visible<'a>(block: &Block, line: &'a LayoutRun) -> Vec<&'a cosmic_text::LayoutGlyph> {
+        let base = line_starts(&block.text)[line.line_i];
+        let mut glyphs: Vec<_> = line.glyphs.iter().collect();
+        while glyphs
+            .last()
+            .is_some_and(|g| block.text[base + g.start..base + g.end].trim().is_empty())
+        {
+            glyphs.pop();
+        }
+        glyphs
+    }
+
+    fn hanging_layout(text: &str, kind: BlockKind, width: f32) -> (Block, BlockLayout, f32) {
+        let mut fs = FontSystem::new();
+        fs.db_mut()
+            .load_font_file(font_path("IBMPlexMono-Regular.ttf"))
+            .unwrap();
+        load_fonts(&mut fs);
+        let mut config = LayoutConfig::with_body_size(16.0);
+        config.body_width = width;
+        let block = kind_block(kind, text);
+        let layout = layout_block_marked(&mut fs, &block, &config, &[]);
+        (block, layout, width)
+    }
+
+    const WRAPPING: &str = "Typography, is the craft, of endowing human, language with, a durable \
+visual form, and thus, with an independent, existence, whose heartwood, is calligraphy, the \
+dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
+
+    #[test]
+    fn a_comma_at_the_end_of_a_justified_line_hangs_past_the_measure() {
+        let (block, layout, width) = hanging_layout(WRAPPING, BlockKind::Paragraph, 240.0);
+        let mut hung = 0;
+        for line in &layout.runs[..layout.runs.len() - 1] {
+            let glyphs = visible(&block, line);
+            let last = glyphs[glyphs.len() - 1];
+            let end = last.x + last.w;
+            if &block.text[last.start..last.end] == "," {
+                assert!(end > width + 0.5, "a comma ending at {end} of {width}");
+                hung += 1;
+            } else {
+                assert!(
+                    (end - width).abs() < 0.5,
+                    "a word ending at {end} of {width}"
+                );
+            }
+        }
+        assert!(hung >= 2, "expected lines ending in commas, got {hung}");
+    }
+
+    #[test]
+    fn what_comes_before_a_hanging_comma_nearly_reaches_the_measure() {
+        let (block, layout, width) = hanging_layout(WRAPPING, BlockKind::Paragraph, 240.0);
+        for line in &layout.runs[..layout.runs.len() - 1] {
+            let glyphs = visible(&block, line);
+            let last = glyphs[glyphs.len() - 1];
+            if &block.text[last.start..last.end] == "," {
+                let word_end = last.x;
+                assert!(word_end < width + 0.5 && word_end > width - last.w);
+            }
+        }
+    }
+
+    #[test]
+    fn an_opening_quote_hangs_past_the_left_of_the_measure() {
+        let (_, layout, _) = hanging_layout(
+            "\u{201c}Words,\u{201d} they said.",
+            BlockKind::Paragraph,
+            400.0,
+        );
+        let first = &layout.runs[0].glyphs[0];
+        assert!(first.x < -0.5, "the quote starts at {}", first.x);
+        assert!(layout.runs[0].glyphs[1].x < first.w, "the word follows it");
+    }
+
+    #[test]
+    fn a_quote_starting_a_heading_or_a_list_item_hangs_too() {
+        for kind in [
+            BlockKind::Heading { level: 2 },
+            BlockKind::ListItem { ordered: false },
+        ] {
+            let (_, layout, _) = hanging_layout("\u{201c}Words\u{201d}", kind, 400.0);
+            assert!(layout.runs[0].glyphs[0].x < -0.5);
+        }
+    }
+
+    #[test]
+    fn a_comma_at_a_ragged_edge_is_left_alone() {
+        let (block, layout, width) = hanging_layout(WRAPPING, BlockKind::BlockQuote, 240.0);
+        for line in &layout.runs {
+            let glyphs = visible(&block, line);
+            let last = glyphs[glyphs.len() - 1];
+            assert!(last.x + last.w <= width + 0.5);
+        }
+    }
+
+    #[test]
+    fn the_last_line_of_a_paragraph_is_not_stretched() {
+        let (block, layout, width) = hanging_layout(WRAPPING, BlockKind::Paragraph, 240.0);
+        let line = layout.runs.last().unwrap();
+        let glyphs = visible(&block, line);
+        let last = glyphs[glyphs.len() - 1];
+        assert!(
+            last.x + last.w < width - 1.0,
+            "the rest. ends at {}",
+            last.x + last.w
+        );
+    }
+
+    #[test]
+    fn exact_text_does_not_hang() {
+        for kind in [BlockKind::Code { language: None }, BlockKind::Prose] {
+            let (_, layout, _) = hanging_layout("\u{201c}Words,\u{201d}", kind, 400.0);
+            assert_eq!(layout.runs[0].glyphs[0].x, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_line_with_nothing_to_hang_is_exactly_as_shaped() {
+        let (_, layout, _) = hanging_layout("Plain words only", BlockKind::Paragraph, 400.0);
+        let shaped = layout.buffer.layout_runs().next().unwrap();
+        for (drawn, shaped) in layout.runs[0].glyphs.iter().zip(shaped.glyphs) {
+            assert_eq!(drawn.x, shaped.x);
+            assert_eq!(drawn.w, shaped.w);
+        }
+    }
+
+    #[test]
+    fn hanging_leaves_the_text_offsets_and_the_order_alone() {
+        let (_, layout, _) = hanging_layout(WRAPPING, BlockKind::Paragraph, 240.0);
+        let shaped: Vec<_> = layout.buffer.layout_runs().collect();
+        assert_eq!(shaped.len(), layout.runs.len());
+        for (drawn, shaped) in layout.runs.iter().zip(shaped) {
+            assert_eq!(drawn.glyphs.len(), shaped.glyphs.len());
+            for (a, b) in drawn.glyphs.iter().zip(shaped.glyphs) {
+                assert_eq!((a.start, a.end), (b.start, b.end));
+            }
+            for pair in drawn.glyphs.windows(2) {
+                assert!(pair[1].x > pair[0].x, "glyphs out of order");
+            }
+        }
     }
 }

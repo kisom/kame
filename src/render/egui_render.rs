@@ -597,7 +597,7 @@ impl GlyphRenderer {
 /// a run sits after the last advance. Offsets that fall inside a multi-byte
 /// cluster resolve to the cluster's start. Empty layouts report `0.0`.
 pub fn caret_x(layout: &BlockLayout, offset: usize) -> f32 {
-    for run in layout.buffer.layout_runs() {
+    for run in &layout.runs {
         let (Some(first), Some(last)) = (run.glyphs.first(), run.glyphs.last()) else {
             continue;
         };
@@ -660,7 +660,7 @@ pub fn caret_line(layout: &BlockLayout, offset: usize) -> Option<crate::layout::
 /// a line maps to that line's end.
 pub fn offset_at(layout: &BlockLayout, x: f32, y: f32, text_len: usize) -> usize {
     let mut best: Option<(f32, usize)> = None;
-    for run in layout.buffer.layout_runs() {
+    for run in &layout.runs {
         let centre = run.line_top + run.line_height * 0.5;
         let distance = (y - centre).abs();
         if best.is_some_and(|(best_distance, _)| best_distance <= distance) {

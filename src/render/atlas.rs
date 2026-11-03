@@ -139,7 +139,7 @@ impl GlyphAtlas {
         scale: f32,
     ) -> Option<(i32, i32, i32, i32)> {
         let mut bounds: Option<(i32, i32, i32, i32)> = None;
-        for run in layout.buffer.layout_runs() {
+        for run in &layout.runs {
             for glyph in run.glyphs.iter() {
                 let phys = place_glyph(glyph, run.line_y, scale);
                 let Some(image) = self.get_image(fs, phys.cache_key, scale) else {
@@ -184,7 +184,7 @@ impl GlyphAtlas {
         let canvas_w = canvas.width() as i32;
         let canvas_h = canvas.height() as i32;
 
-        for run in layout.buffer.layout_runs() {
+        for run in &layout.runs {
             // `glyph.y` is line-relative: the run's baseline is the anchor.
             for glyph in run.glyphs.iter() {
                 let phys = place_glyph(glyph, run.line_y, scale);

@@ -21,7 +21,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
   to choose its own breaks across the paragraph, with limits on hyphen runs and
   stretch. About 24 call sites read cosmic-text's lines directly, so prototype it
   outside the repo first, then write a spec.
-- [ ] **Hanging punctuation in the margins.** Not started.
 
 ## Markdown import
 

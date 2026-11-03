@@ -731,6 +731,9 @@ const BODY_FRACTION: f32 = 0.5;
 const GUTTER_FRACTION: f32 = 0.25;
 const MARGIN_FRACTION: f32 = 0.25;
 const MARGIN_EDGE: f32 = 0.05;
+/// The space either side of the prose once a narrow window has collapsed the page,
+/// which is also where punctuation hangs.
+const COLLAPSED_GUTTER: f32 = 20.0;
 
 /// True when the window is wide enough to hold the designed page — a half-width
 /// body beside its gutter and margin — without the measure falling below
@@ -755,7 +758,7 @@ fn page_measure(hide_margin: bool, available_width: f32) -> (f32, f32) {
         };
         (body, margin)
     } else {
-        (width.max(MIN_MEASURE), 0.0)
+        ((width - 2.0 * COLLAPSED_GUTTER).max(MIN_MEASURE), 0.0)
     }
 }
 
@@ -763,8 +766,8 @@ fn page_measure(hide_margin: bool, available_width: f32) -> (f32, f32) {
 ///
 /// `config` is the measured config for this frame: `page_measure` has already
 /// chosen the measure and margin column, so this only positions the body — a
-/// fixed quarter-gutter from the left when the page fits, flush against the
-/// edge when it has collapsed to fill a narrow window.
+/// fixed quarter-gutter from the left when the page fits, and
+/// [`COLLAPSED_GUTTER`] when it has collapsed to fill a narrow window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PageGeometry {
     /// Distance from the painter's left edge to the body text.
@@ -782,7 +785,7 @@ fn page_geometry(config: LayoutConfig, available_width: f32) -> PageGeometry {
     let body_left = if page_fits(width) {
         width * GUTTER_FRACTION
     } else {
-        0.0
+        COLLAPSED_GUTTER
     };
     PageGeometry {
         body_left,
@@ -6688,7 +6691,10 @@ mod tests {
 
         // Below twice the minimum measure the page cannot fit its gutter and
         // margin, so the prose fills the window and the body is flush left.
-        assert_eq!(page_measure(false, 560.0), (560.0, 0.0));
+        assert_eq!(
+            page_measure(false, 560.0),
+            (560.0 - 2.0 * COLLAPSED_GUTTER, 0.0)
+        );
         assert_eq!(
             page_geometry(
                 LayoutConfig {
@@ -6699,7 +6705,7 @@ mod tests {
                 560.0,
             )
             .body_left,
-            0.0
+            COLLAPSED_GUTTER
         );
     }
 

@@ -220,7 +220,7 @@ menu is open.
 The status row below it shows the document's title (hover for its path), `not
 saved yet` if it has no file, any mode badges, and the word count.
 
-A notice stays under the row until the next edit or undo. An error stays until
+A notice shows in the row, cut to fit with the full text on hover, until the next edit or undo. An error stays until
 it is resolved.
 
 ## Build

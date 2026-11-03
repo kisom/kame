@@ -286,6 +286,8 @@ fn is_new_chord(event: &egui::Event) -> bool {
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
 /// The colour of [`LINK_COLOR`] as egui takes it.
 const DOCUMENT_LINK_INK: Color32 = Color32::from_rgb(59, 130, 246);
+/// How much of the status row's free space a message can take from the title.
+const STATUS_MESSAGE_SHARE: f32 = 0.65;
 /// How much of the page to keep in view past the caret when following it.
 const CARET_ROOM: f32 = 48.0;
 /// The least time between writes of the caret and scroll to the document.
@@ -4712,32 +4714,32 @@ impl KameApp {
                     if not_saved {
                         ui.label(egui::RichText::new("not saved yet").small().weak());
                     }
+                    // In this row, cut to fit, so a message never changes the height of
+                    // the chrome and moves the page. An error goes first and can be
+                    // selected, to copy a path or reason out of a desktop launch.
+                    let message = error
+                        .as_ref()
+                        .map(|error| (error, self.palette.error_ink, true))
+                        .or(notice
+                            .as_ref()
+                            .map(|notice| (notice, self.palette.notice_ink, false)));
+                    if let Some((text, ink, selectable)) = message {
+                        let room = ui.available_width() * STATUS_MESSAGE_SHARE;
+                        ui.allocate_ui(Vec2::new(room, ui.available_height()), |ui| {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(text).small().color(ink))
+                                    .truncate()
+                                    .selectable(selectable),
+                            )
+                            .on_hover_text(text.as_str());
+                        });
+                    }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate())
                             .on_hover_text(path.as_str());
                     });
                 });
             });
-            // Its own row, wrapping: an import's report can be long, and it must
-            // be readable at any window width rather than clip off the row's end.
-            if let Some(notice) = &notice {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(notice)
-                            .small()
-                            .color(self.palette.notice_ink),
-                    )
-                    .wrap(),
-                );
-            }
-            if let Some(error) = error {
-                // Selectable, so an author can copy a path or reason out of a
-                // desktop launch where there is no terminal to scroll.
-                ui.add(
-                    egui::Label::new(egui::RichText::new(error).color(self.palette.error_ink))
-                        .selectable(true),
-                );
-            }
         });
         if let Some(action) = action {
             self.run_menu_action(ui.ctx(), action);

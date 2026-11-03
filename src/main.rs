@@ -1213,6 +1213,22 @@ fn save_config(config: &KameConfig) {
     }
 }
 
+/// The app's icon. eframe otherwise sets its own at runtime, which on macOS replaces
+/// the bundle's in the Dock and the application switcher.
+fn app_icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../packaging/kame.png"))
+        .map(|image| image.into_rgba8());
+    match image {
+        Ok(image) => egui::IconData {
+            width: image.width(),
+            height: image.height(),
+            rgba: image.into_raw(),
+        },
+        // Empty means no icon of its own, leaving the bundle's in place.
+        Err(_) => egui::IconData::default(),
+    }
+}
+
 fn main() -> eframe::Result {
     // No argument means an anonymous document: the author starts typing at once
     // and the first save prompts for a file. With an argument, open that file.
@@ -1255,6 +1271,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 860.0])
             .with_min_inner_size([560.0, 360.0])
+            .with_icon(app_icon())
             .with_title("kame"),
         ..Default::default()
     };
@@ -6934,6 +6951,13 @@ mod tests {
         assert!(plist.contains("CFBundleDocumentTypes"), "{plist}");
         assert!(plist.contains("UTExportedTypeDeclarations"), "{plist}");
         assert!(plist.contains("<string>kame</string>"), "{plist}");
+    }
+
+    #[test]
+    fn the_app_icon_is_kames_own() {
+        let icon = app_icon();
+        assert!(icon.width > 0 && icon.height > 0);
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
     }
 
     #[test]

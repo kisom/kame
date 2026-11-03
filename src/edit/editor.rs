@@ -724,6 +724,76 @@ impl Editor {
         end: usize,
         url: String,
     ) -> Result<Op, EditError> {
+        let style = (!url.is_empty()).then(|| link_style(url));
+        self.replace_link(block_id, start, end, style)
+    }
+
+    /// Makes `start..end` a link to `target`, a document whatever it is called.
+    pub fn set_document_link(
+        &mut self,
+        block_id: BlockId,
+        start: usize,
+        end: usize,
+        target: String,
+    ) -> Result<Op, EditError> {
+        self.replace_link(
+            block_id,
+            start,
+            end,
+            Some(SpanStyle::DocumentLink { target }),
+        )
+    }
+
+    /// Inserts `shown` at `cursor` as a link to the document `target`, as one edit.
+    pub fn insert_document_link(
+        &mut self,
+        cursor: &Cursor,
+        shown: &str,
+        target: String,
+    ) -> Result<Op, EditError> {
+        let block = self.block(cursor.block_id)?;
+        self.check_offset(block, cursor.offset)?;
+        let insert = Op::InsertText {
+            block_id: cursor.block_id,
+            offset: cursor.offset,
+            text: shown.to_string(),
+        };
+        // The existing spans move and widen around the new text as they always do.
+        let mut staged = self.doc.clone();
+        apply(&mut staged, &insert);
+        let spans = staged
+            .blocks
+            .iter()
+            .find(|block| block.id == cursor.block_id)
+            .map(|block| block.spans.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .chain(std::iter::once(Span {
+                start: cursor.offset,
+                end: cursor.offset + shown.len(),
+                style: SpanStyle::DocumentLink { target },
+            }))
+            .collect();
+        let ops = vec![
+            Op::set_spans(&self.doc, cursor.block_id, Vec::new()),
+            insert,
+            Op::SetSpans {
+                block_id: cursor.block_id,
+                old_spans: Vec::new(),
+                spans,
+            },
+        ];
+        Ok(self.apply_edit(Op::Batch { ops }))
+    }
+
+    /// Replaces any link overlapping `start..end` with `style`, or with nothing.
+    fn replace_link(
+        &mut self,
+        block_id: BlockId,
+        start: usize,
+        end: usize,
+        style: Option<SpanStyle>,
+    ) -> Result<Op, EditError> {
         let block = self.block(block_id)?;
         self.check_offset(block, start)?;
         self.check_offset(block, end)?;
@@ -741,11 +811,7 @@ impl Editor {
                     && start < span.end)
             })
             .cloned()
-            .chain((!url.is_empty()).then(|| Span {
-                start,
-                end,
-                style: link_style(url),
-            }))
+            .chain(style.map(|style| Span { start, end, style }))
             .collect();
         Ok(self.apply_edit(Op::set_spans(&self.doc, block_id, spans)))
     }

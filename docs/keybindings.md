@@ -156,7 +156,12 @@ whenever it is opened.
 
 ## Links between documents
 
-Type `[[essay]]`, `[[notes/essay#The Intro]]` or `[[notes/essay#The Intro|the intro]]`. The
+File > Link to Document…, or the right-click menu, asks for a file and links to it, as
+`~/path/to/essay.kame` when it is under your home folder. With text selected, the selected
+words become the link. With the caret in a link, the link points at the new file instead.
+Otherwise the document's title goes in at the caret as the link's text.
+
+Or type `[[essay]]`, `[[notes/essay#The Intro]]` or `[[notes/essay#The Intro|the intro]]`. The
 text after `|` is what shows, or the target if there is none. A link entered as an
 ordinary link, with Ctrl-K or `[text](url)`, is a document link too if it names a `.kame`
 file or starts with `#`. Document links are underlined, and clicking one opens the

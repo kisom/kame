@@ -625,6 +625,15 @@ fn pick_open_path(directory: Option<&Path>) -> Option<PathBuf> {
         .pick_file()
 }
 
+/// The native file browser for a document to link to, or `None` if it is cancelled.
+fn pick_document_link_path(directory: Option<&Path>) -> Option<PathBuf> {
+    file_dialog("Link to Document", directory)
+        .add_filter("kame or Markdown", &["kame", "md", "markdown"])
+        .add_filter("kame document", &["kame"])
+        .add_filter("Markdown", &["md", "markdown"])
+        .pick_file()
+}
+
 /// The native "save as" browser for an export, starting at `suggestion`, or `None`
 /// when the author cancels it.
 fn pick_export_path(
@@ -1077,6 +1086,7 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
 /// Something chosen from the menu bar, applied once the panel closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    LinkDocument,
     New,
     Open,
     OpenPath,
@@ -2354,6 +2364,58 @@ impl Session {
         }
     }
 
+    /// Why the caret or selection can't take a document link, if it can't. A span lives
+    /// in one block, and the blocks that hold no styled text can't hold a link.
+    fn document_link_refusal(&self) -> Option<&'static str> {
+        if self.save_failed {
+            return Some("the last save failed, so retry it first");
+        }
+        if let Some((start, end)) = self.ordered_selection() {
+            if start.block_id != end.block_id {
+                return Some("select text within one block to link it");
+            }
+        }
+        let caret = self.caret;
+        let block = self
+            .document()
+            .blocks
+            .iter()
+            .find(|block| block.id == caret.block_id)?;
+        match block.kind {
+            BlockKind::Code { .. }
+            | BlockKind::Prose
+            | BlockKind::Rule
+            | BlockKind::Image { .. } => Some("a link can't go in this block"),
+            _ => None,
+        }
+    }
+
+    /// Links to a document: the selected words, or the link the caret is in. With
+    /// neither, `title` goes in at the caret as the link's text.
+    fn link_to_document(&mut self, target: String, title: &str) -> Result<(), &'static str> {
+        if let Some(refusal) = self.document_link_refusal() {
+            return Err(refusal);
+        }
+        match self.link_target().filter(|(_, start, end, _)| start < end) {
+            Some((block_id, start, end, _)) => {
+                let result = self.editor.set_document_link(block_id, start, end, target);
+                self.commit(result);
+            }
+            None => {
+                let caret = self.valid_caret();
+                let result = self.editor.insert_document_link(&caret, title, target);
+                if self.commit(result) {
+                    self.selection = None;
+                    self.caret = Cursor {
+                        block_id: caret.block_id,
+                        offset: caret.offset + title.len(),
+                    };
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The start of the first heading with exactly `text`.
     fn heading_cursor(&self, text: &str) -> Option<Cursor> {
         self.document()
@@ -3150,6 +3212,38 @@ fn document_link_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
         }
         _ => None,
     })
+}
+
+/// The target for a link to the file at `path`, written from `~` when it is under home.
+fn document_link_target(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// What to call the document at `path` in a link to it: its title, or its file name if
+/// it has none worth using or can't be read. A Markdown file is left unread.
+fn document_title(path: &Path) -> String {
+    let stem = || {
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    };
+    if is_markdown_path(path) {
+        return stem();
+    }
+    let Ok(db) = Db::open(path) else {
+        return stem();
+    };
+    db.load_metadata()
+        .ok()
+        .flatten()
+        .map(|metadata| metadata.title)
+        .into_iter()
+        .chain(db.load_document().ok().map(|document| document.title))
+        .find(|title| !title.is_empty() && title != "Untitled")
+        .unwrap_or_else(stem)
 }
 
 /// A document link's target as its path and the heading it names, if any.
@@ -4452,6 +4546,9 @@ impl KameApp {
                         action = Some(MenuAction::SaveAs);
                     }
                     ui.separator();
+                    if menu_item(ui, "Link to Document…", None, false) {
+                        action = Some(MenuAction::LinkDocument);
+                    }
                     if menu_item(ui, "Import Markdown…", None, false) {
                         action = Some(MenuAction::ImportMarkdown);
                     }
@@ -4588,6 +4685,7 @@ impl KameApp {
     /// Carries out a menu choice through the same path its shortcut uses.
     fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
         match action {
+            MenuAction::LinkDocument => self.link_document_with_dialog(),
             MenuAction::New => self.request_new(),
             MenuAction::Open => self.open_with_dialog(),
             MenuAction::OpenPath => self.begin_open(),
@@ -5250,6 +5348,7 @@ impl KameApp {
         // --- context menu -----------------------------------------------------
         // Block formatting and annotation actions live here, on the page's
         // right-click, rather than as rows of buttons in the status bar.
+        let mut link_document = false;
         response.context_menu(|ui| {
             ui.set_min_width(180.0);
             for (label, kind) in [
@@ -5290,7 +5389,14 @@ impl KameApp {
                 });
                 ui.close();
             }
+            if ui.button("Link to document…").clicked() {
+                link_document = true;
+                ui.close();
+            }
         });
+        if link_document {
+            self.link_document_with_dialog();
+        }
 
         self.show_note_popover(ui.ctx());
     }
@@ -5800,6 +5906,24 @@ impl KameApp {
         let directory = self.session.dialog_directory();
         if let Some(path) = pick_open_path(directory.as_deref()) {
             self.open_picked(path);
+        }
+    }
+
+    /// Asks for a document, then links to it from the caret or selection.
+    fn link_document_with_dialog(&mut self) {
+        if let Some(refusal) = self.session.document_link_refusal() {
+            self.notice = Some(refusal.to_string());
+            return;
+        }
+        let directory = self.session.dialog_directory();
+        let Some(path) = pick_document_link_path(directory.as_deref()) else {
+            return;
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let target = document_link_target(&path, home.as_deref());
+        let title = document_title(&path);
+        if let Err(refusal) = self.session.link_to_document(target, &title) {
+            self.notice = Some(refusal.to_string());
         }
     }
 
@@ -10339,5 +10463,187 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_picked_document_under_home_links_from_tilde() {
+        let home = Path::new("/home/kyle");
+        assert_eq!(
+            document_link_target(Path::new("/home/kyle/notes/a.kame"), Some(home)),
+            "~/notes/a.kame"
+        );
+        assert_eq!(
+            document_link_target(Path::new("/srv/notes/a.kame"), Some(home)),
+            "/srv/notes/a.kame"
+        );
+        assert_eq!(
+            document_link_target(Path::new("/home/kylie/a.kame"), Some(home)),
+            "/home/kylie/a.kame"
+        );
+        assert_eq!(
+            document_link_target(Path::new("/srv/a.kame"), None),
+            "/srv/a.kame"
+        );
+    }
+
+    #[test]
+    fn a_tilde_target_finds_the_document_it_was_made_from() {
+        let dir = std::fs::canonicalize(std::env::var("HOME").unwrap()).unwrap();
+        let found = resolve_open_path("~/x.kame", Path::new("/elsewhere/from.kame"));
+        assert_eq!(
+            found.canonicalize().unwrap_or(dir.join("x.kame")),
+            dir.join("x.kame")
+        );
+    }
+
+    #[test]
+    fn a_documents_title_comes_from_its_metadata() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        let mut metadata = session.metadata.clone();
+        metadata.title = "The Essay".to_string();
+        session.set_metadata(metadata);
+        drop(session);
+        assert_eq!(document_title(&path), "The Essay");
+    }
+
+    #[test]
+    fn a_document_with_no_real_title_goes_by_its_file_name() {
+        let dir = scratch_dir("titles");
+        let plain = dir.join("my essay.kame");
+        let mut db = crate::storage::Db::open(&plain).unwrap();
+        db.save_document(&Document::new("Untitled")).unwrap();
+        drop(db);
+        assert_eq!(document_title(&plain), "my essay");
+        let broken = dir.join("broken.kame");
+        std::fs::write(&broken, "not a database").unwrap();
+        assert_eq!(document_title(&broken), "broken");
+        let markdown = dir.join("post.md");
+        std::fs::write(&markdown, "# Heading\n").unwrap();
+        assert_eq!(document_title(&markdown), "post");
+        assert_eq!(
+            std::fs::read(&markdown).unwrap(),
+            b"# Heading\n",
+            "only read"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn linking_a_document_at_the_caret_inserts_its_title_as_a_link() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "see  and *more*");
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 4,
+        });
+        let before = session.document().blocks[0].clone();
+        session
+            .link_to_document("~/a.kame".to_string(), "The Essay")
+            .unwrap();
+        let block = &session.document().blocks[0];
+        assert_eq!(block.text, "see The Essay and more");
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(4, 13, "~/a.kame".to_string())]
+        );
+        assert!(block
+            .spans
+            .iter()
+            .any(|span| span.style == SpanStyle::Italic && span.start == 18 && span.end == 22));
+        assert_eq!(session.caret.offset, 13);
+        session.undo();
+        assert_eq!(
+            session.document().blocks[0],
+            before,
+            "one undo takes it back"
+        );
+    }
+
+    #[test]
+    fn linking_a_document_over_a_selection_keeps_the_selected_words() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("the old essay");
+        let block_id = session.document().blocks[0].id;
+        session.selection = Some(Selection {
+            start: Cursor {
+                block_id,
+                offset: 4,
+            },
+            end: Cursor {
+                block_id,
+                offset: 7,
+            },
+        });
+        session
+            .link_to_document("~/a.md".to_string(), "Ignored")
+            .unwrap();
+        assert_eq!(session.document().blocks[0].text, "the old essay");
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(4, 7, "~/a.md".to_string())]
+        );
+    }
+
+    #[test]
+    fn linking_a_document_with_the_caret_in_a_link_points_that_link_elsewhere() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "[[old|words]]");
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 2,
+        });
+        session
+            .link_to_document("~/new.kame".to_string(), "Ignored")
+            .unwrap();
+        assert_eq!(session.document().blocks[0].text, "words");
+        assert_eq!(
+            document_link_spans(&session),
+            vec![(0, 5, "~/new.kame".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_document_link_cant_go_where_styles_dont() {
+        let mut code = code_session();
+        assert!(code.link_to_document("~/a.kame".to_string(), "T").is_err());
+        assert_eq!(code.document().blocks[0].text, "");
+        let mut rule = Session::anonymous().unwrap();
+        typed(&mut rule, "---");
+        rule.split();
+        let block_id = rule.document().blocks[0].id;
+        rule.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        assert!(rule.link_to_document("~/a.kame".to_string(), "T").is_err());
+    }
+
+    #[test]
+    fn a_selection_across_blocks_cant_be_linked() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one");
+        session.split();
+        session.insert("two");
+        let (first, second) = (
+            session.document().blocks[0].id,
+            session.document().blocks[1].id,
+        );
+        session.selection = Some(Selection {
+            start: Cursor {
+                block_id: first,
+                offset: 1,
+            },
+            end: Cursor {
+                block_id: second,
+                offset: 1,
+            },
+        });
+        assert!(session
+            .link_to_document("~/a.kame".to_string(), "T")
+            .is_err());
+        assert_eq!(session.document().blocks.len(), 2);
     }
 }

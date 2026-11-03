@@ -685,4 +685,32 @@ mod tests {
         assert!(!page.contains("/tags/only-here/"), "{page}");
         assert!(page.contains("/tags/shared/"), "{page}");
     }
+
+    #[test]
+    fn drafts_dont_count_towards_tags() {
+        let site = Site::new("plandraftcount");
+        let a = site.add(
+            "a.kame",
+            &metadata("Public", "2026-01-01", &["shared"]),
+            "x",
+        );
+        let d = site.add(
+            "d.kame",
+            &metadata("Secret", "2030-01-01", &["shared", "only-here"]),
+            "x",
+        );
+        site.config(&[("a", &a)], &[("d", &d)]);
+        let plan = site.plan();
+        let tags = text(&plan, "tags/index.html");
+        assert!(tags.contains("shared</a> (1)"), "{tags}");
+        assert!(!tags.contains("only-here"), "{tags}");
+        let shared = text(&plan, "tags/shared/index.html");
+        assert!(
+            shared.contains("Public") && !shared.contains("Secret"),
+            "{shared}"
+        );
+        assert!(!plan
+            .files
+            .contains_key(Path::new("tags/only-here/index.html")));
+    }
 }

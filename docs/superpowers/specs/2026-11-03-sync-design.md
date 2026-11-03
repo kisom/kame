@@ -1,7 +1,7 @@
 # Sync between one person's machines — design
 
 Date: 2026-11-03
-Status: draft, with a working proof of concept in `crates/kame-sync`. Written overnight without
+Status: accepted 2026-11-03, including `sha2`. A working proof of concept is in `crates/kame-sync`. Written overnight without
 a chance to ask, so section 10 lists every decision made on your behalf.
 
 ## 1. Purpose

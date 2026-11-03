@@ -53,6 +53,8 @@ a tab, and pasted lines stay in the block. Enter adds a line, and Enter on a bla
 line returns to body text. Shift-Enter adds a line without ever leaving, for blank lines
 inside the block. Prose is set in the body face, code in IBM Plex Mono.
 
+Tab does nothing in any other block. It moves between fields only in a dialog.
+
 Typed bold and italic work in prose. In code they stay literal, and typed links stay
 literal in both.
 

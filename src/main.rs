@@ -222,6 +222,21 @@ fn tabs_to_text(events: &mut Vec<egui::Event>) {
     });
 }
 
+/// Removes the keys egui moves the focus on, for when there is nowhere useful to move it.
+fn drop_tabs(events: &mut Vec<egui::Event>) {
+    events.retain(|event| {
+        !matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.any() || modifiers.shift_only()
+        )
+    });
+}
+
 /// Ctrl-N, or Cmd-N on a Mac. With Shift it adds a note.
 fn is_new_chord(event: &egui::Event) -> bool {
     matches!(
@@ -3654,6 +3669,20 @@ impl KameApp {
         self.position_saved_at = std::time::Instant::now();
     }
 
+    /// Decides what Tab does this frame. A dialog keeps it, for moving between its
+    /// fields. Anywhere else it would only walk the focus through the menu bar, so it
+    /// types a tab in a block that takes one and otherwise does nothing.
+    fn claim_tabs(&self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+        if self.dialog_open() || self.close_flow.prompting {
+            return;
+        }
+        if self.prose_takes_tabs(ctx) {
+            tabs_to_text(events);
+        } else {
+            drop_tabs(events);
+        }
+    }
+
     /// Whether Tab goes to the page: the caret is in a verbatim block and nothing else
     /// has the keyboard, the same conditions `handle_input` gives the page its keys.
     fn prose_takes_tabs(&self, ctx: &egui::Context) -> bool {
@@ -6055,9 +6084,7 @@ impl eframe::App for KameApp {
     /// egui moves the keyboard focus on Tab before any of kame's code sees the frame,
     /// so a block that takes tabs has to claim the key here.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if self.prose_takes_tabs(ctx) {
-            tabs_to_text(&mut raw_input.events);
-        }
+        self.claim_tabs(ctx, &mut raw_input.events);
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -9651,5 +9678,32 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let mut session = code_session();
         session.insert("\t");
         assert_eq!(session.document().blocks[0].text, "\t");
+    }
+
+    #[test]
+    fn a_tab_key_can_be_dropped_so_it_moves_no_focus() {
+        let key = |pressed, modifiers| egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        let mut events = vec![
+            key(true, egui::Modifiers::NONE),
+            key(true, egui::Modifiers::SHIFT),
+            key(false, egui::Modifiers::NONE),
+            key(true, egui::Modifiers::COMMAND),
+            egui::Event::Text("x".to_string()),
+        ];
+        drop_tabs(&mut events);
+        assert_eq!(
+            events,
+            vec![
+                key(false, egui::Modifiers::NONE),
+                key(true, egui::Modifiers::COMMAND),
+                egui::Event::Text("x".to_string()),
+            ]
+        );
     }
 }

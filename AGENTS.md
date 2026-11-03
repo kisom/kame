@@ -52,6 +52,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-site` — the static site generator, a command line tool on `kame-core`. `config` reads `site.yaml`, `source` and `pages` read what publishes, `refs` works out where links and images lead, `plan` works out the whole site with nothing written, and `write` replaces `output/` atomically. The starting theme is under `theme/`, embedded for `kame-site new`.
 
+`crates/kame-sync` — a proof of concept for merging one person's diverged documents, linked into nothing yet. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
+
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 
 The layering is one-way: core knows nothing of typeset or the app. Keep logic out of the app where it can go in a library. Keybindings are documented in `docs/keybindings.md`.

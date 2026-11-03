@@ -1,19 +1,13 @@
 //! Revisions moving between machines in logs, with the sync tool played by copying files.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 
 use kame_core::model::{Block, BlockKind, Document};
 use kame_sync::merge::document_digest;
 use kame_sync::revlog::{Replica, Store};
 use uuid::Uuid;
-
-fn folder(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("kame-sync-tests")
-        .join(format!("{name}-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn start() -> Document {
     Document {
@@ -97,7 +91,7 @@ fn exchange(machines: &[&Machine]) {
 
 #[test]
 fn two_machines_merge_separately_and_write_the_same_revision() {
-    let root = folder("two");
+    let root = common::test_folder("two");
     let (mut talos, mut titan) = (Machine::new(&root, "talos"), Machine::new(&root, "titan"));
     let first = talos.sync();
     titan.sync();
@@ -136,7 +130,7 @@ fn two_machines_merge_separately_and_write_the_same_revision() {
 
 #[test]
 fn a_conflict_converges_with_one_note_on_both() {
-    let root = folder("conflict");
+    let root = common::test_folder("conflict");
     let (mut talos, mut titan) = (Machine::new(&root, "talos"), Machine::new(&root, "titan"));
     talos.sync();
     titan.sync();
@@ -155,7 +149,7 @@ fn a_conflict_converges_with_one_note_on_both() {
 
 #[test]
 fn undoing_a_merge_is_just_the_next_revision_and_sticks() {
-    let root = folder("undo");
+    let root = common::test_folder("undo");
     let (mut talos, mut titan) = (Machine::new(&root, "talos"), Machine::new(&root, "titan"));
     talos.sync();
     titan.sync();
@@ -183,7 +177,7 @@ fn undoing_a_merge_is_just_the_next_revision_and_sticks() {
 
 #[test]
 fn a_line_cut_off_in_transit_is_ignored_until_the_rest_arrives() {
-    let root = folder("torn");
+    let root = common::test_folder("torn");
     let (mut talos, mut titan) = (Machine::new(&root, "talos"), Machine::new(&root, "titan"));
     talos.sync();
     titan.sync();
@@ -208,7 +202,7 @@ fn a_line_cut_off_in_transit_is_ignored_until_the_rest_arrives() {
 
 #[test]
 fn a_revision_waits_for_the_log_holding_what_it_builds_on() {
-    let root = folder("order");
+    let root = common::test_folder("order");
     let (mut talos, mut titan, mut straylight) = (
         Machine::new(&root, "talos"),
         Machine::new(&root, "titan"),
@@ -244,7 +238,7 @@ impl Random {
 #[test]
 fn random_delivery_converges_and_keeps_every_sentence() {
     for seed in 1..=60u64 {
-        let root = folder("random");
+        let root = common::test_folder("random");
         let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut machines = vec![
             Machine::new(&root, "talos"),

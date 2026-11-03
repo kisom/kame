@@ -1,23 +1,16 @@
 //! Two `.kame` files, the way a sync tool's conflict copy leaves them.
 
+mod common;
+
 use std::path::PathBuf;
 
 use kame_core::edit::Cursor;
 use kame_core::session::Session;
 use kame_sync::files::{merge_versions, shared_ops, Version};
-use uuid::Uuid;
-
-fn dir() -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("kame-sync-tests")
-        .join(format!("files-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// A document typed in two paragraphs, closed, and copied: two machines that then drift.
 fn diverged() -> (PathBuf, PathBuf) {
-    let dir = dir();
+    let dir = common::test_folder("files");
     let (one, other) = (dir.join("talos.kame"), dir.join("titan.kame"));
     {
         let mut session = Session::open(&one).unwrap();

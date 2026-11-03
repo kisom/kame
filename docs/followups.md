@@ -30,13 +30,10 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Ideas
 
-- [ ] **Sync for drift between one person's machines.** A thinking notebook with one user, not a
-  Google Docs replacement: mostly a laptop and a desktop that each drifted offline. The op log is
-  the natural thing to sync. It could double as a publishing server. Start by detecting divergence
-  and merging logs, showing what can't be resolved, with a prototype replaying two diverged logs
-  from real documents. To read first: Eg-walker, which keeps plain positional edits as kame does, and
-  Peritext, for rich text and annotations. The hard questions are marginalia anchored to a range,
-  and what linear undo means after a merge.
+- [ ] **Sync for drift between one person's machines.** Designed and prototyped: see
+  `docs/superpowers/specs/2026-11-03-sync-design.md` and `crates/kame-sync`. It merges document
+  states by block and sentence, keeps a conflict's other version in a note, and carries revisions in
+  logs that each have one writer. Not yet in the app. Waiting on a review of that design.
 
 - [ ] **Footnotes in the site's margins.** Sidenotes beside their markers on wide screens, so
   readers don't jump to the foot and back. Held back because kame already separates the two: a

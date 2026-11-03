@@ -1,0 +1,16 @@
+/* The site around a document. The document itself is styled by kame's own stylesheet. */
+a {
+  color: inherit;
+  text-underline-offset: 0.15em;
+}
+nav.site {
+  margin-bottom: 3em;
+  font-size: 0.95em;
+}
+nav.site a:first-child {
+  font-weight: bold;
+}
+p.meta {
+  color: #6b6459;
+  font-size: 0.95em;
+}

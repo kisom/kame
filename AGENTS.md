@@ -50,6 +50,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `render/` — swash glyph-atlas rasterization + egui texture upload
 - `fonts/` — the embedded faces
 
+`crates/kame-site` — the static site generator, a command line tool on `kame-core`. `config` reads `site.yaml`, `source` and `pages` read what publishes, `refs` works out where links and images lead, `plan` works out the whole site with nothing written, and `write` replaces `output/` atomically. The starting theme is under `theme/`, embedded for `kame-site new`.
+
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 
 The layering is one-way: core knows nothing of typeset or the app. Keep logic out of the app where it can go in a library. Keybindings are documented in `docs/keybindings.md`.

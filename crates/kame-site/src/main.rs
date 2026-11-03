@@ -1,4 +1,4 @@
 fn main() {
-    eprintln!("kame-site: not built yet");
-    std::process::exit(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::exit(kame_site::run(&args));
 }

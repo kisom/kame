@@ -93,3 +93,13 @@ Key bindings are listed in [docs/keybindings.md](docs/keybindings.md).
 A `.kame` document is a SQLite database: the current document, an append-only
 log of every edit (persistent, shareable undo), and point-in-time snapshots.
 The schema is versioned with `PRAGMA user_version`.
+
+## Publishing
+
+`kame-site` builds a static site from `.kame` documents and Markdown pages:
+
+    cargo run -p kame-site -- new mysite
+    cd mysite
+    # edit site.yaml and theme/templates/index.html
+    cargo run -p kame-site -- build
+    python3 -m http.server -d output

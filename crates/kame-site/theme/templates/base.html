@@ -6,17 +6,18 @@
 {% block meta %}{% endblock %}
 <title>{% block title %}{{ site.name }}{% endblock %}</title>
 <link rel="alternate" type="application/rss+xml" title="{{ site.name }}" href="/feed.xml">
-<link rel="stylesheet" href="/css/fonts.css">
 <style>{{ kame_css }}</style>
+<link rel="stylesheet" href="/css/fonts.css">
+<link rel="stylesheet" href="/css/site.css">
 </head>
 <body>
-<header class="document">
+<main class="document">
+<nav class="site">
 <a href="/">{{ site.name }}</a> ·
 <a href="/archive/">Archive</a> ·
 <a href="/tags/">Tags</a> ·
 <a href="/about/">About</a>
-</header>
-<main class="document">
+</nav>
 {% block content %}{% endblock %}
 </main>
 </body>

@@ -7,6 +7,7 @@ pub mod plan;
 pub mod refs;
 pub mod source;
 pub mod starter;
+pub mod write;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -16,4 +17,69 @@ pub(crate) mod testing;
 pub struct Problems {
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+/// Builds the site at `site_dir`, replacing `output/` only if all of it succeeds.
+pub fn build(site_dir: &std::path::Path, include_drafts: bool) -> Problems {
+    let mut problems = Problems::default();
+    if let Some(plan) = plan::build_plan(site_dir, include_drafts, &mut problems) {
+        if let Err(err) = write::write_site(&plan, site_dir) {
+            problems
+                .errors
+                .push(format!("could not write the site: {err}"));
+        }
+    }
+    problems
+}
+
+const USAGE: &str = "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]";
+
+/// The command line, without its program name. Returns the exit code: 1 when the work
+/// failed, and 2 when the command wasn't understood.
+pub fn run(args: &[String]) -> i32 {
+    let mut args = args.iter().map(String::as_str);
+    match args.next() {
+        Some("new") => {
+            let (Some(dir), None) = (args.next(), args.next()) else {
+                eprintln!("{USAGE}");
+                return 2;
+            };
+            match starter::new_site(std::path::Path::new(dir)) {
+                Ok(()) => {
+                    println!("Created a site in {dir}. Edit site.yaml, then run kame-site build.");
+                    0
+                }
+                Err(err) => {
+                    eprintln!("kame-site: {err}");
+                    1
+                }
+            }
+        }
+        Some("build") => {
+            let mut include_drafts = true;
+            let mut dir = None;
+            for arg in args {
+                match arg {
+                    "--no-drafts" => include_drafts = false,
+                    other if other.starts_with('-') || dir.is_some() => {
+                        eprintln!("{USAGE}");
+                        return 2;
+                    }
+                    other => dir = Some(other),
+                }
+            }
+            let problems = build(std::path::Path::new(dir.unwrap_or(".")), include_drafts);
+            for warning in &problems.warnings {
+                eprintln!("warning: {warning}");
+            }
+            for error in &problems.errors {
+                eprintln!("error: {error}");
+            }
+            i32::from(!problems.errors.is_empty())
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            2
+        }
+    }
 }

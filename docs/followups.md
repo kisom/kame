@@ -27,6 +27,14 @@ Open work, most pressing first. Tick items off or delete them as they land.
 - [ ] **Richer Markdown elements (deferred).** Tables, nested lists and inline code
   are simplified on import because the model has no equivalent.
 
+## Linking
+
+- [ ] **Links to other kame documents.** Link from one document to another, and open it
+  in kame on a click rather than handing it to the system. Still to decide: how such a
+  link is stored so that it survives moving a folder of documents, whether it can point
+  at a place inside the document, and what it becomes on export. That last one depends
+  on the static site generator.
+
 ## From earlier feedback
 
 - [ ] **PDF export.** Still open in `feedback2.txt`; not required for v1.

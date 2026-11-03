@@ -1,0 +1,14 @@
+[package]
+name = "kame-typeset"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kame-core = { path = "../kame-core" }
+egui = "0.37"
+cosmic-text = { version = "0.19", features = ["swash"] }
+swash = "0.2"
+image = "0.25"
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }

@@ -2059,6 +2059,8 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "kame-core",
+ "kame-typeset",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -2070,6 +2072,29 @@ dependencies = [
  "swash",
  "uuid",
  "winit",
+]
+
+[[package]]
+name = "kame-core"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "kame-typeset"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "egui",
+ "image",
+ "kame-core",
+ "swash",
+ "uuid",
 ]
 
 [[package]]

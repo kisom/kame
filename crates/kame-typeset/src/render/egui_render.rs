@@ -517,7 +517,6 @@ impl GlyphRenderer {
 
     /// Shapes one block with the configured column width. Callers keep the
     /// returned layouts for the frame to map carets and clicks.
-    #[cfg(test)]
     pub fn layout(&mut self, block: &Block) -> BlockLayout {
         self.layout_marked(block, &[])
     }

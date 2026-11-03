@@ -3,7 +3,14 @@ name = "kame"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = ["crates/*"]
+# So that `cargo build` and `cargo test` at the root cover the libraries too.
+default-members = [".", "crates/*"]
+
 [dependencies]
+kame-core = { path = "crates/kame-core" }
+kame-typeset = { path = "crates/kame-typeset" }
 eframe = "0.37"
 egui = "0.37"
 cosmic-text = { version = "0.19", features = ["swash"] }

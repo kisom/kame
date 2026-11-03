@@ -14,7 +14,7 @@
 //! position, then annotation id), never in storage order, so exporting the same
 //! document twice — or after a serde round trip — produces identical bytes.
 
-use crate::layout::bare_link_ranges;
+use crate::model::bare_link_ranges;
 use crate::model::{
     is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle,
 };

@@ -137,6 +137,63 @@ pub fn list_labels(blocks: &[Block]) -> Vec<Option<String>> {
         .collect()
 }
 
+/// The bare URLs in `block` that read as links. Code is literal, so a URL in a code
+/// block or in inline code is only text.
+pub fn bare_link_ranges(block: &Block) -> Vec<(usize, usize)> {
+    if matches!(block.kind, BlockKind::Code { .. }) {
+        return Vec::new();
+    }
+    link_ranges(&block.text)
+        .into_iter()
+        .filter(|(start, end)| {
+            !block
+                .spans
+                .iter()
+                .any(|span| span.style == SpanStyle::Code && span.start < *end && *start < span.end)
+        })
+        .collect()
+}
+
+/// Byte ranges of URLs in `text`, each extended to the next whitespace and
+/// with trailing punctuation (`.,;:!?)]}`) trimmed. Recognises `http://`,
+/// `https://` and `www.` forms, so a pasted or typed link becomes a clickable
+/// range without the author marking it up.
+pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let scheme = ["https://", "http://", "www."]
+            .into_iter()
+            .find(|prefix| rest.starts_with(prefix));
+        let Some(scheme) = scheme else {
+            i += text[i..].chars().next().map_or(0, char::len_utf8);
+            continue;
+        };
+        let start = i;
+        // The link runs to the next whitespace.
+        let mut end = text.len();
+        for (j, c) in text[i + scheme.len()..].char_indices() {
+            if c.is_whitespace() {
+                end = i + scheme.len() + j;
+                break;
+            }
+        }
+        // Trim trailing punctuation that belongs to the sentence, not the URL.
+        while end > start + scheme.len() {
+            let last = text[..end].chars().next_back().unwrap();
+            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+                end -= last.len_utf8();
+            } else {
+                break;
+            }
+        }
+        ranges.push((start, end));
+        i = end;
+    }
+    ranges
+}
+
 /// The style for a link entered as `url`: a document link if it names a `.kame` file or
 /// a heading, and an ordinary link otherwise.
 pub fn link_style(url: String) -> SpanStyle {

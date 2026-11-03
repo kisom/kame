@@ -6,17 +6,12 @@
 //! commands; every command is persisted through the durable op log so history
 //! survives a restart.
 
-mod edit;
-mod export;
 mod external;
-mod import;
-mod layout;
 #[cfg(target_os = "macos")]
 mod macos;
-mod model;
-mod render;
-mod storage;
 
+use kame_core::{edit, export, import, model, storage};
+use kame_typeset::{layout, render};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -28,13 +23,13 @@ use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::layout::reading_order;
 use crate::layout::{
-    bare_link_ranges, heading_size_for, place_footnotes, place_marginalia, BlockLayout,
-    FootnotePlacement, LayoutConfig, MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP,
-    FOOTNOTE_LINE_HEIGHT, FOOTNOTE_MARK_EM,
+    heading_size_for, place_footnotes, place_marginalia, BlockLayout, FootnotePlacement,
+    LayoutConfig, MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
+    FOOTNOTE_MARK_EM,
 };
 use crate::model::{
-    is_script_url, list_labels, list_positions, Anchor, Annotation, AnnotationId, AnnotationKind,
-    Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
+    bare_link_ranges, is_script_url, list_labels, list_positions, Anchor, Annotation, AnnotationId,
+    AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
     adjacent_line, caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word,

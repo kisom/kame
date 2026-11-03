@@ -27,20 +27,29 @@ Both `cargo build` and `cargo test` must pass. The test suite is headless (no di
 
 ## Typography
 
-Headings = Crimson Pro; body = EB Garamond; code = IBM Plex Mono. Fonts are `include_bytes!`-embedded from `fonts/` (10 faces: CrimsonPro Regular/Bold/Italic, EBGaramond Regular/Bold/Italic/SemiBold, IBMPlexMono Regular/Bold/Italic) — never system font paths. Body shapes with `Shaping::Advanced` + `Align::Justified`. Punctuation hangs outside the measure (`hang_line`), except in code and prose blocks, so paint and hit-test from `BlockLayout::runs`, not `buffer.layout_runs()`.
+Headings = Crimson Pro; body = EB Garamond; code = IBM Plex Mono. Fonts are `include_bytes!`-embedded from `crates/kame-typeset/fonts/` (10 faces: CrimsonPro Regular/Bold/Italic, EBGaramond Regular/Bold/Italic/SemiBold, IBMPlexMono Regular/Bold/Italic) — never system font paths. Body shapes with `Shaping::Advanced` + `Align::Justified`. Punctuation hangs outside the measure (`hang_line`), except in code and prose blocks, so paint and hit-test from `BlockLayout::runs`, not `buffer.layout_runs()`.
 
 ## Module map
 
-- `src/model/` — `Document`/`Block`/`Annotation` types + `anchor` shifting (byte offsets)
-- `src/storage/` — SQLite `Db` (WAL, `PRAGMA user_version` migrations, snapshots)
-- `src/edit/` — `Op` log + `Editor` (undo/redo, commands)
-- `src/layout/` — cosmic-text block shaping, anchor→Y mapping, marginalia placement
-- `src/render/` — swash glyph-atlas rasterization + egui texture upload
-- `src/export/` — `to_markdown`, `to_html` (deterministic)
-- `src/import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
-- `src/main.rs` — egui shell (`Session`, `KameApp`, keybindings, distraction-free modes)
+A workspace, so that documents can be used without a window. `cargo build` and `cargo test` at the root cover every crate.
 
-Only `main.rs` knows about both egui and the DB; the layering is one-way. Keybindings are documented in `docs/keybindings.md`.
+`crates/kame-core` — documents, with no GUI or text engine, which is what lets a command line tool use it:
+
+- `model/` — `Document`/`Block`/`Annotation` types + `anchor` shifting (byte offsets)
+- `storage/` — SQLite `Db` (WAL, `PRAGMA user_version` migrations, snapshots)
+- `edit/` — `Op` log + `Editor` (undo/redo, commands)
+- `export/` — `to_markdown`, `to_html` (deterministic)
+- `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
+
+`crates/kame-typeset` — how a document looks, reading it and never changing it:
+
+- `layout/` — cosmic-text block shaping, anchor→Y mapping, marginalia placement
+- `render/` — swash glyph-atlas rasterization + egui texture upload
+- `fonts/` — the embedded faces
+
+`src/main.rs` — the app: egui shell (`Session`, `KameApp`, keybindings, distraction-free modes).
+
+Only `main.rs` knows about both egui and the DB; the layering is one-way. Keep logic out of the app where it can go in a library. Keybindings are documented in `docs/keybindings.md`.
 
 ## Conventions
 

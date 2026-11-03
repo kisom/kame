@@ -2090,6 +2090,7 @@ dependencies = [
  "minijinja",
  "pulldown-cmark",
  "roxmltree 0.21.2",
+ "rusqlite",
  "serde",
  "uuid",
  "yaml_serde",

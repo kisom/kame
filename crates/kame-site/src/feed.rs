@@ -36,7 +36,7 @@ fn escape(text: &str) -> String {
 pub fn render(config: &Config, sources: &[Source], index: &SiteIndex, site_dir: &Path) -> String {
     let site = &config.url;
     let mut out = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\">\n<channel>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n<channel>\n",
     );
     out.push_str(&format!("<title>{}</title>\n", escape(&config.name)));
     out.push_str(&format!("<link>{}/</link>\n", escape(site)));
@@ -74,6 +74,13 @@ pub fn render(config: &Config, sources: &[Source], index: &SiteIndex, site_dir: 
             escape(&url)
         ));
         out.push_str(&format!("<pubDate>{}</pubDate>\n", source.date.rfc822()));
+        // RSS's own author element wants an email address, which kame doesn't keep.
+        if !source.author.is_empty() {
+            out.push_str(&format!(
+                "<dc:creator>{}</dc:creator>\n",
+                escape(&source.author)
+            ));
+        }
         for tag in &source.tags {
             out.push_str(&format!("<category>{}</category>\n", escape(&tag.name)));
         }
@@ -183,6 +190,22 @@ mod tests {
             "{xml}"
         );
         assert!(xml.contains("<category>t one</category>"), "{xml}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_item_names_its_author_when_it_has_one() {
+        let dir = temp_dir("author");
+        let xml = feed(
+            &dir,
+            &[make(&dir, "a", "2026-11-02", false, plain("Words."))],
+        );
+        let parsed = roxmltree::Document::parse(&xml).unwrap();
+        let creator = parsed
+            .descendants()
+            .find(|n| n.tag_name().name() == "creator")
+            .and_then(|n| n.text());
+        assert_eq!(creator, Some("K. Isom"), "{xml}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

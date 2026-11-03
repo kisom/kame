@@ -68,7 +68,7 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
         return None;
     }
     let loaded = kame_core::storage::Db::open_read_only(path)
-        .and_then(|db| Ok((db.load_document()?, db.load_metadata().ok().flatten())));
+        .and_then(|db| Ok((db.load_document()?, db.load_metadata()?)));
     let (doc, metadata) = match loaded {
         Ok(loaded) => loaded,
         Err(err) => {
@@ -326,6 +326,26 @@ mod tests {
         let mut problems = Problems::default();
         read(&entry("a", path.clone()), false, &mut problems).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file from before kame kept metadata would otherwise publish under the wrong title
+    /// and date, with no sign of why.
+    #[test]
+    fn a_file_with_no_metadata_table_says_to_open_it_in_kame() {
+        let dir = temp_dir("oldfile");
+        let path = dir.join("a.kame");
+        write_kame(&path, &doc("A"), Some(&metadata("A", "2026-11-02", &["x"])));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("DROP TABLE metadata", []).unwrap();
+        drop(conn);
+        let mut problems = Problems::default();
+        assert!(read(&entry("a", path), false, &mut problems).is_none());
+        assert!(
+            problems.errors[0].contains("open it in kame"),
+            "{:?}",
+            problems.errors
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

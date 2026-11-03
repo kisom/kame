@@ -25,6 +25,10 @@ macOS (`Modifiers::command`).
 | Escape | close the find bar, a dialog, or the note popover |
 | F1 | toggle the help dialog |
 
+## Selecting
+
+Double-click a word to select it, and drag or Shift-click to select a range.
+
 ## Moving and deleting by word
 
 | Key | Action |

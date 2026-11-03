@@ -3537,6 +3537,7 @@ impl KameApp {
         let shift = ui.input(|input| input.modifiers.shift);
         let mut caret_action: Option<(Cursor, bool)> = None;
         let mut followed_link = None;
+        let mut word_selection = None;
         let mut marker_click: Option<(AnnotationId, Rect)> = None;
         let pointer = response.interact_pointer_pos();
         if response.drag_started() {
@@ -3572,8 +3573,12 @@ impl KameApp {
                 } else if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, body_left, pos)
                 {
-                    // A click on a link opens it instead of moving the caret.
-                    if let Some(target) = document_link_at(blocks, &cursor) {
+                    // A double click selects a word, even in a link: its first click has
+                    // already opened the link. A click on a link opens it instead of moving
+                    // the caret.
+                    if response.double_clicked() {
+                        word_selection = Some(cursor);
+                    } else if let Some(target) = document_link_at(blocks, &cursor) {
                         followed_link = Some(target);
                     } else if let Some(url) = url_at(blocks, &cursor) {
                         open_in_browser(&url);
@@ -3586,7 +3591,10 @@ impl KameApp {
 
         // `blocks` borrows the document; every caret move is applied after the
         // borrow's last use.
-        if let Some(target) = followed_link {
+        if let Some(at) = word_selection {
+            self.session.select_word_at(at);
+            self.set_open_note(None);
+        } else if let Some(target) = followed_link {
             self.follow_document_link(&target);
         } else if let Some((id, rect)) = marker_click {
             let open = if self.open_note == Some(id) {

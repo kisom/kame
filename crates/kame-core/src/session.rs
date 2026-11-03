@@ -744,6 +744,29 @@ impl Session {
     /// the selection began. With no selection yet, the current caret becomes
     /// the fixed edge, so a drag selects the span it covers. Collapsing back
     /// onto the fixed edge clears the selection.
+    /// Selects the word at `at`, as a double click does. Where there is no word, the caret
+    /// just goes there.
+    pub fn select_word_at(&mut self, at: Cursor) {
+        let at = clamp_cursor(self.editor.document(), at);
+        let Some(index) = self.block_index(at.block_id) else {
+            return;
+        };
+        let (start, end) = word_at(&self.document().blocks[index].text, at.offset);
+        if start == end {
+            self.set_caret(at);
+            return;
+        }
+        let cursor = |offset| Cursor {
+            block_id: at.block_id,
+            offset,
+        };
+        self.selection = Some(Selection {
+            start: cursor(start),
+            end: cursor(end),
+        });
+        self.caret = cursor(end);
+    }
+
     pub fn select_to(&mut self, caret: Cursor) {
         let origin = self
             .selection
@@ -5113,5 +5136,90 @@ mod tests {
         session.set_metadata(metadata);
         session.apply_default_author("K. Isom");
         assert_eq!(session.metadata.author, "");
+    }
+
+    fn selected_after_double_click(text: &str, offset: usize) -> Option<String> {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(text);
+        let block_id = session.document().blocks[0].id;
+        session.select_word_at(Cursor { block_id, offset });
+        session.selected_text()
+    }
+
+    #[test]
+    fn a_double_click_selects_the_word_under_it() {
+        assert_eq!(
+            selected_after_double_click("one two three", 5).as_deref(),
+            Some("two")
+        );
+        assert_eq!(
+            selected_after_double_click("one two three", 4).as_deref(),
+            Some("two")
+        );
+        assert_eq!(
+            selected_after_double_click("one two three", 0).as_deref(),
+            Some("one")
+        );
+    }
+
+    #[test]
+    fn a_double_click_counts_bytes_and_keeps_apostrophes() {
+        assert_eq!(
+            selected_after_double_click("un été ici", 5).as_deref(),
+            Some("été")
+        );
+        assert_eq!(
+            selected_after_double_click("don't go", 2).as_deref(),
+            Some("don't")
+        );
+    }
+
+    #[test]
+    fn a_double_click_on_nothing_selects_nothing_and_places_the_caret() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("a  b");
+        let block_id = session.document().blocks[0].id;
+        session.select_word_at(Cursor {
+            block_id,
+            offset: 2,
+        });
+        assert_eq!(session.selected_text(), None);
+        assert_eq!(session.caret.offset, 2);
+    }
+
+    #[test]
+    fn a_double_click_replaces_an_earlier_selection_and_leaves_the_caret_at_its_end() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two three");
+        let block_id = session.document().blocks[0].id;
+        session.selection = Some(Selection {
+            start: Cursor {
+                block_id,
+                offset: 0,
+            },
+            end: Cursor {
+                block_id,
+                offset: 3,
+            },
+        });
+        session.select_word_at(Cursor {
+            block_id,
+            offset: 9,
+        });
+        assert_eq!(session.selected_text().as_deref(), Some("three"));
+        assert_eq!(session.caret.offset, 13);
+    }
+
+    #[test]
+    fn typing_replaces_a_double_clicked_word() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two three");
+        let block_id = session.document().blocks[0].id;
+        session.select_word_at(Cursor {
+            block_id,
+            offset: 5,
+        });
+        session.insert("2");
+        assert_eq!(session.document().blocks[0].text, "one 2 three");
     }
 }

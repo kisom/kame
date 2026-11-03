@@ -9,6 +9,7 @@ macOS (`Modifiers::command`).
 | --- | --- |
 | text, Enter, Backspace, Delete | insert, new paragraph, delete back/forward |
 | Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y | undo / redo / redo |
+| Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste, as plain text |
 | Shift-Enter | in a code or prose block, a line without leaving the block |
 | Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
 | Ctrl-Shift-0 | return the caret's block to body text |

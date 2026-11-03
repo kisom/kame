@@ -864,6 +864,8 @@ pub fn word_at(text: &str, offset: usize) -> (usize, usize) {
 pub enum Command {
     Insert(String),
     Paste(String),
+    Copy,
+    Cut,
     Backspace,
     Delete,
     SplitParagraph,
@@ -985,6 +987,8 @@ pub fn command_for_event(event: &Event) -> Option<Command> {
     match event {
         Event::Text(text) if !text.is_empty() => Some(Command::Insert(text.clone())),
         Event::Paste(text) if !text.is_empty() => Some(Command::Paste(text.clone())),
+        Event::Copy => Some(Command::Copy),
+        Event::Cut => Some(Command::Cut),
         Event::Key {
             key,
             physical_key,
@@ -2212,5 +2216,11 @@ xyz"
             (with_tab - with_spaces).abs() < 0.5,
             "{with_tab} against {with_spaces}"
         );
+    }
+
+    #[test]
+    fn copy_and_cut_events_are_commands() {
+        assert_eq!(command_for_event(&Event::Copy), Some(Command::Copy));
+        assert_eq!(command_for_event(&Event::Cut), Some(Command::Cut));
     }
 }

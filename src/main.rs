@@ -2439,6 +2439,32 @@ impl Session {
         Ok(())
     }
 
+    /// The selected text, with a line break between blocks so that pasting it makes
+    /// blocks again. `None` when nothing is selected.
+    fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.ordered_selection()?;
+        if start == end {
+            return None;
+        }
+        let blocks = &self.document().blocks;
+        let first = self.block_index(start.block_id)?;
+        let last = self.block_index(end.block_id)?;
+        let lines: Vec<&str> = blocks[first..=last]
+            .iter()
+            .enumerate()
+            .map(|(index, block)| {
+                let from = if index == 0 { start.offset } else { 0 };
+                let to = if first + index == last {
+                    end.offset
+                } else {
+                    block.text.len()
+                };
+                block.text.get(from..to).unwrap_or("")
+            })
+            .collect();
+        Some(lines.join("\n"))
+    }
+
     /// The start of the first heading with exactly `text`.
     fn heading_cursor(&self, text: &str) -> Option<Cursor> {
         self.document()
@@ -4335,6 +4361,15 @@ impl KameApp {
                 }
                 Command::Paste(text) => {
                     self.session.paste(&text);
+                }
+                // With nothing selected these leave the clipboard as it was.
+                Command::Copy | Command::Cut => {
+                    if let Some(text) = self.session.selected_text() {
+                        ctx.copy_text(text);
+                        if matches!(command, Command::Cut) {
+                            self.session.backspace();
+                        }
+                    }
                 }
                 Command::Backspace => {
                     self.session.backspace();
@@ -10718,5 +10753,79 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             Some(4400.0)
         );
         assert_eq!(scroll_to_show(10.0, 40.0, 0.0, 600.0, 300.0), None);
+    }
+
+    fn select(session: &mut Session, start: (usize, usize), end: (usize, usize)) {
+        let id = |index: usize| session.document().blocks[index].id;
+        let selection = Selection {
+            start: Cursor {
+                block_id: id(start.0),
+                offset: start.1,
+            },
+            end: Cursor {
+                block_id: id(end.0),
+                offset: end.1,
+            },
+        };
+        session.selection = Some(selection);
+    }
+
+    #[test]
+    fn nothing_selected_has_nothing_to_copy() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("words");
+        assert_eq!(session.selected_text(), None);
+        select(&mut session, (0, 2), (0, 2));
+        assert_eq!(session.selected_text(), None);
+    }
+
+    #[test]
+    fn a_selection_in_one_block_copies_its_bytes() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("une été ici");
+        select(&mut session, (0, 4), (0, "une été".len()));
+        assert_eq!(session.selected_text(), Some("été".to_string()));
+    }
+
+    #[test]
+    fn a_backwards_selection_copies_the_same_text() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("words");
+        select(&mut session, (0, 4), (0, 1));
+        assert_eq!(session.selected_text(), Some("ord".to_string()));
+    }
+
+    #[test]
+    fn a_selection_across_blocks_copies_a_line_for_each() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("first");
+        session.split();
+        session.insert("second");
+        session.split();
+        session.insert("third");
+        select(&mut session, (0, 2), (2, 2));
+        assert_eq!(session.selected_text(), Some("rst\nsecond\nth".to_string()));
+    }
+
+    #[test]
+    fn what_is_copied_across_blocks_pastes_back_as_blocks() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("first");
+        session.split();
+        session.insert("second");
+        select(&mut session, (0, 0), (1, 6));
+        let copied = session.selected_text().unwrap();
+        let mut other = Session::anonymous().unwrap();
+        other.paste(&copied);
+        assert_eq!(other.document().blocks.len(), 2);
+        assert_eq!(other.document().blocks[1].text, "second");
+    }
+
+    #[test]
+    fn a_selection_in_code_copies_its_line_breaks() {
+        let mut session = code_session();
+        session.paste("a\n\tb");
+        select(&mut session, (0, 0), (0, 4));
+        assert_eq!(session.selected_text(), Some("a\n\tb".to_string()));
     }
 }

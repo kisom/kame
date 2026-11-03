@@ -1291,4 +1291,32 @@ mod tests {
         assert_eq!(doc.blocks[0].spans.len(), 1);
         assert_eq!(doc.blocks[0].spans[0].style, SpanStyle::Bold);
     }
+
+    /// What the exporter writes for a destination reads back as the same URL.
+    #[test]
+    fn link_destinations_survive_export_and_import() {
+        for url in [
+            "https://example.com/?a=1&b=2",
+            "https://en.wikipedia.org/wiki/Foo_(bar)",
+            "javascript&#58;alert(1)",
+            "back\\slash",
+            "paper.pdf",
+        ] {
+            let mut doc = Document::new("t");
+            doc.blocks[0].text = "words".to_string();
+            doc.blocks[0].spans = vec![Span {
+                start: 0,
+                end: 5,
+                style: SpanStyle::Link {
+                    url: url.to_string(),
+                },
+            }];
+            let exported = to_markdown(&doc);
+            let again = import(&exported).document;
+            assert_eq!(
+                again.blocks[0].spans, doc.blocks[0].spans,
+                "from {exported:?}"
+            );
+        }
+    }
 }

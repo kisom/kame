@@ -50,7 +50,7 @@ pub fn to_markdown(doc: &Document) -> String {
         // the empty-text skip drops it.
         if let BlockKind::Image { path } = &block.kind {
             ordered_index = 0;
-            parts.push(format!("![]({path})"));
+            parts.push(format!("![]({})", link_destination(path)));
             continue;
         }
         // An empty block carries no text and no apparatus: exporting it would
@@ -414,8 +414,33 @@ fn close_delimiter(style: &SpanStyle) -> String {
     match style {
         SpanStyle::Bold => "**".to_string(),
         SpanStyle::Italic => "*".to_string(),
-        SpanStyle::Link { url } => format!("]({url})"),
+        SpanStyle::Link { url } => format!("]({})", link_destination(url)),
     }
+}
+
+/// A URL as a Markdown link destination, meaning the same URL once read back. A
+/// renderer decodes character references here, so `&` is escaped, or `&#58;` could
+/// decode into a scheme after [`is_script_url`] had passed it. A parenthesis or
+/// space would otherwise end the link early.
+fn link_destination(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for c in url.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '\\' | '(' | ')' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_whitespace() || c.is_control() => {
+                let mut bytes = [0; 4];
+                for byte in c.encode_utf8(&mut bytes).bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Pull a snapped `(start, end)` range in past leading and trailing whitespace,
@@ -1092,5 +1117,35 @@ mod tests {
         let mut doc = Document::new("t");
         doc.blocks = vec![linked("paper.pdf")];
         assert_eq!(to_markdown(&doc), "[the demo](paper.pdf)\n");
+    }
+
+    /// A renderer decodes character references in a destination, so `&#58;` would
+    /// turn this back into a working script link after the check had passed.
+    #[test]
+    fn a_character_reference_in_a_link_cannot_decode_into_a_scheme() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![linked("javascript&#58;alert(1)")];
+        let out = to_markdown(&doc);
+        assert!(!out.contains("&#58;") || out.contains("&amp;#58;"), "{out}");
+    }
+
+    #[test]
+    fn a_parenthesis_or_space_cannot_end_a_link_early() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![linked("a) <script>x</script> (b")];
+        let out = to_markdown(&doc);
+        assert_eq!(out, "[the demo](a\\)%20<script>x</script>%20\\(b)\n");
+    }
+
+    #[test]
+    fn an_image_path_with_a_space_stays_one_destination() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Image {
+                path: "my pic.png".to_string(),
+            },
+            "",
+        )];
+        assert_eq!(to_markdown(&doc), "![](my%20pic.png)\n");
     }
 }

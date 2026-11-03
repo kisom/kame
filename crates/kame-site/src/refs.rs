@@ -46,6 +46,28 @@ pub struct Images {
     named: HashMap<String, String>,
 }
 
+impl SiteIndex {
+    /// Why [`SiteIndex::link_url`] found nothing, for the build to say so.
+    fn why_unlinked(&self, target: &str, from: &Source) -> &'static str {
+        let (path, _heading) = split_document_target(target);
+        if path.is_empty() {
+            return "it is to a heading, and headings aren't linked";
+        }
+        let Some(file) = find_document(path, &from.path) else {
+            return "there is no document there";
+        };
+        let listed = file
+            .canonicalize()
+            .ok()
+            .is_some_and(|file| self.by_file.contains_key(&file));
+        if listed {
+            "it is to a draft, which a published document doesn't reveal"
+        } else {
+            "that document isn't in site.yaml"
+        }
+    }
+}
+
 /// `text` as it can appear in a URL's path.
 fn percent_encode(text: &str) -> String {
     let mut out = String::new();
@@ -164,8 +186,9 @@ pub fn note_unpublished_links(source: &Source, index: &SiteIndex, problems: &mut
             if let SpanStyle::DocumentLink { target } = &span.style {
                 if index.link_url(target, source).is_none() {
                     problems.warnings.push(format!(
-                        "\"{}\": the link to {target} publishes as its text",
-                        source.slug
+                        "\"{}\": the link to {target} publishes as its text: {}",
+                        source.slug,
+                        index.why_unlinked(target, source)
                     ));
                 }
             }
@@ -400,6 +423,68 @@ mod tests {
             images.relative("sub/../sub/my photo été.png"),
             "my%20photo%20%C3%A9t%C3%A9.png"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn linking(dir: &Path, target: &str) -> Source {
+        let mut doc = plain();
+        doc.blocks[0].spans = vec![Span {
+            start: 0,
+            end: 5,
+            style: SpanStyle::DocumentLink {
+                target: target.to_string(),
+            },
+        }];
+        make(dir, "from", false, doc)
+    }
+
+    fn note(dir: &Path, target: &str, others: Vec<Source>) -> String {
+        let from = linking(dir, target);
+        let mut sources = others;
+        sources.push(from.clone());
+        let index = SiteIndex::new(&sources);
+        let mut problems = Problems::default();
+        note_unpublished_links(&from, &index, &mut problems);
+        problems.warnings.join("\n")
+    }
+
+    #[test]
+    fn a_note_says_when_a_link_is_to_a_draft() {
+        let dir = temp_dir("whydraft");
+        let draft = make(&dir, "d", true, plain());
+        let found = note(&dir, "d.kame", vec![draft]);
+        assert!(
+            found.contains("d.kame") && found.contains("a draft"),
+            "{found}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_note_says_when_a_link_is_to_a_heading() {
+        let dir = temp_dir("whyheading");
+        let found = note(&dir, "#Intro", Vec::new());
+        assert!(
+            found.contains("#Intro") && found.contains("heading"),
+            "{found}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_note_says_when_a_document_exists_but_isnt_published() {
+        let dir = temp_dir("whyunlisted");
+        std::fs::write(dir.join("other.kame"), "").unwrap();
+        let found = note(&dir, "other.kame", Vec::new());
+        assert!(found.contains("isn't in site.yaml"), "{found}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_note_says_when_a_link_has_rotted() {
+        let dir = temp_dir("whyrot");
+        let found = note(&dir, "gone.kame", Vec::new());
+        assert!(found.contains("no document there"), "{found}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

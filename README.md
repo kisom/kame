@@ -103,3 +103,6 @@ The schema is versioned with `PRAGMA user_version`.
     # edit site.yaml and theme/templates/index.html
     cargo run -p kame-site -- build
     python3 -m http.server -d output
+
+`kame-site regen-theme` updates a site's theme from a newer `kame-site`, moving the old one to
+`theme.old` so that nothing you edited is lost.

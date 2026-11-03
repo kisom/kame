@@ -106,6 +106,72 @@ pub fn new_site(dir: &Path) -> Result<(), String> {
     write().map_err(|err| format!("could not write {}: {err}", dir.display()))
 }
 
+/// Whether the theme on disk is exactly the embedded one, with nothing added.
+fn theme_is_current(theme: &Path) -> bool {
+    fn count_files(dir: &Path) -> usize {
+        std::fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .flatten()
+                .map(|entry| {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        count_files(&path)
+                    } else {
+                        1
+                    }
+                })
+                .sum()
+        })
+    }
+    let embedded: Vec<_> = theme_files().collect();
+    count_files(theme) == embedded.len()
+        && embedded.iter().all(|(path, contents)| {
+            std::fs::read(theme.join(path)).is_ok_and(|found| found == *contents)
+        })
+}
+
+/// The embedded theme's files, as paths under `theme/` and their contents.
+fn theme_files() -> impl Iterator<Item = (&'static str, &'static [u8])> {
+    FILES
+        .iter()
+        .filter_map(|(path, contents)| Some((path.strip_prefix("theme/")?, *contents)))
+}
+
+/// Puts the embedded theme back at `theme/`. A theme that differs is moved aside, never
+/// overwritten, since edits to it are the author's. Returns where it went, or `None` if there
+/// was nothing to keep, which includes a theme that is already current.
+pub fn regen_theme(dir: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    if !dir.join("site.yaml").is_file() {
+        return Err(format!(
+            "{} has no site.yaml, so it isn't a site",
+            dir.display()
+        ));
+    }
+    let theme = dir.join("theme");
+    if theme_is_current(&theme) {
+        return Ok(None);
+    }
+    let failed = |err: std::io::Error| format!("could not update {}: {err}", theme.display());
+    let mut kept = None;
+    if theme.exists() {
+        let aside = std::iter::once("theme.old".to_string())
+            .chain((2..).map(|number| format!("theme.old-{number}")))
+            .map(|name| dir.join(name))
+            .find(|path| !path.exists())
+            .expect("there is always another number");
+        std::fs::rename(&theme, &aside).map_err(failed)?;
+        kept = Some(aside);
+    }
+    for (path, contents) in theme_files() {
+        let target = theme.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(failed)?;
+        }
+        std::fs::write(target, contents).map_err(failed)?;
+    }
+    Ok(kept)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +262,89 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    fn fresh(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let parent = temp_dir(name);
+        let dir = parent.join("site");
+        new_site(&dir).unwrap();
+        (parent, dir)
+    }
+
+    #[test]
+    fn a_current_theme_is_left_alone_with_no_copy() {
+        let (parent, dir) = fresh("regensame");
+        assert_eq!(regen_theme(&dir).unwrap(), None);
+        assert!(!dir.join("theme.old").exists());
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn an_edited_theme_moves_aside_and_the_starting_one_returns() {
+        let (parent, dir) = fresh("regenedit");
+        let index = dir.join("theme/templates/index.html");
+        let original = std::fs::read(&index).unwrap();
+        std::fs::write(&index, "my own words").unwrap();
+        assert_eq!(regen_theme(&dir).unwrap(), Some(dir.join("theme.old")));
+        assert_eq!(std::fs::read(&index).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("theme.old/templates/index.html")).unwrap(),
+            "my own words"
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn a_file_added_to_a_theme_counts_as_an_edit_and_is_kept() {
+        let (parent, dir) = fresh("regenadded");
+        std::fs::write(dir.join("theme/static/css/mine.css"), "mine").unwrap();
+        regen_theme(&dir).unwrap();
+        assert!(dir.join("theme.old/static/css/mine.css").is_file());
+        assert!(!dir.join("theme/static/css/mine.css").exists());
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn an_earlier_copy_is_never_overwritten() {
+        let (parent, dir) = fresh("regentwice");
+        let index = dir.join("theme/templates/index.html");
+        std::fs::write(&index, "first").unwrap();
+        regen_theme(&dir).unwrap();
+        std::fs::write(&index, "second").unwrap();
+        assert_eq!(regen_theme(&dir).unwrap(), Some(dir.join("theme.old-2")));
+        let read = |path: &str| std::fs::read_to_string(dir.join(path)).unwrap();
+        assert_eq!(read("theme.old/templates/index.html"), "first");
+        assert_eq!(read("theme.old-2/templates/index.html"), "second");
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn a_missing_theme_is_written() {
+        let (parent, dir) = fresh("regenmissing");
+        std::fs::remove_dir_all(dir.join("theme")).unwrap();
+        assert_eq!(regen_theme(&dir).unwrap(), None);
+        assert!(dir.join("theme/templates/index.html").is_file());
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn only_the_theme_changes() {
+        let (parent, dir) = fresh("regenrest");
+        std::fs::write(dir.join("site.yaml"), "mine").unwrap();
+        std::fs::write(dir.join("pages/about.md"), "mine").unwrap();
+        std::fs::write(dir.join("theme/templates/index.html"), "edited").unwrap();
+        regen_theme(&dir).unwrap();
+        assert_eq!(std::fs::read(dir.join("site.yaml")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(dir.join("pages/about.md")).unwrap(), b"mine");
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn somewhere_that_isnt_a_site_is_refused() {
+        let dir = temp_dir("regennosite");
+        let err = regen_theme(&dir).unwrap_err();
+        assert!(err.contains("site.yaml"), "{err}");
+        assert!(!dir.join("theme").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

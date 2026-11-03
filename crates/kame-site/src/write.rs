@@ -228,4 +228,24 @@ mod tests {
         assert!(!dir.join(".output-old").exists());
         assert!(!dir.join(".output-building").exists());
     }
+
+    #[test]
+    fn the_command_line_regenerates_the_theme() {
+        let parent = temp_dir("cliregen");
+        let dir = parent.join("site");
+        let shown = dir.display().to_string();
+        assert_eq!(
+            crate::run(&["regen-theme".to_string(), shown.clone()]),
+            1,
+            "not a site yet"
+        );
+        assert_eq!(crate::run(&["new".to_string(), shown.clone()]), 0);
+        std::fs::write(dir.join("theme/templates/index.html"), "edited").unwrap();
+        assert_eq!(crate::run(&["regen-theme".to_string(), shown.clone()]), 0);
+        assert!(dir.join("theme.old/templates/index.html").is_file());
+        assert_eq!(
+            crate::run(&["regen-theme".to_string(), shown, "extra".to_string()]),
+            2
+        );
+    }
 }

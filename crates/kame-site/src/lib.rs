@@ -32,7 +32,8 @@ pub fn build(site_dir: &std::path::Path, include_drafts: bool) -> Problems {
     problems
 }
 
-const USAGE: &str = "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]";
+const USAGE: &str =
+    "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site regen-theme [DIR]";
 
 /// The command line, without its program name. Returns the exit code: 1 when the work
 /// failed, and 2 when the command wasn't understood.
@@ -47,6 +48,27 @@ pub fn run(args: &[String]) -> i32 {
             match starter::new_site(std::path::Path::new(dir)) {
                 Ok(()) => {
                     println!("Created a site in {dir}. Edit site.yaml, then run kame-site build.");
+                    0
+                }
+                Err(err) => {
+                    eprintln!("kame-site: {err}");
+                    1
+                }
+            }
+        }
+        Some("regen-theme") => {
+            let dir = args.next().unwrap_or(".");
+            if args.next().is_some() {
+                eprintln!("{USAGE}");
+                return 2;
+            }
+            match starter::regen_theme(std::path::Path::new(dir)) {
+                Ok(Some(kept)) => {
+                    println!("Updated the theme. Your old one is in {}.", kept.display());
+                    0
+                }
+                Ok(None) => {
+                    println!("The theme is up to date.");
                     0
                 }
                 Err(err) => {

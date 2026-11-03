@@ -313,6 +313,7 @@ Markdown pages are never in it.
 ```
 kame-site new DIR
 kame-site build [--no-drafts] [DIR]
+kame-site regen-theme [DIR]
 ```
 
 ### `kame-site new`
@@ -327,8 +328,14 @@ Like `pelican-quickstart`, this sets up a site that builds and browses straight 
 
 It asks no questions: the placeholders are in one short file you edit next. It refuses to run in a
 directory that already has anything in it, so it can't overwrite a site. Once written, the theme is
-yours. A later subcommand could regenerate it from the embedded copy, and the design leaves room for
-that without it being part of v1.
+yours.
+
+### `kame-site regen-theme`
+
+Puts the embedded theme back at `theme/`, for picking up a newer one. A theme that differs at all,
+including an added file, is moved to `theme.old`, then `theme.old-2` and so on, and never overwritten.
+A theme that is already current is left alone, with no copy. Only `theme/` changes, and a directory
+with no `site.yaml` is refused.
 
 ### `kame-site build`
 

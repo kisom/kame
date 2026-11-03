@@ -325,6 +325,7 @@ Like `pelican-quickstart`, this sets up a site that builds and browses straight 
 - `theme/`, with every template, the stylesheet and the fonts
 - `static/`, with `images/`, `files/`, `css/` and `js/`
 - `README.md`, saying how to build and preview it, and a `.gitignore` for `output/`
+- a `Makefile` with `build`, `serve`, `clean` and `sync`, with `UPSTREAM` at its top for rsync
 
 It asks no questions: the placeholders are in one short file you edit next. It refuses to run in a
 directory that already has anything in it, so it can't overwrite a site. Once written, the theme is

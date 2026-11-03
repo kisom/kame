@@ -42,11 +42,10 @@ const README: &str = r#"# My Site
 
 Built with kame-site.
 
-    kame-site build
-    python3 -m http.server -d output
+    make serve
 
 Then open http://localhost:8000. Edit `theme/templates/index.html` for the home page,
-and `site.yaml` for what gets published.
+and `site.yaml` for what gets published. Set UPSTREAM in the Makefile for `make sync`.
 "#;
 
 const ABOUT: &str = "---\ntitle: About\n---\n\nA page about this site.\n";
@@ -56,6 +55,7 @@ pub const FILES: &[(&str, &[u8])] = &[
     ("README.md", README.as_bytes()),
     (".gitignore", b"output/\n.output-building/\n.output-old/\n"),
     ("pages/about.md", ABOUT.as_bytes()),
+    ("Makefile", include_bytes!("../site/Makefile")),
     theme_text!("templates/base.html"),
     theme_text!("templates/index.html"),
     theme_text!("templates/archive.html"),
@@ -187,6 +187,7 @@ mod tests {
             "site.yaml",
             "README.md",
             ".gitignore",
+            "Makefile",
             "pages/about.md",
             "theme/templates/base.html",
             "theme/templates/index.html",
@@ -346,5 +347,26 @@ mod tests {
         assert!(err.contains("site.yaml"), "{err}");
         assert!(!dir.join("theme").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_makefile_says_where_to_sync_at_its_top() {
+        let makefile = FILES
+            .iter()
+            .find(|(path, _)| *path == "Makefile")
+            .map(|(_, contents)| std::str::from_utf8(contents).unwrap())
+            .unwrap();
+        let first = makefile
+            .lines()
+            .find(|line| !line.starts_with('#'))
+            .unwrap();
+        assert_eq!(first, "UPSTREAM =");
+        for target in ["build:", "serve: build", "sync: build", "clean:"] {
+            assert!(makefile.lines().any(|line| line == target), "{target}");
+        }
+        assert!(
+            makefile.contains("\t$(KAME_SITE) build"),
+            "recipes need tabs"
+        );
     }
 }

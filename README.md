@@ -104,5 +104,8 @@ The schema is versioned with `PRAGMA user_version`.
     cargo run -p kame-site -- build
     python3 -m http.server -d output
 
+A new site has a `Makefile` with `build`, `serve`, `clean` and `sync`. Set `UPSTREAM` at its top
+for `make sync`, which rsyncs `output/` there and deletes anything else.
+
 `kame-site regen-theme` updates a site's theme from a newer `kame-site`, moving the old one to
 `theme.old` so that nothing you edited is lost.

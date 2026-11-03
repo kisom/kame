@@ -40,6 +40,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `edit/` — `Op` log + `Editor` (undo/redo, commands)
 - `export/` — `to_markdown`, `to_html` (deterministic)
 - `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
+- `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk
+- `text.rs` — moving through text by character and word
 
 `crates/kame-typeset` — how a document looks, reading it and never changing it:
 
@@ -47,9 +49,9 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `render/` — swash glyph-atlas rasterization + egui texture upload
 - `fonts/` — the embedded faces
 
-`src/main.rs` — the app: egui shell (`Session`, `KameApp`, keybindings, distraction-free modes).
+`src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 
-Only `main.rs` knows about both egui and the DB; the layering is one-way. Keep logic out of the app where it can go in a library. Keybindings are documented in `docs/keybindings.md`.
+The layering is one-way: core knows nothing of typeset or the app. Keep logic out of the app where it can go in a library. Keybindings are documented in `docs/keybindings.md`.
 
 ## Conventions
 

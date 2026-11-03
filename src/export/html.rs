@@ -86,6 +86,24 @@ em {
 li > ul, li > ol {
   margin: 0;
 }
+ol:not(.footnotes) {
+  counter-reset: item;
+}
+ol:not(.footnotes) > li {
+  counter-increment: item;
+  list-style: none;
+  position: relative;
+}
+ol:not(.footnotes) > li::before {
+  content: counters(item, ".") ".";
+  position: absolute;
+  right: 100%;
+  margin-right: 0.4em;
+  white-space: nowrap;
+}
+li ol:not(.footnotes) > li::before {
+  content: counters(item, ".");
+}
 ul, ol {
   margin: 0 0 1.1em;
   padding-left: 1.4em;
@@ -1632,5 +1650,17 @@ mod tests {
             ),
             "{html}"
         );
+    }
+
+    #[test]
+    fn nested_numbers_are_numbered_by_the_stylesheet() {
+        let html = to_html(&list(&[(true, 0, "a"), (true, 1, "b")]));
+        assert!(html.contains("counters(item, \".\")"), "{html}");
+    }
+
+    #[test]
+    fn footnotes_keep_their_own_numbers() {
+        let html = to_html(&list(&[(true, 0, "a")]));
+        assert!(html.contains("ol:not(.footnotes)"), "{html}");
     }
 }

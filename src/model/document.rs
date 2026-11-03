@@ -114,6 +114,29 @@ pub fn list_positions(blocks: &[Block], skip_empty: bool) -> Vec<Option<ListPosi
         .collect()
 }
 
+/// What each numbered item shows on the page: `1.`, then `1.1` and `1.1.1` as lists nest.
+/// A bullet has no label, and adds nothing to the numbers below it.
+pub fn list_labels(blocks: &[Block]) -> Vec<Option<String>> {
+    let mut path: Vec<Option<usize>> = Vec::new();
+    list_positions(blocks, false)
+        .into_iter()
+        .map(|position| {
+            let Some(position) = position else {
+                path.clear();
+                return None;
+            };
+            path.truncate(usize::from(position.depth));
+            path.push(position.number);
+            position.number?;
+            let numbers: Vec<String> = path.iter().flatten().map(usize::to_string).collect();
+            Some(match numbers.as_slice() {
+                [only] => format!("{only}."),
+                _ => numbers.join("."),
+            })
+        })
+        .collect()
+}
+
 /// The style for a link entered as `url`: a document link if it names a `.kame` file or
 /// a heading, and an ordinary link otherwise.
 pub fn link_style(url: String) -> SpanStyle {
@@ -514,6 +537,65 @@ mod script_url_tests {
         assert_eq!(
             serde_json::to_string(&kind).unwrap(),
             r#"{"ListItem":{"ordered":true}}"#
+        );
+    }
+
+    fn labels(blocks: &[Block]) -> Vec<Option<String>> {
+        super::list_labels(blocks)
+    }
+
+    fn label(text: &str) -> Option<String> {
+        Some(text.to_string())
+    }
+
+    #[test]
+    fn a_nested_number_carries_its_parents_numbers() {
+        let blocks = [
+            item(true, 0, "a"),
+            item(true, 1, "b"),
+            item(true, 2, "c"),
+            item(true, 2, "d"),
+            item(true, 1, "e"),
+            item(true, 0, "f"),
+            item(true, 1, "g"),
+        ];
+        assert_eq!(
+            labels(&blocks),
+            vec![
+                label("1."),
+                label("1.1"),
+                label("1.1.1"),
+                label("1.1.2"),
+                label("1.2"),
+                label("2."),
+                label("2.1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bullet_has_no_label_and_adds_nothing_to_the_number_below_it() {
+        let blocks = [item(true, 0, "a"), item(false, 1, "b"), item(true, 2, "c")];
+        assert_eq!(labels(&blocks), vec![label("1."), None, label("1.1")]);
+    }
+
+    #[test]
+    fn a_number_under_a_top_level_bullet_is_a_top_level_number() {
+        let blocks = [item(false, 0, "a"), item(true, 1, "b"), item(true, 1, "c")];
+        assert_eq!(labels(&blocks), vec![None, label("1."), label("2.")]);
+    }
+
+    #[test]
+    fn labels_start_over_after_the_list_ends() {
+        let blocks = [
+            item(true, 0, "a"),
+            item(true, 1, "b"),
+            para("x"),
+            item(true, 0, "c"),
+        ];
+        assert_eq!(
+            labels(&blocks),
+            vec![label("1."), label("1.1"), None, label("1.")]
         );
     }
 }

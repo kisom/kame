@@ -37,8 +37,11 @@ Esc counts as a prefix when it has nothing to close, and for two seconds.
 
 ## Nested lists
 
-In a list item, Tab moves it a level in and Shift-Tab a level out. An item can only go one
-level below the item before it, so a list's first item stays put. Enter on an empty nested
+In a list item, Tab moves it a level in and Shift-Tab a level out, and with several items
+selected they all move together. An item can only go one level below the item before it,
+so a list's first item stays put. An item's children stay where they are when it moves.
+Numbers nest as `1.`, `1.1`, `1.1.1`, on the page and in HTML. Markdown has no way to write
+that, so it exports plain numbers and leaves the numbering to whatever renders it. Enter on an empty nested
 item comes out a level, and on an empty top-level item returns to body text.
 
 ## Typed markdown

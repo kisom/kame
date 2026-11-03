@@ -687,32 +687,51 @@ impl Editor {
         Some((op, close_bracket - 1))
     }
 
-    /// Moves a list item a level in or out, as one edit. `None` if it isn't a list item
-    /// or can't go there: going in, an item can only be one level below the item before
-    /// it, so the first item of a list stays put.
-    pub fn indent_list_item(&mut self, block_id: BlockId, indent: bool) -> Option<Op> {
-        let index = self
-            .doc
-            .blocks
-            .iter()
-            .position(|block| block.id == block_id)?;
-        let BlockKind::ListItem { ordered, depth } = self.doc.blocks[index].kind else {
-            return None;
-        };
-        let depth = if indent {
-            let previous = index.checked_sub(1).map(|at| &self.doc.blocks[at].kind);
-            let Some(BlockKind::ListItem { depth: above, .. }) = previous else {
-                return None;
-            };
-            if depth > *above || depth >= MAX_LIST_DEPTH {
-                return None;
+    /// Moves list items a level in or out together, as one edit, keeping their shape.
+    /// Anything else among `block_ids` stays where it is.
+    ///
+    /// Going in, an item can only be one level below the item before it, unless that one
+    /// is moving too. If any can't go, none do, or the selection would lose its shape.
+    /// Going out, an item already at the top stays. `None` if nothing moved.
+    pub fn indent_list_items(&mut self, block_ids: &[BlockId], indent: bool) -> Option<Op> {
+        let moving = |id: &BlockId| block_ids.contains(id);
+        let mut ops = Vec::new();
+        for (index, block) in self.doc.blocks.iter().enumerate() {
+            if !moving(&block.id) {
+                continue;
             }
-            depth + 1
-        } else {
-            depth.checked_sub(1)?
-        };
-        let kind = BlockKind::ListItem { ordered, depth };
-        Some(self.apply_edit(Op::set_block_kind(&self.doc, block_id, kind)))
+            let BlockKind::ListItem { ordered, depth } = block.kind else {
+                continue;
+            };
+            let depth = if indent {
+                let above = index.checked_sub(1).map(|at| &self.doc.blocks[at]);
+                let fits = match above {
+                    Some(above)
+                        if moving(&above.id)
+                            && matches!(above.kind, BlockKind::ListItem { .. }) =>
+                    {
+                        true
+                    }
+                    Some(Block {
+                        kind: BlockKind::ListItem { depth: above, .. },
+                        ..
+                    }) => depth <= *above,
+                    _ => false,
+                };
+                if !fits || depth >= MAX_LIST_DEPTH {
+                    return None;
+                }
+                depth + 1
+            } else {
+                match depth.checked_sub(1) {
+                    Some(depth) => depth,
+                    None => continue,
+                }
+            };
+            let kind = BlockKind::ListItem { ordered, depth };
+            ops.push(Op::set_block_kind(&self.doc, block.id, kind));
+        }
+        (!ops.is_empty()).then(|| self.apply_edit(Op::Batch { ops }))
     }
 
     /// Turns a `` `code` `` the caret just closed into inline code, as one edit, returning

@@ -33,8 +33,8 @@ use crate::layout::{
     FOOTNOTE_LINE_HEIGHT, FOOTNOTE_MARK_EM,
 };
 use crate::model::{
-    is_script_url, list_positions, Anchor, Annotation, AnnotationId, AnnotationKind, Block,
-    BlockId, BlockKind, Document, Metadata, SpanStyle,
+    is_script_url, list_labels, list_positions, Anchor, Annotation, AnnotationId, AnnotationKind,
+    Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
     adjacent_line, caret_line, caret_x, command_for_event, install_fonts, next_boundary, next_word,
@@ -2495,13 +2495,40 @@ impl Session {
         Some(lines.join("\n"))
     }
 
-    /// Moves the caret's list item a level in or out, if it can go there.
+    /// The blocks a Tab acts on: those the selection touches, or the caret's. A selection
+    /// ending at the very start of a block doesn't reach into it.
+    fn tabbed_blocks(&self) -> Vec<BlockId> {
+        let caret_block = vec![self.caret.block_id];
+        let Some((start, end)) = self.ordered_selection().filter(|(start, end)| start != end)
+        else {
+            return caret_block;
+        };
+        let (Some(first), Some(last)) = (
+            self.block_index(start.block_id),
+            self.block_index(end.block_id),
+        ) else {
+            return caret_block;
+        };
+        let last = if last > first && end.offset == 0 {
+            last - 1
+        } else {
+            last
+        };
+        self.document().blocks[first..=last]
+            .iter()
+            .map(|block| block.id)
+            .collect()
+    }
+
+    /// Moves the selected list items, or the caret's, a level in or out, if they can go
+    /// there.
     fn indent_list_item(&mut self, indent: bool) -> bool {
         if self.save_failed {
             return false;
         }
-        let caret = self.valid_caret();
-        match self.editor.indent_list_item(caret.block_id, indent) {
+        self.valid_caret();
+        let blocks = self.tabbed_blocks();
+        match self.editor.indent_list_items(&blocks, indent) {
             Some(op) => {
                 self.record(&op);
                 true
@@ -4889,12 +4916,12 @@ impl KameApp {
         // List markers: a bullet that changes with the level, or a number.
         let list_markers: Vec<Option<String>> = list_positions(blocks, false)
             .into_iter()
-            .map(|position| {
-                position.map(|position| match position.number {
-                    Some(number) => format!("{number}."),
-                    None => {
+            .zip(list_labels(blocks))
+            .map(|(position, label)| {
+                position.map(|position| {
+                    label.unwrap_or_else(|| {
                         LIST_BULLETS[usize::from(position.depth) % LIST_BULLETS.len()].to_string()
-                    }
+                    })
                 })
             })
             .collect();
@@ -11121,5 +11148,127 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             egui::Event::Text("x".to_string()),
         ];
         assert_eq!(tab_presses(&events), vec![true, false]);
+    }
+
+    fn depths(session: &Session) -> Vec<u8> {
+        session
+            .document()
+            .blocks
+            .iter()
+            .map(|block| match block.kind {
+                BlockKind::ListItem { depth, .. } => depth,
+                _ => u8::MAX,
+            })
+            .collect()
+    }
+
+    fn five_items() -> Session {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "- one");
+        for word in ["two", "three", "four", "five"] {
+            session.split();
+            typed(&mut session, word);
+        }
+        session
+    }
+
+    #[test]
+    fn tab_moves_every_selected_item_as_one_undo_step() {
+        let mut session = five_items();
+        select(&mut session, (1, 1), (3, 1));
+        assert!(session.indent_list_item(true));
+        assert_eq!(depths(&session), vec![0, 1, 1, 1, 0]);
+        assert!(
+            session.selection.is_some(),
+            "the selection stays for another Tab"
+        );
+        session.undo();
+        assert_eq!(depths(&session), vec![0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_backwards_selection_moves_the_same_items() {
+        let mut session = five_items();
+        select(&mut session, (3, 1), (1, 1));
+        assert!(session.indent_list_item(true));
+        assert_eq!(depths(&session), vec![0, 1, 1, 1, 0]);
+    }
+
+    #[test]
+    fn shift_tab_moves_every_selected_item_that_can_come_out() {
+        let mut session = five_items();
+        select(&mut session, (1, 1), (3, 1));
+        session.indent_list_item(true);
+        select(&mut session, (0, 1), (2, 1));
+        assert!(session.indent_list_item(false));
+        assert_eq!(depths(&session), vec![0, 0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn selected_items_keep_their_shape_when_they_move() {
+        let mut session = five_items();
+        select(&mut session, (2, 1), (2, 2));
+        session.indent_list_item(true);
+        assert_eq!(depths(&session), vec![0, 0, 1, 0, 0]);
+        select(&mut session, (1, 1), (3, 1));
+        assert!(session.indent_list_item(true));
+        assert_eq!(depths(&session), vec![0, 1, 2, 1, 0]);
+    }
+
+    #[test]
+    fn a_selection_that_cant_all_move_doesnt_move_at_all() {
+        let mut session = five_items();
+        select(&mut session, (0, 1), (2, 1));
+        assert!(
+            !session.indent_list_item(true),
+            "the first item has nowhere to go"
+        );
+        assert_eq!(depths(&session), vec![0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_selection_ending_at_the_start_of_an_item_leaves_that_item_out() {
+        let mut session = five_items();
+        select(&mut session, (1, 0), (3, 0));
+        assert!(session.indent_list_item(true));
+        assert_eq!(depths(&session), vec![0, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn a_selection_within_one_item_moves_that_item() {
+        let mut session = five_items();
+        select(&mut session, (1, 0), (1, 2));
+        assert!(session.indent_list_item(true));
+        assert_eq!(depths(&session), vec![0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn body_text_in_a_selection_stays_where_it_is() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "- one");
+        session.split();
+        typed(&mut session, "two");
+        session.split();
+        session.split();
+        typed(&mut session, "body");
+        select(&mut session, (1, 1), (2, 2));
+        assert!(session.indent_list_item(true));
+        assert_eq!(depths(&session), vec![0, 1, u8::MAX]);
+    }
+
+    #[test]
+    fn outdenting_leaves_children_where_they_are() {
+        let mut session = five_items();
+        select(&mut session, (1, 1), (3, 1));
+        session.indent_list_item(true);
+        select(&mut session, (2, 1), (2, 1));
+        session.selection = None;
+        let parent = session.document().blocks[1].id;
+        session.set_caret(Cursor {
+            block_id: parent,
+            offset: 0,
+        });
+        session.indent_list_item(false);
+        assert_eq!(depths(&session), vec![0, 0, 1, 1, 0]);
     }
 }

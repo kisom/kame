@@ -101,6 +101,12 @@ pub enum Op {
         old: String,
         new: String,
     },
+    /// Replaces the whole document, as merging another version does: one undo step, carrying
+    /// both versions, since a merge can touch anything.
+    ReplaceDocument {
+        old: Box<Document>,
+        new: Box<Document>,
+    },
     /// A group of ops applied in order as **one** history step.
     ///
     /// A command that needs more than one primitive mutation — splitting a
@@ -404,6 +410,10 @@ pub fn invert(op: &Op) -> Op {
             old_body: new_body.clone(),
             new_body: old_body.clone(),
         },
+        Op::ReplaceDocument { old, new } => Op::ReplaceDocument {
+            old: new.clone(),
+            new: old.clone(),
+        },
         Op::SetTitle { old, new } => Op::SetTitle {
             old: new.clone(),
             new: old.clone(),
@@ -628,6 +638,9 @@ pub fn apply(doc: &mut Document, op: &Op) {
                 "SetAnnotationBody payload old_body does not match the document"
             );
             annotation.body = new_body.clone();
+        }
+        Op::ReplaceDocument { new, .. } => {
+            *doc = (**new).clone();
         }
         Op::SetTitle { old, new } => {
             assert_eq!(

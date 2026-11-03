@@ -179,6 +179,11 @@ impl Editor {
 
     /// The last edit, joined up with what came before it, if that is what the last edit did.
     /// It then replaces the last entry in the log rather than adding one.
+    /// The ops that led to the document as it stands, including any not yet saved.
+    pub fn applied_ops(&self) -> &[Op] {
+        &self.undo
+    }
+
     pub fn coalesced_edit(&self) -> Option<&Op> {
         self.undo.last().filter(|_| self.coalesced)
     }

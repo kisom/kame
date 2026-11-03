@@ -133,9 +133,11 @@ and they have converged. This is what makes a server unnecessary.
 Each stage is useful alone.
 
 0. **Now:** land `file-guard` and add the two `.stignore` lines.
-1. **Merge conflict copies.** `kame-sync merge A.kame B.kame OUT.kame` works today, finding the base
-   from the two files' shared ops. Then kame could notice a `.sync-conflict-` file beside the document
-   and offer it. No format change at all.
+1. **Merge conflict copies.** Built. kame notices a `.sync-conflict-` file beside the document and
+   File > Merge Conflict Copies merges it, and a file replaced under an open document offers Merge
+   Them. Words on the screen stay in the text and the other version goes in a note. Each merge is one
+   undo step after a snapshot, and a merged copy is renamed `.merged`, not deleted. No format change.
+   `kame-sync merge A.kame B.kame OUT.kame` does the same from the command line.
 2. **Revision logs in the app**, opt-in per document, with `*.kame` added to `.stignore`.
 3. **The notebook.** The same logs per document give a binder its sync with nothing further.
 

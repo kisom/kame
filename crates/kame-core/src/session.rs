@@ -838,6 +838,22 @@ impl Session {
     /// onto the fixed edge clears the selection.
     /// Selects the word at `at`, as a double click does. Where there is no word, the caret
     /// just goes there.
+    /// Replaces the whole document, as one undo step, keeping the caret on something real.
+    pub fn replace_document(&mut self, new: Document) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let op = Op::ReplaceDocument {
+            old: Box::new(self.editor.document().clone()),
+            new: Box::new(new),
+        };
+        let op = self.editor.apply_edit(op);
+        self.selection = None;
+        let saved = self.record(&op);
+        self.valid_caret();
+        saved
+    }
+
     pub fn select_word_at(&mut self, at: Cursor) {
         let at = clamp_cursor(self.editor.document(), at);
         let Some(index) = self.block_index(at.block_id) else {
@@ -5663,6 +5679,73 @@ mod tests {
         assert!(wal_path(&path).exists());
         drop(reader);
         assert!(text_in(&path).contains("read"));
+    }
+
+    fn replaced_copy(session: &Session, text: &str) -> Document {
+        let mut new = session.document().clone();
+        new.blocks[0].text = text.to_string();
+        new.blocks[0].spans.clear();
+        new
+    }
+
+    #[test]
+    fn replacing_the_document_is_one_undo_step() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("before");
+        let new = replaced_copy(&session, "after");
+        assert!(session.replace_document(new));
+        assert_eq!(session.document().blocks[0].text, "after");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "before");
+        session.redo();
+        assert_eq!(session.document().blocks[0].text, "after");
+    }
+
+    #[test]
+    fn replacing_the_document_survives_a_reopen_and_can_still_be_undone() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        {
+            let mut session = Session::open(&path).unwrap();
+            session.insert("before");
+            let new = replaced_copy(&session, "after");
+            assert!(session.replace_document(new));
+        }
+        let mut session = Session::open(&path).unwrap();
+        assert_eq!(session.document().blocks[0].text, "after");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "before");
+    }
+
+    #[test]
+    fn replacing_the_document_keeps_the_caret_on_something_real() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("a long first version");
+        let new = replaced_copy(&session, "short");
+        session.replace_document(new);
+        assert_eq!(session.selection, None);
+        assert_eq!(session.caret.offset, "short".len());
+    }
+
+    #[test]
+    fn typing_after_replacing_starts_a_new_undo_step() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("before");
+        let new = replaced_copy(&session, "after");
+        session.replace_document(new);
+        session.insert(" more");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "after");
+    }
+
+    #[test]
+    fn nothing_replaces_a_document_once_saving_has_failed() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("before");
+        let new = replaced_copy(&session, "after");
+        session.save_failed = true;
+        assert!(!session.replace_document(new));
+        assert_eq!(session.document().blocks[0].text, "before");
     }
 }
 

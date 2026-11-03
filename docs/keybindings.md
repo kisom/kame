@@ -273,3 +273,13 @@ Xvfb :99 -screen 0 1400x1000x24 &
 DISPLAY=:99 VK_ICD_FILENAMES=/run/current-system/sw/share/vulkan/icd.d/lvp_icd.x86_64.json \
   ./target/debug/kame /tmp/doc.kame
 ```
+
+## Other versions of a document
+
+If a sync tool leaves a conflict copy beside the open document, the status row says so and File >
+Merge Conflict Copies merges it. Sentences both versions changed keep the words on screen, with the
+other version in a note. A merge is one undo, after a snapshot, and the copy stays beside the document
+with `.merged` added to its name.
+
+If the file itself is replaced while open, kame stops saving to it and asks whether to merge the two,
+save this version under a new name, or open the one on disk.

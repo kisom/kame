@@ -33,7 +33,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
 - [ ] **Sync for drift between one person's machines.** Designed and prototyped: see
   `docs/superpowers/specs/2026-11-03-sync-design.md` and `crates/kame-sync`. It merges document
   states by block and sentence, keeps a conflict's other version in a note, and carries revisions in
-  logs that each have one writer. Not yet in the app. Waiting on a review of that design.
+  logs that each have one writer. The design is accepted. The app merges conflict copies and replaced
+  files; revision logs are the next stage.
 
 - [ ] **Footnotes in the site's margins.** Sidenotes beside their markers on wide screens, so
   readers don't jump to the foot and back. Held back because kame already separates the two: a

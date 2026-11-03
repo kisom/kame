@@ -296,6 +296,15 @@ impl BackStack {
     }
 }
 
+/// What a merge says in the status row. A note is a sentence both versions changed.
+fn merged_notice(notes: usize) -> String {
+    match notes {
+        0 => "merged".to_string(),
+        1 => "merged, with 1 note to look at".to_string(),
+        notes => format!("merged, with {notes} notes to look at"),
+    }
+}
+
 /// Whether two paths are one document, however they were written: a launch can name a relative
 /// path, and a later open a full one. Two documents with no file are taken as the same one, as
 /// there is only ever one open.
@@ -374,6 +383,8 @@ const DOUBLE_CLICK_SECONDS: f32 = 0.4;
 const DOUBLE_CLICK_REACH: f32 = 6.0;
 /// How often to look for the open file having been replaced on disk.
 const FILE_CHECK_SECONDS: f32 = 1.0;
+/// How often to look for a sync tool's conflict copies beside the open file.
+const COPY_CHECK_SECONDS: f32 = 5.0;
 /// How far up from the bottom of its line a document link's underline sits, as a share
 /// of the line's height.
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
@@ -1142,6 +1153,7 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
 /// Something chosen from the menu bar, applied once the panel closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    MergeConflictCopies,
     Back,
     CompactHistory,
     LinkDocument,
@@ -1828,6 +1840,9 @@ struct KameApp {
     last_file_check: std::time::Instant,
     /// Asking what to do about a file replaced on disk.
     replaced_prompt: bool,
+    /// When to look for conflict copies next, and what was there last time.
+    next_copy_check: std::time::Instant,
+    conflict_copies: Vec<PathBuf>,
     /// The author new documents start with.
     default_author: String,
     /// The "Snapshot Now" label prompt, when it is open.
@@ -1914,6 +1929,8 @@ impl KameApp {
             word_drag_start: None,
             last_file_check: std::time::Instant::now(),
             replaced_prompt: false,
+            next_copy_check: std::time::Instant::now(),
+            conflict_copies: Vec::new(),
             default_author,
             snapshot_prompt: None,
             open_prompt: None,
@@ -2262,6 +2279,8 @@ impl KameApp {
     /// document (open note, find bar, typewriter anchor, caches).
     fn adopt_session(&mut self, session: Session) {
         self.session = session;
+        self.conflict_copies.clear();
+        self.next_copy_check = std::time::Instant::now();
         self.session.apply_default_author(&self.default_author);
         self.layouts = LayoutCache::new();
         self.textures = TextureCache::new();
@@ -2483,6 +2502,7 @@ impl KameApp {
         if !self.session.is_anonymous() {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(FILE_CHECK_SECONDS));
         }
+        self.look_for_conflict_copies();
         let new_chord = ctx.input(|input| input.events.iter().any(is_new_chord));
         if new_chord && !self.dialog_open() && !self.close_flow.prompting {
             self.request_new();
@@ -2889,6 +2909,11 @@ impl KameApp {
                         action = Some(MenuAction::SaveAs);
                     }
                     ui.separator();
+                    if !self.conflict_copies.is_empty()
+                        && menu_item(ui, "Merge Conflict Copies", None, false)
+                    {
+                        action = Some(MenuAction::MergeConflictCopies);
+                    }
                     if menu_item(ui, "Compact History", None, false) {
                         action = Some(MenuAction::CompactHistory);
                     }
@@ -3034,6 +3059,7 @@ impl KameApp {
     /// Carries out a menu choice through the same path its shortcut uses.
     fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
         match action {
+            MenuAction::MergeConflictCopies => self.merge_conflict_copies(),
             MenuAction::Back => self.go_back(),
             MenuAction::CompactHistory => match self.session.compact_history() {
                 Ok((before, after)) if before == after => {
@@ -4558,9 +4584,69 @@ impl KameApp {
         }
     }
 
-    /// What to do about a file replaced on disk: keep these words under a new name, or take
-    /// what is there now. Either way one version stays where it is, so neither button can lose
-    /// both, and the error strip brings this back after Not Now.
+    /// Says so when a sync tool leaves a conflict copy of this document beside it.
+    fn look_for_conflict_copies(&mut self) {
+        if std::time::Instant::now() < self.next_copy_check {
+            return;
+        }
+        self.next_copy_check =
+            std::time::Instant::now() + std::time::Duration::from_secs_f32(COPY_CHECK_SECONDS);
+        let Some(path) = self.session.path().map(Path::to_path_buf) else {
+            return;
+        };
+        let found = kame_sync::files::conflict_copies(&path);
+        if found
+            .iter()
+            .any(|copy| !self.conflict_copies.contains(copy))
+        {
+            self.notice = Some(
+                "another version of this document is here: File > Merge Conflict Copies"
+                    .to_string(),
+            );
+        }
+        self.conflict_copies = found;
+    }
+
+    /// Merges every conflict copy into this document. Each is one undo step, after a snapshot.
+    fn merge_conflict_copies(&mut self) {
+        let (mut merged, mut notes) = (0, 0);
+        for copy in std::mem::take(&mut self.conflict_copies) {
+            match kame_sync::files::merge_copy_into(&mut self.session, &copy) {
+                Ok(result) => {
+                    merged += 1;
+                    notes += result.notes;
+                }
+                Err(err) => {
+                    self.session.last_error =
+                        Some(format!("could not merge {} — {err}", copy.display()));
+                }
+            }
+        }
+        self.set_open_note(None);
+        if merged > 0 {
+            self.notice = Some(merged_notice(notes));
+        }
+    }
+
+    /// Merges what is on the screen with the file that replaced this one, and carries on in that
+    /// file. On failure these words stay on the screen, with the prompt still up.
+    fn merge_with_replacement(&mut self) {
+        match kame_sync::files::merge_replaced(&self.session) {
+            Ok((session, result)) => {
+                let (caret, scroll) = (self.session.caret, self.page_scroll);
+                self.adopt_session(session);
+                self.session.set_caret(caret);
+                self.pending_scroll = Some(scroll);
+                self.replaced_prompt = false;
+                self.notice = Some(merged_notice(result.notes));
+            }
+            Err(err) => self.session.last_error = Some(format!("could not merge — {err}")),
+        }
+    }
+
+    /// What to do about a file replaced on disk: merge the two, keep these words under a new
+    /// name, or take what is there now. Each leaves the version on disk where it is, so none can
+    /// lose both, and the error strip brings this back after Not Now.
     fn show_replaced_prompt(&mut self, ctx: &egui::Context) {
         if !self.replaced_prompt {
             return;
@@ -4574,6 +4660,7 @@ impl KameApp {
             |name| name.to_string_lossy().into_owned(),
         );
         let there = path.is_file();
+        let mut merge = false;
         let mut save = false;
         let mut open = false;
         let mut later = false;
@@ -4593,6 +4680,9 @@ impl KameApp {
                     "Nothing more can be saved to it. What is on this screen is safe for now.",
                 );
                 ui.horizontal(|ui| {
+                    if there {
+                        merge = ui.button("Merge them").clicked();
+                    }
                     save = ui.button("Save mine as…").clicked();
                     if there {
                         open = ui.button("Open the one on disk").clicked();
@@ -4600,7 +4690,9 @@ impl KameApp {
                     later = ui.button("Not now").clicked();
                 });
             });
-        if save {
+        if merge {
+            self.merge_with_replacement();
+        } else if save {
             self.save_with_dialog(ctx, false);
             self.replaced_prompt = self.session.replaced;
         } else if open {
@@ -7103,5 +7195,12 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(!is_second_press(Some((now, here)), late, close));
         assert!(!is_second_press(Some((now, here)), soon, far));
         assert!(!is_second_press(None, soon, close));
+    }
+
+    #[test]
+    fn a_merge_says_how_many_notes_it_left() {
+        assert_eq!(merged_notice(0), "merged");
+        assert_eq!(merged_notice(1), "merged, with 1 note to look at");
+        assert_eq!(merged_notice(3), "merged, with 3 notes to look at");
     }
 }

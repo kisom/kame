@@ -48,6 +48,12 @@ pub enum Op {
         /// deserialize: they simply cannot restore those notes.
         #[serde(default)]
         removed: Vec<Annotation>,
+        /// The block's spans before the delete, which [`apply_inverse`] puts back: a
+        /// delete drops or trims the spans it touches, and re-inserting the text can't
+        /// tell what they were. Rows written before this field existed have none, and
+        /// undo keeps whatever spans are left.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_spans: Option<Vec<Span>>,
     },
     InsertBlock {
         index: usize,
@@ -165,6 +171,7 @@ impl Op {
             end,
             text: block.text[start..end].to_string(),
             removed: annotations_wholly_inside(doc, block_id, start, end),
+            old_spans: Some(block.spans.clone()),
         }
     }
 
@@ -217,6 +224,7 @@ pub fn invert(op: &Op) -> Op {
             // An insertion cannot leave an anchor wholly inside the inserted
             // run: existing anchors at or after the offset move right with it.
             removed: Vec::new(),
+            old_spans: None,
         },
         Op::DeleteText {
             block_id,
@@ -306,6 +314,14 @@ pub fn apply_inverse(doc: &mut Document, op: &Op) {
         return;
     }
     apply(doc, &invert(op));
+    if let Op::DeleteText {
+        block_id,
+        old_spans: Some(spans),
+        ..
+    } = op
+    {
+        block_mut(doc, *block_id).spans = spans.clone();
+    }
     let restore: &[Annotation] = match op {
         Op::DeleteBlock { annotations, .. } => annotations,
         Op::DeleteText { removed, .. } => removed,
@@ -394,6 +410,7 @@ pub fn apply(doc: &mut Document, op: &Op) {
             end,
             text,
             removed,
+            old_spans: _,
         } => {
             {
                 let block = block_mut(doc, *block_id);
@@ -457,17 +474,13 @@ pub fn apply(doc: &mut Document, op: &Op) {
             );
             block.kind = kind.clone();
         }
+        // Unlike the removal payloads, nothing is lost if `old_spans` is out of step:
+        // spans are only formatting, and history written by older versions can drift
+        // from them. That isn't worth stopping the editor for.
         Op::SetSpans {
-            block_id,
-            old_spans,
-            spans,
+            block_id, spans, ..
         } => {
-            let block = block_mut(doc, *block_id);
-            assert_eq!(
-                &block.spans, old_spans,
-                "SetSpans payload old_spans does not match the document"
-            );
-            block.spans = spans.clone();
+            block_mut(doc, *block_id).spans = spans.clone();
         }
         Op::AddAnnotation { annotation } => doc.annotations.push(annotation.clone()),
         Op::RemoveAnnotation { annotation } => {
@@ -558,6 +571,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
             end,
             text,
             removed,
+            old_spans,
         } => {
             let Some(current) = doc.blocks.iter().find(|b| b.id == block_id) else {
                 return Op::DeleteText {
@@ -566,6 +580,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                     end,
                     text,
                     removed,
+                    old_spans,
                 };
             };
             let range_fits = start <= end
@@ -579,6 +594,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                     end,
                     text,
                     removed,
+                    old_spans,
                 };
             }
             let text = if text.is_empty() && start < end {
@@ -597,6 +613,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                 end,
                 text,
                 removed,
+                old_spans,
             }
         }
         // An empty `old_body` is the only way a caller can say "I did not
@@ -883,6 +900,7 @@ mod tests {
                 end: 5,
                 text: "hi".into(),
                 removed: Vec::new(),
+                old_spans: None,
             }
         );
     }
@@ -1536,6 +1554,7 @@ mod tests {
                 end: 5,
                 text: "wrong".into(),
                 removed: Vec::new(),
+                old_spans: None,
             },
         );
     }
@@ -1707,6 +1726,7 @@ mod tests {
             end: 4,
             text: "abc".into(),
             removed: Vec::new(),
+            old_spans: None,
         };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), op);
@@ -1750,6 +1770,7 @@ mod tests {
                 end: 2,
                 text: "é".into(),
                 removed: vec![annotation.clone()],
+                old_spans: None,
             },
             Op::InsertBlock {
                 index: 0,
@@ -1969,5 +1990,27 @@ mod tests {
         assert_eq!(d, before);
         apply_inverse(&mut d, &Op::Batch { ops: Vec::new() });
         assert_eq!(d, before);
+    }
+
+    /// History written before deletes kept their spans can drift from the document, and
+    /// has to undo without stopping the editor.
+    #[test]
+    fn set_spans_with_stale_old_spans_still_applies() {
+        let mut d = doc("abc");
+        let id = d.blocks[0].id;
+        let span = Span {
+            start: 0,
+            end: 1,
+            style: SpanStyle::Bold,
+        };
+        apply(
+            &mut d,
+            &Op::SetSpans {
+                block_id: id,
+                old_spans: vec![span.clone()],
+                spans: Vec::new(),
+            },
+        );
+        assert!(d.blocks[0].spans.is_empty());
     }
 }

@@ -621,7 +621,7 @@ impl Editor {
                 style,
             }))
             .collect();
-        let ops = vec![
+        let deletions = vec![
             Op::delete_text(
                 &self.doc,
                 cursor.block_id,
@@ -634,9 +634,8 @@ impl Editor {
                 opener_start,
                 opener_start + marker_len,
             ),
-            Op::set_spans(&self.doc, cursor.block_id, spans),
         ];
-        let op = self.apply_edit(Op::Batch { ops });
+        let op = self.apply_edit(strip_markup(&self.doc, cursor.block_id, deletions, spans));
         Some((op, closer_start - marker_len))
     }
 
@@ -671,12 +670,11 @@ impl Editor {
                 style: link_style(url),
             }))
             .collect();
-        let ops = vec![
+        let deletions = vec![
             Op::delete_text(&self.doc, cursor.block_id, close_bracket, close_paren + 1),
             Op::delete_text(&self.doc, cursor.block_id, open_bracket, open_bracket + 1),
-            Op::set_spans(&self.doc, cursor.block_id, spans),
         ];
-        let op = self.apply_edit(Op::Batch { ops });
+        let op = self.apply_edit(strip_markup(&self.doc, cursor.block_id, deletions, spans));
         Some((op, close_bracket - 1))
     }
 
@@ -708,12 +706,11 @@ impl Editor {
                 style: SpanStyle::DocumentLink { target },
             }))
             .collect();
-        let ops = vec![
+        let deletions = vec![
             Op::delete_text(&self.doc, cursor.block_id, close, cursor.offset),
             Op::delete_text(&self.doc, cursor.block_id, open, text_start),
-            Op::set_spans(&self.doc, cursor.block_id, spans),
         ];
-        let op = self.apply_edit(Op::Batch { ops });
+        let op = self.apply_edit(strip_markup(&self.doc, cursor.block_id, deletions, spans));
         Some((op, close - removed))
     }
 
@@ -873,6 +870,41 @@ impl Editor {
 /// The kind of block a split creates: a heading's successor is body text, and
 /// everything else keeps its kind (paragraphs stay paragraphs, list items stay
 /// list items).
+/// The edit that removes typed markup and leaves `spans` on what remains.
+///
+/// Deleting text moves the block's spans, so a `SetSpans` recorded before the deletions
+/// wouldn't match the block by the time it applied, and undoing it would then move what
+/// it restored. So the spans are cleared around the deletions, and undo puts back the
+/// originals exactly.
+fn strip_markup(doc: &Document, block_id: BlockId, deletions: Vec<Op>, spans: Vec<Span>) -> Op {
+    let mut ops = vec![Op::set_spans(doc, block_id, Vec::new())];
+    // There are no spans left for these deletions to restore.
+    ops.extend(deletions.into_iter().map(|op| match op {
+        Op::DeleteText {
+            block_id,
+            start,
+            end,
+            text,
+            removed,
+            ..
+        } => Op::DeleteText {
+            block_id,
+            start,
+            end,
+            text,
+            removed,
+            old_spans: None,
+        },
+        other => other,
+    }));
+    ops.push(Op::SetSpans {
+        block_id,
+        old_spans: Vec::new(),
+        spans,
+    });
+    Op::Batch { ops }
+}
+
 /// A `[[target]]` or `[[target|text]]` ending at `caret`: where it opens, where its
 /// text starts, and its target. Without a `|`, the target is also the text.
 fn document_link(text: &str, caret: usize) -> Option<(usize, usize, String)> {
@@ -1152,6 +1184,7 @@ mod tests {
                 end: 4,
                 text: "cd".into(),
                 removed: Vec::new(),
+                old_spans: None,
             }
         );
 
@@ -1352,6 +1385,7 @@ mod tests {
             end: 11,
             text: String::new(),
             removed: Vec::new(),
+            old_spans: None,
         });
         match &applied {
             Op::DeleteText { text, removed, .. } => {

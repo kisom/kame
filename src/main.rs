@@ -10116,4 +10116,228 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(session.heading_cursor("the intro"), None);
         assert_eq!(session.heading_cursor("The"), None);
     }
+
+    /// Every span has to stay on the text it covered: painting slices the text by them.
+    fn assert_spans_fit(session: &Session) {
+        for block in &session.document().blocks {
+            for span in &block.spans {
+                assert!(
+                    span.start <= span.end
+                        && block.text.is_char_boundary(span.start)
+                        && block.text.is_char_boundary(span.end),
+                    "span {span:?} doesn't fit {:?}",
+                    block.text
+                );
+            }
+        }
+    }
+
+    /// Text with `styled` already formatted, and the caret at the very start.
+    fn styled_at_the_end(styled: &str) -> Session {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, styled);
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        session
+    }
+
+    #[test]
+    fn undoing_a_typed_link_before_other_styles_restores_them_exactly() {
+        for typed_link in ["[[a|b]]", "[b](a.kame)", "[b](https://a.b)", "*b*", "**b**"] {
+            let mut session = styled_at_the_end("*one* [[two|three]]");
+            let before = session.document().blocks[0].clone();
+            for c in typed_link.chars() {
+                session.insert(&c.to_string());
+                session.apply_inline_markdown();
+                session.apply_markdown_link();
+                assert_spans_fit(&session);
+            }
+            session.undo();
+            assert_spans_fit(&session);
+            assert_eq!(
+                session.document().blocks[0].text,
+                format!("{typed_link}{}", before.text),
+                "{typed_link}"
+            );
+            let shifted: Vec<(usize, usize)> = before
+                .spans
+                .iter()
+                .map(|span| (span.start + typed_link.len(), span.end + typed_link.len()))
+                .collect();
+            let spans: Vec<(usize, usize)> = session.document().blocks[0]
+                .spans
+                .iter()
+                .map(|span| (span.start, span.end))
+                .collect();
+            assert_eq!(spans, shifted, "{typed_link}");
+        }
+    }
+
+    #[test]
+    fn a_style_that_no_longer_fits_its_text_does_not_stop_the_page_drawing() {
+        let mut fs = cosmic_text::FontSystem::new();
+        let block = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "été".to_string(),
+            spans: vec![
+                crate::model::Span {
+                    start: 1,
+                    end: 3,
+                    style: SpanStyle::Bold,
+                },
+                crate::model::Span {
+                    start: 2,
+                    end: 400,
+                    style: SpanStyle::Italic,
+                },
+                crate::model::Span {
+                    start: 300,
+                    end: 400,
+                    style: SpanStyle::Bold,
+                },
+            ],
+        };
+        let config = layout::LayoutConfig::with_body_size(16.0);
+        let shaped = layout::layout_block_marked(&mut fs, &block, &config, &[]);
+        assert!(!shaped.lines.is_empty());
+    }
+
+    /// Random editing, undoing and redoing never panics, leaves every style on its text,
+    /// and undoing everything gets back to the start.
+    #[test]
+    fn random_edits_and_undos_keep_the_document_sound() {
+        for seed in 1..=15u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut next = move |limit: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % limit.max(1) as u64) as usize
+            };
+            let mut session = Session::anonymous().unwrap();
+            let start = session.document().blocks[0].text.clone();
+            let mut edits = 0;
+            for _ in 0..120 {
+                let blocks = session.document().blocks.len();
+                let block = session.document().blocks[next(blocks)].clone();
+                let mut offset = next(block.text.len() + 1);
+                while !block.text.is_char_boundary(offset) {
+                    offset -= 1;
+                }
+                session.set_caret(Cursor {
+                    block_id: block.id,
+                    offset,
+                });
+                match next(11) {
+                    0 => type_marked(&mut session, "été "),
+                    1 => type_marked(&mut session, "[[a_b|c]]"),
+                    2 => type_marked(&mut session, "[[essay]]"),
+                    3 => type_marked(&mut session, "[d](a.kame#H)"),
+                    4 => type_marked(&mut session, "[e](https://a.b)"),
+                    5 => type_marked(&mut session, "*f* **g**"),
+                    6 => {
+                        session.delete_word_back();
+                    }
+                    7 => {
+                        session.split();
+                    }
+                    8 => {
+                        let block = session.document().blocks
+                            [next(blocks.min(session.document().blocks.len()))]
+                        .clone();
+                        if !block.text.is_empty() {
+                            let end = block.text.char_indices().count().min(3);
+                            let end = block
+                                .text
+                                .char_indices()
+                                .nth(end)
+                                .map_or(block.text.len(), |(at, _)| at);
+                            if end > 0 {
+                                session.set_link(block.id, 0, end, "b.kame#Z".to_string());
+                            }
+                        }
+                    }
+                    9 => {
+                        for _ in 0..=next(6) {
+                            session.undo();
+                        }
+                    }
+                    _ => {
+                        for _ in 0..=next(6) {
+                            session.redo();
+                        }
+                    }
+                }
+                assert_spans_fit(&session);
+                edits += 1;
+            }
+            assert!(edits > 0);
+            while session.undo() {
+                assert_spans_fit(&session);
+            }
+            assert_eq!(session.document().blocks.len(), 1, "seed {seed}");
+            assert_eq!(session.document().blocks[0].text, start, "seed {seed}");
+            assert!(session.document().blocks[0].spans.is_empty(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn undoing_a_delete_inside_a_link_then_the_link_restores_each_step() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two three");
+        let block_id = session.document().blocks[0].id;
+        session.set_link(block_id, 4, 7, "b.kame".into());
+        let linked = session.document().blocks[0].spans.clone();
+        // The whole of the linked word, and then only part of it.
+        for (start, end) in [(4, 7), (5, 6), (2, 5), (6, 9)] {
+            session.selection = Some(Selection {
+                start: Cursor {
+                    block_id,
+                    offset: start,
+                },
+                end: Cursor {
+                    block_id,
+                    offset: end,
+                },
+            });
+            session.delete_word_back();
+            session.undo();
+            assert_eq!(session.document().blocks[0].text, "one two three");
+            assert_eq!(session.document().blocks[0].spans, linked, "{start}..{end}");
+        }
+        session.undo();
+        assert!(session.document().blocks[0].spans.is_empty());
+    }
+
+    #[test]
+    fn undoing_a_delete_of_bold_text_restores_the_bold() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "**word**");
+        let spans = session.document().blocks[0].spans.clone();
+        assert_eq!(spans.len(), 1);
+        session.delete_word_back();
+        assert!(session.document().blocks[0].spans.is_empty());
+        session.undo();
+        assert_eq!(session.document().blocks[0].spans, spans);
+    }
+
+    #[test]
+    fn a_delete_written_by_an_older_version_still_reads() {
+        let id = uuid::Uuid::new_v4();
+        let json = format!(
+            r#"{{"DeleteText":{{"block_id":"{id}","start":0,"end":1,"text":"a","removed":[]}}}}"#
+        );
+        let op: Op = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            op,
+            Op::DeleteText {
+                old_spans: None,
+                ..
+            }
+        ));
+    }
 }

@@ -474,7 +474,7 @@ fn missing_images(document: &Document) -> usize {
         .blocks
         .iter()
         .filter(|block| match &block.kind {
-            BlockKind::Image { path } => !path.contains("://") && !Path::new(path).exists(),
+            BlockKind::Image { path, .. } => !path.contains("://") && !Path::new(path).exists(),
             _ => false,
         })
         .count()
@@ -2788,6 +2788,9 @@ fn hit_test(
 /// Stored `[text](url)` spans take precedence; a bare URL is the fallback.
 fn url_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
     let block = blocks.iter().find(|block| block.id == cursor.block_id)?;
+    if let BlockKind::Image { link, .. } = &block.kind {
+        return link.clone();
+    }
     if let Some(url) = block
         .spans
         .iter()
@@ -2841,7 +2844,7 @@ fn gap_after(block: &BlockKind, next: &BlockKind) -> f32 {
 /// Minimum height of a block, so an empty paragraph still has a line to click
 /// and a caret to show.
 fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f32 {
-    if let BlockKind::Image { path } = &block.kind {
+    if let BlockKind::Image { path, .. } = &block.kind {
         return image_height(path, config.body_width);
     }
     let minimum = match block.kind {
@@ -4084,7 +4087,7 @@ impl KameApp {
             .blocks
             .iter()
             .filter_map(|block| match &block.kind {
-                BlockKind::Image { path } => Some(path.clone()),
+                BlockKind::Image { path, .. } => Some(path.clone()),
                 _ => None,
             })
             .collect();
@@ -4298,7 +4301,7 @@ impl KameApp {
         let caret_index = blocks.iter().position(|block| block.id == caret.block_id);
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         for (index, block) in blocks.iter().enumerate() {
-            if let BlockKind::Image { path } = &block.kind {
+            if let BlockKind::Image { path, .. } = &block.kind {
                 // An image spans the measure at body width; its height keeps
                 // the source's aspect ratio (already baked into `tops`).
                 let height = image_height(path, config.body_width);
@@ -6859,6 +6862,24 @@ mod tests {
             .collect();
         assert_eq!(left, vec![std::ffi::OsString::from("doc.kame")]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn clicking_a_linked_image_finds_its_link() {
+        let block = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Image {
+                path: "a.png".to_string(),
+                link: Some("large.png".to_string()),
+            },
+            text: String::new(),
+            spans: Vec::new(),
+        };
+        let cursor = Cursor {
+            block_id: block.id,
+            offset: 0,
+        };
+        assert_eq!(url_at(&[block], &cursor), Some("large.png".to_string()));
     }
 
     #[test]

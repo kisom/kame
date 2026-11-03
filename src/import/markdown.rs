@@ -439,8 +439,17 @@ impl<'a> Builder<'a> {
                 if self.footnote.is_none() {
                     self.flush();
                     let path = self.resolve_image(&dest_url);
+                    // The innermost link around it, unless that runs script.
+                    let link = self
+                        .open_styles
+                        .iter()
+                        .rev()
+                        .find_map(|(style, _)| match style {
+                            SpanStyle::Link { url } if !is_script_url(url) => Some(url.clone()),
+                            _ => None,
+                        });
                     self.blocks
-                        .push(new_block(BlockKind::Image { path }, String::new()));
+                        .push(new_block(BlockKind::Image { path, link }, String::new()));
                     self.image_depth += 1;
                 }
             }
@@ -774,6 +783,7 @@ mod tests {
             doc.blocks[0].kind,
             BlockKind::Image {
                 path: PathBuf::from("/notes/pics/a.png").display().to_string(),
+                link: None,
             }
         );
         assert_eq!(doc.blocks[0].text, "");
@@ -788,6 +798,7 @@ mod tests {
                 doc.blocks[0].kind,
                 BlockKind::Image {
                     path: path.to_string(),
+                    link: None,
                 }
             );
         }
@@ -804,6 +815,7 @@ mod tests {
                 (
                     BlockKind::Image {
                         path: "a.png".to_string(),
+                        link: None,
                     },
                     String::new(),
                 ),
@@ -1417,5 +1429,71 @@ mod tests {
     fn a_title_that_looks_like_markdown_keeps_its_words() {
         let imported = import("Title: 1. # First - 2019\n\nBody.\n");
         assert_eq!(imported.metadata.title, "1. # First - 2019");
+    }
+
+    #[test]
+    fn a_linked_image_keeps_its_link() {
+        let doc = import("[![](small.jpg)](large.jpg)\n").document;
+        assert_eq!(
+            outline(&doc),
+            vec![(
+                BlockKind::Image {
+                    path: "small.jpg".to_string(),
+                    link: Some("large.jpg".to_string()),
+                },
+                String::new(),
+            )]
+        );
+    }
+
+    #[test]
+    fn an_image_with_a_script_link_keeps_only_the_image() {
+        let doc = import("[![](a.png)](javascript:alert(1))\n").document;
+        assert_eq!(
+            doc.blocks[0].kind,
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: None,
+            }
+        );
+    }
+
+    #[test]
+    fn text_after_an_image_keeps_the_link_around_both() {
+        let doc = import("[![](a.png) words](b.html)\n").document;
+        assert_eq!(
+            doc.blocks[0].kind,
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: Some("b.html".to_string()),
+            }
+        );
+        assert_eq!(doc.blocks[1].text, "words");
+        assert_eq!(
+            doc.blocks[1].spans[0].style,
+            SpanStyle::Link {
+                url: "b.html".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_linked_image_survives_export_and_import() {
+        let source = "[![](small.jpg)](large.jpg)\n";
+        let exported = to_markdown(&import(source).document);
+        assert_eq!(exported, source);
+    }
+
+    /// Files from before the field read as unlinked.
+    #[test]
+    fn an_older_image_block_has_no_link() {
+        let kind: BlockKind = serde_json::from_str(r#"{"Image":{"path":"a.png"}}"#).unwrap();
+        assert_eq!(
+            kind,
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: None,
+            }
+        );
     }
 }

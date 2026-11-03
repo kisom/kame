@@ -436,7 +436,7 @@ impl Editor {
         let index = self.block_index(cursor.block_id)?;
         let block = Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::Image { path },
+            kind: BlockKind::Image { path, link: None },
             text: String::new(),
             spans: Vec::new(),
         };
@@ -1553,7 +1553,8 @@ mod tests {
         assert_eq!(
             e.document().blocks[1].kind,
             BlockKind::Image {
-                path: "/img/a.png".into()
+                path: "/img/a.png".into(),
+                link: None,
             }
         );
         assert_eq!(e.document().blocks[1].text, "", "an image has no prose");

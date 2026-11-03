@@ -35,8 +35,6 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Markdown import
 
-- [ ] **A linked image loses its link.** `[![](a.png)](b.png)` imports as just the
-  image, because image blocks have no link.
 - [ ] **Richer Markdown elements (deferred).** Code, tables and nested lists are
   simplified on import because the model has no equivalent. Code keeps its line
   breaks and indentation but not a monospaced face. Supporting them is significant

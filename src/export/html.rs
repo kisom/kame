@@ -196,12 +196,22 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
     for (index, block) in doc.blocks.iter().enumerate() {
         // An image is a block with no text: emit it as an `<img>` before the
         // empty-text skip drops it.
-        if let BlockKind::Image { path } = &block.kind {
+        if let BlockKind::Image { path, link } = &block.kind {
             close_list(&mut body, &mut open_list);
-            body.push_str(&format!(
-                "<img class=\"image\" src=\"{}\" alt=\"\">\n",
+            let image = format!(
+                "<img class=\"image\" src=\"{}\" alt=\"\">",
                 escape_attribute(path)
-            ));
+            );
+            match link.as_deref().filter(|url| !is_script_url(url)) {
+                Some(url) => body.push_str(&format!(
+                    "<a href=\"{}\">{image}</a>\n",
+                    escape_attribute(url)
+                )),
+                None => {
+                    body.push_str(&image);
+                    body.push('\n');
+                }
+            }
             continue;
         }
         // An empty block has no glyphs to carry a marker or to hang apparatus
@@ -887,6 +897,7 @@ mod tests {
             vec![block(
                 BlockKind::Image {
                     path: "/img/a.png".into(),
+                    link: None,
                 },
                 "",
             )],
@@ -1204,6 +1215,7 @@ mod tests {
         let image = block(
             BlockKind::Image {
                 path: r#"a" onerror="z.png"#.to_string(),
+                link: None,
             },
             "",
         );
@@ -1318,5 +1330,35 @@ mod tests {
             let words = html.find("Words").expect("the block publishes");
             assert!(side < words, "{kind:?}: {html}");
         }
+    }
+
+    fn image(link: Option<&str>) -> Block {
+        block(
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: link.map(str::to_string),
+            },
+            "",
+        )
+    }
+
+    #[test]
+    fn a_linked_image_is_wrapped_in_its_link() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![image(Some("b\".png"))];
+        let html = to_html(&doc);
+        assert!(
+            html.contains(r#"<a href="b&quot;.png"><img class="image" src="a.png" alt=""></a>"#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn an_image_with_a_script_link_publishes_without_it() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![image(Some("javascript:alert(1)"))];
+        let html = to_html(&doc);
+        assert!(!html.contains("javascript:"), "{html}");
+        assert!(html.contains(r#"<img class="image" src="a.png""#), "{html}");
     }
 }

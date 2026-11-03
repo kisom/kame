@@ -49,9 +49,13 @@ pub fn to_markdown(doc: &Document) -> String {
     for block in &doc.blocks {
         // An image is a block with no text: emit it as a Markdown image before
         // the empty-text skip drops it.
-        if let BlockKind::Image { path } = &block.kind {
+        if let BlockKind::Image { path, link } = &block.kind {
             ordered_index = 0;
-            parts.push(format!("![]({})", link_destination(path)));
+            let image = format!("![]({})", link_destination(path));
+            parts.push(match link.as_deref().filter(|url| !is_script_url(url)) {
+                Some(url) => format!("[{image}]({})", link_destination(url)),
+                None => image,
+            });
             continue;
         }
         // An empty block carries no text and no apparatus: exporting it would
@@ -601,6 +605,7 @@ mod tests {
                 block(
                     BlockKind::Image {
                         path: "/img/a.png".into(),
+                        link: None,
                     },
                     "",
                 ),
@@ -1134,6 +1139,7 @@ mod tests {
         doc.blocks = vec![block(
             BlockKind::Image {
                 path: "my pic.png".to_string(),
+                link: None,
             },
             "",
         )];
@@ -1231,5 +1237,18 @@ mod tests {
             to_markdown(&doc),
             "Body[^1]\n\n[^1]: \\<b\\>x\\</b\\>  # not a heading\n"
         );
+    }
+
+    #[test]
+    fn an_image_with_a_script_link_exports_without_it() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: Some("javascript:alert(1)".to_string()),
+            },
+            "",
+        )];
+        assert_eq!(to_markdown(&doc), "![](a.png)\n");
     }
 }

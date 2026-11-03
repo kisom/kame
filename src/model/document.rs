@@ -19,6 +19,9 @@ pub enum BlockKind {
     /// disk; the block's `text` is empty (the image has no prose).
     Image {
         path: String,
+        /// Where the image links to, if anywhere. Absent in files from before it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link: Option<String>,
     },
 }
 

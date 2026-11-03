@@ -1,3 +1,5 @@
+mod date;
+pub use date::Date;
 mod anchor;
 mod document;
 

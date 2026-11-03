@@ -167,21 +167,7 @@ pub fn to_markdown_with(doc: &Document, metadata: &Metadata) -> String {
     .map(|(key, value)| format!("{key}: {}\n", header_value(value)))
     .collect();
 
-    let repeats_title = doc.blocks.first().is_some_and(|first| {
-        matches!(first.kind, BlockKind::Heading { .. })
-            && first.text == metadata.title
-            && !doc.annotations.iter().any(|annotation| {
-                annotation.kind == AnnotationKind::Footnote
-                    && annotation.anchor.block_id() == first.id
-            })
-    });
-    let body = if repeats_title {
-        let mut rest = doc.clone();
-        rest.blocks.remove(0);
-        to_markdown(&rest)
-    } else {
-        to_markdown(doc)
-    };
+    let body = to_markdown(&super::without_repeated_title(doc, &metadata.title));
 
     match (header.is_empty(), body.is_empty()) {
         (true, _) => body,
@@ -1568,6 +1554,43 @@ mod tests {
         assert_eq!(
             to_markdown(&list(&[(false, 0, "a"), (false, 1, "b\nc")])),
             "- a\n\n  - b\\\n    c\n"
+        );
+    }
+
+    #[test]
+    fn a_first_heading_repeating_the_title_can_be_left_out() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(BlockKind::Heading { level: 1 }, "The Title"),
+            paragraph("Words."),
+        ];
+        let without = crate::export::without_repeated_title(&doc, "The Title");
+        assert_eq!(without.blocks.len(), 1);
+        let different = crate::export::without_repeated_title(&doc, "Another");
+        assert_eq!(different.blocks.len(), 2);
+    }
+
+    #[test]
+    fn a_repeated_title_stays_if_a_footnote_is_anchored_in_it() {
+        let mut doc = Document::new("t");
+        let heading = block(BlockKind::Heading { level: 1 }, "The Title");
+        let id = heading.id;
+        doc.blocks = vec![heading];
+        doc.annotations.push(Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Footnote,
+            anchor: Anchor::Range {
+                block_id: id,
+                start: 0,
+                end: 3,
+            },
+            body: "A note.".to_string(),
+        });
+        assert_eq!(
+            crate::export::without_repeated_title(&doc, "The Title")
+                .blocks
+                .len(),
+            1
         );
     }
 }

@@ -4123,6 +4123,9 @@ impl KameApp {
                     published: prompt.published.trim().to_string(),
                     tags: parse_tags(&prompt.tags),
                 });
+                if let Some(warning) = kame_core::session::date_warning(&self.session.metadata) {
+                    self.notice = Some(warning);
+                }
             }
         }
     }

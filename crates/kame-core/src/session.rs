@@ -1885,6 +1885,14 @@ pub fn today() -> String {
     iso_date(std::time::SystemTime::now())
 }
 
+/// What to say about dates in `metadata` that publishing won't be able to read. They are
+/// the author's text and are saved regardless.
+pub fn date_warning(metadata: &Metadata) -> Option<String> {
+    [&metadata.created, &metadata.published]
+        .into_iter()
+        .find(|date| !date.trim().is_empty() && crate::model::Date::parse(date).is_none())
+        .map(|date| format!("\"{date}\" isn't a date publishing can read: use YYYY-MM-DD"))
+}
 /// `when` as a `YYYY-MM-DD` day, in UTC.
 pub fn iso_date(when: std::time::SystemTime) -> String {
     let secs = when
@@ -4683,5 +4691,16 @@ mod tests {
         });
         session.indent_list_item(false);
         assert_eq!(depths(&session), vec![0, 0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn a_date_that_wont_parse_gets_a_warning() {
+        let mut metadata = Metadata::default();
+        assert_eq!(date_warning(&metadata), None, "empty dates are fine");
+        metadata.created = "2026-11-02".to_string();
+        metadata.published = "2026-11-02 10:30".to_string();
+        assert_eq!(date_warning(&metadata), None);
+        metadata.published = "next week".to_string();
+        assert!(date_warning(&metadata).unwrap().contains("next week"));
     }
 }

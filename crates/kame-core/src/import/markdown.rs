@@ -157,17 +157,22 @@ fn new_block(kind: BlockKind, text: String) -> Block {
 }
 
 /// Front matter found at the top of a source.
-struct FrontMatter<'a> {
-    metadata: Metadata,
+pub struct FrontMatter<'a> {
+    pub metadata: Metadata,
     /// Fields with no place in [`Metadata`].
-    dropped: usize,
-    body: &'a str,
+    pub dropped: usize,
+    /// The template a page asks for, which only a site generator reads.
+    pub template: Option<String>,
+    pub body: &'a str,
 }
-
 impl FrontMatter<'_> {
     /// Files one `key: value` field.
     fn record(&mut self, key: &str, value: &str) {
         let value = unquote(value);
+        if key.eq_ignore_ascii_case("template") {
+            self.template = Some(value.to_string());
+            return;
+        }
         let slot = match key.to_ascii_lowercase().as_str() {
             "title" => &mut self.metadata.title,
             "date" => &mut self.metadata.published,
@@ -193,7 +198,7 @@ impl FrontMatter<'_> {
     }
 }
 
-fn split_front_matter(source: &str) -> Option<FrontMatter<'_>> {
+pub fn split_front_matter(source: &str) -> Option<FrontMatter<'_>> {
     yaml_front_matter(source).or_else(|| pelican_front_matter(source))
 }
 
@@ -208,6 +213,7 @@ fn yaml_front_matter(source: &str) -> Option<FrontMatter<'_>> {
     let mut found = FrontMatter {
         metadata: Metadata::default(),
         dropped: 0,
+        template: None,
         body: "",
     };
     for (index, line) in lines.enumerate() {
@@ -237,6 +243,7 @@ fn pelican_front_matter(source: &str) -> Option<FrontMatter<'_>> {
     let mut found = FrontMatter {
         metadata: Metadata::default(),
         dropped: 0,
+        template: None,
         body: "",
     };
     for line in source.split_inclusive('\n') {
@@ -1563,5 +1570,21 @@ mod tests {
             "- a\n  - b\n    - c\n      - d\n        - e\n          - f\n            - g\n";
         let deepest = levels(source).into_iter().map(|(depth, _, _)| depth).max();
         assert_eq!(deepest, Some(crate::model::MAX_LIST_DEPTH));
+    }
+
+    #[test]
+    fn front_matter_is_available_to_other_tools() {
+        let found =
+            split_front_matter("---\ntitle: About\ntemplate: wide\n---\n\nHello\n").unwrap();
+        assert_eq!(found.metadata.title, "About");
+        assert_eq!(found.template.as_deref(), Some("wide"));
+        assert_eq!(found.body.trim(), "Hello");
+    }
+
+    #[test]
+    fn a_template_field_is_not_reported_as_dropped() {
+        let found =
+            split_front_matter("---\ntitle: About\ntemplate: wide\n---\n\nHello\n").unwrap();
+        assert_eq!(found.dropped, 0);
     }
 }

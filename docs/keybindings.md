@@ -184,6 +184,12 @@ tried. `#The Intro` goes to the first heading with exactly that text, and on its
 means a heading in this document. If a link has rotted, the status row says so and nothing
 opens.
 
+## History
+
+Everything you type is kept in the document's history, joined up a word at a time, so that undo
+takes back a word. File > Compact History does the same for what was saved before kame did this,
+which makes the file much smaller. Nothing you wrote is lost, only the stopping points inside words.
+
 ## What exports publish
 
 Code exports as a fence and as `<pre><code>`, keeping its language. Prose exports to

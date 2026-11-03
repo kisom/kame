@@ -990,6 +990,45 @@ impl Session {
         }
     }
 
+    /// Joins up a saved history word by word, as typing now does, returning how many entries
+    /// there were and now are. Every edit that matters is kept: what goes is stopping points
+    /// inside words. What redo can still return to is left as it is.
+    ///
+    /// This rewrites something irreplaceable, so the new log is first replayed against the old
+    /// one, and if they don't agree, or either can't be replayed, nothing changes.
+    pub fn compact_history(&mut self) -> Result<(usize, usize), String> {
+        if self.save_failed {
+            return Err("the last save failed, so retry it first".to_string());
+        }
+        let failed = |err: DbError| format!("could not read the history: {err}");
+        let ops: Vec<Op> = self
+            .db
+            .load_ops()
+            .map_err(failed)?
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect();
+        let cursor = self.db.cursor().map_err(failed)?.min(ops.len());
+        let (undo, redo) = ops.split_at(cursor);
+        let joined = crate::edit::ops::compact(undo);
+        if joined.len() == undo.len() {
+            return Ok((undo.len(), undo.len()));
+        }
+        let head = self.editor.document().clone();
+        let agrees = std::panic::catch_unwind(|| histories_agree(&head, undo, &joined));
+        if !matches!(agrees, Ok(true)) {
+            return Err("the history doesn't replay cleanly, so it was left as it is".to_string());
+        }
+        let mut all = joined;
+        let new_cursor = all.len();
+        all.extend_from_slice(redo);
+        self.db
+            .replace_log(&all, new_cursor)
+            .map_err(|err| format!("could not save the history: {err}"))?;
+        self.editor = Editor::with_cursor(head, all, new_cursor);
+        Ok((undo.len(), new_cursor))
+    }
+
     /// The start of the first heading with exactly `text`.
     pub fn heading_cursor(&self, text: &str) -> Option<Cursor> {
         self.document()
@@ -1897,6 +1936,42 @@ pub fn date_warning(metadata: &Metadata) -> Option<String> {
         .find(|date| !date.trim().is_empty() && crate::model::Date::parse(date).is_none())
         .map(|date| format!("\"{date}\" isn't a date publishing can read: use YYYY-MM-DD"))
 }
+/// Whether undoing `old` and undoing `new` from `head` reach the same place, and redoing `new`
+/// from there returns to `head`. Panics if either doesn't fit, as a log that has drifted won't.
+fn histories_agree(head: &Document, old: &[Op], new: &[Op]) -> bool {
+    use crate::edit::ops::{apply, apply_inverse};
+    let rewind = |ops: &[Op]| {
+        let mut doc = head.clone();
+        for op in ops.iter().rev() {
+            apply_inverse(&mut doc, op);
+        }
+        doc
+    };
+    let same = |a: &Document, b: &Document| {
+        let shape = |doc: &Document| -> Vec<(uuid::Uuid, BlockKind, String)> {
+            doc.blocks
+                .iter()
+                .map(|block| (block.id, block.kind.clone(), block.text.clone()))
+                .collect()
+        };
+        let notes = |doc: &Document| {
+            let mut ids: Vec<AnnotationId> = doc.annotations.iter().map(|note| note.id).collect();
+            ids.sort();
+            ids
+        };
+        shape(a) == shape(b) && notes(a) == notes(b)
+    };
+    let start = rewind(new);
+    if !same(&start, &rewind(old)) {
+        return false;
+    }
+    let mut forward = start;
+    for op in new {
+        apply(&mut forward, op);
+    }
+    same(&forward, head)
+}
+
 /// `when` as a `YYYY-MM-DD` day, in UTC.
 pub fn iso_date(when: std::time::SystemTime) -> String {
     let secs = when
@@ -4786,5 +4861,164 @@ mod tests {
         assert_eq!(session.document().blocks[1].text, "");
         session.undo();
         assert_eq!(session.document().blocks.len(), 1);
+    }
+
+    /// A file saved before typing coalesced: one log entry per keystroke.
+    fn keystroke_file(words: &str) -> PathBuf {
+        let path = temp_db_path();
+        let mut doc = Document::new("Old");
+        let block_id = doc.blocks[0].id;
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&doc).unwrap();
+        for (offset, c) in words.char_indices() {
+            doc.blocks[0].text.push(c);
+            let op = Op::InsertText {
+                block_id,
+                offset,
+                text: c.to_string(),
+            };
+            db.record_edit(&doc, &op).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn compacting_joins_old_keystrokes_and_keeps_the_text() {
+        let path = keystroke_file("one two three");
+        let mut session = open(&path);
+        assert_eq!(session.history().0, 13);
+        assert_eq!(session.compact_history(), Ok((13, 3)));
+        assert_eq!(session.history().0, 3);
+        assert_eq!(session.document().blocks[0].text, "one two three");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "one two ");
+        session.redo();
+        assert_eq!(session.document().blocks[0].text, "one two three");
+    }
+
+    #[test]
+    fn a_compacted_history_is_saved_and_undoes_all_the_way_back() {
+        let path = keystroke_file("one two three");
+        let mut session = open(&path);
+        session.compact_history().unwrap();
+        drop(session);
+        let mut reopened = open(&path);
+        assert_eq!(reopened.history().0, 3);
+        assert_eq!(reopened.document().blocks[0].text, "one two three");
+        while reopened.undo() {}
+        assert_eq!(reopened.document().blocks[0].text, "");
+        while reopened.redo() {}
+        assert_eq!(reopened.document().blocks[0].text, "one two three");
+    }
+
+    #[test]
+    fn compacting_shrinks_the_file() {
+        let path = keystroke_file(&"lorem ipsum dolor sit amet ".repeat(200));
+        let before = std::fs::metadata(&path).unwrap().len();
+        let mut session = open(&path);
+        session.compact_history().unwrap();
+        drop(session);
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert!(after * 2 < before, "{before} -> {after}");
+    }
+
+    #[test]
+    fn compacting_keeps_what_redo_can_still_return_to() {
+        let path = keystroke_file("one two");
+        let mut session = open(&path);
+        session.undo();
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "one t");
+        assert_eq!(session.compact_history(), Ok((5, 2)));
+        assert_eq!(session.history(), (2, 2));
+        while session.redo() {}
+        assert_eq!(session.document().blocks[0].text, "one two");
+    }
+
+    #[test]
+    fn a_history_that_doesnt_agree_is_left_alone() {
+        let path = keystroke_file("one two");
+        let mut db = Db::open(&path).unwrap();
+        let mut wrong = db.load_document().unwrap();
+        wrong.blocks[0].text = "x".to_string();
+        db.save_document(&wrong).unwrap();
+        drop(db);
+        let mut session = open(&path);
+        let before = session.history();
+        assert!(session.compact_history().is_err());
+        assert_eq!(session.history(), before);
+        assert_eq!(session.document().blocks[0].text, "x");
+        drop(session);
+        assert_eq!(Db::open(&path).unwrap().load_ops().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn compacting_a_compact_history_changes_nothing() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one two");
+        assert_eq!(session.compact_history(), Ok((2, 2)));
+    }
+
+    #[test]
+    fn a_failed_save_stops_compacting() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one");
+        session.save_failed = true;
+        assert!(session.compact_history().is_err());
+    }
+
+    /// Whatever editing got here, compacting must leave the same undo and redo journey.
+    #[test]
+    fn random_edits_compact_to_the_same_document() {
+        for seed in 1..=8u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut next = move |limit: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % limit.max(1) as u64) as usize
+            };
+            let mut session = Session::anonymous().unwrap();
+            for _ in 0..80 {
+                let blocks = session.document().blocks.len();
+                let block = session.document().blocks[next(blocks)].clone();
+                let mut offset = next(block.text.len() + 1);
+                while !block.text.is_char_boundary(offset) {
+                    offset -= 1;
+                }
+                session.set_caret(Cursor {
+                    block_id: block.id,
+                    offset,
+                });
+                match next(5) {
+                    0 => type_marked(&mut session, "été word "),
+                    1 => type_marked(&mut session, "*f* [[a|b]] "),
+                    2 => {
+                        session.delete_word_back();
+                    }
+                    3 => {
+                        session.split();
+                    }
+                    _ => {
+                        session.undo();
+                    }
+                }
+            }
+            let head = session.document().clone();
+            session.compact_history().unwrap();
+            assert_eq!(session.document().blocks, head.blocks, "seed {seed}");
+            // Only as far as it went: edits ending on an undo leave redo history beyond here.
+            let depth = session.history().0;
+            while session.undo() {}
+            assert_eq!(session.document().blocks.len(), 1, "seed {seed}");
+            assert_eq!(session.document().blocks[0].text, "", "seed {seed}");
+            for _ in 0..depth {
+                session.redo();
+            }
+            let texts = |doc: &Document| -> Vec<String> {
+                doc.blocks.iter().map(|block| block.text.clone()).collect()
+            };
+            assert_eq!(texts(session.document()), texts(&head), "seed {seed}");
+        }
     }
 }

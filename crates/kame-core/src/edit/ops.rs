@@ -317,6 +317,19 @@ fn next_body_tail<'a>(before: &str, after: &'a str) -> &'a str {
     after.strip_prefix(before).unwrap_or("")
 }
 
+/// `ops` with everything [`coalesce`] would have joined joined, for a log saved before typing
+/// coalesced.
+pub fn compact(ops: &[Op]) -> Vec<Op> {
+    let mut joined: Vec<Op> = Vec::with_capacity(ops.len());
+    for op in ops {
+        match joined.last().and_then(|last| coalesce(last, op)) {
+            Some(merged) => *joined.last_mut().expect("it was just read") = merged,
+            None => joined.push(op.clone()),
+        }
+    }
+    joined
+}
+
 /// The op that undoes `op`.
 ///
 /// One asymmetry remains, and it is inherent to the op set: [`Op::InsertBlock`]
@@ -2323,5 +2336,30 @@ mod tests {
     fn different_kinds_of_edit_stay_apart() {
         let id = Uuid::new_v4();
         assert_eq!(coalesce(&insert(id, 0, "a"), &removal(id, 0, "a")), None);
+    }
+
+    #[test]
+    fn compacting_joins_what_typing_now_joins() {
+        let id = Uuid::new_v4();
+        let ops = vec![
+            insert(id, 0, "a"),
+            insert(id, 1, "b"),
+            insert(id, 2, " "),
+            insert(id, 3, "c"),
+            removal(id, 3, "c"),
+        ];
+        assert_eq!(
+            compact(&ops),
+            vec![
+                insert(id, 0, "ab "),
+                insert(id, 3, "c"),
+                removal(id, 3, "c")
+            ]
+        );
+    }
+
+    #[test]
+    fn compacting_nothing_is_nothing() {
+        assert!(compact(&[]).is_empty());
     }
 }

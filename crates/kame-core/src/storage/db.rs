@@ -497,6 +497,25 @@ impl Db {
         Ok(())
     }
 
+    /// Replaces the whole op log and the cursor in one transaction, then gives the space back
+    /// to the disk, since a smaller file is why this is done.
+    pub fn replace_log(&mut self, ops: &[Op], cursor: usize) -> Result<(), DbError> {
+        let rows = ops
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<String>, _>>()?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM ops", [])?;
+        for row in &rows {
+            tx.execute("INSERT INTO ops (json) VALUES (?1)", params![row])?;
+        }
+        write_cursor(&tx, cursor)?;
+        tx.commit()?;
+        self.conn
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     /// Persists a head document and its cursor atomically, changing no ops.
     ///
     /// The write path for undo/redo: the op log is untouched, the cursor moves,
@@ -1474,5 +1493,27 @@ mod tests {
         assert_eq!(ops, vec![first, joined]);
         assert_eq!(db.cursor().unwrap(), 2);
         assert_eq!(db.load_document().unwrap().title, "Three");
+    }
+
+    #[test]
+    fn replacing_the_log_replaces_it_and_the_cursor_together() {
+        let mut db = Db::open_in_memory().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let op = |text: &str| Op::InsertText {
+            block_id: id,
+            offset: 0,
+            text: text.to_string(),
+        };
+        db.record_edit(&Document::new("A"), &op("a")).unwrap();
+        db.record_edit(&Document::new("B"), &op("b")).unwrap();
+        db.replace_log(&[op("joined"), op("redo")], 1).unwrap();
+        let ops: Vec<Op> = db
+            .load_ops()
+            .unwrap()
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect();
+        assert_eq!(ops, vec![op("joined"), op("redo")]);
+        assert_eq!(db.cursor().unwrap(), 1);
     }
 }

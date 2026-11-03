@@ -1065,6 +1065,7 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
 /// Something chosen from the menu bar, applied once the panel closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    CompactHistory,
     LinkDocument,
     New,
     Open,
@@ -2762,6 +2763,9 @@ impl KameApp {
                         action = Some(MenuAction::SaveAs);
                     }
                     ui.separator();
+                    if menu_item(ui, "Compact History", None, false) {
+                        action = Some(MenuAction::CompactHistory);
+                    }
                     if menu_item(ui, "Link to Document…", None, false) {
                         action = Some(MenuAction::LinkDocument);
                     }
@@ -2901,6 +2905,17 @@ impl KameApp {
     /// Carries out a menu choice through the same path its shortcut uses.
     fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
         match action {
+            MenuAction::CompactHistory => match self.session.compact_history() {
+                Ok((before, after)) if before == after => {
+                    self.notice = Some("the history is already compact".to_string());
+                }
+                Ok((before, after)) => {
+                    self.notice = Some(format!(
+                        "compacted the history from {before} entries to {after}"
+                    ));
+                }
+                Err(err) => self.session.last_error = Some(err),
+            },
             MenuAction::LinkDocument => self.link_document_with_dialog(),
             MenuAction::New => self.request_new(),
             MenuAction::Open => self.open_with_dialog(),

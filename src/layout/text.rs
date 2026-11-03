@@ -242,7 +242,9 @@ pub fn layout_block_marked_with_align(
     // rather than under the marker. A block quote is indented with no marker:
     // its whole column shifts right and wraps in the remaining width.
     let left_indent = match block.kind {
-        BlockKind::ListItem { depth, .. } => config.list_indent * f32::from(depth + 1),
+        BlockKind::ListItem { depth, .. } => {
+            config.list_indent * f32::from(depth.min(crate::model::MAX_LIST_DEPTH) + 1)
+        }
         BlockKind::BlockQuote | BlockKind::Code { .. } | BlockKind::Prose => {
             config.body_size * QUOTE_INDENT_RATIO
         }
@@ -1677,5 +1679,21 @@ dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
             let last = run.glyphs.last().unwrap();
             assert!(layout.left_indent + last.x + last.w <= 240.5);
         }
+    }
+
+    #[test]
+    fn a_stored_depth_past_the_limit_is_set_at_the_limit() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let kind = BlockKind::ListItem {
+            ordered: false,
+            depth: u8::MAX,
+        };
+        let layout = layout_block(&mut fs, &kind_block(kind, "a"), &config);
+        assert_eq!(
+            layout.left_indent,
+            config.list_indent * f32::from(crate::model::MAX_LIST_DEPTH + 1)
+        );
     }
 }

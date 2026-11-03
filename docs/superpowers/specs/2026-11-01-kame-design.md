@@ -116,7 +116,7 @@ all snapshots. "Compacted" sharing is the current-state export, not the native f
 ## 10. Export
 
 - **Markdown**: blocks → `#`/`-`/paragraphs; inline → `*em*`/`**strong**`; footnotes → `[^n]` +
-  `[^n]: body`. Marginalia → raw `<aside>` after the block. Notes never export. Deterministic output (stable ordering and
+  `[^n]: body`. Marginalia and notes are dropped. Deterministic output (stable ordering and
   numbering) so exported files diff meaningfully in git.
 - **HTML**: Marginalia → `<aside>` pinned at the anchor; notes never export; footnotes → `<sup>` links + footnote list; CSS carries the
   fonts, justified body, ligatures, and `font-variant-numeric: oldstyle-nums`.

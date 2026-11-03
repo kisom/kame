@@ -1355,37 +1355,4 @@ mod tests {
             }
         }
     }
-
-    /// A marginal is raw HTML in Markdown. Whatever its body holds, a parser must
-    /// stay inside that HTML block and find no live Markdown in it.
-    #[test]
-    fn a_marginal_cannot_break_out_of_its_html_block() {
-        for body in [
-            "a\n\n[x](javascript:alert(1))",
-            "a\r\r[x](javascript:alert(1))",
-            "a\r\n\r\n[x](javascript:alert(1))",
-            "a\n \t\n[x](javascript:alert(1))",
-            "a\r \r# heading",
-            "</aside>\n\n[x](javascript:alert(1))",
-        ] {
-            let mut doc = Document::new("t");
-            let id = doc.blocks[0].id;
-            doc.blocks[0].text = "Prose.".to_string();
-            doc.annotations = vec![Annotation {
-                id: Uuid::new_v4(),
-                kind: AnnotationKind::Marginal,
-                anchor: Anchor::block(id),
-                body: body.to_string(),
-            }];
-            let exported = to_markdown(&doc);
-            // Other renderers read a lone carriage return as a line ending.
-            assert!(!exported.contains('\r'), "{body:?} kept a CR: {exported:?}");
-            for event in Parser::new_ext(&exported, Options::empty()) {
-                assert!(
-                    !matches!(event, Event::Start(Tag::Link { .. } | Tag::Heading { .. })),
-                    "{body:?} exported as {exported:?} parsed to {event:?}"
-                );
-            }
-        }
-    }
 }

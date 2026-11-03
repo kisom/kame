@@ -18,8 +18,8 @@ itself is a structured, first-class file, never a pile of markup.
   later.
 - **Distraction-free modes** — fullscreen, hide chrome, hide margin, paragraph
   focus, typewriter.
-- **Export** — deterministic Markdown and HTML with footnotes and marginalia. Notes
-  are private and never export.
+- **Export** — deterministic HTML with footnotes and marginalia, and Markdown with
+  footnotes. Notes are private and never export.
 - **Document properties** — title, author, dates and tags, published with each
   export.
 - **Markdown import** — open a `.md` file as a new document; the status line

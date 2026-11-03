@@ -118,10 +118,9 @@ Clicking a footnote's number drops down to the footnote.
 
 ## What exports publish
 
-Footnotes and marginalia publish; notes are private and never do, in either format.
-Markdown has no form for a marginal, so it goes as raw HTML after its block, as
-`<aside class="marginalia">`, the same as the HTML export. A blog's stylesheet decides
-how that looks.
+Footnotes publish in both formats and marginalia in HTML. Markdown has no form for a
+marginal, so they stay out of it. Notes are private and never publish, in either
+format.
 
 ## Document properties
 

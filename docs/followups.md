@@ -15,11 +15,16 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Publishing
 
-- [ ] **How marginals should publish.** Undecided. Markdown has no form for them, so
-  for now they export as raw `<aside class="marginalia">` after their block, which
-  keeps the text but needs a stylesheet to read as a marginal. A static site
-  generator working from `.kame` files, and the occasional Markdown file, may be the
-  better answer, since it could lay them out properly. Blog posts are the goal.
+- [ ] **A static site generator for blog posts.** Working from `.kame` files, and the
+  occasional Markdown file, so marginals can be laid out properly. Markdown export
+  drops them.
+- [ ] **Marginals may float beside the wrong block in the HTML export.** The aside is
+  written after its block and floats right, so its top should line up with the next
+  block. Writing it before its block should fix that. From reading the CSS; check a
+  rendered page.
+- [ ] **Decide on raw HTML in Markdown export.** `<` is not escaped, so a literal
+  `<script>` in prose or a footnote exports as live HTML. Escaping it would also stop
+  deliberate inline HTML rendering.
 
 ## Typography
 

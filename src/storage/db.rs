@@ -10,6 +10,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::edit::Op;
 use crate::model::Document;
@@ -138,6 +140,16 @@ CREATE TABLE IF NOT EXISTS snapshots (
 
 /// Key under which the applied-op count is stored in `meta`.
 const UNDO_CURSOR_KEY: &str = "undo_cursor";
+const POSITION_KEY: &str = "position";
+
+/// Where the author was in a document, kept in its file so that each document
+/// reopens where it was left.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Position {
+    pub block_id: Uuid,
+    pub offset: usize,
+    pub scroll: f32,
+}
 
 /// Metadata for one stored snapshot: enough to list snapshots without loading
 /// their (potentially large) document JSON.
@@ -211,6 +223,30 @@ impl Db {
             .to_str()
             .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
         self.conn.execute("VACUUM INTO ?1", [target])?;
+        Ok(())
+    }
+
+    /// Where the author last was in this document, if that was recorded and is
+    /// still readable. It is a convenience, so a bad value is the same as none.
+    pub fn load_position(&self) -> Option<Position> {
+        let json: String = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![POSITION_KEY],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    /// Records where the author is. This is not an edit: it has no op and leaves the
+    /// undo cursor alone.
+    pub fn save_position(&mut self, position: &Position) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![POSITION_KEY, serde_json::to_string(position)?],
+        )?;
         Ok(())
     }
 
@@ -1105,5 +1141,32 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.load_metadata().unwrap(), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_position_round_trips_and_starts_absent() {
+        let mut db = Db::open_in_memory().unwrap();
+        assert_eq!(db.load_position(), None);
+        let position = Position {
+            block_id: uuid::Uuid::new_v4(),
+            offset: 7,
+            scroll: 120.5,
+        };
+        db.save_position(&position).unwrap();
+        assert_eq!(db.load_position(), Some(position));
+    }
+
+    /// Saving where the author is reading must not count as editing.
+    #[test]
+    fn saving_a_position_leaves_the_undo_cursor_alone() {
+        let mut db = Db::open_in_memory().unwrap();
+        let before = db.cursor().unwrap();
+        db.save_position(&Position {
+            block_id: uuid::Uuid::new_v4(),
+            offset: 0,
+            scroll: 0.0,
+        })
+        .unwrap();
+        assert_eq!(db.cursor().unwrap(), before);
     }
 }

@@ -176,6 +176,45 @@ fn highlight_map(
     }
     map
 }
+/// The document to start with: the one named, or else the last one, if it is still
+/// there. Opening a missing path would create it, which only a request should do.
+fn document_to_open(argument: Option<PathBuf>, last: Option<PathBuf>) -> Option<PathBuf> {
+    argument.or_else(|| last.filter(|path| path.is_file()))
+}
+
+/// Takes the lock that marks this as the first running kame, holding it until the
+/// process exits. Without a lock to take there is nothing to tell apart, so that counts
+/// as being first.
+fn hold_instance_lock(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::create(path) else {
+        return true;
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            std::mem::forget(file);
+            true
+        }
+        Err(std::fs::TryLockError::WouldBlock) => false,
+        Err(std::fs::TryLockError::Error(_)) => true,
+    }
+}
+
+/// Ctrl-N, or Cmd-N on a Mac. With Shift it adds a note.
+fn is_new_chord(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key {
+            key: egui::Key::N,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } if modifiers.command && !modifiers.shift
+    )
+}
+
+/// The least time between writes of the caret and scroll to the document.
+const POSITION_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// A horizontal rule's width, as a share of the measure.
 const RULE_WIDTH: f32 = 0.25;
 /// Gap between a list marker's right edge and its item's text.
@@ -962,6 +1001,7 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
 /// Something chosen from the menu bar, applied once the panel closes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    New,
     Open,
     OpenPath,
     Save,
@@ -1119,6 +1159,8 @@ struct CloseFlow {
     prompting: bool,
     /// The author answered the prompt by closing.
     confirmed: bool,
+    /// The prompt is up for a new document, rather than for closing the window.
+    for_new: bool,
 }
 
 impl CloseFlow {
@@ -1129,12 +1171,33 @@ impl CloseFlow {
             return false;
         }
         self.prompting = true;
+        // Closing the window is the larger request, so it takes over the prompt.
+        self.for_new = false;
         true
+    }
+
+    /// Puts up the prompt on the way to a new document.
+    fn request_new(&mut self) {
+        self.prompting = true;
+        self.for_new = true;
     }
 
     /// The author chose to keep editing.
     fn cancel(&mut self) {
         self.prompting = false;
+        self.for_new = false;
+    }
+
+    /// The author chose to leave the document. Returns true if that is for a new
+    /// document, which leaves the window's own close guarded as before.
+    fn finish(&mut self) -> bool {
+        if self.for_new {
+            self.cancel();
+            true
+        } else {
+            self.confirm();
+            false
+        }
     }
 
     /// The author chose to close: the close request this sends must go through.
@@ -1157,6 +1220,9 @@ struct KameConfig {
     body_size: f32,
     #[serde(default)]
     dark: bool,
+    /// The document open when kame last ran, to reopen on a launch that names none.
+    #[serde(default)]
+    last_document: Option<PathBuf>,
 }
 
 fn default_body_size() -> f32 {
@@ -1168,6 +1234,7 @@ impl Default for KameConfig {
         KameConfig {
             body_size: DEFAULT_BODY_SIZE,
             dark: false,
+            last_document: None,
         }
     }
 }
@@ -1232,42 +1299,52 @@ fn app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
-    // No argument means an anonymous document: the author starts typing at once
-    // and the first save prompts for a file. With an argument, open that file.
-    let (session, notice) = match std::env::args_os().nth(1).map(PathBuf::from) {
-        None => (
-            Session::anonymous().unwrap_or_else(|err| {
-                eprintln!("kame: {err}");
-                std::process::exit(1);
-            }),
-            None,
-        ),
-        Some(path) => {
-            // Open the document before the window exists, so a failure is
-            // reported as "your file is the problem" rather than an opaque
-            // app-creation error that reads as "kame is broken". A failed open
-            // still shows the author an editable (in-memory) document and the
-            // reason in the status panel, since a desktop launch has no
-            // terminal to print to.
-            match Session::open_any(&path) {
-                Ok(opened) => opened,
-                Err(err) => {
-                    let message = format!("could not open {} — {err}", path.display());
-                    let session = Session::blank(&path, message).unwrap_or_else(|err| {
-                        eprintln!("kame: {err}");
-                        std::process::exit(1);
-                    });
-                    (session, None)
-                }
-            }
-        }
-    };
-
     // The type size and theme are kame preferences, read once here and applied
     // to every document the app opens.
     let config = load_config();
     let body_size = config.body_size;
     let dark = config.dark;
+    // Two windows on one file would overwrite each other's edits, so only the first
+    // running kame goes back to the last document.
+    let first = config_dir().is_none_or(|dir| {
+        let _ = std::fs::create_dir_all(&dir);
+        hold_instance_lock(&dir.join("instance.lock"))
+    });
+    let last_document = config.last_document;
+    let last = last_document.clone().filter(|_| first);
+
+    // With an argument, open that file, and with none go back to the last document.
+    // Failing that, an anonymous document: the author starts typing at once and the
+    // first save prompts for a file.
+    let (session, notice) =
+        match document_to_open(std::env::args_os().nth(1).map(PathBuf::from), last) {
+            None => (
+                Session::anonymous().unwrap_or_else(|err| {
+                    eprintln!("kame: {err}");
+                    std::process::exit(1);
+                }),
+                None,
+            ),
+            Some(path) => {
+                // Open the document before the window exists, so a failure is
+                // reported as "your file is the problem" rather than an opaque
+                // app-creation error that reads as "kame is broken". A failed open
+                // still shows the author an editable (in-memory) document and the
+                // reason in the status panel, since a desktop launch has no
+                // terminal to print to.
+                match Session::open_any(&path) {
+                    Ok(opened) => opened,
+                    Err(err) => {
+                        let message = format!("could not open {} — {err}", path.display());
+                        let session = Session::blank(&path, message).unwrap_or_else(|err| {
+                            eprintln!("kame: {err}");
+                            std::process::exit(1);
+                        });
+                        (session, None)
+                    }
+                }
+            }
+        };
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1278,8 +1355,16 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    let app_creator: eframe::AppCreator<'_> =
-        Box::new(move |cc| Ok(Box::new(KameApp::new(cc, session, notice, body_size, dark))));
+    let app_creator: eframe::AppCreator<'_> = Box::new(move |cc| {
+        Ok(Box::new(KameApp::new(
+            cc,
+            session,
+            notice,
+            body_size,
+            dark,
+            last_document,
+        )))
+    });
 
     // On macOS, kame's application events have to be in place before the event loop
     // runs, or a file opened from Finder at launch is missed, so it owns the loop there.
@@ -1350,6 +1435,8 @@ struct Session {
     save_failed: bool,
     /// The file this document was imported from.
     source_path: Option<PathBuf>,
+    /// Where the page was scrolled when this document was last left.
+    restored_scroll: Option<f32>,
     /// What the document says about itself. Saved directly, not an undo step.
     metadata: Metadata,
     /// The file this session is persisted to, or `None` for an anonymous
@@ -1427,6 +1514,23 @@ impl Session {
                 offset: 0,
             })
             .ok_or("document has no blocks")?;
+        // Pick up where this document was left, unless that block has since gone.
+        let position = db.load_position().filter(|position| {
+            editor
+                .document()
+                .blocks
+                .iter()
+                .any(|block| block.id == position.block_id)
+        });
+        let caret = position.map_or(caret, |position| {
+            clamp_cursor(
+                editor.document(),
+                Cursor {
+                    block_id: position.block_id,
+                    offset: position.offset,
+                },
+            )
+        });
         // A reset that failed leaves the unreadable log on disk beside an
         // editor with no history. Do not open a session whose history could
         // diverge from the DB: open it read-only, so the first edit cannot
@@ -1453,6 +1557,7 @@ impl Session {
             last_error,
             save_failed,
             source_path: None,
+            restored_scroll: position.map(|position| position.scroll),
             metadata,
             path: Some(path.to_path_buf()),
         })
@@ -1486,6 +1591,7 @@ impl Session {
             last_error: Some(error),
             save_failed: false,
             source_path: None,
+            restored_scroll: None,
             metadata: Metadata {
                 created: today(),
                 ..Metadata::default()
@@ -1517,6 +1623,7 @@ impl Session {
             last_error: None,
             save_failed: false,
             source_path: None,
+            restored_scroll: None,
             metadata: Metadata {
                 created: today(),
                 ..Metadata::default()
@@ -1592,6 +1699,7 @@ impl Session {
             last_error: None,
             save_failed: false,
             source_path: Some(path.clone()),
+            restored_scroll: None,
             metadata,
             path: None,
         };
@@ -1654,6 +1762,18 @@ impl Session {
             .and_then(Path::parent)
             .filter(|dir| !dir.as_os_str().is_empty())
             .map(Path::to_path_buf)
+    }
+
+    /// Records where the author is, for a document with a file to keep it in. Losing
+    /// this costs nothing but the place, so a failed write is not reported.
+    fn save_position(&mut self, scroll: f32) {
+        if self.path.is_some() {
+            let _ = self.db.save_position(&storage::Position {
+                block_id: self.caret.block_id,
+                offset: self.caret.offset,
+                scroll,
+            });
+        }
     }
 
     /// What the first save suggests calling the file: the source's name for an
@@ -3107,6 +3227,15 @@ struct KameApp {
     /// Scroll offset requested by last frame's typewriter centring. Applied to
     /// the scroll area on the next frame, when its geometry is known.
     pending_scroll: Option<f32>,
+    /// How far the page was scrolled on the last frame.
+    page_scroll: f32,
+    /// The caret and scroll last written to the document.
+    saved_position: Option<(Cursor, f32)>,
+    position_saved_at: std::time::Instant,
+    /// The document to reopen on the next launch that names none.
+    last_document: Option<PathBuf>,
+    /// The session path `last_document` was last taken from.
+    remembered_path: Option<PathBuf>,
     /// The "Snapshot Now" label prompt, when it is open.
     snapshot_prompt: Option<SnapshotPrompt>,
     /// The "Open" path prompt (Ctrl-O), when it is open.
@@ -3150,6 +3279,7 @@ impl KameApp {
         notice: Option<String>,
         body_size: f32,
         dark: bool,
+        last_document: Option<PathBuf>,
     ) -> KameApp {
         cc.egui_ctx.set_visuals(if dark {
             egui::Visuals::dark()
@@ -3175,6 +3305,11 @@ impl KameApp {
             palette: Palette::for_mode(dark),
             typewriter_anchor: None,
             pending_scroll: None,
+            page_scroll: 0.0,
+            saved_position: None,
+            position_saved_at: std::time::Instant::now(),
+            last_document,
+            remembered_path: None,
             snapshot_prompt: None,
             open_prompt: None,
             image_prompt: None,
@@ -3397,7 +3532,107 @@ impl KameApp {
         save_config(&KameConfig {
             body_size: self.body_size,
             dark: self.dark,
+            last_document: self.last_document.clone(),
         });
+    }
+
+    /// Notes the current document as the one to come back to. Every way of getting a
+    /// file behind the session passes through here, whether opening or a first save. A
+    /// document with no file leaves the last one standing.
+    fn remember_document(&mut self) {
+        let Some(path) = self.session.path() else {
+            return;
+        };
+        if self.remembered_path.as_deref() == Some(path) {
+            return;
+        }
+        let path = path.to_path_buf();
+        // A launch can name a relative path, which means nothing to the next one.
+        self.last_document = Some(std::path::absolute(&path).unwrap_or_else(|_| path.clone()));
+        self.remembered_path = Some(path);
+        self.persist();
+    }
+
+    /// Writes the caret and scroll to the document once they have changed, at most
+    /// every couple of seconds so that scrolling does not write on every frame.
+    fn keep_position(&mut self, ctx: &egui::Context) {
+        let current = (self.session.caret, self.page_scroll);
+        if self.session.is_anonymous() || self.saved_position == Some(current) {
+            return;
+        }
+        let since = self.position_saved_at.elapsed();
+        if since < POSITION_SAVE_INTERVAL {
+            // An idle window draws no more frames, so ask for the one that writes it.
+            ctx.request_repaint_after(POSITION_SAVE_INTERVAL - since);
+            return;
+        }
+        self.save_position_now();
+    }
+
+    /// Writes the caret and scroll now, for when the document is about to be left.
+    fn save_position_now(&mut self) {
+        self.session.save_position(self.page_scroll);
+        self.saved_position = Some((self.session.caret, self.page_scroll));
+        self.position_saved_at = std::time::Instant::now();
+    }
+
+    /// Ctrl-N: asks about unsaved work if there is any, then starts an empty document.
+    fn request_new(&mut self) {
+        // The text in a document that could not be written is only in this window.
+        if self.session.save_failed {
+            self.notice = Some("the last save failed, so retry it first".to_string());
+            return;
+        }
+        if self.session.would_lose_work() {
+            self.close_flow.request_new();
+        } else {
+            self.start_new();
+        }
+    }
+
+    /// Replaces the current document with an empty one.
+    fn start_new(&mut self) {
+        self.save_position_now();
+        match Session::anonymous() {
+            Ok(session) => {
+                self.adopt_session(session);
+                self.notice = None;
+            }
+            Err(err) => {
+                self.session.last_error = Some(format!("could not start a document — {err}"));
+            }
+        }
+    }
+
+    /// The close prompt was answered by leaving this document, so do what asked.
+    fn finish_close(&mut self, ctx: &egui::Context) {
+        if self.close_flow.finish() {
+            self.start_new();
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Replaces the session, resetting the view state that pointed into the old
+    /// document (open note, find bar, typewriter anchor, caches).
+    fn adopt_session(&mut self, session: Session) {
+        self.session = session;
+        self.layouts = LayoutCache::new();
+        self.textures = TextureCache::new();
+        self.annotation_textures = AnnotationTextureCache::new();
+        self.open_note = None;
+        self.open_note_pos = None;
+        self.open_note_body = String::new();
+        self.open_note_focus = false;
+        self.find = None;
+        self.typewriter_anchor = None;
+        // The scroll area remembers its offset, which belonged to the old document.
+        self.pending_scroll = Some(0.0);
+        self.page_scroll = 0.0;
+        self.saved_position = None;
+        self.position_saved_at = std::time::Instant::now();
+        self.reveal_caret = false;
+        self.image_textures.clear();
     }
 
     /// Steps the body font size, from which every other size is derived.
@@ -3587,6 +3822,10 @@ impl KameApp {
         });
         if open_chord {
             self.open_with_dialog();
+        }
+        let new_chord = ctx.input(|input| input.events.iter().any(is_new_chord));
+        if new_chord && !self.dialog_open() && !self.close_flow.prompting {
+            self.request_new();
         }
         // Ctrl-K opens the link prompt on the current selection (or the link
         // under the caret), so a link can be added or edited from the keyboard.
@@ -3964,6 +4203,9 @@ impl KameApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 let file_menu = ui.menu_button("File", |ui| {
                     ui.set_min_width(260.0);
+                    if menu_item(ui, "New", Some("Ctrl-N"), false) {
+                        action = Some(MenuAction::New);
+                    }
                     if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
                         action = Some(MenuAction::Open);
                     }
@@ -4113,6 +4355,7 @@ impl KameApp {
     /// Carries out a menu choice through the same path its shortcut uses.
     fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
         match action {
+            MenuAction::New => self.request_new(),
             MenuAction::Open => self.open_with_dialog(),
             MenuAction::OpenPath => self.begin_open(),
             MenuAction::Save => self.save_action(ctx, false),
@@ -5331,21 +5574,11 @@ impl KameApp {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let path = resolve_open_path(&typed, &base);
+        // Before the open, which may be of this same file.
+        self.save_position_now();
         match Session::open_any(&path) {
             Ok((session, note)) => {
-                self.session = session;
-                self.layouts = LayoutCache::new();
-                self.textures = TextureCache::new();
-                self.annotation_textures = AnnotationTextureCache::new();
-                self.open_note = None;
-                self.open_note_pos = None;
-                self.open_note_body = String::new();
-                self.open_note_focus = false;
-                self.find = None;
-                self.typewriter_anchor = None;
-                self.pending_scroll = None;
-                self.reveal_caret = false;
-                self.image_textures.clear();
+                self.adopt_session(session);
                 self.notice = Some(note.unwrap_or_else(|| format!("opened {}", path.display())));
             }
             Err(err) => {
@@ -5398,8 +5631,7 @@ impl KameApp {
             Ok(()) => {
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
-                    self.close_flow.confirm();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.finish_close(ctx);
                 }
             }
             Err(err) => {
@@ -5444,8 +5676,7 @@ impl KameApp {
             return;
         }
         if discard {
-            self.close_flow.confirm();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.finish_close(ctx);
             return;
         }
         if save {
@@ -5738,6 +5969,9 @@ impl eframe::App for KameApp {
             self.open_picked(path);
         }
         let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if close_requested {
+            self.save_position_now();
+        }
         let unsaved =
             !self.session.save_failed && self.session.is_anonymous() && self.session.has_content();
         if close_requested && self.close_flow.on_close_request(unsaved) {
@@ -5794,13 +6028,20 @@ impl eframe::App for KameApp {
         // The typewriter's centring offset was measured last frame, against the
         // same geometry, and is applied here where the scroll area is built.
         let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(offset) = self.session.restored_scroll.take() {
+            self.pending_scroll = Some(offset);
+        }
         if let Some(offset) = self.pending_scroll.take() {
             scroll = scroll.vertical_scroll_offset(offset);
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.palette.background))
             .show(ui, |ui| {
-                scroll.show(ui, |ui| self.draw_surface(ui));
+                self.page_scroll = scroll
+                    .show(ui, |ui| self.draw_surface(ui))
+                    .state
+                    .clamped_offset()
+                    .y;
                 // The save-failure signal belongs to the page, not the chrome:
                 // it is painted in this panel so it outlives hide-chrome.
                 if let Some(error) = &error {
@@ -5816,6 +6057,8 @@ impl eframe::App for KameApp {
         // Dialogs are drawn last, from the root: above the page, and available
         // even while the chrome (and with it the buttons) is hidden.
         self.show_dialogs(ui.ctx());
+        self.remember_document();
+        self.keep_position(ui.ctx());
     }
 }
 
@@ -6147,11 +6390,13 @@ mod tests {
         let config = KameConfig {
             body_size: 21.0,
             dark: true,
+            last_document: Some(PathBuf::from("/notes/essay.kame")),
         };
         let json = serde_json::to_string(&config).unwrap();
         let read = serde_json::from_str::<KameConfig>(&json).unwrap();
         assert_eq!(read.body_size, 21.0);
         assert!(read.dark);
+        assert_eq!(read.last_document, config.last_document);
 
         // A config written by an older build (no body_size, no dark) still
         // parses and defaults to light, body-size 16.
@@ -8912,5 +9157,211 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     fn an_older_document_reads_as_before() {
         let kind: BlockKind = serde_json::from_str(r#"{"Code":{}}"#).unwrap();
         assert_eq!(kind, BlockKind::Code { language: None });
+    }
+
+    fn long_document(session: &mut Session) {
+        typed(session, "first");
+        session.split();
+        typed(session, "second paragraph");
+    }
+
+    #[test]
+    fn a_document_reopens_where_it_was_left() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        long_document(&mut session);
+        let second = session.document().blocks[1].id;
+        session.caret = Cursor {
+            block_id: second,
+            offset: 6,
+        };
+        session.save_position(840.0);
+        drop(session);
+
+        let reopened = open(&path);
+        assert_eq!(reopened.caret.block_id, second);
+        assert_eq!(reopened.caret.offset, 6);
+        assert_eq!(reopened.restored_scroll, Some(840.0));
+    }
+
+    #[test]
+    fn a_new_file_has_no_position_to_restore() {
+        let session = open(&temp_db_path());
+        assert_eq!(session.restored_scroll, None);
+        assert_eq!(session.caret.offset, 0);
+    }
+
+    #[test]
+    fn a_position_in_a_block_that_is_gone_falls_back_to_the_start() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        long_document(&mut session);
+        let first = session.document().blocks[0].id;
+        session.caret = Cursor {
+            block_id: uuid::Uuid::new_v4(),
+            offset: 3,
+        };
+        session.save_position(10.0);
+        drop(session);
+        let reopened = open(&path);
+        assert_eq!(reopened.caret.block_id, first);
+        assert_eq!(reopened.caret.offset, 0);
+    }
+
+    #[test]
+    fn a_position_past_the_end_of_its_block_is_clamped() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        typed(&mut session, "abc");
+        let block_id = session.document().blocks[0].id;
+        session.caret = Cursor {
+            block_id,
+            offset: 3,
+        };
+        let id = session.db.load_position();
+        assert_eq!(id, None);
+        session
+            .db
+            .save_position(&crate::storage::Position {
+                block_id,
+                offset: 999,
+                scroll: 0.0,
+            })
+            .unwrap();
+        drop(session);
+        assert_eq!(open(&path).caret.offset, 3);
+    }
+
+    #[test]
+    fn an_unsaved_document_has_no_position_to_keep() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Words");
+        session.save_position(50.0);
+        assert_eq!(session.db.load_position(), None);
+    }
+
+    #[test]
+    fn saving_a_position_is_not_an_edit() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("Words");
+        let history = session.history();
+        session.save_position(5.0);
+        assert_eq!(session.history(), history);
+    }
+
+    #[test]
+    fn an_argument_outranks_the_last_document() {
+        let dir = scratch_dir("startup");
+        let last = dir.join("last.kame");
+        std::fs::write(&last, "").unwrap();
+        let named = PathBuf::from("/named.kame");
+        assert_eq!(
+            document_to_open(Some(named.clone()), Some(last.clone())),
+            Some(named)
+        );
+        assert_eq!(document_to_open(None, Some(last.clone())), Some(last));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opening a missing path creates it, which is not what reopening should do.
+    #[test]
+    fn a_last_document_that_has_gone_is_not_reopened() {
+        let gone = std::env::temp_dir().join(format!("kame-gone-{}.kame", uuid::Uuid::new_v4()));
+        assert_eq!(document_to_open(None, Some(gone.clone())), None);
+        assert!(!gone.exists());
+        assert_eq!(document_to_open(None, None), None);
+    }
+
+    #[test]
+    fn an_older_config_has_no_last_document() {
+        let config: KameConfig = serde_json::from_str(r#"{"body_size":18.0,"dark":true}"#).unwrap();
+        assert_eq!(config.last_document, None);
+        assert_eq!(config.body_size, 18.0);
+    }
+
+    #[test]
+    fn only_cmd_n_is_the_new_chord() {
+        let key = |key, pressed, repeat, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers,
+        };
+        let command = egui::Modifiers::COMMAND;
+        let shift = egui::Modifiers {
+            shift: true,
+            ..command
+        };
+        assert!(is_new_chord(&key(egui::Key::N, true, false, command)));
+        assert!(
+            !is_new_chord(&key(egui::Key::N, true, false, shift)),
+            "that adds a note"
+        );
+        assert!(!is_new_chord(&key(
+            egui::Key::N,
+            true,
+            false,
+            egui::Modifiers::NONE
+        )));
+        assert!(!is_new_chord(&key(egui::Key::N, false, false, command)));
+        assert!(!is_new_chord(&key(egui::Key::N, true, true, command)));
+        assert!(!is_new_chord(&key(egui::Key::M, true, false, command)));
+    }
+
+    #[test]
+    fn a_new_document_only_takes_over_the_prompt_until_it_is_answered() {
+        let mut flow = CloseFlow::default();
+        flow.request_new();
+        assert!(flow.prompting);
+        assert!(flow.finish(), "the answer goes to the new document");
+        assert!(!flow.prompting);
+        assert!(!flow.confirmed);
+        assert!(
+            flow.on_close_request(true),
+            "starting a document must not disarm the guard on closing"
+        );
+        assert!(!flow.finish(), "this answer closes the window");
+        assert!(flow.confirmed);
+    }
+
+    #[test]
+    fn cancelling_a_new_document_forgets_it() {
+        let mut flow = CloseFlow::default();
+        flow.request_new();
+        flow.cancel();
+        flow.on_close_request(true);
+        assert!(
+            !flow.finish(),
+            "a later close must not start a document instead"
+        );
+    }
+
+    #[test]
+    fn closing_the_window_takes_over_a_prompt_for_a_new_document() {
+        let mut flow = CloseFlow::default();
+        flow.request_new();
+        assert!(flow.on_close_request(true));
+        assert!(!flow.finish());
+    }
+
+    #[test]
+    fn only_the_first_kame_holds_the_instance_lock() {
+        let dir = scratch_dir("instance");
+        let lock = dir.join("instance.lock");
+        assert!(hold_instance_lock(&lock));
+        assert!(!hold_instance_lock(&lock));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_position_in_a_block_that_is_gone_restores_no_scroll_either() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.caret.block_id = uuid::Uuid::new_v4();
+        session.save_position(300.0);
+        drop(session);
+        assert_eq!(open(&path).restored_scroll, None);
     }
 }

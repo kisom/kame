@@ -115,6 +115,7 @@ the text, and it is deliberately **not** an undo step:
 
 | Key | Action | Effect |
 | --- | --- | --- |
+| Ctrl-N | new | an empty document, asking first if the current one has unsaved work |
 | Ctrl-O | open | the system's file browser, replacing the current document |
 | Ctrl-S | save | a document already on disk is saved continuously, so this is a no-op; an anonymous document opens the system save-as browser |
 | Ctrl-Shift-E | export Markdown | asks where, suggesting `<stem>.md` |
@@ -127,6 +128,16 @@ auto-repeats: one press is one command, and a held Enter cannot step through
 the restore confirmation.
 
 Clicking a footnote's number drops down to the footnote.
+
+## Coming back
+
+Launching kame without naming a file reopens the last file you had open, if it is
+still there. A new document that was never saved doesn't count, so the file before it
+stands. A second kame started while one is running begins empty instead, because two
+windows on one file would overwrite each other's edits.
+
+Each document keeps its caret and scroll position in its own file, and returns to them
+whenever it is opened.
 
 ## What exports publish
 

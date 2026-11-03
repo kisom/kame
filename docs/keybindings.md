@@ -206,7 +206,9 @@ lines but not extra spacing.
 A link to a kame document publishes as its text, since it can't lead anywhere outside
 kame.
 
-HTML uses kame's own type and colours, and follows the reader's system between light and
+HTML shows the author under the first heading, and the passages your notes highlight, though
+never the notes' words. Markdown has no highlight, so those passages are plain text there. HTML
+uses kame's own type and colours, and follows the reader's system between light and
 dark. Footnotes publish in both formats and marginalia in HTML. Markdown has no form for a
 marginal, so they stay out of it. Notes are private and never publish, in either
 format.

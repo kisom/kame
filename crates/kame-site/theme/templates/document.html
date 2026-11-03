@@ -5,6 +5,6 @@
 {% block title %}{{ title }} · {{ site.name }}{% endblock %}
 {% block content %}
 <h1>{{ title }}</h1>
-<p class="meta">{% if draft %}Draft · {% endif %}{{ date }}{% for tag in tags %} · <a href="{{ tag.url }}">{{ tag.name }}</a>{% endfor %}</p>
+<p class="meta">{% if draft %}Draft · {% endif %}{% if author %}{{ author }} · {% endif %}{{ date }}{% for tag in tags %} · <a href="{{ tag.url }}">{{ tag.name }}</a>{% endfor %}</p>
 {{ body }}
 {% endblock %}

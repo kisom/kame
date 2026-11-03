@@ -735,4 +735,17 @@ mod tests {
         assert!(text(&plan, "k/a/index.html").contains("content=\"The Site\""));
         assert!(text(&plan, "feed.xml").contains("<dc:creator>The Site</dc:creator>"));
     }
+
+    #[test]
+    fn a_document_page_shows_its_author() {
+        let site = Site::new("planbyline");
+        let a = site.add("a.kame", &metadata("A", "2026-01-01", &[]), "x");
+        site.config(&[("a", &a)], &[]);
+        let page = text(&site.plan(), "k/a/index.html");
+        let meta = &page[page.find("<p class=\"meta\">").unwrap()..];
+        assert!(
+            meta[..meta.find("</p>").unwrap()].contains("K. Isom"),
+            "{page}"
+        );
+    }
 }

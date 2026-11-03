@@ -1609,4 +1609,23 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn markdown_keeps_a_highlighted_passage_as_plain_text() {
+        let mut doc = Document::new("t");
+        let para = paragraph("See this bit now.");
+        let id = para.id;
+        doc.blocks = vec![para];
+        doc.annotations.push(Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Note,
+            anchor: Anchor::Range {
+                block_id: id,
+                start: 4,
+                end: 12,
+            },
+            body: "SECRET NOTE".to_string(),
+        });
+        assert_eq!(to_markdown(&doc), "See this bit now.\n");
+    }
 }

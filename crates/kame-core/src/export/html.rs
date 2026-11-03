@@ -34,6 +34,7 @@ pub const STYLE: &str = r#"
   --rule: #968d7e;
   --footnote: #366084;
   --link: #3b82f6;
+  --mark: rgba(255, 170, 60, 0.27);
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -42,6 +43,7 @@ pub const STYLE: &str = r#"
   --muted: #a8a094;
   --rule: #6e6860;
   --footnote: #78a0be;
+  --mark: rgba(196, 128, 40, 0.31);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -51,6 +53,7 @@ pub const STYLE: &str = r#"
     --muted: #a8a094;
     --rule: #6e6860;
     --footnote: #78a0be;
+  --mark: rgba(196, 128, 40, 0.31);
   }
 }
 html {
@@ -110,6 +113,14 @@ p {
 }
 strong {
   font-weight: bold;
+}
+mark {
+  background: var(--mark);
+  color: inherit;
+}
+p.byline {
+  color: var(--muted);
+  text-align: left;
 }
 em {
   font-style: italic;
@@ -223,6 +234,7 @@ a.footnote-backref {
     --rule: #888;
     --footnote: #000;
     --link: #000;
+    --mark: #eee;
   }
   body { font-size: 11pt; }
   main.document { padding: 0; }
@@ -260,7 +272,7 @@ struct BlockApparatus {
 /// - footnotes leave a `<sup class="footnote-ref"><a href="#fnN">N</a></sup>`
 ///   marker at the end of their anchored range and collect in one
 ///   `<ol class="footnotes">` at the foot, numbered in reading order,
-/// - notes do not publish,
+/// - a note's words do not publish, though the passage it highlights does, as `<mark>`,
 /// - empty blocks are skipped; a footnote or margin note that has lost
 ///   its anchor loses only its marker — the body is still emitted, unanchored,
 /// - text is escaped (`&`, `<`, `>`); the output carries no document or
@@ -290,7 +302,7 @@ impl Publish<'_> {
 /// [`to_html`] for publishing: `metadata` fills the page's head. An empty title
 /// falls back to the document's own, and an empty date to the created date.
 pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String {
-    let body = html_body(doc, &Publish::plain());
+    let body = render_body(doc, &Publish::plain(), Some(metadata.author.trim()));
     let title = if metadata.title.is_empty() {
         escape(&doc.title)
     } else {
@@ -327,9 +339,25 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
 /// A document's own markup, without the page around it, for a tool that supplies its own
 /// page. A whole page is this inside [`to_html_with`]'s head.
 pub fn html_body(doc: &Document, publish: &Publish) -> String {
+    render_body(doc, publish, None)
+}
+
+/// [`html_body`], with `author` as a visible byline if it is given: under a first heading, or
+/// else leading the document.
+fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> String {
     let collected = collect_apparatus(doc);
 
+    let byline = author
+        .filter(|author| !author.is_empty())
+        .map(|author| format!("<p class=\"byline\">{}</p>\n", escape(author)));
+    let under_heading = doc.blocks.first().is_some_and(|first| {
+        matches!(first.kind, BlockKind::Heading { .. }) && !first.text.is_empty()
+    });
+
     let mut body = String::new();
+    if let (Some(byline), false) = (&byline, under_heading) {
+        body.push_str(byline);
+    }
     let mut open_list: Vec<bool> = Vec::new();
     let positions = list_positions(&doc.blocks, true);
     for (index, block) in doc.blocks.iter().enumerate() {
@@ -365,7 +393,12 @@ pub fn html_body(doc: &Document, publish: &Publish) -> String {
             continue;
         }
         let apparatus = &collected.blocks[index];
-        let inner = render_inline(block, &apparatus.footnotes, publish);
+        let inner = render_inline(
+            block,
+            &apparatus.footnotes,
+            &note_highlights(doc, block),
+            publish,
+        );
         // A bare newline renders as a space. A heading is one line by definition, and
         // a verbatim block is preformatted, so its newlines stand.
         let inner = inner.trim_end_matches('\n');
@@ -381,6 +414,9 @@ pub fn html_body(doc: &Document, publish: &Publish) -> String {
                 let level = level.clamp(1, 6);
                 body.push_str(&after);
                 body.push_str(&format!("<h{level}>{inner}</h{level}>\n"));
+                if let (Some(byline), 0) = (&byline, index) {
+                    body.push_str(byline);
+                }
             }
             BlockKind::Paragraph => {
                 close_list(&mut body, &mut open_list);
@@ -664,6 +700,7 @@ enum InlineTag {
     Bold,
     Italic,
     Code,
+    Mark,
     Link { url: String },
 }
 
@@ -673,6 +710,7 @@ impl InlineTag {
             InlineTag::Bold => "<strong>".to_string(),
             InlineTag::Italic => "<em>".to_string(),
             InlineTag::Code => "<code>".to_string(),
+            InlineTag::Mark => "<mark>".to_string(),
             InlineTag::Link { url } => format!("<a href=\"{}\">", escape_attribute(url)),
         }
     }
@@ -682,9 +720,27 @@ impl InlineTag {
             InlineTag::Bold => "</strong>",
             InlineTag::Italic => "</em>",
             InlineTag::Code => "</code>",
+            InlineTag::Mark => "</mark>",
             InlineTag::Link { .. } => "</a>",
         }
     }
+}
+
+/// The passages notes highlight in `block`, as byte ranges that fit its text. A note's words
+/// never publish, but what it marks does.
+fn note_highlights(doc: &Document, block: &Block) -> Vec<(usize, usize)> {
+    doc.annotations
+        .iter()
+        .filter(|annotation| {
+            annotation.kind == AnnotationKind::Note && annotation.anchor.block_id() == block.id
+        })
+        .filter_map(|annotation| {
+            let (start, end) = annotation.anchor.byte_range()?;
+            let start = snap_up(&block.text, start.min(block.text.len()));
+            let end = snap_down(&block.text, end.min(block.text.len()));
+            (start < end).then_some((start, end))
+        })
+        .collect()
 }
 
 /// Render one block's text with spans and footnote markers applied.
@@ -699,7 +755,12 @@ impl InlineTag {
 /// both tags at 10 and reopen bold, or the italic would silently cover 10..15.
 /// Notes open outside spans, so a highlighted phrase can carry emphasis without
 /// producing crossed tags.
-fn render_inline(block: &Block, footnotes: &[(usize, usize)], publish: &Publish) -> String {
+fn render_inline(
+    block: &Block,
+    footnotes: &[(usize, usize)],
+    highlights: &[(usize, usize)],
+    publish: &Publish,
+) -> String {
     let text = block.text.as_str();
 
     let spans: Vec<(usize, usize, SpanStyle)> = block
@@ -735,6 +796,10 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)], publish: &Publish)
         boundaries.push(*start);
         boundaries.push(*end);
     }
+    for (start, end) in highlights {
+        boundaries.push(*start);
+        boundaries.push(*end);
+    }
     for (offset, _) in footnotes {
         boundaries.push(*offset);
     }
@@ -749,6 +814,9 @@ fn render_inline(block: &Block, footnotes: &[(usize, usize)], publish: &Publish)
             continue;
         }
         let mut wanted: Vec<InlineTag> = Vec::new();
+        if highlights.iter().any(|(s, e)| *s <= start && end <= *e) {
+            wanted.push(InlineTag::Mark);
+        }
         for style in [SpanStyle::Bold, SpanStyle::Italic, SpanStyle::Code] {
             let covered = spans
                 .iter()
@@ -1467,12 +1535,11 @@ mod tests {
 
     /// A note is the author's own: neither its words nor any sign of it publishes.
     #[test]
-    fn a_note_leaves_no_trace_in_the_page() {
+    fn a_notes_words_never_reach_the_page() {
         let html = to_html(&with_annotations(AnnotationKind::Note));
         assert!(!html.contains("SECRET BODY"), "{html}");
-        assert!(!html.contains("<mark"), "{html}");
         assert!(!html.contains("<details"), "{html}");
-        assert!(html.contains("<p>Some prose here.</p>"), "{html}");
+        assert!(html.contains("<mark>"), "its highlight does: {html}");
     }
 
     #[test]
@@ -1874,5 +1941,176 @@ mod tests {
         let print = &STYLE[STYLE.find("@media print").unwrap()..];
         assert!(print.contains("--paper: #fff"), "{print}");
         assert!(print.contains("--ink: #000"), "{print}");
+    }
+
+    fn authored(author: &str) -> crate::model::Metadata {
+        crate::model::Metadata {
+            author: author.to_string(),
+            ..crate::model::Metadata::default()
+        }
+    }
+
+    #[test]
+    fn the_author_shows_under_a_first_heading() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(BlockKind::Heading { level: 1 }, "Title"),
+            paragraph("Words."),
+        ];
+        let html = to_html_with(&doc, &authored("K. Isom"));
+        assert!(
+            html.contains("<h1>Title</h1>\n<p class=\"byline\">K. Isom</p>\n<p>Words.</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn the_author_leads_a_document_with_no_first_heading() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Words.")];
+        let html = to_html_with(&doc, &authored("K. Isom"));
+        assert!(
+            html.contains("<p class=\"byline\">K. Isom</p>\n<p>Words.</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn the_author_shows_once_and_is_escaped() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(BlockKind::Heading { level: 1 }, "One"),
+            block(BlockKind::Heading { level: 2 }, "Two"),
+        ];
+        let html = to_html_with(&doc, &authored("A & <B>"));
+        assert_eq!(html.matches("class=\"byline\"").count(), 1);
+        assert!(html.contains(">A &amp; &lt;B&gt;<"), "{html}");
+    }
+
+    #[test]
+    fn no_author_means_no_byline() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("Words.")];
+        assert!(!to_html_with(&doc, &authored("")).contains("<p class=\"byline\""));
+    }
+
+    #[test]
+    fn a_body_has_no_byline_since_a_theme_prints_its_own() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(BlockKind::Heading { level: 1 }, "Title")];
+        assert!(!html_body(&doc, &Publish::plain()).contains("byline"));
+    }
+
+    fn noted(text: &str, start: usize, end: usize, kind: AnnotationKind) -> Document {
+        let mut doc = Document::new("t");
+        let para = paragraph(text);
+        let id = para.id;
+        doc.blocks = vec![para];
+        doc.annotations.push(Annotation {
+            id: Uuid::new_v4(),
+            kind,
+            anchor: Anchor::Range {
+                block_id: id,
+                start,
+                end,
+            },
+            body: "SECRET NOTE".to_string(),
+        });
+        doc
+    }
+
+    #[test]
+    fn a_notes_highlight_publishes_without_its_words() {
+        let html = html_body(
+            &noted("See this bit now.", 4, 12, AnnotationKind::Note),
+            &Publish::plain(),
+        );
+        assert_eq!(html, "<p>See <mark>this bit</mark> now.</p>\n");
+    }
+
+    #[test]
+    fn a_highlight_nests_with_other_styles() {
+        let mut doc = noted("one two three", 4, 13, AnnotationKind::Note);
+        doc.blocks[0].spans = vec![Span {
+            start: 0,
+            end: 7,
+            style: SpanStyle::Bold,
+        }];
+        let html = html_body(&doc, &Publish::plain());
+        assert!(html.contains("<mark>"), "{html}");
+        assert_eq!(
+            html.matches("<mark>").count(),
+            html.matches("</mark>").count(),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<strong>").count(),
+            html.matches("</strong>").count(),
+            "{html}"
+        );
+        let open = html.find("<strong>").unwrap();
+        assert!(open < html.find("two").unwrap(), "{html}");
+    }
+
+    #[test]
+    fn a_highlight_counts_bytes_and_survives_a_bad_range() {
+        let html = html_body(
+            &noted("été ok", 2, 5, AnnotationKind::Note),
+            &Publish::plain(),
+        );
+        assert_eq!(html.matches("<mark>").count(), 1, "{html}");
+        let html = html_body(
+            &noted("short", 3, 400, AnnotationKind::Note),
+            &Publish::plain(),
+        );
+        assert!(html.contains("<mark>rt</mark>"), "{html}");
+        let html = html_body(
+            &noted("short", 300, 400, AnnotationKind::Note),
+            &Publish::plain(),
+        );
+        assert!(!html.contains("<mark>"), "{html}");
+    }
+
+    #[test]
+    fn two_overlapping_highlights_are_one_run() {
+        let mut doc = noted("one two three", 0, 7, AnnotationKind::Note);
+        let id = doc.blocks[0].id;
+        doc.annotations.push(Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Note,
+            anchor: Anchor::Range {
+                block_id: id,
+                start: 4,
+                end: 13,
+            },
+            body: String::new(),
+        });
+        let html = html_body(&doc, &Publish::plain());
+        assert_eq!(html, "<p><mark>one two three</mark></p>\n");
+    }
+
+    #[test]
+    fn only_notes_highlight() {
+        for kind in [AnnotationKind::Marginal, AnnotationKind::Footnote] {
+            let html = html_body(&noted("See this bit.", 4, 12, kind), &Publish::plain());
+            assert!(!html.contains("<mark>"), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_highlight_in_code_stays_exact() {
+        let mut doc = noted("a < b\n  c", 0, 5, AnnotationKind::Note);
+        doc.blocks[0].kind = BlockKind::Code { language: None };
+        let html = html_body(&doc, &Publish::plain());
+        assert!(html.contains("<mark>a &lt; b</mark>\n  c"), "{html}");
+    }
+
+    #[test]
+    fn the_stylesheet_styles_highlights_in_both_modes() {
+        assert!(STYLE.contains("mark {"));
+        assert!(
+            STYLE.matches("--mark:").count() >= 3,
+            "light, dark and system dark"
+        );
     }
 }

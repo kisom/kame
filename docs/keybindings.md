@@ -108,6 +108,8 @@ Both dialogs take Enter as their primary action and Escape as cancel. Nothing
 auto-repeats: one press is one command, and a held Enter cannot step through
 the restore confirmation.
 
+Clicking a footnote's number drops down to the footnote.
+
 ## Document properties
 
 File > Document Properties holds the document's title, author, created and

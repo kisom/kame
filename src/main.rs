@@ -2792,6 +2792,22 @@ fn footnote_origin(page_top: f32, body_left: f32, placement: &FootnotePlacement)
     Pos2::new(body_left, page_top + placement.y)
 }
 
+/// Where to scroll so a footnote at page position `footnote_y` lands a third of
+/// the way down the window, with the entries before it still in view.
+fn footnote_scroll_offset(footnote_y: f32, viewport_height: f32) -> f32 {
+    (footnote_y - viewport_height / 3.0).max(0.0)
+}
+
+/// The page position of the footnote whose superscript is under `pos`. `marks`
+/// pairs each superscript's rectangle with its footnote's position. A digit is
+/// tiny, so the target reaches a little past it.
+fn footnote_mark_at(marks: &[(Rect, f32)], pos: Pos2) -> Option<f32> {
+    marks
+        .iter()
+        .find(|(rect, _)| rect.expand(3.0).contains(pos))
+        .map(|(_, footnote_y)| *footnote_y)
+}
+
 /// Page position of a footnote's superscript number.
 ///
 /// The number is set at the END of the anchored range — the pen after the last
@@ -4388,6 +4404,7 @@ impl KameApp {
             }
         }
 
+        let mut footnote_marks_drawn: Vec<(Rect, f32)> = Vec::new();
         // Superscript number at each footnote's anchor. Drawn after the range's
         // last glyph (see `superscript_origin`) so it sits beside the anchored
         // word rather than overprinting its ink.
@@ -4411,13 +4428,14 @@ impl KameApp {
             ) else {
                 continue;
             };
-            painter.text(
+            let mark = painter.text(
                 origin,
                 Align2::LEFT_TOP,
                 placement.number.to_string(),
                 FontId::proportional(config.body_size * 0.62),
                 self.palette.footnote_mark,
             );
+            footnote_marks_drawn.push((mark, placement.y));
         }
 
         // --- pointer ---------------------------------------------------------
@@ -4438,9 +4456,22 @@ impl KameApp {
                 }
             }
         }
+        if response
+            .hover_pos()
+            .is_some_and(|pos| footnote_mark_at(&footnote_marks_drawn, pos).is_some())
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         if response.clicked() {
             if let Some(pos) = pointer {
-                if let Some(hit) = markers.iter().find(|(_, rect)| rect.contains(pos)).copied() {
+                if let Some(footnote_y) = footnote_mark_at(&footnote_marks_drawn, pos) {
+                    // A click on a footnote's number drops down to the footnote.
+                    self.pending_scroll =
+                        Some(footnote_scroll_offset(footnote_y, ui.clip_rect().height()));
+                    ui.ctx().request_repaint();
+                } else if let Some(hit) =
+                    markers.iter().find(|(_, rect)| rect.contains(pos)).copied()
+                {
                     marker_click = Some(hit);
                 } else if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, body_left, pos)
@@ -6327,6 +6358,43 @@ mod tests {
             html.contains(r#"<meta name="author" content="K">"#),
             "{html}"
         );
+    }
+
+    #[test]
+    fn a_footnote_lands_in_the_upper_part_of_the_window() {
+        assert_eq!(footnote_scroll_offset(3000.0, 900.0), 2700.0);
+    }
+
+    #[test]
+    fn a_footnote_near_the_top_of_the_page_does_not_scroll_above_it() {
+        assert_eq!(footnote_scroll_offset(100.0, 900.0), 0.0);
+    }
+
+    #[test]
+    fn clicking_a_superscript_finds_its_footnote() {
+        let marks = [
+            (
+                Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(16.0, 20.0)),
+                500.0,
+            ),
+            (
+                Rect::from_min_max(Pos2::new(40.0, 10.0), Pos2::new(46.0, 20.0)),
+                600.0,
+            ),
+        ];
+        assert_eq!(footnote_mark_at(&marks, Pos2::new(42.0, 15.0)), Some(600.0));
+        assert_eq!(footnote_mark_at(&marks, Pos2::new(12.0, 15.0)), Some(500.0));
+    }
+
+    /// A digit is tiny, so the target reaches a little past it.
+    #[test]
+    fn a_superscript_is_forgiving_to_click() {
+        let marks = [(
+            Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(16.0, 20.0)),
+            500.0,
+        )];
+        assert_eq!(footnote_mark_at(&marks, Pos2::new(8.0, 8.0)), Some(500.0));
+        assert_eq!(footnote_mark_at(&marks, Pos2::new(30.0, 15.0)), None);
     }
 
     #[test]

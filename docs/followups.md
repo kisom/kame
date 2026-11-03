@@ -29,6 +29,16 @@ Open work, most pressing first. Tick items off or delete them as they land.
   is the case only they fix, so judge them after the rest. How the movement feels can only be judged
   in the app. The study left out the room footnote marks take. Write a spec before building.
 
+  Tuned on the two essays, which are the writing this is for, with the devlog only as a check. Best so
+  far at type 16: look one line ahead, let spaces close to no less than 90%, and charge a high cost for
+  a hyphen (50000 in the study). Spaces over 1.5x fall from 28% to 6.1% and over 2x from 6.8% to none,
+  the widest goes from 2.30x to 1.63x, and no line is tighter than 90%. It used 7 hyphens in about 2650
+  words, moved an earlier line for 0.5% of words typed and none for words removed. The devlog, which
+  played no part in choosing, goes from 29% to 11% and 5.7% to 1.0%. Type 18 gains less: 10% and 0.7%.
+  Without hyphens the same rule reaches 13% and 1.5%. The devlog also shows two-letter starts such as
+  be-tween and al-ways, so try requiring three letters before a hyphen. The stylesheet's test that says
+  kame doesn't hyphenate covers exports, which browsers break for themselves.
+
 ## Markdown import
 
 - [ ] **Tables (deferred).** Simplified on import because the model has no equivalent.

@@ -642,7 +642,11 @@ impl Session {
     /// Persists one applied edit (op + head + cursor in one transaction).
     /// Returns whether the write landed.
     pub fn record(&mut self, op: &Op) -> bool {
-        match self.db.record_edit(self.editor.document(), op) {
+        let saved = match self.editor.coalesced_edit() {
+            Some(joined) => self.db.replace_last_edit(self.editor.document(), joined),
+            None => self.db.record_edit(self.editor.document(), op).map(|_| ()),
+        };
+        match saved {
             Ok(_) => {
                 self.clear_save_error();
                 true
@@ -4401,9 +4405,9 @@ mod tests {
             vec![(4, 8)],
             "what follows isn't code"
         );
-        for _ in " now".chars() {
-            session.undo();
-        }
+        // " " and "now", and then the code.
+        session.undo();
+        session.undo();
         session.undo();
         assert_eq!(session.document().blocks[0].text, "run `make`");
         assert!(code_spans(&session).is_empty());
@@ -4702,5 +4706,85 @@ mod tests {
         assert_eq!(date_warning(&metadata), None);
         metadata.published = "next week".to_string();
         assert!(date_warning(&metadata).unwrap().contains("next week"));
+    }
+
+    #[test]
+    fn undo_takes_back_a_word_at_a_time() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one two three");
+        assert_eq!(session.history().0, 3);
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "one two ");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "one ");
+        session.redo();
+        assert_eq!(session.document().blocks[0].text, "one two ");
+    }
+
+    #[test]
+    fn typing_after_an_undo_starts_a_new_entry() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one");
+        session.undo();
+        typed(&mut session, "x");
+        assert_eq!(session.history(), (1, 0));
+        assert_eq!(session.document().blocks[0].text, "x");
+    }
+
+    #[test]
+    fn what_is_saved_is_a_word_at_a_time_too() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        typed(&mut session, "one two");
+        drop(session);
+        let mut reopened = open(&path);
+        assert_eq!(reopened.history().0, 2);
+        assert_eq!(reopened.document().blocks[0].text, "one two");
+        reopened.undo();
+        assert_eq!(reopened.document().blocks[0].text, "one ");
+    }
+
+    #[test]
+    fn a_keystroke_is_on_disk_at_once() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        typed(&mut session, "wor");
+        let db = crate::storage::Db::open_read_only(&path).unwrap();
+        assert_eq!(db.load_document().unwrap().blocks[0].text, "wor");
+        assert_eq!(db.load_ops().unwrap().len(), 1);
+        drop(session);
+    }
+
+    #[test]
+    fn backspacing_a_word_is_one_undo() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one two");
+        for _ in 0..3 {
+            session.backspace();
+        }
+        assert_eq!(session.document().blocks[0].text, "one ");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "one two");
+    }
+
+    #[test]
+    fn typed_markup_still_undoes_on_its_own() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "*word*");
+        assert_eq!(session.document().blocks[0].text, "word");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "*word*");
+    }
+
+    #[test]
+    fn enter_separates_words_into_their_own_entries() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one");
+        session.split();
+        typed(&mut session, "two");
+        session.undo();
+        assert_eq!(session.document().blocks[1].text, "");
+        session.undo();
+        assert_eq!(session.document().blocks.len(), 1);
     }
 }

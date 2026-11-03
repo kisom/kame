@@ -474,6 +474,29 @@ impl Db {
         Ok(seq)
     }
 
+    /// Persists an edit that joined up with the last one: the last entry in the log becomes
+    /// `op`, and the head follows it in one transaction, like [`Db::record_edit`].
+    pub fn replace_last_edit(&mut self, doc: &Document, op: &Op) -> Result<(), DbError> {
+        let json = serde_json::to_string(doc)?;
+        let op_json = serde_json::to_string(op)?;
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE ops SET json = ?1 WHERE seq = (SELECT MAX(seq) FROM ops)",
+            params![op_json],
+        )?;
+        if changed == 0 {
+            tx.execute("INSERT INTO ops (json) VALUES (?1)", params![op_json])?;
+            let cursor = read_cursor(&tx)?;
+            write_cursor(&tx, cursor + 1)?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO documents (id, json) VALUES (1, ?1)",
+            params![json],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Persists a head document and its cursor atomically, changing no ops.
     ///
     /// The write path for undo/redo: the op log is untouched, the cursor moves,
@@ -1417,5 +1440,39 @@ mod tests {
         drop(db);
         assert!(!scratch.unwrap().exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replacing_the_last_edit_changes_it_and_the_head_together() {
+        let mut db = Db::open_in_memory().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let first = Op::InsertText {
+            block_id: id,
+            offset: 0,
+            text: "a".to_string(),
+        };
+        let second = Op::InsertText {
+            block_id: id,
+            offset: 1,
+            text: "b".to_string(),
+        };
+        let joined = Op::InsertText {
+            block_id: id,
+            offset: 1,
+            text: "bc".to_string(),
+        };
+        db.record_edit(&Document::new("One"), &first).unwrap();
+        db.record_edit(&Document::new("Two"), &second).unwrap();
+        db.replace_last_edit(&Document::new("Three"), &joined)
+            .unwrap();
+        let ops: Vec<Op> = db
+            .load_ops()
+            .unwrap()
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect();
+        assert_eq!(ops, vec![first, joined]);
+        assert_eq!(db.cursor().unwrap(), 2);
+        assert_eq!(db.load_document().unwrap().title, "Three");
     }
 }

@@ -15,7 +15,9 @@ use std::fmt;
 
 use uuid::Uuid;
 
-use crate::edit::ops::{anchor_wholly_inside, apply, apply_inverse, invert, normalize, Op};
+use crate::edit::ops::{
+    anchor_wholly_inside, apply, apply_inverse, coalesce, invert, normalize, Op,
+};
 use crate::model::{
     link_style, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
     Document, Span, SpanStyle, MAX_LIST_DEPTH,
@@ -93,6 +95,8 @@ pub struct Editor {
     doc: Document,
     undo: Vec<Op>,
     redo: Vec<Op>,
+    /// Whether the last edit joined up with the one before it.
+    coalesced: bool,
 }
 
 impl Editor {
@@ -102,6 +106,7 @@ impl Editor {
             doc,
             undo: Vec::new(),
             redo: Vec::new(),
+            coalesced: false,
         }
     }
 
@@ -127,7 +132,12 @@ impl Editor {
         let cursor = cursor.min(ops.len());
         let redo: Vec<Op> = ops[cursor..].iter().rev().cloned().collect();
         let undo: Vec<Op> = ops[..cursor].to_vec();
-        Editor { doc, undo, redo }
+        Editor {
+            doc,
+            undo,
+            redo,
+            coalesced: false,
+        }
     }
 
     /// The current document.
@@ -152,9 +162,25 @@ impl Editor {
     pub fn apply_edit(&mut self, op: Op) -> Op {
         let op = normalize(&self.doc, op);
         apply(&mut self.doc, &op);
-        self.undo.push(op.clone());
+        // Never onto history a redo could still return to, since that history is going.
+        let joined = if self.redo.is_empty() {
+            self.undo.last().and_then(|last| coalesce(last, &op))
+        } else {
+            None
+        };
+        self.coalesced = joined.is_some();
+        match joined {
+            Some(joined) => *self.undo.last_mut().expect("it was just read") = joined,
+            None => self.undo.push(op.clone()),
+        }
         self.redo.clear();
         op
+    }
+
+    /// The last edit, joined up with what came before it, if that is what the last edit did.
+    /// It then replaces the last entry in the log rather than adding one.
+    pub fn coalesced_edit(&self) -> Option<&Op> {
+        self.undo.last().filter(|_| self.coalesced)
     }
 
     /// Undoes the most recent edit, returning the inverse that was applied so

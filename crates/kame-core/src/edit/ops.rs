@@ -204,6 +204,119 @@ impl Op {
     }
 }
 
+/// `previous` and `next` as one edit, if `next` carries on the same word.
+///
+/// Nearly all of a document's history would otherwise be single keystrokes, at about 1 KB per
+/// finished word, and undo would take back one letter at a time. So letters join up into
+/// words, each keeping the spaces after it, and only a single character joins on: a paste
+/// stays its own step, as does anything that isn't plain typing.
+pub fn coalesce(previous: &Op, next: &Op) -> Option<Op> {
+    fn new_word(before: &str, after: &str) -> bool {
+        let spaced = before.chars().next_back().is_some_and(char::is_whitespace);
+        spaced && !after.chars().next().is_some_and(char::is_whitespace)
+    }
+    fn typed(text: &str) -> bool {
+        let mut chars = text.chars();
+        chars.next().is_some() && chars.next().is_none() && text != "\n"
+    }
+    match (previous, next) {
+        (
+            Op::InsertText {
+                block_id,
+                offset,
+                text,
+            },
+            Op::InsertText {
+                block_id: next_block,
+                offset: next_offset,
+                text: next_text,
+            },
+        ) if block_id == next_block
+            && *next_offset == offset + text.len()
+            && typed(next_text)
+            && !text.ends_with('\n')
+            && !new_word(text, next_text) =>
+        {
+            Some(Op::InsertText {
+                block_id: *block_id,
+                offset: *offset,
+                text: format!("{text}{next_text}"),
+            })
+        }
+        (
+            Op::DeleteText {
+                block_id,
+                start,
+                end,
+                text,
+                removed,
+                old_spans,
+            },
+            Op::DeleteText {
+                block_id: next_block,
+                start: next_start,
+                end: next_end,
+                text: next_text,
+                removed: next_removed,
+                ..
+            },
+        ) if block_id == next_block
+            && removed.is_empty()
+            && next_removed.is_empty()
+            && typed(next_text) =>
+        {
+            // Backspacing runs back from where it began, and deleting forward stays put.
+            let (start, end, joined) = if next_end == start {
+                if new_word(next_text, text) {
+                    return None;
+                }
+                (*next_start, *end, format!("{next_text}{text}"))
+            } else if next_start == start {
+                if new_word(text, next_text) {
+                    return None;
+                }
+                (*start, end + next_text.len(), format!("{text}{next_text}"))
+            } else {
+                return None;
+            };
+            Some(Op::DeleteText {
+                block_id: *block_id,
+                start,
+                end,
+                text: joined,
+                removed: Vec::new(),
+                old_spans: old_spans.clone(),
+            })
+        }
+        (
+            Op::SetAnnotationBody {
+                annotation_id,
+                old_body,
+                new_body,
+            },
+            Op::SetAnnotationBody {
+                annotation_id: next_annotation,
+                new_body: next_body,
+                ..
+            },
+        ) if annotation_id == next_annotation
+            && !new_word(new_body, next_body_tail(new_body, next_body)) =>
+        {
+            Some(Op::SetAnnotationBody {
+                annotation_id: *annotation_id,
+                old_body: old_body.clone(),
+                new_body: next_body.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// What `after` adds to `before`, for telling whether a note's edit starts a new word.
+fn next_body_tail<'a>(before: &str, after: &'a str) -> &'a str {
+    after.strip_prefix(before).unwrap_or("")
+}
+
 /// The op that undoes `op`.
 ///
 /// One asymmetry remains, and it is inherent to the op set: [`Op::InsertBlock`]
@@ -2028,5 +2141,187 @@ mod tests {
             },
         );
         assert!(d.blocks[0].spans.is_empty());
+    }
+
+    fn insert(id: Uuid, offset: usize, text: &str) -> Op {
+        Op::InsertText {
+            block_id: id,
+            offset,
+            text: text.to_string(),
+        }
+    }
+
+    fn removal(id: Uuid, start: usize, text: &str) -> Op {
+        Op::DeleteText {
+            block_id: id,
+            start,
+            end: start + text.len(),
+            text: text.to_string(),
+            removed: Vec::new(),
+            old_spans: None,
+        }
+    }
+
+    fn body(id: Uuid, old: &str, new: &str) -> Op {
+        Op::SetAnnotationBody {
+            annotation_id: id,
+            old_body: old.to_string(),
+            new_body: new.to_string(),
+        }
+    }
+
+    #[test]
+    fn typed_letters_join_up() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            coalesce(&insert(id, 3, "ab"), &insert(id, 5, "c")),
+            Some(insert(id, 3, "abc"))
+        );
+    }
+
+    #[test]
+    fn a_space_stays_with_the_word_before_it() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            coalesce(&insert(id, 0, "ab"), &insert(id, 2, " ")),
+            Some(insert(id, 0, "ab "))
+        );
+        assert_eq!(
+            coalesce(&insert(id, 0, "ab "), &insert(id, 3, " ")),
+            Some(insert(id, 0, "ab  "))
+        );
+    }
+
+    #[test]
+    fn a_new_word_starts_a_new_entry() {
+        let id = Uuid::new_v4();
+        assert_eq!(coalesce(&insert(id, 0, "ab "), &insert(id, 3, "c")), None);
+    }
+
+    #[test]
+    fn typing_elsewhere_or_in_another_block_starts_a_new_entry() {
+        let id = Uuid::new_v4();
+        assert_eq!(coalesce(&insert(id, 0, "ab"), &insert(id, 7, "c")), None);
+        assert_eq!(
+            coalesce(&insert(id, 0, "ab"), &insert(Uuid::new_v4(), 2, "c")),
+            None
+        );
+    }
+
+    #[test]
+    fn offsets_count_bytes() {
+        let id = Uuid::new_v4();
+        let joined = coalesce(&insert(id, 0, "é"), &insert(id, 2, "t"));
+        assert_eq!(joined, Some(insert(id, 0, "ét")));
+    }
+
+    #[test]
+    fn only_a_single_typed_character_joins_on() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            coalesce(&insert(id, 0, "ab"), &insert(id, 2, "pasted")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_line_break_starts_a_new_entry() {
+        let id = Uuid::new_v4();
+        assert_eq!(coalesce(&insert(id, 0, "ab"), &insert(id, 2, "\n")), None);
+        assert_eq!(coalesce(&insert(id, 0, "ab\n"), &insert(id, 3, " ")), None);
+    }
+
+    #[test]
+    fn backspaces_join_up_back_to_the_word_before() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            coalesce(&removal(id, 5, "c"), &removal(id, 4, "b")),
+            Some(removal(id, 4, "bc"))
+        );
+        assert_eq!(
+            coalesce(&removal(id, 4, "bc"), &removal(id, 3, " ")),
+            None,
+            "the space belongs to the word before it"
+        );
+    }
+
+    #[test]
+    fn forward_deletes_join_up() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            coalesce(&removal(id, 4, "b"), &removal(id, 4, "c")),
+            Some(removal(id, 4, "bc"))
+        );
+    }
+
+    #[test]
+    fn a_joined_delete_keeps_the_spans_from_before_it_began() {
+        let id = Uuid::new_v4();
+        let span = Span {
+            start: 0,
+            end: 6,
+            style: SpanStyle::Bold,
+        };
+        let with_spans = |start: usize, text: &str, spans: Vec<Span>| Op::DeleteText {
+            block_id: id,
+            start,
+            end: start + text.len(),
+            text: text.to_string(),
+            removed: Vec::new(),
+            old_spans: Some(spans),
+        };
+        let joined = coalesce(
+            &with_spans(5, "c", vec![span.clone()]),
+            &with_spans(4, "b", Vec::new()),
+        );
+        assert_eq!(joined, Some(with_spans(4, "bc", vec![span])));
+    }
+
+    #[test]
+    fn a_delete_that_took_a_note_with_it_stays_alone() {
+        let id = Uuid::new_v4();
+        let note = Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Note,
+            anchor: Anchor::Range {
+                block_id: id,
+                start: 4,
+                end: 5,
+            },
+            body: String::new(),
+        };
+        let took_note = Op::DeleteText {
+            block_id: id,
+            start: 4,
+            end: 5,
+            text: "b".to_string(),
+            removed: vec![note],
+            old_spans: None,
+        };
+        assert_eq!(coalesce(&took_note, &removal(id, 3, "a")), None);
+        assert_eq!(coalesce(&removal(id, 5, "c"), &took_note), None);
+    }
+
+    #[test]
+    fn note_edits_join_up_word_by_word() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            coalesce(&body(id, "", "a"), &body(id, "a", "ab")),
+            Some(body(id, "", "ab"))
+        );
+        assert_eq!(
+            coalesce(&body(id, "", "ab "), &body(id, "ab ", "ab c")),
+            None
+        );
+        assert_eq!(
+            coalesce(&body(id, "", "a"), &body(Uuid::new_v4(), "", "b")),
+            None
+        );
+    }
+
+    #[test]
+    fn different_kinds_of_edit_stay_apart() {
+        let id = Uuid::new_v4();
+        assert_eq!(coalesce(&insert(id, 0, "a"), &removal(id, 0, "a")), None);
     }
 }

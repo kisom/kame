@@ -71,11 +71,9 @@ Open work, most pressing first. Tick items off or delete them as they land.
 
 ## Ideas
 
-- [ ] **Spelling and grammar check.** Typos in essays only get caught by rereading. Marks could use
-  `range_rects` and be drawn on the page without touching the text, with a personal word list in the
-  config and code skipped. Spelling is a word list. Grammar is the harder half and what turned up in
-  the essays: "is has" and "what need" are made of real words, so it takes a language checker or a
-  review pass rather than a dictionary.
+- [ ] **Spelling and grammar check.** Rereading is the only thing catching mistakes in an essay today, and
+  most of them are made of real words, so a spell checker alone isn't enough. Design in
+  `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`, starting with a trial of Harper.
 
 - [ ] **Sync for drift between one person's machines.** Designed and prototyped: see
   `docs/superpowers/specs/2026-11-03-sync-design.md` and `crates/kame-sync`. It merges document

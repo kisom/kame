@@ -2165,6 +2165,7 @@ dependencies = [
  "image",
  "kame-core",
  "swash",
+ "unicode-linebreak",
  "uuid",
 ]
 

@@ -1345,11 +1345,11 @@ mod tests {
         let layout = renderer.layout(&block);
         assert!(layout.lines.len() >= 2, "expected a wrapped paragraph");
 
-        let first_line = layout.buffer.layout_runs().next().unwrap();
+        let first_line = layout.runs.first().unwrap();
         let first_glyph = first_line.glyphs.first().unwrap();
         assert_eq!(caret_x(&layout, 0), first_glyph.x);
 
-        let second = layout.buffer.layout_runs().nth(1).unwrap();
+        let second = layout.runs.get(1).unwrap();
         let second_first = second.glyphs.first().unwrap();
         assert_eq!(
             caret_x(&layout, second_first.start),
@@ -1364,7 +1364,7 @@ mod tests {
         let mut renderer = GlyphRenderer::new(config());
         let block = paragraph("Hello world");
         let layout = renderer.layout(&block);
-        let run = layout.buffer.layout_runs().next().unwrap();
+        let run = layout.runs.first().unwrap();
 
         for glyph in run.glyphs.iter() {
             let x = caret_x(&layout, glyph.start);
@@ -1387,7 +1387,7 @@ mod tests {
         let mut renderer = GlyphRenderer::new(config());
         let block = paragraph("Hello world");
         let layout = renderer.layout(&block);
-        let run = layout.buffer.layout_runs().next().unwrap();
+        let run = layout.runs.first().unwrap();
         let y = run.line_top + 1.0;
         // Click the dead centre of each glyph: the caret must precede it, never
         // the next letter over.
@@ -1422,7 +1422,7 @@ mod tests {
             "Typography is the craft of endowing human language with a durable visual form.",
         );
         let layout = renderer.layout(&block);
-        let second = layout.buffer.layout_runs().nth(1).unwrap();
+        let second = layout.runs.get(1).unwrap();
         let second_first = second.glyphs.first().unwrap();
         let offset = offset_at(
             &layout,

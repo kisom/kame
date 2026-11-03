@@ -6,6 +6,7 @@ use cosmic_text::{
     Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, Weight, Wrap,
 };
 
+use super::breaks::{set_lines, Break, Item, Run};
 use crate::model::bare_link_ranges;
 use crate::model::{Block, BlockId, BlockKind, SpanStyle};
 
@@ -275,14 +276,61 @@ pub fn layout_block_marked_with_align(
         marks,
         Metrics::new(size * CODE_RATIO, line_height),
     );
-    buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
-    buffer.set_wrap(Wrap::Word);
-    buffer.shape_until_scroll(font_system, false);
-
+    // Justified text is shaped once on one long line, and kame chooses the lines itself. The engine
+    // takes each line as it comes, which leaves wide gaps, and it can't close spaces up.
+    let own = if align == Align::Justified && !block.text.is_empty() {
+        buffer.set_size(None, None);
+        buffer.set_rich_text(spans.clone(), &attrs, Shaping::Advanced, Some(Align::Left));
+        buffer.set_wrap(Wrap::None);
+        buffer.shape_until_scroll(font_system, false);
+        set_own_lines(&buffer, block, width)
+    } else {
+        None
+    };
+    let (runs, mut lines) = match own {
+        Some(set) => set,
+        None => {
+            buffer.set_size(Some(width), None);
+            buffer.set_rich_text(spans, &attrs, Shaping::Advanced, Some(align));
+            buffer.set_wrap(Wrap::Word);
+            buffer.shape_until_scroll(font_system, false);
+            (
+                drawn_runs(&buffer, block, width, align),
+                engine_lines(&buffer, block),
+            )
+        }
+    };
     let line_starts = line_starts(&block.text);
+    // The text engine makes no line for a trailing break, but the caret goes there.
+    if block.text.ends_with('\n') {
+        if let Some(last) = lines.last().copied() {
+            lines.push(LayoutLine {
+                y: last.y + last.height,
+                height: last.height,
+                start: block.text.len(),
+                end: block.text.len(),
+            });
+        }
+    }
+    let height = lines.last().map_or(0.0, |line| line.y + line.height);
+
+    BlockLayout {
+        #[cfg(test)]
+        buffer,
+        runs,
+        lines,
+        height,
+        left_indent,
+        line_starts,
+    }
+}
+
+/// The lines as the engine wrapped them.
+fn engine_lines(buffer: &Buffer, block: &Block) -> Vec<LayoutLine> {
+    let starts = line_starts(&block.text);
     let mut lines = Vec::new();
     for run in buffer.layout_runs() {
-        let base = line_starts.get(run.line_i).copied().unwrap_or(0);
+        let base = starts.get(run.line_i).copied().unwrap_or(0);
         let (start, end) = match (run.glyphs.first(), run.glyphs.last()) {
             (Some(first), Some(last)) if first.start < last.end => {
                 (base + first.start, base + last.end)
@@ -299,30 +347,141 @@ pub fn layout_block_marked_with_align(
             end,
         });
     }
-    // The text engine makes no line for a trailing break, but the caret goes there.
-    if block.text.ends_with('\n') {
-        if let Some(last) = lines.last().copied() {
-            lines.push(LayoutLine {
-                y: last.y + last.height,
-                height: last.height,
-                start: block.text.len(),
-                end: block.text.len(),
+    lines
+}
+
+/// Whether a glyph sits in an inline code span, where nothing hangs.
+fn in_code_span(block: &Block, base: usize, glyph: &cosmic_text::LayoutGlyph) -> bool {
+    block.spans.iter().any(|span| {
+        span.style == SpanStyle::Code
+            && span.start <= base + glyph.start
+            && base + glyph.end <= span.end
+    })
+}
+
+/// The glyphs of one unwrapped line, as the line breaker sees them.
+fn measured_run(
+    glyphs: &[cosmic_text::LayoutGlyph],
+    text: &str,
+    exact: impl Fn(&cosmic_text::LayoutGlyph) -> bool,
+) -> Run {
+    let items = glyphs
+        .iter()
+        .map(|glyph| {
+            let shown = &text[glyph.start..glyph.end];
+            let width = f64::from(glyph.w);
+            let hang = |share: f32| {
+                if exact(glyph) {
+                    0.0
+                } else {
+                    f64::from(share) * width
+                }
+            };
+            Item {
+                width,
+                space: shown.trim().is_empty(),
+                left_hang: hang(shown.chars().next().map_or(0.0, left_hang)),
+                right_hang: hang(shown.chars().next_back().map_or(0.0, right_hang)),
+            }
+        })
+        .collect();
+    // The same opportunities the engine wraps at. The last is the end of the text, which is
+    // no glyph's start and needs no candidate.
+    let candidates = unicode_linebreak::linebreaks(text)
+        .filter_map(|(offset, _)| {
+            let at = glyphs.partition_point(|glyph| glyph.start < offset);
+            let starts_here = at > 0 && glyphs.get(at).is_some_and(|glyph| glyph.start == offset);
+            starts_here.then_some(Break { at, hyphen: false })
+        })
+        .collect();
+    Run {
+        items,
+        candidates,
+        hyphen_width: 0.0,
+        hyphen_hang: 0.0,
+    }
+}
+
+/// Chooses the lines of text shaped on one long line and builds what is drawn. Right-to-left text
+/// stays with the engine, so this answers `None` for any.
+fn set_own_lines(
+    buffer: &Buffer,
+    block: &Block,
+    width: f32,
+) -> Option<(Vec<LayoutRun>, Vec<LayoutLine>)> {
+    let shaped: Vec<_> = buffer.layout_runs().collect();
+    if shaped
+        .iter()
+        .any(|run| run.rtl || run.glyphs.iter().any(|glyph| glyph.level.is_rtl()))
+    {
+        return None;
+    }
+    let starts = line_starts(&block.text);
+    let mut runs = Vec::new();
+    let mut lines = Vec::new();
+    let mut top = 0.0;
+    for run in &shaped {
+        let base = starts.get(run.line_i).copied().unwrap_or(0);
+        let height = run.line_height;
+        // Each line sits the same distance down, so that a paragraph's lines are even.
+        let baseline = run.line_y - run.line_top;
+        if run.glyphs.is_empty() {
+            runs.push(LayoutRun {
+                line_i: run.line_i,
+                glyphs: Vec::new(),
+                line_y: top + baseline,
+                line_top: top,
+                line_height: height,
             });
+            lines.push(LayoutLine {
+                y: top,
+                height,
+                start: base,
+                end: base,
+            });
+            top += height;
+            continue;
+        }
+        let exact = |glyph: &cosmic_text::LayoutGlyph| in_code_span(block, base, glyph);
+        let measured = measured_run(run.glyphs, run.text, exact);
+        let breaks = set_lines(&measured, f64::from(width));
+        let mut start = 0;
+        for (index, line_break) in breaks.iter().enumerate() {
+            let last_of_run = index + 1 == breaks.len();
+            // Spaces at the end of a wrapped line aren't drawn, and the caret skips them. At the
+            // end of the text it's where the caret is while typing.
+            let mut end = line_break.at;
+            if !last_of_run {
+                while end > start && measured.items[end - 1].space {
+                    end -= 1;
+                }
+            }
+            let origin = run.glyphs[start].x;
+            let mut glyphs: Vec<_> = run.glyphs[start..end].to_vec();
+            for glyph in &mut glyphs {
+                glyph.x -= origin;
+            }
+            let natural: f32 = glyphs.iter().map(|glyph| glyph.w).sum();
+            let justified = !last_of_run || natural > width;
+            hang_line(&mut glyphs, run.text, width, justified, exact);
+            lines.push(LayoutLine {
+                y: top,
+                height,
+                start: glyphs.first().map_or(base, |glyph| base + glyph.start),
+                end: glyphs.last().map_or(base, |glyph| base + glyph.end),
+            });
+            runs.push(LayoutRun {
+                line_i: run.line_i,
+                glyphs,
+                line_y: top + baseline,
+                line_top: top,
+                line_height: height,
+            });
+            top += height;
+            start = line_break.at;
         }
     }
-    let height = lines.last().map_or(0.0, |line| line.y + line.height);
-
-    let runs = drawn_runs(&buffer, block, width, align);
-
-    BlockLayout {
-        #[cfg(test)]
-        buffer,
-        runs,
-        lines,
-        height,
-        left_indent,
-        line_starts,
-    }
+    Some((runs, lines))
 }
 
 /// The shaped lines as they are drawn, with their punctuation hung if `hang`.
@@ -343,13 +502,7 @@ fn drawn_runs(buffer: &Buffer, block: &Block, width: f32, align: Align) -> Vec<L
                     .is_none_or(|next| next.line_i != run.line_i);
                 let justified = align == Align::Justified && !last_of_paragraph;
                 let base = starts.get(run.line_i).copied().unwrap_or(0);
-                let exact = |glyph: &cosmic_text::LayoutGlyph| {
-                    block.spans.iter().any(|span| {
-                        span.style == SpanStyle::Code
-                            && span.start <= base + glyph.start
-                            && base + glyph.end <= span.end
-                    })
-                };
+                let exact = |glyph: &cosmic_text::LayoutGlyph| in_code_span(block, base, glyph);
                 hang_line(&mut glyphs, run.text, width, justified, exact);
             }
             LayoutRun {
@@ -361,6 +514,32 @@ fn drawn_runs(buffer: &Buffer, block: &Block, width: f32, align: Align) -> Vec<L
             }
         })
         .collect()
+}
+
+/// Where first fit breaks a one-line paragraph, by block offset, on the glyphs kame measures.
+#[cfg(test)]
+fn measured_first_fit(
+    font_system: &mut FontSystem,
+    block: &Block,
+    config: &LayoutConfig,
+) -> Vec<usize> {
+    let unbounded = LayoutConfig {
+        body_width: 1e7,
+        ..config.clone()
+    };
+    let layout = layout_block_with_align(font_system, block, &unbounded, Align::Left);
+    let glyphs = &layout.runs[0].glyphs;
+    let run = measured_run(glyphs, &block.text, |_| false);
+    let mut starts: Vec<usize> = super::breaks::first_fit(&run, f64::from(config.body_width))
+        .iter()
+        .map(|line_break| {
+            glyphs
+                .get(line_break.at)
+                .map_or(usize::MAX, |glyph| glyph.start)
+        })
+        .collect();
+    starts.pop();
+    starts
 }
 
 /// How much of an opening mark's width hangs left of the measure.
@@ -433,7 +612,7 @@ fn hang_line(
     } else {
         0.0
     };
-    if left == 0.0 && right == 0.0 {
+    if left == 0.0 && right == 0.0 && !justified {
         return;
     }
     let spaces = glyphs[..last]
@@ -722,11 +901,253 @@ dance, on a page, of pen, eye and hand.";
     /// Width of `line`, read off the matching layout run's pen position.
     fn line_width(layout: &BlockLayout, line: &LayoutLine) -> f32 {
         layout
-            .buffer
-            .layout_runs()
+            .runs
+            .iter()
             .find(|run| !run.glyphs.is_empty() && (run.line_top - line.y).abs() < 0.01)
-            .map(|run| run.line_w)
+            .and_then(|run| run.glyphs.last())
+            .map(|last| last.x + last.w)
             .expect("layout line has a matching run")
+    }
+
+    /// A long stretch of plain prose, in its own words so nothing depends on a real essay.
+    const LONG: &str = "Typography is the craft of endowing human language with a durable visual \
+form, and thus with an independent existence. Its heartwood is calligraphy, the dance on a tiny \
+stage of the living, speaking hand, and its roots reach into living soil, though its branches may \
+be hung each year with new machines. So long as the root lives, typography remains a source of \
+true delight, true knowledge, true surprise. Characteristically, unexceptionable compositions \
+accommodate extraordinarily disproportionate considerations, notwithstanding misunderstandings \
+about internationalization, while straightforward arrangements occasionally demonstrate \
+remarkably counterintuitive properties under circumstances nobody anticipated beforehand.";
+
+    fn wide(layout: &BlockLayout, block: &Block, natural: f32) -> Vec<f32> {
+        // Every space's width as a share of normal, on every line but the last.
+        let mut shares = Vec::new();
+        for run in layout.runs.iter().take(layout.runs.len().saturating_sub(1)) {
+            let base = layout.line_start(run.line_i);
+            let last = run
+                .glyphs
+                .iter()
+                .rposition(|g| !block.text[base + g.start..base + g.end].trim().is_empty())
+                .unwrap();
+            for glyph in &run.glyphs[..last] {
+                if block.text[base + glyph.start..base + glyph.end]
+                    .trim()
+                    .is_empty()
+                {
+                    shares.push(glyph.w / natural);
+                }
+            }
+        }
+        shares
+    }
+
+    /// A normal space's width, from ragged text that the engine leaves alone.
+    fn natural_space(fs: &mut FontSystem, config: &LayoutConfig) -> f32 {
+        let block = paragraph("a b");
+        let layout = layout_block_with_align(fs, &block, config, Align::Left);
+        layout.runs[0].glyphs[1].w
+    }
+
+    #[test]
+    fn choosing_lines_leaves_fewer_loose_spaces_than_first_fit() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(LONG);
+        let (mut own_loose, mut first_fit_loose) = (0, 0);
+        for width in [300.0, 380.0, 460.0, 540.0, 640.0] {
+            let config = LayoutConfig {
+                body_width: width,
+                ..LayoutConfig::with_body_size(16.0)
+            };
+            let natural = natural_space(&mut fs, &config);
+            let own = layout_block(&mut fs, &block, &config);
+            own_loose += wide(&own, &block, natural)
+                .iter()
+                .filter(|s| **s > 1.5)
+                .count();
+            // What first fit makes of the same width.
+            let ragged = layout_block_with_align(&mut fs, &block, &config, Align::Left);
+            for run in ragged.runs.iter().take(ragged.runs.len() - 1) {
+                let end = run.glyphs.last().map_or(0.0, |g| g.x + g.w);
+                let spaces = run
+                    .glyphs
+                    .iter()
+                    .filter(|g| block.text[g.start..g.end].trim().is_empty())
+                    .count() as f32;
+                if spaces > 0.0 && 1.0 + (width - end) / (spaces * natural) > 1.5 {
+                    first_fit_loose += spaces as usize;
+                }
+            }
+        }
+        assert!(
+            own_loose < first_fit_loose,
+            "{own_loose} loose spaces against {first_fit_loose}"
+        );
+    }
+
+    #[test]
+    fn spaces_stay_at_or_above_the_closing_limit() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(LONG);
+        for width in [300.0, 380.0, 460.0, 540.0, 640.0] {
+            let config = LayoutConfig {
+                body_width: width,
+                ..LayoutConfig::with_body_size(16.0)
+            };
+            let natural = natural_space(&mut fs, &config);
+            let layout = layout_block(&mut fs, &block, &config);
+            for share in wide(&layout, &block, natural) {
+                assert!(share >= 0.899, "{share} at width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_line_but_the_last_reaches_the_measure() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(LONG);
+        let config = LayoutConfig {
+            body_width: 400.0,
+            ..LayoutConfig::with_body_size(16.0)
+        };
+        let layout = layout_block(&mut fs, &block, &config);
+        assert!(layout.runs.len() > 3);
+        for run in layout.runs.iter().take(layout.runs.len() - 1) {
+            let last = run.glyphs.last().unwrap();
+            let end = last.x + last.w;
+            // Punctuation may hang a little past it.
+            assert!((399.5..=406.0).contains(&end), "line ends at {end}");
+        }
+        let last = layout.runs.last().unwrap().glyphs.last().unwrap();
+        assert!(last.x + last.w < 399.0);
+    }
+
+    #[test]
+    fn a_justified_paragraphs_lines_are_evenly_spaced() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut block = paragraph(LONG);
+        block.spans.push(Span {
+            start: 11,
+            end: 20,
+            style: SpanStyle::Code,
+        });
+        let config = LayoutConfig {
+            body_width: 400.0,
+            ..LayoutConfig::with_body_size(16.0)
+        };
+        let layout = layout_block(&mut fs, &block, &config);
+        let gaps: Vec<f32> = layout
+            .runs
+            .windows(2)
+            .map(|pair| pair[1].line_y - pair[0].line_y)
+            .collect();
+        assert!(
+            gaps.iter().all(|gap| *gap == config.body_line_height),
+            "{gaps:?}"
+        );
+        for (line, run) in layout.lines.iter().zip(&layout.runs) {
+            assert_eq!(line.y, run.line_top);
+        }
+    }
+
+    #[test]
+    fn every_byte_is_on_a_line_in_order() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let text = format!(
+            "{LONG}\nA second piece after a line break, also long enough to wrap \
+around at this measure.\n\nAnd one after a blank line."
+        );
+        let block = paragraph(&text);
+        let config = LayoutConfig {
+            body_width: 300.0,
+            ..LayoutConfig::with_body_size(16.0)
+        };
+        let layout = layout_block(&mut fs, &block, &config);
+        assert_eq!(layout.lines.first().unwrap().start, 0);
+        assert_eq!(layout.lines.last().unwrap().end, text.len());
+        for pair in layout.lines.windows(2) {
+            assert!(pair[0].end <= pair[1].start, "{pair:?}");
+            let between = &text[pair[0].end..pair[1].start];
+            assert!(between.trim().is_empty(), "lost {between:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_break_ends_a_justified_stretch() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph("Short first piece.\nAnother short piece.");
+        let config = LayoutConfig {
+            body_width: 400.0,
+            ..LayoutConfig::with_body_size(16.0)
+        };
+        let layout = layout_block(&mut fs, &block, &config);
+        assert_eq!(layout.runs.len(), 2);
+        assert_eq!(layout.line_start(1), 19);
+        for run in &layout.runs {
+            let last = run.glyphs.last().unwrap();
+            assert!(last.x + last.w < 300.0, "{}", last.x + last.w);
+        }
+    }
+
+    #[test]
+    fn an_edit_leaves_lines_well_above_it_alone() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig {
+            body_width: 300.0,
+            ..LayoutConfig::with_body_size(16.0)
+        };
+        let before = layout_block(&mut fs, &paragraph(LONG), &config);
+        let words: Vec<(usize, &str)> = LONG.match_indices(|c: char| c == ' ').collect();
+        for pair in words.windows(2).step_by(5) {
+            let (from, to) = (pair[0].0, pair[1].0);
+            let edited = format!("{}{}", &LONG[..from], &LONG[to..]);
+            let after = layout_block(&mut fs, &paragraph(&edited), &config);
+            let line = before.lines.iter().position(|l| from < l.end).unwrap();
+            for index in 0..line.saturating_sub(2) {
+                assert_eq!(
+                    before.lines[index].start, after.lines[index].start,
+                    "line {index} moved for an edit on line {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_space_typed_at_the_end_moves_the_caret() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig::with_body_size(16.0);
+        let plain = layout_block(&mut fs, &paragraph("Some words"), &config);
+        let spaced = layout_block(&mut fs, &paragraph("Some words "), &config);
+        let end = |layout: &BlockLayout| {
+            let last = layout.runs.last().unwrap().glyphs.last().unwrap();
+            last.x + last.w
+        };
+        assert!(end(&spaced) > end(&plain));
+        assert_eq!(spaced.lines.last().unwrap().end, 11);
+    }
+
+    #[test]
+    fn first_fit_on_the_measured_glyphs_breaks_where_the_engine_does() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let block = paragraph(LONG);
+        for width in [300.0, 380.0, 460.0, 540.0, 640.0] {
+            let config = LayoutConfig {
+                body_width: width,
+                ..LayoutConfig::with_body_size(16.0)
+            };
+            let engine = layout_block_with_align(&mut fs, &block, &config, Align::Left);
+            let wrapped: Vec<usize> = engine.lines.iter().skip(1).map(|l| l.start).collect();
+            let starts = measured_first_fit(&mut fs, &block, &config);
+            assert_eq!(starts, wrapped, "at width {width}");
+        }
     }
 
     #[test]
@@ -1486,12 +1907,15 @@ dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
     #[test]
     fn hanging_leaves_the_text_offsets_and_the_order_alone() {
         let (_, layout, _) = hanging_layout(WRAPPING, BlockKind::Paragraph, 240.0);
-        let shaped: Vec<_> = layout.buffer.layout_runs().collect();
-        assert_eq!(shaped.len(), layout.runs.len());
-        for (drawn, shaped) in layout.runs.iter().zip(shaped) {
-            assert_eq!(drawn.glyphs.len(), shaped.glyphs.len());
-            for (a, b) in drawn.glyphs.iter().zip(shaped.glyphs) {
-                assert_eq!((a.start, a.end), (b.start, b.end));
+        let shaped = layout.buffer.layout_runs().next().unwrap();
+        let mut remaining = shaped.glyphs.iter();
+        for drawn in &layout.runs {
+            for a in &drawn.glyphs {
+                assert!(
+                    remaining.any(|b| (a.start, a.end) == (b.start, b.end)),
+                    "a glyph at {} isn't where it was shaped",
+                    a.start
+                );
             }
             for pair in drawn.glyphs.windows(2) {
                 assert!(pair[1].x > pair[0].x, "glyphs out of order");

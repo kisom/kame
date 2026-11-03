@@ -1,4 +1,5 @@
 mod annotations;
+mod breaks;
 mod text;
 
 pub use annotations::{

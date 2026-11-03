@@ -209,6 +209,7 @@ A way to send someone an unfinished essay.
 
 - Built to `/drafts/<slug>/`, with `<meta name="robots" content="noindex">`.
 - Left out of every listing and the feed.
+- Its tags don't count: they get no page and no count, and the draft itself shows none.
 - `kame-site build --no-drafts` leaves them out altogether, for a public deploy that shouldn't
   carry them.
 

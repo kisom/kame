@@ -210,12 +210,6 @@ pub fn build_plan(site_dir: &Path, include_drafts: bool, problems: &mut Problems
         .map(|source| document_value(source))
         .collect();
 
-    // Tag pages only come from published documents, so a tag only on drafts has none.
-    let tag_pages: std::collections::BTreeSet<&str> = published
-        .iter()
-        .flat_map(|source| source.tags.iter().map(|tag| tag.slug.as_str()))
-        .collect();
-
     let mut plan = Plan::default();
 
     // Documents, with their images beside them.
@@ -232,16 +226,15 @@ pub fn build_plan(site_dir: &Path, include_drafts: bool, problems: &mut Problems
             },
         );
         let url = source.url();
-        let tags: Vec<Value> = source
-            .tags
+        // A draft shows no tags: it is in none of their listings, so they'd lead elsewhere.
+        let shown = if source.draft {
+            &[][..]
+        } else {
+            &source.tags[..]
+        };
+        let tags: Vec<Value> = shown
             .iter()
-            .map(|tag| {
-                let page = tag_pages.contains(tag.slug.as_str());
-                context! {
-                    name => tag.name.clone(),
-                    url => page.then(|| safe(tag_url(&tag.slug))),
-                }
-            })
+            .map(|tag| context! { name => tag.name.clone(), url => safe(tag_url(&tag.slug)) })
             .collect();
         let values = context! {
             site => site.clone(),
@@ -667,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tag_only_on_drafts_is_shown_without_a_link() {
+    fn a_draft_shows_no_tags() {
         let site = Site::new("plandrafttag");
         let a = site.add(
             "a.kame",
@@ -680,10 +673,11 @@ mod tests {
             "x",
         );
         site.config(&[("a", &a)], &[("d", &d)]);
-        let page = text(&site.plan(), "drafts/d/index.html");
-        assert!(page.contains("only-here"), "{page}");
-        assert!(!page.contains("/tags/only-here/"), "{page}");
-        assert!(page.contains("/tags/shared/"), "{page}");
+        let plan = site.plan();
+        let draft = text(&plan, "drafts/d/index.html");
+        assert!(!draft.contains("only-here"), "{draft}");
+        assert!(!draft.contains("shared"), "{draft}");
+        assert!(text(&plan, "k/a/index.html").contains("/tags/shared/"));
     }
 
     #[test]

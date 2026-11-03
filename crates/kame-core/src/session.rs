@@ -5587,6 +5587,83 @@ mod tests {
         session.check_file();
         assert_eq!(std::fs::read(wal_path(&path)).unwrap(), b"their log");
     }
+
+    #[test]
+    fn a_normal_close_takes_its_log_with_it() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        assert!(wal_path(&path).exists());
+        drop(session);
+        assert!(!wal_path(&path).exists());
+    }
+
+    #[test]
+    fn a_log_that_arrived_survives_the_old_session_closing() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        std::fs::write(dir.join("incoming"), b"their log").unwrap();
+        std::fs::rename(dir.join("incoming"), wal_path(&path)).unwrap();
+        session.check_file();
+        drop(session);
+        assert_eq!(std::fs::read(wal_path(&path)).unwrap(), b"their log");
+    }
+
+    /// The order "Open the one on disk" uses: the new session opens while the old one is still
+    /// alive, and the old one closing must not take the new one's log with it.
+    #[test]
+    fn opening_the_new_file_survives_the_old_session_closing() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut old = Session::open(&path).unwrap();
+        old.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        old.check_file();
+        let mut new = Session::open(&path).unwrap();
+        new.insert(" and more");
+        assert!(wal_path(&path).exists(), "the new session's log");
+        drop(old);
+        assert!(wal_path(&path).exists(), "still the new session's log");
+        new.insert(" again");
+        assert!(!new.save_failed);
+        // Copy without closing, as a crash would leave it.
+        let crash = dir.join("crash");
+        std::fs::create_dir_all(&crash).unwrap();
+        let copied = crash.join("a.kame");
+        std::fs::copy(&path, &copied).unwrap();
+        std::fs::copy(wal_path(&path), wal_path(&copied)).unwrap();
+        assert!(
+            text_in(&copied).contains("again"),
+            "a crash here keeps the words"
+        );
+        drop(new);
+        assert!(text_in(&path).contains("again"));
+    }
+
+    /// Saving elsewhere closes the old connection after the new file exists at another path.
+    #[test]
+    fn saving_elsewhere_leaves_the_new_files_own_log_alone() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+        session.check_file();
+        let mut reader = Session::open(&path).unwrap();
+        reader.insert(" read");
+        assert!(wal_path(&path).exists());
+        session.save_as(&dir.join("mine.kame")).unwrap();
+        assert!(wal_path(&path).exists());
+        drop(reader);
+        assert!(text_in(&path).contains("read"));
+    }
 }
 
 #[cfg(test)]

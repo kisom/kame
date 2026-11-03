@@ -112,7 +112,8 @@ Held keys do not auto-repeat a toggle: one press is one flip.
 
 View > Check spelling marks likely mistakes as you write, in red for spelling and blue for anything else, without
 changing a word. Right-click a mark to take a suggestion, accept it for this document, add the word to this document's
-list or your own, or turn off the rule. F7 selects the next mark. Code, links, quotes and prose blocks aren't checked.
+list or your own, or turn off the rule. F7 selects the next mark in the text. Margin notes and footnotes are checked too,
+though F7 doesn't go to them. Code, links, quotes, prose blocks and notes aren't checked.
 
 File > Document Properties shows this document's words and accepted marks, to change or take back. Your own words and the rules
 you've turned off are in `config.json`, as `words` and `rules_off`.

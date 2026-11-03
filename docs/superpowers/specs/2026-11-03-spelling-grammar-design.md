@@ -104,7 +104,8 @@ multibyte text.
 
 **What gets checked.** Paragraphs, headings and list items. Not code or prose blocks, and not inline code or
 links. Not block quotes either, since those are someone else's words, and marking them is noise. Margin notes and
-footnotes come later, because they're edited differently, even though the review found a misspelling in one.
+footnotes are checked as drawn on the page, with the same right-click menu, and F7 stays in the text. Notes aren't
+checked, since those are the writer's own thinking. While a popover is open, marks don't appear in its field.
 
 **When.** On a background thread, about half a second after typing stops, and only for changed blocks, which are
 cached by their text. The page never waits for it. The word under the caret isn't marked while you're still

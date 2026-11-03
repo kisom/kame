@@ -1023,6 +1023,27 @@ fn find_bar_closes(lost_focus: bool, window_focused: bool, pointer_in_bar: bool)
     lost_focus && window_focused && !pointer_in_bar
 }
 
+/// What the checker sees of an annotation, if it reads this kind: marginals and footnotes, which
+/// are prose for the reader. A note is the writer's own thinking.
+fn annotation_block(annotation: &Annotation) -> Option<Block> {
+    let prose = matches!(
+        annotation.kind,
+        AnnotationKind::Marginal | AnnotationKind::Footnote
+    );
+    (prose && !annotation.body.trim().is_empty()).then(|| Block {
+        id: annotation.id,
+        kind: BlockKind::Paragraph,
+        text: annotation.body.clone(),
+        spans: Vec::new(),
+    })
+}
+
+/// An annotation's body with part of it replaced, or `None` if the range doesn't fit.
+fn body_with_replacement(body: &str, start: usize, end: usize, with: &str) -> Option<String> {
+    let (before, after) = (body.get(..start)?, body.get(end..)?);
+    (start <= end).then(|| format!("{before}{with}{after}"))
+}
+
 /// How far a page key moves: a window's height, less two lines so the eye keeps its place.
 fn page_step(viewport_height: f32, line_height: f32) -> f32 {
     (viewport_height - 2.0 * line_height).max(line_height)
@@ -3432,12 +3453,19 @@ impl KameApp {
             }
             self.marks.checked.insert(block.id, (block, findings));
         }
-        let blocks = &self.session.document().blocks;
-        self.marks
-            .checked
-            .retain(|id, _| blocks.iter().any(|block| block.id == *id));
+        let document = self.session.document();
+        let notes: Vec<Block> = document
+            .annotations
+            .iter()
+            .filter_map(annotation_block)
+            .collect();
+        let blocks = &document.blocks;
+        self.marks.checked.retain(|id, _| {
+            blocks.iter().any(|block| block.id == *id) || notes.iter().any(|note| note.id == *id)
+        });
         let stale: Vec<&Block> = blocks
             .iter()
+            .chain(notes.iter())
             .filter(|block| {
                 self.marks.checked.get(&block.id).map(|(seen, _)| seen) != Some(*block)
                     && self.marks.asked.get(&block.id) != Some(*block)
@@ -3510,19 +3538,37 @@ impl KameApp {
 
     /// Does what the mark's menu was asked for.
     fn apply_mark_action(&mut self, action: MarkAction, block_id: BlockId, finding: &Finding) {
-        let shown = self
-            .session
-            .block_index(block_id)
-            .and_then(|index| {
-                let text = &self.session.document().blocks[index].text;
-                text.get(finding.start..finding.end).map(str::to_string)
-            })
-            .unwrap_or_default();
+        // A mark is on a block's text, or on the body of the annotation with that id.
+        let document = self.session.document();
+        let body = document
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == block_id)
+            .map(|annotation| annotation.body.clone());
+        let text = body.clone().or_else(|| {
+            self.session
+                .block_index(block_id)
+                .map(|index| document.blocks[index].text.clone())
+        });
+        let shown = text
+            .as_deref()
+            .and_then(|text| text.get(finding.start..finding.end))
+            .unwrap_or_default()
+            .to_string();
         match action {
-            MarkAction::Replace(with) => {
-                self.session
-                    .replace_text(block_id, finding.start, finding.end, &with);
-            }
+            MarkAction::Replace(with) => match body {
+                Some(body) => {
+                    if let Some(new) =
+                        body_with_replacement(&body, finding.start, finding.end, &with)
+                    {
+                        self.session.set_annotation_body(block_id, &new);
+                    }
+                }
+                None => {
+                    self.session
+                        .replace_text(block_id, finding.start, finding.end, &with);
+                }
+            },
             MarkAction::Accept => {
                 let mut metadata = self.session.metadata.clone();
                 metadata.accepted.push(AcceptedMark {
@@ -4096,6 +4142,9 @@ impl KameApp {
             .map(|annotation| (annotation.id, annotation))
             .collect();
         let mut markers: Vec<(AnnotationId, Rect)> = Vec::new();
+        // Each checked annotation as drawn: its layout's origin, the column it's set in, and what
+        // comes before its body.
+        let mut drawn_notes: Vec<(Block, Pos2, f32, String, Rect)> = Vec::new();
         for placement in &margins {
             let Some(annotation) = by_id.get(&placement.annotation_id) else {
                 continue;
@@ -4143,6 +4192,9 @@ impl KameApp {
                         // The body is the hit target, so a marginal can be
                         // reopened and revised once its popover has closed.
                         markers.push((annotation.id, rect));
+                        if let Some(block) = annotation_block(annotation) {
+                            drawn_notes.push((block, origin, margin_column, String::new(), rect));
+                        }
                     }
                 }
                 AnnotationKind::Note => {
@@ -4191,7 +4243,57 @@ impl KameApp {
                 painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
                 // The foot entry is the hit target for reopening its popover.
                 markers.push((placement.annotation_id, rect));
+                let annotation = by_id.get(&placement.annotation_id);
+                if let Some(block) = annotation.and_then(|annotation| annotation_block(annotation))
+                {
+                    let prefix = format!("{}. ", placement.number);
+                    drawn_notes.push((block, origin, config.body_width, prefix, rect));
+                }
             }
+        }
+
+        // --- likely mistakes in marginals and footnotes ---------------------------
+        // Their text is drawn as an image, so finding a word on it takes the same layout.
+        let mut note_layouts: Vec<Option<BlockLayout>> = Vec::with_capacity(drawn_notes.len());
+        for (block, origin, width, prefix, _) in &drawn_notes {
+            let exceptions = Exceptions {
+                words: &self.my_words,
+                document_words: &self.session.metadata.words,
+                accepted: &self.session.metadata.accepted,
+                rules_off: &self.rules_off,
+            };
+            let shown = if self.check_spelling {
+                visible_marks(&self.marks, &exceptions, block, None)
+            } else {
+                Vec::new()
+            };
+            if shown.is_empty() {
+                note_layouts.push(None);
+                continue;
+            }
+            let entry = Block {
+                text: format!("{prefix}{}", block.text),
+                ..block.clone()
+            };
+            let layout = self
+                .renderer
+                .layout_in_column(&entry, *width, annotation_size);
+            for finding in &shown {
+                let color = match finding.kind {
+                    FindingKind::Spelling => self.palette.spelling_mark,
+                    FindingKind::Grammar => self.palette.grammar_mark,
+                };
+                let (start, end) = (finding.start + prefix.len(), finding.end + prefix.len());
+                for rect in range_rects(&layout, start, end) {
+                    let rect = rect.translate(origin.to_vec2());
+                    let y = rect.bottom() - rect.height() * MARK_LIFT;
+                    painter.add(egui::Shape::line(
+                        wavy_line(rect.left(), rect.right(), y),
+                        egui::Stroke::new(1.0, color),
+                    ));
+                }
+            }
+            note_layouts.push(Some(layout));
         }
 
         let mut footnote_marks_drawn: Vec<(Rect, f32)> = Vec::new();
@@ -4278,6 +4380,26 @@ impl KameApp {
                             self.mark_menu = Some((block.id, finding.clone()));
                         }
                     }
+                }
+                // A marginal or a footnote under the pointer is what the click was on.
+                for (note, layout) in drawn_notes.iter().zip(&note_layouts) {
+                    let (block, origin, _, prefix, rect) = note;
+                    let Some(layout) = layout.as_ref().filter(|_| rect.contains(pos)) else {
+                        continue;
+                    };
+                    let exceptions = Exceptions {
+                        words: &self.my_words,
+                        document_words: &self.session.metadata.words,
+                        accepted: &self.session.metadata.accepted,
+                        rules_off: &self.rules_off,
+                    };
+                    let shown = visible_marks(&self.marks, &exceptions, block, None);
+                    let at = pos - *origin;
+                    let offset = offset_at(layout, at.x, at.y, block.text.len() + prefix.len());
+                    self.mark_menu = offset
+                        .checked_sub(prefix.len())
+                        .and_then(|offset| mark_at(&shown, offset))
+                        .map(|finding| (block.id, finding.clone()));
                 }
             }
         }
@@ -7975,6 +8097,46 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(words, vec!["alpha", "beta", "kame", "mantrap", "Udacity"]);
         add_words(&mut words, "   ");
         assert_eq!(words.len(), 5);
+    }
+
+    fn annotation(kind: AnnotationKind, body: &str) -> Annotation {
+        Annotation {
+            id: uuid::Uuid::new_v4(),
+            kind,
+            anchor: Anchor::Block(uuid::Uuid::new_v4()),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn marginals_and_footnotes_are_checked_and_notes_arent() {
+        let marginal = annotation(AnnotationKind::Marginal, "A wrod.");
+        let block = annotation_block(&marginal).unwrap();
+        assert_eq!(block.id, marginal.id);
+        assert_eq!(block.text, "A wrod.");
+        assert_eq!(block.kind, BlockKind::Paragraph);
+        assert!(annotation_block(&annotation(AnnotationKind::Footnote, "A wrod.")).is_some());
+        assert!(annotation_block(&annotation(AnnotationKind::Note, "A wrod.")).is_none());
+    }
+
+    #[test]
+    fn an_empty_annotation_has_nothing_to_check() {
+        assert!(annotation_block(&annotation(AnnotationKind::Marginal, "  ")).is_none());
+    }
+
+    #[test]
+    fn a_suggestion_rewrites_part_of_a_body() {
+        assert_eq!(
+            body_with_replacement("A wrod here.", 2, 6, "word").as_deref(),
+            Some("A word here.")
+        );
+        assert_eq!(
+            body_with_replacement("caf\u{e9}", 4, 5, "x"),
+            None,
+            "inside a character"
+        );
+        assert_eq!(body_with_replacement("short", 2, 99, "x"), None);
+        assert_eq!(body_with_replacement("short", 3, 2, "x"), None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # Spelling and grammar check — design
 
 Date: 2026-11-03
-Status: draft for review. Nothing is built. The trial in section 4 has run, and Harper missed the mark it was
-set for grammar, so section 4 ends in a decision for you. Section 8 lists the decisions made on your behalf.
+Status: accepted 2026-11-03, with option A from section 4. The trial has run, and Harper missed the mark it was
+set for grammar, so it checks spelling, names and compounds. Section 8 lists the decisions made on your behalf.
 
 ## 1. Purpose
 

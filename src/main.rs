@@ -407,6 +407,8 @@ const STATUS_MESSAGE_SHARE: f32 = 0.65;
 const CARET_ROOM: f32 = 48.0;
 /// How much of a code line to keep in view past the caret when scrolling it sideways.
 const CODE_CARET_ROOM: f32 = 24.0;
+/// The most a list in Document Properties shows before it scrolls.
+const PROPERTIES_LIST_HEIGHT: f32 = 130.0;
 /// The shape of a mark's wavy underline.
 const WAVE_STEP: f32 = 2.0;
 const WAVE_HEIGHT: f32 = 1.0;
@@ -1386,6 +1388,22 @@ fn parse_tags(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Sorts a word list for reading, ignoring case.
+fn sort_words(words: &mut [String]) {
+    words.sort_by_key(|word| word.to_lowercase());
+}
+
+/// Adds what was typed to a word list, which may be several words separated by commas, keeping it
+/// sorted and without repeats.
+fn add_words(words: &mut Vec<String>, typed: &str) {
+    for word in parse_tags(typed) {
+        if !words.iter().any(|known| known.eq_ignore_ascii_case(&word)) {
+            words.push(word);
+        }
+    }
+    sort_words(words);
+}
+
 /// The document's metadata as the dialog leaves it.
 fn metadata_from_prompt(prompt: &MetadataPrompt) -> Metadata {
     Metadata {
@@ -1394,7 +1412,11 @@ fn metadata_from_prompt(prompt: &MetadataPrompt) -> Metadata {
         created: prompt.created.trim().to_string(),
         published: prompt.published.trim().to_string(),
         tags: parse_tags(&prompt.tags),
-        words: parse_tags(&prompt.words),
+        words: {
+            let mut words = prompt.words.clone();
+            add_words(&mut words, &prompt.new_word);
+            words
+        },
         accepted: prompt.accepted.clone(),
     }
 }
@@ -1406,8 +1428,9 @@ struct MetadataPrompt {
     created: String,
     published: String,
     tags: String,
-    /// This document's words for the spell checker.
-    words: String,
+    /// This document's words for the spell checker, and one being typed to add.
+    words: Vec<String>,
+    new_word: String,
     /// The marks accepted in this document, which can be taken back here.
     accepted: Vec<AcceptedMark>,
     /// Make this author the one new documents start with.
@@ -4908,7 +4931,12 @@ impl KameApp {
             created: metadata.created.clone(),
             published: metadata.published.clone(),
             tags: metadata.tags.join(", "),
-            words: metadata.words.join(", "),
+            words: {
+                let mut words = metadata.words.clone();
+                sort_words(&mut words);
+                words
+            },
+            new_word: String::new(),
             accepted: metadata.accepted.clone(),
             default_author: false,
             focus: true,
@@ -4944,11 +4972,6 @@ impl KameApp {
                             ("Created", &mut prompt.created, "YYYY-MM-DD"),
                             ("Published", &mut prompt.published, "YYYY-MM-DD"),
                             ("Tags", &mut prompt.tags, "separated by commas"),
-                            (
-                                "Words",
-                                &mut prompt.words,
-                                "right in this document, separated by commas",
-                            ),
                         ]
                         .into_iter()
                         .enumerate()
@@ -4965,23 +4988,73 @@ impl KameApp {
                             ui.end_row();
                         }
                     });
+                ui.add_space(4.0);
+                ui.label("Words that are right in this document");
+                let mut forget_word = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("kame-metadata-words")
+                    .max_height(PROPERTIES_LIST_HEIGHT)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        if prompt.words.is_empty() {
+                            ui.label(egui::RichText::new("none yet").weak());
+                        }
+                        for (index, word) in prompt.words.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .small_button("×")
+                                    .on_hover_text("mark it again")
+                                    .clicked()
+                                {
+                                    forget_word = Some(index);
+                                }
+                                ui.label(word);
+                            });
+                        }
+                    });
+                if let Some(index) = forget_word {
+                    prompt.words.remove(index);
+                }
+                ui.horizontal(|ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut prompt.new_word)
+                            .return_key(None)
+                            .desired_width(240.0)
+                            .hint_text("add a word"),
+                    );
+                    let adding = !prompt.new_word.trim().is_empty();
+                    let add = ui.add_enabled(adding, egui::Button::new("Add")).clicked();
+                    // Enter here adds the word, rather than saving the dialog around it.
+                    if add || (enter && adding && field.has_focus()) {
+                        let typed = std::mem::take(&mut prompt.new_word);
+                        add_words(&mut prompt.words, &typed);
+                        save = false;
+                        field.request_focus();
+                    }
+                });
                 if !prompt.accepted.is_empty() {
                     ui.add_space(4.0);
                     ui.label("Accepted marks");
                     let mut forget = None;
-                    for (index, mark) in prompt.accepted.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("mark it again")
-                                .clicked()
-                            {
-                                forget = Some(index);
+                    egui::ScrollArea::vertical()
+                        .id_salt("kame-metadata-accepted")
+                        .max_height(PROPERTIES_LIST_HEIGHT)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (index, mark) in prompt.accepted.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("mark it again")
+                                        .clicked()
+                                    {
+                                        forget = Some(index);
+                                    }
+                                    ui.label(&mark.text);
+                                    ui.label(egui::RichText::new(&mark.rule).weak());
+                                });
                             }
-                            ui.label(&mark.text);
-                            ui.label(egui::RichText::new(&mark.rule).weak());
                         });
-                    }
                     if let Some(index) = forget {
                         prompt.accepted.remove(index);
                     }
@@ -7852,7 +7925,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             created: "2026-01-01".to_string(),
             published: String::new(),
             tags: "one, two".to_string(),
-            words: "kame,  Udacity , ,nanodegrees".to_string(),
+            words: vec!["kame".to_string(), "Udacity".to_string()],
+            new_word: String::new(),
             accepted: vec![AcceptedMark {
                 rule: "Rule".to_string(),
                 text: "key point".to_string(),
@@ -7865,7 +7939,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     #[test]
     fn the_properties_dialog_saves_the_documents_words() {
         let metadata = metadata_from_prompt(&prompt());
-        assert_eq!(metadata.words, vec!["kame", "Udacity", "nanodegrees"]);
+        assert_eq!(metadata.words, vec!["kame", "Udacity"]);
         assert_eq!(metadata.title, "T");
         assert_eq!(metadata.author, "A");
         assert_eq!(metadata.tags, vec!["one", "two"]);
@@ -7881,10 +7955,26 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     }
 
     #[test]
-    fn clearing_the_words_field_clears_the_list() {
-        let mut cleared = prompt();
-        cleared.words = "  ".to_string();
-        assert!(metadata_from_prompt(&cleared).words.is_empty());
+    fn a_word_still_being_typed_is_saved_too() {
+        let mut typing = prompt();
+        typing.new_word = " MOOCs ".to_string();
+        assert_eq!(
+            metadata_from_prompt(&typing).words,
+            vec!["kame", "MOOCs", "Udacity"]
+        );
+    }
+
+    #[test]
+    fn adding_words_keeps_the_list_sorted_without_repeats() {
+        let mut words = vec!["kame".to_string(), "Udacity".to_string()];
+        add_words(&mut words, "mantrap");
+        assert_eq!(words, vec!["kame", "mantrap", "Udacity"]);
+        add_words(&mut words, "KAME");
+        assert_eq!(words.len(), 3, "the same word in other capitals");
+        add_words(&mut words, " alpha , beta,, ");
+        assert_eq!(words, vec!["alpha", "beta", "kame", "mantrap", "Udacity"]);
+        add_words(&mut words, "   ");
+        assert_eq!(words.len(), 5);
     }
 
     #[test]

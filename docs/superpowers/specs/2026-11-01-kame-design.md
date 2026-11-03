@@ -157,8 +157,8 @@ kame/
 ```
 
 Dependencies: eframe/egui, cosmic-text, swash, rusqlite (bundled), serde + serde_json, uuid,
-pulldown-cmark (Markdown import only), winit (macOS only, already built by eframe, to turn
-off its default menu).
+pulldown-cmark (Markdown import only), winit and objc2 (macOS only, already built by eframe,
+for the application delegate).
 Deferred: hypher (hyphenation), a markdown/HTML writer library if hand-rolling proves wanting.
 
 ## 15. Deferred / open items

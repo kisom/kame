@@ -71,6 +71,10 @@ Dark mode (`Ctrl-Shift-D`) is separate from these: a persisted preference
 
 ## Files, exports and snapshots
 
+On macOS, `kame.app` opens `.kame` files from Finder, and can open Markdown files
+through Open With. Quitting by any route, from Cmd-Q to the Dock, goes through the
+prompt for an unsaved document.
+
 Opening a `.md` or `.markdown` file imports it: with Ctrl-O, File > Import
 Markdown, or `kame notes.md`. The file is only read, and the result is a new
 document with no file, so the first save asks where to put it. Front matter

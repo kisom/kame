@@ -4114,6 +4114,7 @@ dependencies = [
  "image",
  "kame-check",
  "kame-core",
+ "kame-notebook",
  "kame-sync",
  "kame-typeset",
  "objc2 0.6.5",

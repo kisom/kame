@@ -134,3 +134,130 @@ pub fn title_of(path: &Path) -> String {
         .find(|title| !title.trim().is_empty())
         .unwrap_or_else(stem)
 }
+
+/// An entry with what it goes by, for lists.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    pub entry: Entry,
+    pub title: String,
+}
+
+/// Every entry with its title, which reads every document, so it's for a background thread.
+pub fn listed(notebook: &Notebook) -> Vec<Listed> {
+    notebook
+        .entries()
+        .into_iter()
+        .map(|entry| {
+            let title = match entry.kind {
+                Kind::Document => title_of(&entry.path),
+                Kind::File => entry.relative.clone(),
+            };
+            Listed { entry, title }
+        })
+        .collect()
+}
+
+/// How well `query`'s letters appear, in order, in `text`: lower is better. It counts the gaps
+/// between them and how far in they start.
+fn subsequence(query: &str, text: &str) -> Option<u32> {
+    let mut score = 0u32;
+    let mut letters = query.chars().flat_map(char::to_lowercase).peekable();
+    let mut last: Option<u32> = None;
+    for (at, c) in text.chars().flat_map(char::to_lowercase).enumerate() {
+        let Some(wanted) = letters.peek() else {
+            break;
+        };
+        if c == *wanted {
+            let at = at as u32;
+            score += match last {
+                Some(previous) => (at - previous - 1) * 4,
+                None => at,
+            };
+            last = Some(at);
+            letters.next();
+        }
+    }
+    letters.peek().is_none().then_some(score)
+}
+
+/// How well `query` matches a document, by title or path, or `None` if it doesn't.
+pub fn rank(query: &str, title: &str, relative: &str) -> Option<u32> {
+    match (subsequence(query, title), subsequence(query, relative)) {
+        (Some(one), Some(other)) => Some(one.min(other)),
+        (one, other) => one.or(other),
+    }
+}
+
+/// Which of `all` match `query`, as indices, best first, with recently opened documents ahead of
+/// equals. `recent` runs from the latest.
+pub fn narrow(query: &str, all: &[Listed], recent: &[PathBuf]) -> Vec<usize> {
+    let mut found: Vec<(u32, usize, usize)> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(at, item)| {
+            let score = rank(query, &item.title, &item.entry.relative)?;
+            let how_recent = recent
+                .iter()
+                .position(|path| *path == item.entry.path)
+                .unwrap_or(usize::MAX);
+            Some((score, how_recent, at))
+        })
+        .collect();
+    if query.is_empty() {
+        found.sort_by_key(|(_, how_recent, at)| (*how_recent, *at));
+    } else {
+        // A short query's scores are close, and what was just open is the likelier wish.
+        found.sort_by_key(|(score, how_recent, at)| (score / 8, *how_recent, *score, *at));
+    }
+    found.into_iter().map(|(_, _, at)| at).collect()
+}
+
+/// A row of the browser.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    pub depth: usize,
+    pub name: String,
+    pub what: RowKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowKind {
+    /// A folder, by its path from the root.
+    Folder(String),
+    /// An entry, by its index in what was listed.
+    Entry(usize),
+}
+
+/// The rows of the browser for `entries`, in order by path, with `open` the folders that show what
+/// is inside them.
+pub fn rows(entries: &[Entry], open: &std::collections::HashSet<String>) -> Vec<Row> {
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (at, entry) in entries.iter().enumerate() {
+        let parts: Vec<&str> = entry.relative.split('/').collect();
+        let mut folder = String::new();
+        let mut showing = true;
+        for (depth, part) in parts[..parts.len() - 1].iter().enumerate() {
+            if !folder.is_empty() {
+                folder.push('/');
+            }
+            folder.push_str(part);
+            if showing && seen.insert(folder.clone()) {
+                found.push(Row {
+                    depth,
+                    name: (*part).to_string(),
+                    what: RowKind::Folder(folder.clone()),
+                });
+            }
+            showing = showing && open.contains(&folder);
+        }
+        if showing {
+            found.push(Row {
+                depth: parts.len() - 1,
+                name: parts[parts.len() - 1].to_string(),
+                what: RowKind::Entry(at),
+            });
+        }
+    }
+    found
+}

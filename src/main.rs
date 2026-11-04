@@ -9,6 +9,7 @@
 mod external;
 #[cfg(target_os = "macos")]
 mod macos;
+mod notebook;
 
 use kame_core::links::{resolve_open_path, split_document_target};
 use kame_core::session::{is_markdown_path, Session};
@@ -183,6 +184,13 @@ fn highlight_map(
 }
 /// The document to start with: the one named, or else the last one, if it is still
 /// there. Opening a missing path would create it, which only a request should do.
+/// The file named on the command line, as a full path. A relative one would later be read against
+/// whichever document was open, so coming back to it could open or make the wrong file.
+fn launch_path(argument: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let path = PathBuf::from(argument?);
+    Some(std::path::absolute(&path).unwrap_or(path))
+}
+
 fn document_to_open(argument: Option<PathBuf>, last: Option<PathBuf>) -> Option<PathBuf> {
     argument.or_else(|| last.filter(|path| path.is_file()))
 }
@@ -295,6 +303,12 @@ struct BackStack {
 }
 
 impl BackStack {
+    /// Forgets stops in a document that's gone.
+    fn forget(&mut self, path: &Path) {
+        self.stops
+            .retain(|stop| !same_document(stop.path.as_deref(), Some(path)));
+    }
+
     fn push(&mut self, stop: BackStop) {
         if self.stops.len() == MAX_BACK_STOPS {
             self.stops.remove(0);
@@ -307,7 +321,6 @@ impl BackStack {
     }
 }
 
-/// What a merge says in the status row. A note is a sentence both versions changed.
 /// What to say when another machine's words have arrived through the logs.
 fn logs_notice(from: Option<&str>, notes: usize) -> String {
     let from = from.unwrap_or("another machine");
@@ -318,6 +331,7 @@ fn logs_notice(from: Option<&str>, notes: usize) -> String {
     }
 }
 
+/// What a merge says in the status row. A note is a sentence both versions changed.
 fn merged_notice(notes: usize) -> String {
     match notes {
         0 => "merged".to_string(),
@@ -1356,6 +1370,9 @@ enum MarkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    ToggleBrowser,
+    Jump,
+    SearchNotebook,
     MergeConflictCopies,
     Back,
     CompactHistory,
@@ -1565,6 +1582,11 @@ struct KameConfig {
     /// What this machine's revision logs are called, chosen when first needed and then kept.
     #[serde(default)]
     device: String,
+    /// Whether a notebook's browser is showing, and which of its folders are open.
+    #[serde(default)]
+    browser_open: bool,
+    #[serde(default)]
+    browser_folders: Vec<String>,
 }
 
 fn default_body_size() -> f32 {
@@ -1587,6 +1609,8 @@ impl Default for KameConfig {
             words: Vec::new(),
             rules_off: Vec::new(),
             device: String::new(),
+            browser_open: false,
+            browser_folders: Vec::new(),
         }
     }
 }
@@ -1661,6 +1685,8 @@ fn main() -> eframe::Result {
     let config_words = config.words.clone();
     let config_rules_off = config.rules_off.clone();
     let config_device = config.device.clone();
+    let config_browser_open = config.browser_open;
+    let config_browser_folders = config.browser_folders.clone();
     // Two windows on one file would overwrite each other's edits, so only the first
     // running kame goes back to the last document.
     let first = config_dir().is_none_or(|dir| {
@@ -1675,53 +1701,64 @@ fn main() -> eframe::Result {
     // With an argument, open that file, and with none go back to the last document.
     // Failing that, an anonymous document: the author starts typing at once and the
     // first save prompts for a file.
-    let (session, notice) =
-        match document_to_open(std::env::args_os().nth(1).map(PathBuf::from), last) {
-            None => (
-                Session::anonymous().unwrap_or_else(|err| {
-                    eprintln!("kame: {err}");
-                    std::process::exit(1);
-                }),
-                None,
-            ),
-            Some(path) => {
-                // Open the document before the window exists, so a failure is
-                // reported as "your file is the problem" rather than an opaque
-                // app-creation error that reads as "kame is broken". A failed open
-                // still shows the author an editable (in-memory) document and the
-                // reason in the status panel, since a desktop launch has no
-                // terminal to print to.
-                let _ = kame_sync::logs::build_from_logs(&path);
-                match Session::open_any(&path) {
-                    Ok(opened) => {
-                        // An import has no file yet, so it is like a new document.
-                        if opened.0.is_anonymous() {
-                            last_document = None;
-                            save_config(&KameConfig {
-                                body_size,
-                                dark,
-                                last_document: None,
-                                author: config_author.clone(),
-                                hyphenate: config_hyphenate,
-                                check_spelling: config_check,
-                                words: config_words.clone(),
-                                rules_off: config_rules_off.clone(),
-                                device: config_device.clone(),
-                            });
-                        }
-                        opened
-                    }
-                    Err(err) => {
-                        let message = format!("could not open {} — {err}", path.display());
-                        let session = Session::blank(&path, message).unwrap_or_else(|err| {
-                            eprintln!("kame: {err}");
-                            std::process::exit(1);
+    // A notebook's folder opens its contents page, or just its browser if it has none.
+    let argument = launch_path(std::env::args_os().nth(1));
+    let folder_notebook = argument
+        .as_deref()
+        .filter(|path| path.is_dir())
+        .and_then(|folder| kame_notebook::Notebook::open(folder).ok());
+    let (argument, last) = match &folder_notebook {
+        Some(notebook) => (notebook.index(), None),
+        None => (argument, last),
+    };
+    let (session, notice) = match document_to_open(argument, last) {
+        None => (
+            Session::anonymous().unwrap_or_else(|err| {
+                eprintln!("kame: {err}");
+                std::process::exit(1);
+            }),
+            None,
+        ),
+        Some(path) => {
+            // Open the document before the window exists, so a failure is
+            // reported as "your file is the problem" rather than an opaque
+            // app-creation error that reads as "kame is broken". A failed open
+            // still shows the author an editable (in-memory) document and the
+            // reason in the status panel, since a desktop launch has no
+            // terminal to print to.
+            let _ = kame_sync::logs::build_from_logs(&path);
+            match Session::open_any(&path) {
+                Ok(opened) => {
+                    // An import has no file yet, so it is like a new document.
+                    if opened.0.is_anonymous() {
+                        last_document = None;
+                        save_config(&KameConfig {
+                            body_size,
+                            dark,
+                            last_document: None,
+                            author: config_author.clone(),
+                            hyphenate: config_hyphenate,
+                            check_spelling: config_check,
+                            words: config_words.clone(),
+                            rules_off: config_rules_off.clone(),
+                            device: config_device.clone(),
+                            browser_open: config_browser_open,
+                            browser_folders: config_browser_folders.clone(),
                         });
-                        (session, None)
                     }
+                    opened
+                }
+                Err(err) => {
+                    let message = format!("could not open {} — {err}", path.display());
+                    let session = Session::blank(&path, message).unwrap_or_else(|err| {
+                        eprintln!("kame: {err}");
+                        std::process::exit(1);
+                    });
+                    (session, None)
                 }
             }
-        };
+        }
+    };
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1733,7 +1770,7 @@ fn main() -> eframe::Result {
     };
 
     let app_creator: eframe::AppCreator<'_> = Box::new(move |cc| {
-        Ok(Box::new(KameApp::new(
+        let mut app = KameApp::new(
             cc,
             session,
             notice,
@@ -1747,8 +1784,16 @@ fn main() -> eframe::Result {
                 words: config_words,
                 rules_off: config_rules_off,
                 device: config_device,
+                browser_open: config_browser_open,
+                browser_folders: config_browser_folders,
             },
-        )))
+        );
+        if let Some(notebook) = folder_notebook {
+            if app.session.is_anonymous() {
+                app.start_in_notebook(notebook);
+            }
+        }
+        Ok(Box::new(app))
     });
 
     // On macOS, kame's application events have to be in place before the event loop
@@ -2076,6 +2121,8 @@ struct KameApp {
     rules_off: Vec<String>,
     /// What this machine's revision logs are called, or empty until one is needed.
     device: String,
+    /// The notebook this document is in, and what's showing of it.
+    nb: notebook::NotebookUi,
     /// The open document's revision logs, if its folder has them turned on.
     logged: Option<kame_sync::logs::Logged>,
     /// The file `logged` is for, and whether a problem with its logs has been mentioned.
@@ -2211,6 +2258,8 @@ impl KameApp {
             words,
             rules_off,
             device,
+            browser_open,
+            browser_folders,
         } = preferences;
         cc.egui_ctx.set_visuals(if dark {
             egui::Visuals::dark()
@@ -2229,6 +2278,7 @@ impl KameApp {
             my_words: words,
             rules_off,
             device,
+            nb: notebook::NotebookUi::new(browser_open, browser_folders),
             logged: None,
             logged_path: None,
             orphan_mentioned: false,
@@ -2365,12 +2415,14 @@ impl KameApp {
             || self.link_prompt.is_some()
             || self.restore_picker.is_some()
             || self.replaced_prompt
+            || self.nb.list_open()
     }
 
     /// Closes whichever file dialog is open. Returns whether one was closed, so
     /// Escape can fall through to the note popover only when it was not.
     fn dismiss_dialog(&mut self) -> bool {
         let open = self.dialog_open();
+        self.nb.close_lists();
         self.metadata_prompt = None;
         self.snapshot_prompt = None;
         self.open_prompt = None;
@@ -2500,6 +2552,8 @@ impl KameApp {
             words: self.my_words.clone(),
             rules_off: self.rules_off.clone(),
             device: self.device.clone(),
+            browser_open: self.nb.browser_open,
+            browser_folders: self.nb.browser_folders.iter().cloned().collect(),
         });
     }
 
@@ -2624,6 +2678,7 @@ impl KameApp {
         // The last of this document's words go in its logs before it's left. Not if `session` is
         // on the same file: it has read that file already, and a merge now would leave it stale,
         // so whoever is reopening a file syncs first.
+        let left_untouched = self.on_untouched_fresh();
         if !same_document(self.session.path(), session.path()) {
             self.sync_logs();
         }
@@ -2631,6 +2686,7 @@ impl KameApp {
         self.logged_path = None;
         self.orphan_mentioned = false;
         self.session = session;
+        self.clear_left_fresh(left_untouched);
         self.conflict_copies.clear();
         self.next_copy_check = std::time::Instant::now();
         self.session.apply_default_author(&self.default_author);
@@ -2859,6 +2915,7 @@ impl KameApp {
         if open_chord {
             self.open_with_dialog();
         }
+        self.handle_notebook_keys(ctx);
         let back_chord = ctx.input(|input| input.events.iter().any(is_back_chord));
         if back_chord && !self.dialog_open() && !self.close_flow.prompting {
             self.go_back();
@@ -3243,7 +3300,10 @@ impl KameApp {
     }
 
     fn show_status(&mut self, ui: &mut egui::Ui) {
-        let title = self.session.display_title();
+        let title = match &self.nb.notebook {
+            Some(notebook) => format!("{} — {}", notebook.title(), self.session.display_title()),
+            None => self.session.display_title(),
+        };
         let blocks = self.session.document().blocks.len();
         let words: usize = self
             .session
@@ -3363,6 +3423,18 @@ impl KameApp {
                     if menu_item(ui, "Hyphenate", None, self.hyphenate) {
                         action = Some(MenuAction::ToggleHyphenate);
                     }
+                    if self.nb.notebook.is_some() {
+                        if menu_item(ui, "Notebook browser", Some("Ctrl-Shift-O"), self.nb.browser_open) {
+                            action = Some(MenuAction::ToggleBrowser);
+                        }
+                        if menu_item(ui, "Jump to document", Some("Ctrl-L"), false) {
+                            action = Some(MenuAction::Jump);
+                        }
+                        if menu_item(ui, "Search this notebook", Some("Ctrl-R"), false) {
+                            action = Some(MenuAction::SearchNotebook);
+                        }
+                        ui.separator();
+                    }
                     if menu_item(ui, "Check spelling", None, self.check_spelling) {
                         action = Some(MenuAction::ToggleCheck);
                     }
@@ -3444,6 +3516,9 @@ impl KameApp {
     fn run_menu_action(&mut self, ctx: &egui::Context, action: MenuAction) {
         match action {
             MenuAction::MergeConflictCopies => self.merge_conflict_copies(),
+            MenuAction::ToggleBrowser => self.toggle_browser(),
+            MenuAction::Jump => self.toggle_jump(),
+            MenuAction::SearchNotebook => self.toggle_search(),
             MenuAction::Back => self.go_back(),
             MenuAction::CompactHistory => match self.session.compact_history() {
                 Ok((before, after)) if before == after => {
@@ -3775,17 +3850,38 @@ impl KameApp {
             })
             .unwrap_or(body_bottom);
 
-        let content_height = (footnote_bottom + PAGE_PADDING).max(ui.available_height());
+        let backlinks_height =
+            notebook::backlinks_height(self.nb.backlinks.len(), config.margin_size);
+        let content_height =
+            (footnote_bottom + backlinks_height + PAGE_PADDING).max(ui.available_height());
 
         let (response, painter) = ui.allocate_painter(
             Vec2::new(ui.available_width(), content_height),
             Sense::click_and_drag(),
         );
-        let geometry = page_geometry(config, response.rect.width());
+        let mut geometry = page_geometry(config, response.rect.width());
+        if let Some(left) = self.nb.page_left {
+            geometry.body_left = left;
+        }
         // A zero gutter means the margin column has no room (hidden, or too
         // narrow to sit beside a readable measure): marginalia cannot be set.
         let show_margin = geometry.margin_width > 0.0;
         let body_left = response.rect.left() + geometry.body_left;
+        let backlink = notebook::draw_backlinks(
+            &painter,
+            &response,
+            &self.nb.backlinks,
+            Pos2::new(body_left, response.rect.top() + footnote_bottom),
+            config.margin_size,
+            Color32::from_rgb(
+                self.palette.apparatus_ink[0],
+                self.palette.apparatus_ink[1],
+                self.palette.apparatus_ink[2],
+            ),
+        );
+        if backlink.is_some() {
+            self.nb.pending_open = backlink;
+        }
 
         let mut tops = Vec::with_capacity(blocks.len());
         let mut y = response.rect.top() + PAGE_PADDING;
@@ -4583,7 +4679,11 @@ impl KameApp {
                     } else if let Some(target) = document_link_at(blocks, &cursor) {
                         followed_link = Some(target);
                     } else if let Some(url) = url_at(blocks, &cursor) {
-                        open_in_browser(&url);
+                        if self.nb.notebook.is_some() && notebook::is_relative_link(&url) {
+                            followed_link = Some(url);
+                        } else {
+                            open_in_browser(&url);
+                        }
                     } else {
                         caret_action = Some((cursor, shift));
                     }
@@ -4917,6 +5017,9 @@ impl KameApp {
                                 "split a block; on an empty list item, end the list",
                             ),
                             ("Ctrl-F", "find"),
+                            ("Ctrl-L", "jump to a document, in a notebook"),
+                            ("Ctrl-R", "search a notebook"),
+                            ("Ctrl-Shift-O", "a notebook's browser"),
                             ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
                             ("Ctrl-Shift-F", "footnote on the selection or word"),
                             ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
@@ -5360,10 +5463,17 @@ impl KameApp {
             self.go_to_heading(heading);
             return;
         }
-        let found = kame_sync::logs::find_or_build(path, &self.session.link_base());
-        let Ok(Some(found)) = found else {
-            self.notice = Some(format!("no document at {path}"));
-            return;
+        let found = match self.follow_in_notebook(path, heading) {
+            Some(Some(found)) => found,
+            Some(None) => return,
+            None => {
+                let found = kame_sync::logs::find_or_build(path, &self.session.link_base());
+                let Ok(Some(found)) = found else {
+                    self.notice = Some(format!("no document at {path}"));
+                    return;
+                };
+                found
+            }
         };
         let same = self
             .session
@@ -5483,7 +5593,9 @@ impl KameApp {
                     self.persist();
                 }
                 self.notice = Some(note.unwrap_or_else(|| format!("opened {}", path.display())));
+                self.note_fresh_opened();
                 self.go_to_heading(heading.as_deref());
+                self.apply_pending_place();
             }
             Err(err) => {
                 self.notice = None;
@@ -5588,6 +5700,10 @@ impl KameApp {
         let Some(path) = self.session.path().map(Path::to_path_buf) else {
             return;
         };
+        // An untouched new document may yet be taken away, so it leaves nothing to take back.
+        if self.on_untouched_fresh() {
+            return;
+        }
         if kame_sync::logs::orphaned_logs(&path) && !self.orphan_mentioned {
             self.orphan_mentioned = true;
             self.notice = Some(format!(
@@ -6075,6 +6191,12 @@ impl eframe::App for KameApp {
 
     fn on_exit(&mut self) {
         self.sync_logs();
+        if self.on_untouched_fresh() {
+            if let Ok(empty) = Session::anonymous() {
+                self.session = empty;
+                self.clear_left_fresh(true);
+            }
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -6091,6 +6213,7 @@ impl eframe::App for KameApp {
         // Here because eframe skips `ui` while the window is hidden, and before it so that a key
         // pressed on coming back lands in text that's up to date.
         self.tick_logs(ctx);
+        self.notebook_tick(ctx);
         let close_requested = ctx.input(|input| input.viewport().close_requested());
         if close_requested {
             self.save_position_now();
@@ -6139,6 +6262,18 @@ impl eframe::App for KameApp {
             self.layouts.clear();
             self.textures.clear();
         }
+        let browser_showing =
+            self.nb.browser_open && self.nb.notebook.is_some() && !self.modes.hide_chrome;
+        let beside_browser = browser_showing.then(|| {
+            notebook::page_left_beside_browser(
+                page_geometry(config, available).body_left,
+                body_width,
+                margin_width,
+                available,
+            )
+        });
+        self.nb.page_left = beside_browser.flatten();
+        self.nb.page_hidden = beside_browser.is_some_and(|left| left.is_none());
         let error = error_indicator(self.session.last_error.as_deref()).map(str::to_owned);
         // The find bar is transient and only exists because the author opened it
         // (Ctrl-F), so it shows even when the status panel is hidden.
@@ -6149,6 +6284,7 @@ impl eframe::App for KameApp {
         if !self.modes.hide_chrome {
             self.show_status(ui);
         }
+        self.show_browser(ui);
         // The typewriter's centring offset was measured last frame, against the
         // same geometry, and is applied here where the scroll area is built.
         let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
@@ -6158,30 +6294,34 @@ impl eframe::App for KameApp {
         if let Some(offset) = self.pending_scroll.take() {
             scroll = scroll.vertical_scroll_offset(offset);
         }
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(self.palette.background))
-            .show(ui, |ui| {
-                self.page_scroll = scroll
-                    .show(ui, |ui| self.draw_surface(ui))
-                    .state
-                    .clamped_offset()
-                    .y;
-                // The save-failure signal belongs to the page, not the chrome:
-                // it is painted in this panel so it outlives hide-chrome.
-                if let Some(error) = &error {
-                    // A failed write's strip retries the save; any other message
-                    // (a degraded open, a failed export) is dismissed, so it
-                    // cannot sit there offering a write that does nothing.
-                    let retry = self.session.save_failed;
-                    if draw_error_indicator(ui, error, retry, self.palette.error_ink) {
-                        self.session.retry_or_dismiss();
-                        self.replaced_prompt = self.session.replaced;
+        if !self.nb.page_hidden {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(self.palette.background))
+                .show(ui, |ui| {
+                    self.page_scroll = scroll
+                        .show(ui, |ui| self.draw_surface(ui))
+                        .state
+                        .clamped_offset()
+                        .y;
+                    // The save-failure signal belongs to the page, not the chrome:
+                    // it is painted in this panel so it outlives hide-chrome.
+                    if let Some(error) = &error {
+                        // A failed write's strip retries the save; any other message
+                        // (a degraded open, a failed export) is dismissed, so it
+                        // cannot sit there offering a write that does nothing.
+                        let retry = self.session.save_failed;
+                        if draw_error_indicator(ui, error, retry, self.palette.error_ink) {
+                            self.session.retry_or_dismiss();
+                            self.replaced_prompt = self.session.replaced;
+                        }
                     }
-                }
-            });
+                });
+        }
         // Dialogs are drawn last, from the root: above the page, and available
         // even while the chrome (and with it the buttons) is hidden.
         self.show_dialogs(ui.ctx());
+        self.show_notebook_lists(ui.ctx());
+        self.open_pending_backlink();
         self.show_replaced_prompt(ui.ctx());
         self.remember_document();
         self.keep_position(ui.ctx());
@@ -6550,6 +6690,8 @@ mod tests {
             words: vec!["kame".to_string()],
             rules_off: vec!["Rule".to_string()],
             device: "talos-3f9a".to_string(),
+            browser_open: true,
+            browser_folders: vec!["maritain".to_string()],
         };
         let json = serde_json::to_string(&config).unwrap();
         let read = serde_json::from_str::<KameConfig>(&json).unwrap();
@@ -7923,6 +8065,18 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(notice.as_deref(), Some("merged from titan"));
         tracker.update(&mut notice, (3, 0));
         assert_eq!(notice, None, "the next edit still clears it");
+    }
+
+    #[test]
+    fn a_path_named_at_launch_is_made_full_so_it_means_the_same_later() {
+        let full = launch_path(Some("essay.kame".into())).unwrap();
+        assert!(full.is_absolute());
+        assert!(full.ends_with("essay.kame"));
+        assert_eq!(
+            launch_path(Some("/already/full.kame".into())),
+            Some(PathBuf::from("/already/full.kame"))
+        );
+        assert_eq!(launch_path(None), None);
     }
 
     #[test]

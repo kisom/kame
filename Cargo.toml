@@ -11,6 +11,7 @@ default-members = [".", "crates/*"]
 [dependencies]
 kame-check = { path = "crates/kame-check" }
 kame-core = { path = "crates/kame-core" }
+kame-notebook = { path = "crates/kame-notebook" }
 kame-sync = { path = "crates/kame-sync" }
 kame-typeset = { path = "crates/kame-typeset" }
 eframe = "0.37"

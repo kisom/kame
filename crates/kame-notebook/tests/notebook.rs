@@ -201,7 +201,7 @@ mod searching {
         assert_eq!(all[0].relative, "a.kame");
         assert_eq!(&all[0].line, "The MATERIAL world.");
         assert_eq!(hits(&found, "—").len(), 1);
-        assert_eq!(hits(&found, "e").len() > 3, true);
+        assert!(hits(&found, "e").len() > 3);
         assert!(hits(&found, "").is_empty());
         assert!(hits(&found, "nowhere at all").is_empty());
     }
@@ -462,5 +462,107 @@ mod linking {
             .map(|link| link.relative)
             .collect();
         assert_eq!(from, ["deep/two.kame", "one.kame"], "and not itself");
+    }
+}
+
+mod lists {
+    use super::*;
+    use kame_notebook::list::{narrow, rank, rows, Entry, Kind, Listed};
+    use std::collections::HashSet;
+
+    fn listed(relative: &str, title: &str) -> Listed {
+        Listed {
+            entry: Entry {
+                path: PathBuf::from("/nb").join(relative),
+                relative: relative.to_string(),
+                kind: Kind::Document,
+            },
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn letters_need_only_appear_in_order_ignoring_case() {
+        assert!(rank("mat", "Materialism", "x.kame").is_some());
+        assert!(rank("MTR", "Materialism", "x.kame").is_some());
+        assert!(rank("rtm", "Materialism", "x.kame").is_none());
+        assert!(
+            rank("deep", "Title", "deep/x.kame").is_some(),
+            "the path counts"
+        );
+        assert!(rank("", "Anything", "x.kame").is_some());
+    }
+
+    #[test]
+    fn closer_matches_come_first() {
+        assert!(
+            rank("mat", "Materialism", "x").unwrap()
+                < rank("mat", "Maritain at home", "x").unwrap()
+        );
+        assert!(rank("mat", "Materialism", "x").unwrap() < rank("mat", "Dogmatics", "x").unwrap());
+    }
+
+    #[test]
+    fn recent_documents_come_first_and_narrowing_leaves_the_rest_out() {
+        let all = [
+            listed("a.kame", "Alpha"),
+            listed("b.kame", "Beta"),
+            listed("c.kame", "Gamma"),
+        ];
+        let recent = [PathBuf::from("/nb/c.kame")];
+        let order = |query: &str| -> Vec<&str> {
+            narrow(query, &all, &recent)
+                .into_iter()
+                .map(|at| all[at].entry.relative.as_str())
+                .collect()
+        };
+        assert_eq!(order(""), ["c.kame", "a.kame", "b.kame"]);
+        assert_eq!(order("et"), ["b.kame"]);
+        assert_eq!(
+            order("a"),
+            ["c.kame", "a.kame", "b.kame"],
+            "ties go to the recent"
+        );
+        assert!(order("zzz").is_empty());
+    }
+
+    #[test]
+    fn the_browser_shows_folders_and_hides_what_is_inside_closed_ones() {
+        let entry = |relative: &str| Entry {
+            path: PathBuf::from("/nb").join(relative),
+            relative: relative.to_string(),
+            kind: Kind::Document,
+        };
+        let entries = [
+            entry("Notebook.kame"),
+            entry("a/b/deep.kame"),
+            entry("a/one.kame"),
+            entry("z.kame"),
+        ];
+        let names = |open: &[&str]| -> Vec<(usize, String)> {
+            let open: HashSet<String> = open.iter().map(|name| name.to_string()).collect();
+            rows(&entries, &open)
+                .into_iter()
+                .map(|row| (row.depth, row.name))
+                .collect()
+        };
+        let shut = names(&[]);
+        assert_eq!(
+            shut,
+            [
+                (0, "Notebook.kame".to_string()),
+                (0, "a".to_string()),
+                (0, "z.kame".to_string())
+            ]
+        );
+        let open = names(&["a"]);
+        assert_eq!(open[2], (1, "b".to_string()));
+        assert_eq!(open[3], (1, "one.kame".to_string()));
+        assert_eq!(names(&["a", "a/b"])[3], (2, "deep.kame".to_string()));
+        assert_eq!(
+            names(&["a/b"]).len(),
+            3,
+            "an open folder inside a closed one stays hidden"
+        );
     }
 }

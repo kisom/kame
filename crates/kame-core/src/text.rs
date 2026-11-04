@@ -120,3 +120,38 @@ pub fn word_at(text: &str, offset: usize) -> (usize, usize) {
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '\'' || c == '’'
 }
+
+/// ASCII-fast, Unicode-correct case-insensitive character equality.
+fn char_eq_ignore_case(a: char, b: char) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        a.eq_ignore_ascii_case(&b)
+    } else {
+        a.to_lowercase().eq(b.to_lowercase())
+    }
+}
+
+/// Case-insensitive matches of `needle` in `text`, as byte ranges of `text`. This is what finding
+/// text means everywhere in kame. Overlapping matches are reported, and an empty needle matches
+/// nothing.
+pub fn find_in(text: &str, needle: &str) -> Vec<(usize, usize)> {
+    let needle: Vec<char> = needle.chars().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    // Over the text's own char boundaries, so that byte offsets stay exact even when a character
+    // lowercases to a different length. `windows` yields nothing for a shorter text.
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    chars
+        .windows(needle.len())
+        .filter(|window| {
+            window
+                .iter()
+                .zip(&needle)
+                .all(|(&(_, c), &n)| char_eq_ignore_case(c, n))
+        })
+        .map(|window| {
+            let last = window[window.len() - 1];
+            (window[0].0, last.0 + last.1.len_utf8())
+        })
+        .collect()
+}

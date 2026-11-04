@@ -4147,6 +4147,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kame-notebook"
+version = "0.1.0"
+dependencies = [
+ "kame-core",
+ "kame-sync",
+ "serde",
+ "uuid",
+ "yaml_serde",
+]
+
+[[package]]
 name = "kame-site"
 version = "0.1.0"
 dependencies = [

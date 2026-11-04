@@ -1,0 +1,14 @@
+[package]
+name = "kame-notebook"
+version = "0.1.0"
+edition = "2021"
+description = "A notebook: a folder of kame documents to move through, search and publish. See docs/superpowers/specs/2026-11-03-notebook-design.md."
+
+[dependencies]
+kame-core = { path = "../kame-core" }
+kame-sync = { path = "../kame-sync" }
+serde = { version = "1", features = ["derive"] }
+yaml_serde = "0.10"
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }

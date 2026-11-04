@@ -1104,47 +1104,19 @@ fn scroll_after_page_key(
     .unwrap_or(moved)
 }
 
-/// ASCII-fast, Unicode-correct case-insensitive character equality.
-fn char_eq_ignore_case(a: char, b: char) -> bool {
-    if a.is_ascii() && b.is_ascii() {
-        a.eq_ignore_ascii_case(&b)
-    } else {
-        a.to_lowercase().collect::<String>() == b.to_lowercase().collect::<String>()
-    }
-}
-
 /// Case-insensitive matches of `needle` across every block, in document order,
 /// as `(block_id, byte_start, byte_end)` in the original text's byte offsets.
 /// Overlapping matches are reported; an empty needle matches nothing.
 fn find_matches(document: &Document, needle: &str) -> Vec<(BlockId, usize, usize)> {
-    let mut matches = Vec::new();
-    if needle.is_empty() {
-        return matches;
-    }
-    let needle: Vec<char> = needle.chars().collect();
-    for block in &document.blocks {
-        // Match over the text's own char boundaries so byte offsets stay exact
-        // even when a query or text char lowercases to a different length.
-        let chars: Vec<(usize, char)> = block.text.char_indices().collect();
-        // `windows` yields nothing when the block is shorter than the needle,
-        // so a block with fewer chars (an empty block) never panics the way an
-        // open `0..=saturating_sub` range would.
-        for window in chars.windows(needle.len()) {
-            if window
-                .iter()
-                .zip(&needle)
-                .all(|(&(_, c), &n)| char_eq_ignore_case(c, n))
-            {
-                let start = window[0].0;
-                let end = window
-                    .last()
-                    .map(|&(offset, c)| offset + c.len_utf8())
-                    .unwrap_or(start);
-                matches.push((block.id, start, end));
-            }
-        }
-    }
-    matches
+    document
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            kame_core::text::find_in(&block.text, needle)
+                .into_iter()
+                .map(|(start, end)| (block.id, start, end))
+        })
+        .collect()
 }
 
 /// The window command a mode toggle sends, or `None` when the mode lives

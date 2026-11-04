@@ -17,8 +17,8 @@ yaml_serde = "0.10"
 minijinja = "3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-uuid = { version = "1", features = ["v4", "serde"] }
 roxmltree = "0.21"
 rusqlite = "0.41"

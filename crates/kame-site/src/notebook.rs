@@ -3,7 +3,6 @@
 //! is what any other site uses. See section 9 of
 //! `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use kame_core::model::{BlockKind, SpanStyle};
@@ -334,13 +333,14 @@ const MARKER: &str = ".kame-site-output";
 const TOO_MANY_DELETIONS: usize = 5;
 
 /// A folder to lay out the theme in while building, out of the way of the notebook, where a folder
-/// named `pages` would be taken for the site's own. It's gone when the build is done.
-fn work_dir(notebook: &Notebook) -> PathBuf {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    notebook.root.hash(&mut hasher);
-    std::process::id().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    std::env::temp_dir().join(format!("kame-site-{:016x}", hasher.finish()))
+/// named `pages` would be taken for the site's own. Its templates get rendered, so in a temporary
+/// folder others can write to, it has to be one that nobody could have prepared: it's newly made
+/// under a random name, which fails if something is there, and only this user can open it.
+fn new_work_dir(parent: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let work = parent.join(format!("kame-site-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::DirBuilder::new().mode(0o700).create(&work)?;
+    Ok(work)
 }
 
 /// Builds the notebook at `dir` into its `output/` folder, which is replaced only if all of it
@@ -362,7 +362,15 @@ pub fn build(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
         ));
         return None;
     }
-    let work = work_dir(&notebook);
+    let work = match new_work_dir(&std::env::temp_dir()) {
+        Ok(work) => work,
+        Err(err) => {
+            problems
+                .errors
+                .push(format!("could not make a folder to build in: {err}"));
+            return None;
+        }
+    };
     let built = plan_notebook(&notebook, &work, problems).and_then(|mut plan| {
         plan.add(PathBuf::from(MARKER), Output::Bytes(Vec::new()), problems);
         if let Err(err) = crate::write::write_site(&plan, &notebook.root) {
@@ -1039,6 +1047,17 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn the_folder_a_build_works_in_is_private_and_new() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = temp_dir("nbwork");
+        let one = new_work_dir(&parent).unwrap();
+        let other = new_work_dir(&parent).unwrap();
+        assert_ne!(one, other);
+        let mode = std::fs::metadata(&one).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]

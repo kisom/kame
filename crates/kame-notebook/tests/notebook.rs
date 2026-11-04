@@ -424,6 +424,33 @@ mod linking {
     }
 
     #[test]
+    fn only_named_schemes_are_web_links() {
+        use kame_notebook::links::is_web_link;
+        for link in [
+            "https://x.example/",
+            "HTTP://x.example/",
+            "mailto:a@b.c",
+            "//x.example/y",
+            "ftp://x/",
+            "tel:123",
+        ] {
+            assert!(is_web_link(link), "{link}");
+        }
+        for link in [
+            "a:b",
+            "Q3:plan.pdf",
+            "zotero:abc",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "static/x.pdf",
+            "#H",
+            "",
+        ] {
+            assert!(!is_web_link(link), "{link}");
+        }
+    }
+
+    #[test]
     fn a_new_document_takes_the_heading_from_its_link() {
         let (root, _) = with_notebook("heading");
         let file = root.join("a/b/new.kame");

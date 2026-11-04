@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use kame_core::model::{BlockKind, SpanStyle};
-use kame_notebook::links::{is_relative, Follow};
+use kame_notebook::links::{is_web_link, Follow};
 use kame_notebook::{read_document, Notebook, INDEX};
 
 use crate::config::Config;
@@ -52,6 +52,21 @@ fn relative_to(notebook: &Notebook, path: &Path) -> Option<String> {
     )
 }
 
+/// Takes out `.` and `..` by what they say, since what's named may not exist.
+fn tidied_path(path: &Path) -> PathBuf {
+    let mut tidy = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                tidy.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => tidy.push(other),
+        }
+    }
+    tidy
+}
+
 /// Where a link in the document at `from` leads on the site, or `None` to publish it as its text.
 /// A file that isn't there publishes as written, for the web server to answer.
 fn published_link(
@@ -64,19 +79,8 @@ fn published_link(
 ) -> Option<String> {
     let (path, _) = kame_core::links::split_document_target(target);
     let as_written = |notebook: &Notebook| {
-        let named = kame_core::links::resolve_open_path(path, from);
+        let named = tidied_path(&kame_core::links::resolve_open_path(path, from));
         let parts: Vec<String> = named
-            .components()
-            .fold(PathBuf::new(), |mut tidy, part| {
-                match part {
-                    std::path::Component::ParentDir => {
-                        tidy.pop();
-                    }
-                    std::path::Component::CurDir => {}
-                    other => tidy.push(other),
-                }
-                tidy
-            })
             .strip_prefix(&notebook.root)
             .ok()?
             .components()
@@ -118,17 +122,27 @@ fn published_link(
             None
         }
         Follow::Rotted => {
-            let url = as_written(notebook);
-            if url.is_some() {
-                problems.warnings.push(format!(
-                    "\"{slug}\": nothing is at {target}, so its link is left to the web server"
-                ));
-            } else {
-                problems.warnings.push(format!(
-                    "\"{slug}\": the link to {target} publishes as its text: it leads outside the notebook"
-                ));
+            // Only what would be public if it were there is left to the web server, since a page
+            // naming anything else says that it exists.
+            let url = as_written(notebook).filter(|url| url.starts_with("/static/"));
+            let named = kame_core::links::resolve_open_path(path, from);
+            let hidden = url
+                .as_deref()
+                .is_some_and(|url| url.split('/').any(|part| part.starts_with('.')));
+            match url.filter(|_| !hidden && notebook.holds(&tidied_path(&named))) {
+                Some(url) => {
+                    problems.warnings.push(format!(
+                        "\"{slug}\": nothing is at {target}, so its link is left to the web server"
+                    ));
+                    Some(url)
+                }
+                None => {
+                    problems.warnings.push(format!(
+                        "\"{slug}\": the link to {target} publishes as its text: it doesn't lead anywhere public"
+                    ));
+                    None
+                }
             }
-            url
         }
     }
 }
@@ -148,7 +162,9 @@ fn rewrite_links(
         spans.retain_mut(|span| {
             let target = match &span.style {
                 SpanStyle::DocumentLink { target } => target.clone(),
-                SpanStyle::Link { url } if is_relative(url) => url.clone(),
+                SpanStyle::Link { url } if !is_web_link(url) && !url.starts_with('#') => {
+                    url.clone()
+                }
                 _ => return true,
             };
             if target.starts_with('#') {
@@ -178,7 +194,7 @@ fn rewrite_links(
         }
         // An image's link goes the same way as any other.
         if let BlockKind::Image { link, .. } = &mut block.kind {
-            if let Some(url) = link.clone().filter(|url| is_relative(url)) {
+            if let Some(url) = link.clone().filter(|url| !is_web_link(url)) {
                 *link = published_link(notebook, published, &url, &from, &slug, problems);
             }
         }
@@ -364,6 +380,19 @@ pub fn build(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
     Some(site_dir.join("output"))
 }
 
+/// Whether a remote could be read as anything but where to send a site: it has an option at its
+/// start or as its host, or space or control characters to split it up.
+fn bad_remote(remote: &str) -> bool {
+    let host = remote
+        .split_once(':')
+        .filter(|(before, _)| !before.contains('/'))
+        .map_or("", |(before, _)| before);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    remote.starts_with('-')
+        || host.starts_with('-')
+        || remote.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 /// Builds the notebook at `dir` and sends it to its `remote`, as `make sync` does for a site.
 pub fn sync(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
     let remote = match Notebook::open(dir) {
@@ -379,8 +408,8 @@ pub fn sync(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
             .push("notebook.yaml has no remote to send this to".to_string());
         return None;
     };
-    // This file syncs from other machines, and rsync would take this as an option to obey.
-    if remote.starts_with('-') {
+    // This file syncs from other machines, and rsync or ssh would obey an option found in it.
+    if bad_remote(&remote) {
         problems
             .errors
             .push(format!("notebook.yaml has an odd remote, \"{remote}\""));
@@ -816,6 +845,101 @@ mod tests {
         assert!(page(&plan, "public/index.html").contains("/static/c%3Ad.pdf"));
         assert!(page(&plan, "web/index.html").contains("//example.com/x"));
         assert!(page(&plan, "mail/index.html").contains("mailto:a@example.com"));
+    }
+
+    /// Every page's text, for checking that a name appears on none of them.
+    fn everything(plan: &Plan) -> String {
+        plan.files
+            .iter()
+            .filter_map(|(path, output)| match output {
+                Output::Bytes(bytes) if !path.ends_with("fonts") => {
+                    Some(String::from_utf8_lossy(bytes).into_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_file_only_publishes_where_it_would_be_public() {
+        let nb = made("nbmissing", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        std::os::unix::fs::symlink(nb.root.parent().unwrap(), nb.root.join("away")).unwrap();
+        std::os::unix::fs::symlink(nb.root.parent().unwrap(), {
+            std::fs::create_dir_all(nb.root.join("static")).unwrap();
+            nb.root.join("static/away")
+        })
+        .unwrap();
+        for (name, url) in [
+            ("a", "papers/secret-plan.pdf"),
+            ("b", "away/secret-plan.pdf"),
+            ("c", ".hidden/secret-plan.pdf"),
+            ("d", "theme/secret-plan.pdf"),
+            ("e", "static/away/secret-plan.pdf"),
+            ("f", "static/.hidden/secret-plan.pdf"),
+            ("g", "Q3:secret-plan.pdf"),
+            ("h", "zotero:secret-plan"),
+        ] {
+            nb.document(
+                &format!("{name}.kame"),
+                true,
+                &linking(
+                    "The words.",
+                    SpanStyle::Link {
+                        url: url.to_string(),
+                    },
+                ),
+            );
+        }
+        nb.document(
+            "kept.kame",
+            true,
+            &linking(
+                "The words.",
+                SpanStyle::Link {
+                    url: "static/gone.pdf".to_string(),
+                },
+            ),
+        );
+        let (plan, problems) = nb.plan();
+        let all = everything(&plan);
+        assert!(!all.contains("secret-plan"), "a private name leaked");
+        assert!(page(&plan, "kept/index.html").contains("href=\"/static/gone.pdf\""));
+        for name in [
+            "a.kame", "b.kame", "c.kame", "d.kame", "e.kame", "f.kame", "g.kame", "h.kame",
+        ] {
+            assert!(
+                problems
+                    .warnings
+                    .iter()
+                    .any(|said| said.contains(name) && said.contains("as its text")),
+                "{name}: {:?}",
+                problems.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_remote_that_can_only_be_a_destination_is_used() {
+        for remote in [
+            "--rsh=x",
+            "\" --rsh=x\"",
+            "x@-oProxyCommand=y:/p",
+            "-oProxyCommand=y:/p",
+            "host -o y:/p",
+            "\"a\\nb:/p\"a\nb:/p",
+        ] {
+            assert!(bad_remote(remote.trim_matches('"')), "{remote}");
+        }
+        for remote in [
+            "kyle@host:/srv/philosophy/",
+            "host:/srv/x",
+            "/srv/local/",
+            "../up/",
+            "user@host.example.net:site",
+        ] {
+            assert!(!bad_remote(remote), "{remote}");
+        }
     }
 
     #[test]

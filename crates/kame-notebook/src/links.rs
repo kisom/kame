@@ -23,6 +23,20 @@ pub enum Follow {
     Rotted,
 }
 
+/// Whether a link leaves for the web, by naming a scheme known to, or by `//`, another host. Anything
+/// else that looks like a scheme may be a file with a colon in its name, so it isn't assumed to be
+/// safe to publish as it stands.
+pub fn is_web_link(link: &str) -> bool {
+    if link.starts_with("//") {
+        return true;
+    }
+    link.split_once(':').is_some_and(|(scheme, _)| {
+        ["http", "https", "mailto", "ftp", "ftps", "tel", "sms"]
+            .iter()
+            .any(|known| scheme.eq_ignore_ascii_case(known))
+    })
+}
+
 /// Whether a link is a path, rather than a web address or the like. A scheme is letters, digits
 /// and a little punctuation before the first colon, so a colon further along a path doesn't make
 /// one, and `//` leads to another host as it would in a browser.
@@ -62,7 +76,7 @@ fn tidied(path: &Path) -> PathBuf {
 impl Notebook {
     /// Whether `path` is inside the notebook, going by the real location of as much of it as exists,
     /// so that a symbolic link can't lead out.
-    fn holds(&self, path: &Path) -> bool {
+    pub fn holds(&self, path: &Path) -> bool {
         if !path.starts_with(&self.root) {
             return false;
         }

@@ -2639,8 +2639,12 @@ impl KameApp {
     /// Replaces the session, resetting the view state that pointed into the old
     /// document (open note, find bar, typewriter anchor, caches).
     fn adopt_session(&mut self, session: Session) {
-        // The last of this document's words go in its logs before it's left.
-        self.sync_logs();
+        // The last of this document's words go in its logs before it's left. Not if `session` is
+        // on the same file: it has read that file already, and a merge now would leave it stale,
+        // so whoever is reopening a file syncs first.
+        if !same_document(self.session.path(), session.path()) {
+            self.sync_logs();
+        }
         self.logged = None;
         self.logged_path = None;
         self.orphan_mentioned = false;
@@ -5481,6 +5485,7 @@ impl KameApp {
         let path = resolve_open_path(&typed, &base);
         // Before the open, which may be of this same file.
         self.save_position_now();
+        self.sync_logs();
         if let Err(err) = kame_sync::logs::build_from_logs(&path) {
             self.session.last_error = Some(format!(
                 "could not build {} from its logs — {err}",

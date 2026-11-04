@@ -529,3 +529,25 @@ fn a_link_to_a_document_with_only_logs_builds_it() {
     let none = find_or_build("nothing", &titan.path).unwrap();
     assert_eq!(none, None);
 }
+
+#[test]
+fn a_remembered_revision_missing_from_the_logs_starts_from_the_history_again() {
+    let (talos, titan) = two_machines();
+    let mut there = talos.session();
+    talos.sync(&mut there, 1);
+    let checkpoints = revisions(&talos.path);
+    assert!(checkpoints > 1);
+    // As after Save As, or the logs being cleared: the database remembers what isn't there.
+    std::fs::remove_dir_all(log_folder(&talos.path)).unwrap();
+    talos.sync(&mut there, 2);
+    assert_eq!(
+        revisions(&talos.path),
+        checkpoints,
+        "the same checkpoints again"
+    );
+
+    let mut here = titan.session();
+    titan.sync(&mut here, 3);
+    titan.receive_from(&talos);
+    assert_eq!(titan.sync(&mut here, 4).notes, 0);
+}

@@ -2,7 +2,8 @@
 
 Date: 2026-11-03
 Status: accepted 2026-11-03, including `sha2`. A working proof of concept is in `crates/kame-sync`. Written overnight without
-a chance to ask, so section 10 lists every decision made on your behalf.
+a chance to ask, so section 10 lists every decision made on your behalf. Section 13 is a second pass on what stage 2 needs,
+which is a draft for your review.
 
 ## 1. Purpose
 
@@ -138,7 +139,7 @@ Each stage is useful alone.
    Them. Words on the screen stay in the text and the other version goes in a note. Each merge is one
    undo step after a snapshot, and a merged copy is renamed `.merged`, not deleted. No format change.
    `kame-sync merge A.kame B.kame OUT.kame` does the same from the command line.
-2. **Revision logs in the app**, opt-in per document, with `*.kame` added to `.stignore`.
+2. **Revision logs in the app**, opt-in per folder, as section 13 sets out.
 3. **The notebook.** The same logs per document give a binder its sync with nothing further.
 
 ## 9. Evidence
@@ -201,9 +202,8 @@ database, and 125 KB for MultiKame against 397 KB.
 - **Crossed merges** with several shared ancestors use one of them. It agrees everywhere, but can raise
   a conflict again.
 - **wntrmute** was unreachable by ssh, so it took no part.
-- **Before this goes in the app:** reading logs and finding ancestors is quadratic in history (7 s for
-  400 revisions in the study, mostly from re-reading). Logs need caching and eventually trimming. Device
-  names must be unique, since a log with two writers breaks the whole idea. Nothing here touches the app.
+- **Before this goes in the app:** see section 13 for reading logs, trimming and unique device names.
+  Nothing here touches the app.
 
 ## 12. Trying it
 
@@ -212,3 +212,101 @@ cargo run -p kame-sync -- merge A.kame B.kame OUT.kame   # never changes A or B
 cargo run -p kame-sync -- trial DOC.kame                 # prints counts only
 cargo run -p kame-sync -- study DOC.kame                 # what logs would weigh
 ```
+
+## 13. Second pass: what stage 2 needs
+
+The test throughout is how easily each decision can be undone. Essays are what's at stake, and this software is days old, so
+the lack of any conflict so far says nothing.
+
+**Opting in is by folder, not by document.** Section 8 used to say per document with `*.kame` in `.stignore`, which contradicts
+itself: that line stops every document syncing, including those not opted in, and a document could silently stop moving between
+machines. So what's logged and what's ignored have to be the same set, which means a folder:
+
+- A file named `.kame-logs` in a folder turns on logs for every document under it, found by looking up through parent folders, as
+  a notebook is found. It's empty and it syncs, so every machine agrees.
+- That folder's databases are ignored with one line per folder in `~/data/.stignore`, such as
+  `/writing/notebook-test/**.kame`, added by hand on each machine. Syncthing doesn't sync that file, though it can `#include` one
+  that it does, which could make this one edit.
+- A notebook is then simply a folder that may have this file. The sync design doesn't need a notebook, and a notebook doesn't
+  need logs.
+- If the line is missing on a machine, its database keeps travelling too. That's today's situation, with `file-guard` and merging
+  as the net, so nothing is lost, but it's noisy. If the file is missing and the line isn't, documents stop moving with no
+  warning, so kame should warn when a document's database is older than a log beside it. That needs testing.
+
+**The database stays beside the document.** The alternative in section 10, a `.kame` folder with the database in
+`~/.local/state`, needs no ignore rule, but it changes what a `.kame` is, and can't be tried on one folder and taken back.
+Keeping it beside the document is purely additive: logs are added, and nothing about a `.kame` changes.
+
+**Going back.** Remove the `.stignore` line, and the databases sync again, as conflict copies at worst. Merging two databases with
+no shared history was tried, and added no notes and lost no words in the three cases below. Then delete `.kame-logs` and the
+`.sync` folders.
+
+| Case | Notes added | Words lost |
+|---|---:|---:|
+| Same text, separate histories | 0 | 0 |
+| Each edited a different block, from the same revision | 0 | 0 |
+| Built from different revisions, with no edits since | 0 | 0 |
+
+Not tried: both built from different revisions and then edited, which should give notes where they overlap.
+
+**What opting in gives up.** The database no longer travels, so snapshots and undo history stay on the machine that made them.
+Every revision's text is in the logs everywhere, so nothing written is lost with a machine, but going back to an old revision
+needs a command that doesn't exist yet. Snapshots made before opting in stay in each machine's copy of the database.
+
+**A document with only logs.** A fresh machine has `X.kame.sync/` and no `X.kame`. It's a document all the same, listed by the
+title in its latest revision, and opening it builds the database, as section 7 says. For a notebook:
+
+- The list of documents counts `X.kame.sync/` with no `X.kame`.
+- A database can lag behind its logs, when another machine wrote while this one's copy was closed. So the database records how
+  much of each log it has seen, and comparing that with the logs' sizes finds the ones behind.
+- On opening a notebook, a background pass brings those up to date: building what's missing and merging what's new, into the
+  ignored database. Search then reads head rows as the notebook design says, and those it hasn't reached yet are read from the
+  logs. This writes only to databases, and never during a search.
+
+**Reading logs is fast enough.** Measured on the real histories in `notebook-test`. The 7 seconds in section 11 was the prototype
+reloading every log for each of 400 revisions, and it isn't the cost of a read. Each log read here is well under the time a person
+would notice. A notebook can't read all its logs for each search, which is why the databases are kept up to date.
+
+| History | Revisions | Log | Database | Reading the log | Finding heads |
+|---|---:|---:|---:|---:|---:|
+| 2,644 words, 4,102 ops, every 50 ops | 84 | 266 KB | 815 KB | 2.6 ms | 0.2 ms |
+| The same, every 10 ops | 411 | 1.1 MB | 815 KB | 4.2 ms | 0.4 ms |
+| 1,356 words, every 50 ops | 48 | 124 KB | 356 KB | 0.5 ms | under 0.1 ms |
+| 674 words, every 50 ops | 64 | 125 KB | 397 KB | 0.6 ms | 0.1 ms |
+
+At sizes no essay reaches, with made-up edits to the longest of these:
+
+| Revisions | Log | Reading | Heads, now | Heads, fixed | Ancestor, now | Ancestor, fixed | One new revision, keeping logs in memory |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 400 | 1.6 MB | 5 ms | 2.7 ms | 0.5 ms | 8 ms | 0.2 ms | 2.7 ms |
+| 2,000 | 8.2 MB | 26 ms | 97 ms | 3.6 ms | 254 ms | 1.1 ms | 14 ms |
+| 10,000 | 46 MB | 137 ms | not run | 30 ms | not run | 8.8 ms | 101 ms |
+
+Reading 100 documents' logs of 200 revisions each, with their heads, took 305 ms. That's about 3 ms a document, against under
+0.1 ms for a head row.
+
+- **Two fixes are needed.** `usable` and `shared_ancestor` each become linear. In a scratch copy, both gave the same answers as the
+  prototype on every history above up to 2,000 revisions, which matters since every machine has to choose alike. None of those
+  histories has crossed merges, so a test has to cover that.
+- **The app keeps a loaded log in memory** while a document is open, and reads only what's new.
+- **Revisions on a pause, at about one per 50 ops.** Every 10 ops makes a log bigger than the database. Most of a log's weight is
+  a whole paragraph repeated each time it changes, and the list of notes in every revision.
+
+**No trimming yet.** A log at this rate stays smaller than its database. Trimming would have to keep the shared ancestor that a
+machine long offline needs, so it isn't simple, and it can be added later without changing the format of what's already written.
+
+**Device names can't collide.** Each machine picks its name once, as its host name and four random characters, and keeps it in
+`config.json`: `talos-3f9a.log`. Notes still say "On talos". Reinstalling makes a new log, which is safe, whereas two machines
+writing one log would break the premise.
+
+**How often conflict notes appear stays unknown.** It can't be learned until this is in use, and being opt-in by folder is what
+makes that safe. Try it on `notebook-test` first, then on one real folder, and see.
+
+### Stage 2, in order
+
+1. In `kame-sync`: the two linear fixes, reading only what's new, device names, and the database recording what it has seen.
+2. `.kame-logs`, with the app writing revisions and merging when a document is open. Tried on `notebook-test` on Talos and Titan.
+3. A database built from logs on opening, and kame warning when a log is newer than expected.
+4. A real folder.
+
+The background pass waits for the notebook. `kame-site` reading from logs follows once a published folder opts in.

@@ -2014,7 +2014,7 @@ fn block_height(
     document: Option<&Path>,
 ) -> f32 {
     if let BlockKind::Image { path, .. } = &block.kind {
-        return image_height(&image_file(path, document), config.body_width);
+        return image_size(&image_file(path, document), config.body_width).y;
     }
     let minimum = match block.kind {
         crate::model::BlockKind::Heading { level } => heading_size_for(config, level) * 1.4,
@@ -2026,13 +2026,19 @@ fn block_height(
 /// Height of the placeholder drawn for an image that cannot be read.
 const MISSING_IMAGE_HEIGHT: f32 = 72.0;
 
-/// Display height of an image at `width`, preserving its aspect ratio. A file
-/// that cannot be read (or reports a zero dimension) takes a short placeholder's
-/// height, which says what is missing without leaving a blank stretch of page.
-fn image_height(path: &Path, width: f32) -> f32 {
+/// How large an image is drawn in a column `width` across. One that fits is shown at its own
+/// size, a pixel to a point, as a browser would, and a wider one is scaled down to the column,
+/// keeping its shape. A file that can't be read (or reports a zero dimension) takes the whole
+/// column at a short placeholder's height, which says what is missing without leaving a blank
+/// stretch of page.
+fn image_size(path: &Path, width: f32) -> Vec2 {
     match image::image_dimensions(path) {
-        Ok((w, h)) if w > 0 && h > 0 => width * h as f32 / w as f32,
-        _ => MISSING_IMAGE_HEIGHT,
+        Ok((w, h)) if w > 0 && h > 0 => {
+            let (w, h) = (w as f32, h as f32);
+            let scale = (width / w).min(1.0);
+            Vec2::new(w * scale, h * scale)
+        }
+        _ => Vec2::new(width, MISSING_IMAGE_HEIGHT),
     }
 }
 
@@ -4066,14 +4072,11 @@ impl KameApp {
                 continue;
             }
             if let BlockKind::Image { path, .. } = &block.kind {
-                // An image spans the measure at body width; its height keeps
-                // the source's aspect ratio (already baked into `tops`).
+                // At its own size if it fits the measure, and scaled to it if not. Its
+                // height is already baked into `tops`.
                 let file = image_file(path, self.session.path());
-                let height = image_height(&file, config.body_width);
-                let rect = Rect::from_min_size(
-                    Pos2::new(body_left, tops[index]),
-                    Vec2::new(config.body_width, height),
-                );
+                let size = image_size(&file, config.body_width);
+                let rect = Rect::from_min_size(Pos2::new(body_left, tops[index]), size);
                 if let Some(texture) = self.image_textures.get(path) {
                     painter.image(texture.id(), rect, uv, Color32::WHITE);
                 } else {
@@ -6994,13 +6997,13 @@ mod tests {
             .unwrap();
         let document = dir.join("maritain/essay.kame");
         let file = image_file("../static/wide.png", Some(&document));
-        assert_eq!(image_height(&file, 600.0), 300.0);
+        assert_eq!(image_size(&file, 600.0), Vec2::new(200.0, 100.0));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_missing_image_reserves_a_short_placeholder() {
-        let height = image_height(Path::new("/does/not/exist.png"), 600.0);
+        let height = image_size(Path::new("/does/not/exist.png"), 600.0).y;
         assert_eq!(height, MISSING_IMAGE_HEIGHT);
         assert!(
             height < 120.0,
@@ -7393,7 +7396,7 @@ mod tests {
     }
 
     #[test]
-    fn image_height_preserves_aspect_ratio_and_falls_back() {
+    fn an_image_is_shown_at_its_own_size_unless_it_is_too_wide() {
         // Write a real 200×100 image to test the aspect ratio.
         let dir = test_temp_dir().join(format!("kame-img-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -7403,7 +7406,12 @@ mod tests {
             .unwrap();
 
         // A 2:1 image at 600px wide is 300px tall.
-        assert_eq!(image_height(&path, 600.0), 300.0);
+        // Narrower than the column, a 2:1 image is shown at its own size.
+        assert_eq!(image_size(&path, 600.0), Vec2::new(200.0, 100.0));
+        // Exactly the column's width, it's the same.
+        assert_eq!(image_size(&path, 200.0), Vec2::new(200.0, 100.0));
+        // Wider than the column, it's scaled to fit and keeps its shape.
+        assert_eq!(image_size(&path, 100.0), Vec2::new(100.0, 50.0));
         // An unreadable path reserves a 3:2 box instead of collapsing.
     }
 

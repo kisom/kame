@@ -681,3 +681,72 @@ fn a_list_is_read_again_only_when_what_is_there_has_changed() {
         "or left"
     );
 }
+
+mod starting {
+    use super::*;
+    use kame_notebook::init;
+
+    #[test]
+    fn a_new_notebook_has_settings_and_a_contents_page() {
+        let parent = folder("init");
+        let root = parent.join("deep/Philosophy");
+        let made = init(&root).unwrap();
+        assert_eq!(made.title(), "Philosophy");
+        assert!(root.join("notebook.yaml").is_file());
+        let index = made.index().unwrap();
+        assert_eq!(index, made.root.join("Notebook.kame"));
+        let session = Session::open(&index).unwrap();
+        assert_eq!(session.document().blocks[0].text, "Philosophy");
+        assert!(session.heading_cursor("Philosophy").is_some());
+        assert_eq!(session.history(), (0, 0), "there's nothing to undo");
+    }
+
+    #[test]
+    fn its_settings_file_reads_back_and_shows_what_can_go_in_it() {
+        let root = folder("initread");
+        init(&root).unwrap();
+        let yaml = std::fs::read_to_string(root.join("notebook.yaml")).unwrap();
+        for key in ["title", "url", "author", "remote"] {
+            assert!(yaml.contains(key), "{yaml}");
+        }
+        assert_eq!(Notebook::open(&root).unwrap().settings, Default::default());
+        let uncommented = yaml.replace("# title:", "title:");
+        std::fs::write(root.join("notebook.yaml"), uncommented).unwrap();
+        assert!(Notebook::open(&root).unwrap().settings.title.is_some());
+    }
+
+    #[test]
+    fn a_notebook_can_begin_in_a_folder_that_already_has_documents() {
+        let root = folder("initkeep");
+        document(&root.join("Notebook.kame"), "My own contents.");
+        document(&root.join("essay.kame"), "An essay.");
+        init(&root).unwrap();
+        let session = Session::open(&root.join("Notebook.kame")).unwrap();
+        assert_eq!(
+            session.document().blocks[0].text,
+            "My own contents.",
+            "kept"
+        );
+        assert_eq!(notebook(&root).documents().len(), 2);
+    }
+
+    #[test]
+    fn a_folder_that_is_already_a_notebook_is_refused_and_left_alone() {
+        let root = folder("initagain");
+        std::fs::write(root.join("notebook.yaml"), "title: Mine\n").unwrap();
+        let error = init(&root).unwrap_err();
+        assert!(error.contains("already"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("notebook.yaml")).unwrap(),
+            "title: Mine\n"
+        );
+        assert!(!root.join("Notebook.kame").exists());
+    }
+
+    #[test]
+    fn a_file_in_the_way_is_refused() {
+        let root = folder("initfile");
+        std::fs::write(root.join("taken"), "x").unwrap();
+        assert!(init(&root.join("taken")).is_err());
+    }
+}

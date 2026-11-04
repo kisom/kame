@@ -1208,6 +1208,18 @@ mod tests {
     }
 
     #[test]
+    fn the_command_line_starts_a_notebook_and_says_so() {
+        let dir = temp_dir("nbnew");
+        let root = dir.join("Fresh");
+        let args = ["new-notebook".to_string(), root.display().to_string()];
+        assert_eq!(crate::run(&args), 0);
+        assert!(root.join("notebook.yaml").is_file());
+        assert!(root.join("Notebook.kame").is_file());
+        assert_eq!(crate::run(&args), 1, "not twice");
+        assert_eq!(crate::run(&["new-notebook".to_string()]), 2);
+    }
+
+    #[test]
     fn a_notebook_is_told_from_a_site_by_its_files() {
         let nb = made("nbkind", "");
         assert!(is_notebook(&nb.root));

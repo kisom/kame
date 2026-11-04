@@ -62,6 +62,8 @@ remote: kyle@host:/srv/philosophy/
 publishing. `remote` is the same idea as `UPSTREAM` in a `kame-site` Makefile. Unknown keys are refused, as in
 `site.yaml`, so a typo shows up instead of quietly doing nothing.
 
+**Starting one.** File > New Notebook…, or `kame-site new-notebook DIR`, writes a `notebook.yaml` of commented-out settings, and a `Notebook.kame` unless there is one. A folder that's already a notebook is refused.
+
 **Finding the notebook.** Opening any document looks up through its parent folders for a `notebook.yaml`, and the
 nearest one wins. So there's no separate step to enter a notebook, and a notebook inside another is just its own
 notebook. `kame philosophy/` opens its `Notebook.kame`, or the browser if there isn't one.

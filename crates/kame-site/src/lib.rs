@@ -34,7 +34,7 @@ pub fn build(site_dir: &std::path::Path, include_drafts: bool) -> Problems {
 }
 
 const USAGE: &str =
-    "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site sync [--yes] [DIR]\n  kame-site regen-theme [DIR]";
+    "usage:\n  kame-site new DIR\n  kame-site new-notebook DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site sync [--yes] [DIR]\n  kame-site regen-theme [DIR]";
 
 /// The command line, without its program name. Returns the exit code: 1 when the work
 /// failed, and 2 when the command wasn't understood.
@@ -49,6 +49,26 @@ pub fn run(args: &[String]) -> i32 {
             match starter::new_site(std::path::Path::new(dir)) {
                 Ok(()) => {
                     println!("Created a site in {dir}. Edit site.yaml, then run kame-site build.");
+                    0
+                }
+                Err(err) => {
+                    eprintln!("kame-site: {err}");
+                    1
+                }
+            }
+        }
+        Some("new-notebook") => {
+            let (Some(dir), None) = (args.next(), args.next()) else {
+                eprintln!("{USAGE}");
+                return 2;
+            };
+            match kame_notebook::init(std::path::Path::new(dir)) {
+                Ok(notebook) => {
+                    println!(
+                        "Created a notebook in {}. Open its {} in kame to start.",
+                        notebook.root.display(),
+                        kame_notebook::INDEX
+                    );
                     0
                 }
                 Err(err) => {

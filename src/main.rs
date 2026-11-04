@@ -184,6 +184,16 @@ fn highlight_map(
 }
 /// The document to start with: the one named, or else the last one, if it is still
 /// there. Opening a missing path would create it, which only a request should do.
+/// The arguments for the site tool, if that's what was asked for: `kame site ...`, or this program
+/// run under the name `kame-site`, as through a link to it. A file named `site` can be opened as
+/// `./site`.
+fn site_arguments(program: &Path, args: &[String]) -> Option<Vec<String>> {
+    if program.file_stem().is_some_and(|name| name == "kame-site") {
+        return Some(args.to_vec());
+    }
+    (args.first().map(String::as_str) == Some("site")).then(|| args[1..].to_vec())
+}
+
 /// The file named on the command line, as a full path. A relative one would later be read against
 /// whichever document was open, so coming back to it could open or make the wrong file.
 fn launch_path(argument: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -721,6 +731,11 @@ fn pick_open_path(directory: Option<&Path>) -> Option<PathBuf> {
         .add_filter("kame document", &["kame"])
         .add_filter("Markdown", &["md", "markdown"])
         .pick_file()
+}
+
+/// The native file browser for the folder of a new notebook, or `None` if it is cancelled.
+fn pick_notebook_folder(directory: Option<&Path>) -> Option<PathBuf> {
+    file_dialog("New Notebook", directory).pick_folder()
 }
 
 /// The native file browser for a document to link to, or `None` if it is cancelled.
@@ -1370,6 +1385,7 @@ enum MarkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    NewNotebook,
     ToggleBrowser,
     NotebookHome,
     Jump,
@@ -1679,6 +1695,13 @@ fn app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    // The site tool comes with the app, which opens no window for it.
+    let mut arguments = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
+    let program = arguments.next().unwrap_or_default();
+    let rest: Vec<String> = arguments.collect();
+    if let Some(site) = site_arguments(Path::new(&program), &rest) {
+        std::process::exit(kame_site::run(&site));
+    }
     // The type size and theme are kame preferences, read once here and applied
     // to every document the app opens.
     let config = load_config();
@@ -3338,6 +3361,9 @@ impl KameApp {
                     if menu_item(ui, "New", Some("Ctrl-N"), false) {
                         action = Some(MenuAction::New);
                     }
+                    if menu_item(ui, "New Notebook…", None, false) {
+                        action = Some(MenuAction::NewNotebook);
+                    }
                     if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
                         action = Some(MenuAction::Open);
                     }
@@ -3541,6 +3567,7 @@ impl KameApp {
             },
             MenuAction::LinkDocument => self.link_document_with_dialog(),
             MenuAction::New => self.request_new(),
+            MenuAction::NewNotebook => self.new_notebook(),
             MenuAction::Open => self.open_with_dialog(),
             MenuAction::OpenPath => self.begin_open(),
             MenuAction::Save => self.save_action(ctx, false),
@@ -8090,6 +8117,40 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             Some(PathBuf::from("/already/full.kame"))
         );
         assert_eq!(launch_path(None), None);
+    }
+
+    fn site_args(program: &str, args: &[&str]) -> Option<Vec<String>> {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        site_arguments(program.as_ref(), &args)
+    }
+
+    #[test]
+    fn the_site_tool_is_reached_by_a_word_or_by_the_programs_name() {
+        let build = || Some(vec!["build".to_string(), "dir".to_string()]);
+        assert_eq!(site_args("kame", &["site", "build", "dir"]), build());
+        assert_eq!(
+            site_args("/a/kame.app/Contents/MacOS/kame", &["site", "build", "dir"]),
+            build()
+        );
+        assert_eq!(site_args("kame-site", &["build", "dir"]), build());
+        assert_eq!(
+            site_args("/home/k/.local/bin/kame-site", &["build", "dir"]),
+            build()
+        );
+        assert_eq!(site_args("kame-site", &[]), Some(Vec::new()));
+        assert_eq!(site_args("kame", &["site"]), Some(Vec::new()));
+    }
+
+    #[test]
+    fn anything_else_opens_the_app() {
+        assert_eq!(site_args("kame", &[]), None);
+        assert_eq!(site_args("kame", &["essay.kame"]), None);
+        assert_eq!(
+            site_args("kame", &["./site"]),
+            None,
+            "a file named site, said plainly"
+        );
+        assert_eq!(site_args("kame", &["essay.kame", "site"]), None);
     }
 
     #[test]

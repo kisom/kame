@@ -64,8 +64,12 @@ impl Notebook {
         let file = root.join(SETTINGS);
         let yaml = std::fs::read_to_string(&file)
             .map_err(|err| format!("could not read {}: {err}", file.display()))?;
-        // An empty file is a fine notebook, with every setting left out.
-        let settings = if yaml.trim().is_empty() {
+        // An empty file is a fine notebook, with every setting left out, and so is one with
+        // nothing but comments, as a new one has.
+        let says_nothing = yaml
+            .lines()
+            .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'));
+        let settings = if says_nothing {
             Settings::default()
         } else {
             yaml_serde::from_str(&yaml).map_err(|err| format!("{}: {err}", file.display()))?
@@ -93,6 +97,43 @@ impl Notebook {
         let index = self.root.join(INDEX);
         (index.is_file() || kame_sync::logs::log_folder(&index).is_dir()).then_some(index)
     }
+}
+
+/// What a new `notebook.yaml` holds: only what could go in it, so that it starts with the folder's
+/// name for a title and nothing set.
+const NEW_SETTINGS: &str = "\
+# All of these are optional. Take away the # to use one.
+#
+# title: A name, if not the folder's
+#
+# These are for publishing, with kame-site.
+# url: https://example.net/
+# author: Your Name
+# remote: you@host:/srv/site/
+";
+
+/// Makes `root` a notebook, with any folders that takes, a `notebook.yaml`, and a contents page
+/// unless it has one. A folder that's already a notebook is refused and left alone.
+pub fn init(root: &Path) -> Result<Notebook, String> {
+    let settings = root.join(SETTINGS);
+    if settings.exists() {
+        return Err(format!("{} is already a notebook", root.display()));
+    }
+    std::fs::create_dir_all(root)
+        .map_err(|err| format!("could not make {}: {err}", root.display()))?;
+    let index = root.join(INDEX);
+    if !index.exists() {
+        let root = root.canonicalize().map_err(|err| err.to_string())?;
+        let title = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        links::create_document(&root.join(INDEX), title.as_deref())
+            .map_err(|err| format!("could not make its contents page: {err}"))?;
+    }
+    // Last, since this is what makes it a notebook, so that a failure leaves it not one.
+    std::fs::write(&settings, NEW_SETTINGS)
+        .map_err(|err| format!("could not write {}: {err}", settings.display()))?;
+    Notebook::open(root)
 }
 
 /// A document's text and properties, read and never changed, whatever form it's in: a database,

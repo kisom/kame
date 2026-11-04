@@ -12,6 +12,7 @@ default-members = [".", "crates/*"]
 kame-check = { path = "crates/kame-check" }
 kame-core = { path = "crates/kame-core" }
 kame-notebook = { path = "crates/kame-notebook" }
+kame-site = { path = "crates/kame-site" }
 kame-sync = { path = "crates/kame-sync" }
 kame-typeset = { path = "crates/kame-typeset" }
 eframe = "0.37"

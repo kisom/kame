@@ -302,6 +302,9 @@ save this version under a new name, or open the one on disk.
 
 ## Notebooks
 
+File > New Notebook… makes a folder you choose into a notebook, keeping anything already in it, and opens its new `Notebook.kame`. So does
+`kame site new-notebook FOLDER`, which then needs opening.
+
 A folder with a `notebook.yaml` in it is a notebook, and opening any document under it is opening the notebook. `kame FOLDER` opens its
 `Notebook.kame`, or the browser if it has none. The file holds `title`, `url`, `author` and `remote`, all optional, and an empty one
 is fine. These do something only in a notebook, and are also in the View menu:
@@ -326,6 +329,17 @@ opened.
 
 To move or delete a document in a folder with revision logs, move or delete both `X.kame` and `.X.kame.sync/`. Moving one leaves a stale copy
 on the other machine for now.
+
+### The site tool
+
+`kame site ...` is `kame-site ...`, with no window, so the app is all you need to have. Run under the name `kame-site` it behaves as that
+too, so on a Mac a link keeps the two in step:
+
+```sh
+ln -sf ~/Applications/kame.app/Contents/MacOS/kame ~/.local/bin/kame-site
+```
+
+A file named `site` opens as `kame ./site`.
 
 ### Publishing a notebook
 

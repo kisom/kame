@@ -302,6 +302,22 @@ impl KameApp {
         }
     }
 
+    /// File > New Notebook: makes a chosen folder a notebook, and opens its contents page.
+    pub(crate) fn new_notebook(&mut self) {
+        let Some(folder) = super::pick_notebook_folder(self.session.dialog_directory().as_deref())
+        else {
+            return;
+        };
+        match kame_notebook::init(&folder) {
+            Ok(notebook) => {
+                if let Some(index) = notebook.index() {
+                    self.open_or_confirm(index);
+                }
+            }
+            Err(err) => self.session.last_error = Some(err),
+        }
+    }
+
     /// Goes to the contents page, with Ctrl-[ coming back.
     pub(crate) fn go_home(&mut self) {
         match self.nb.notebook.as_ref().and_then(Notebook::index) {

@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod feed;
+pub mod notebook;
 pub mod pages;
 pub mod plan;
 pub mod refs;
@@ -33,7 +34,7 @@ pub fn build(site_dir: &std::path::Path, include_drafts: bool) -> Problems {
 }
 
 const USAGE: &str =
-    "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site regen-theme [DIR]";
+    "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site sync [DIR]\n  kame-site regen-theme [DIR]";
 
 /// The command line, without its program name. Returns the exit code: 1 when the work
 /// failed, and 2 when the command wasn't understood.
@@ -90,7 +91,13 @@ pub fn run(args: &[String]) -> i32 {
                     other => dir = Some(other),
                 }
             }
-            let problems = build(std::path::Path::new(dir.unwrap_or(".")), include_drafts);
+            let dir = std::path::Path::new(dir.unwrap_or("."));
+            if notebook::is_notebook(dir) {
+                let mut problems = Problems::default();
+                let output = notebook::build(dir, &mut problems);
+                return finish_notebook(output, problems);
+            }
+            let problems = build(dir, include_drafts);
             for warning in &problems.warnings {
                 eprintln!("warning: {warning}");
             }
@@ -99,9 +106,41 @@ pub fn run(args: &[String]) -> i32 {
             }
             i32::from(!problems.errors.is_empty())
         }
+        Some("sync") => {
+            let dir = args.next().unwrap_or(".");
+            if args.next().is_some() {
+                eprintln!("{USAGE}");
+                return 2;
+            }
+            let dir = std::path::Path::new(dir);
+            if !notebook::is_notebook(dir) {
+                eprintln!(
+                    "kame-site: sync is for a notebook, and {} has no notebook.yaml",
+                    dir.display()
+                );
+                return 1;
+            }
+            let mut problems = Problems::default();
+            let output = notebook::sync(dir, &mut problems);
+            finish_notebook(output, problems)
+        }
         _ => {
             eprintln!("{USAGE}");
             2
         }
     }
+}
+
+/// Says how a notebook's build went, and what its exit code is.
+fn finish_notebook(output: Option<std::path::PathBuf>, problems: Problems) -> i32 {
+    for warning in &problems.warnings {
+        eprintln!("warning: {warning}");
+    }
+    for error in &problems.errors {
+        eprintln!("error: {error}");
+    }
+    if let Some(output) = &output {
+        println!("Built in {}", output.display());
+    }
+    i32::from(output.is_none() || !problems.errors.is_empty())
 }

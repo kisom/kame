@@ -69,7 +69,7 @@ impl SiteIndex {
 }
 
 /// `text` as it can appear in a URL's path.
-fn percent_encode(text: &str) -> String {
+pub(crate) fn percent_encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
         match byte {

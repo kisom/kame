@@ -115,7 +115,7 @@ fn files_under(dir: &Path, found: &mut Vec<PathBuf>) {
 
 impl Plan {
     /// Adds a generated file, or reports what it collides with.
-    fn add(&mut self, path: PathBuf, output: Output, problems: &mut Problems) {
+    pub(crate) fn add(&mut self, path: PathBuf, output: Output, problems: &mut Problems) {
         if self.files.contains_key(&path) {
             problems
                 .errors
@@ -189,6 +189,17 @@ pub fn build_plan(site_dir: &Path, include_drafts: bool, problems: &mut Problems
         }
     };
     let sources = read_all(&config, include_drafts, problems);
+    plan_site(site_dir, &config, sources, problems)
+}
+
+/// Works out a whole site from what it's made of, with nothing written. A document at `/` is the
+/// home page, in place of the usual listing, and a site with no URL has no feed, which needs one.
+pub fn plan_site(
+    site_dir: &Path,
+    config: &Config,
+    sources: Vec<Source>,
+    problems: &mut Problems,
+) -> Option<Plan> {
     let pages: Vec<Page> = pages::read_all(site_dir, problems);
     let extra: Vec<String> = pages.iter().map(|page| page.template.clone()).collect();
     let env = load_templates(site_dir, &extra, problems);
@@ -269,13 +280,15 @@ pub fn build_plan(site_dir: &Path, include_drafts: bool, problems: &mut Problems
     }
 
     // The listings.
-    let home = render(
-        &env,
-        "index.html",
-        context! { site => site.clone(), kame_css => kame_css.clone(), documents => listed.clone() },
-        problems,
-    );
-    plan.add(PathBuf::from("index.html"), Output::Bytes(home), problems);
+    if !sources.iter().any(|source| source.url() == "/") {
+        let home = render(
+            &env,
+            "index.html",
+            context! { site => site.clone(), kame_css => kame_css.clone(), documents => listed.clone() },
+            problems,
+        );
+        plan.add(PathBuf::from("index.html"), Output::Bytes(home), problems);
+    }
     let archive = render(
         &env,
         "archive.html",
@@ -331,12 +344,14 @@ pub fn build_plan(site_dir: &Path, include_drafts: bool, problems: &mut Problems
     }
 
     // The feed.
-    let xml = feed::render(&config, &sources, &index, site_dir);
-    plan.add(
-        PathBuf::from("feed.xml"),
-        Output::Bytes(xml.into_bytes()),
-        problems,
-    );
+    if !config.url.is_empty() {
+        let xml = feed::render(config, &sources, &index, site_dir);
+        plan.add(
+            PathBuf::from("feed.xml"),
+            Output::Bytes(xml.into_bytes()),
+            problems,
+        );
+    }
 
     // Static files. The site's override the theme's on purpose, and either colliding with
     // something generated is an error.

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 kame-core = { path = "../kame-core" }
+kame-notebook = { path = "../kame-notebook" }
 yaml_serde = "0.10"
 minijinja = "3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

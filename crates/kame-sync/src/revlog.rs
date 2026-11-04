@@ -306,6 +306,7 @@ pub fn merge_metadata(base: Option<&Metadata>, later: &Metadata, earlier: &Metad
         tags: field(base.map(|m| &m.tags), &later.tags, &earlier.tags),
         words: later.words.clone(),
         accepted: later.accepted.clone(),
+        publish: field(base.map(|m| &m.publish), &later.publish, &earlier.publish),
     };
     merged.take_exceptions_from(earlier);
     merged

@@ -1,7 +1,7 @@
 # Kame notebook — design
 
 Date: 2026-11-03
-Status: for review, revised after four rounds of answers. Nothing is built. Section 13 says what's left, section 12 ends with the decisions made on your behalf, and section 11 says how easily each decision can be undone. The
+Status: approved, and built as a proof of concept. Section 13 says what's left, section 12 ends with the decisions made on your behalf, and section 11 says how easily each decision can be undone. The
 starting notes are in `MultiKame.kame`.
 
 ## 1. Purpose
@@ -274,4 +274,6 @@ beside a document, and that a build publishes nothing from outside `static/` but
 
 ## 13. What's left
 
-Nothing is left to settle in this design on its own. The implementation plan waits on your review of this.
+Built without an implementation plan, for trying out and seeing what shakes out. A few choices were made along the way: the browser is
+200 points wide, and the page hides if the text and its margin don't fit beside it, which on a narrow tiled window is often. The Move
+command, and what section 10 says about databases left behind by a move, aren't built.

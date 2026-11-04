@@ -300,6 +300,45 @@ with `.merged` added to its name.
 If the file itself is replaced while open, kame stops saving to it and asks whether to merge the two,
 save this version under a new name, or open the one on disk.
 
+## Notebooks
+
+A folder with a `notebook.yaml` in it is a notebook, and opening any document under it is opening the notebook. `kame FOLDER` opens its
+`Notebook.kame`, or the browser if it has none. The file holds `title`, `url`, `author` and `remote`, all optional, and an empty one
+is fine. These do something only in a notebook, and are also in the View menu:
+
+| Key | Action |
+| --- | --- |
+| Ctrl-L | jump to a document by title or path. Letters only have to appear in order. If nothing matches, the last row offers to create it |
+| Ctrl-R | search every document, including margin notes, footnotes and private notes, matching as Ctrl-F does. Every match is listed |
+| Ctrl-Shift-O | the browser, a folder tree on the left. If the text and its margin don't fit beside it, the page hides until you choose something or close it |
+
+Both lists take the arrows, Enter and Escape. Ctrl-[ comes back from anywhere they lead.
+
+Following a link to a document that isn't there creates it, inside the notebook only, as a `.kame` with any folders it needs. A heading in
+the link becomes its first heading, and a link to a folder makes that folder's `Notebook.kame`. Leave it unwritten and it's removed again.
+A link to any other kind of file opens it in the system's viewer, and a missing one says so.
+
+Below the footnotes, "Linked from" lists the documents linking to this one. It's only drawn, and never reaches an export or a site.
+
+What's searched is what this machine has. With revision logs, a closed document can be behind what another machine wrote until it's next
+opened.
+
+To move or delete a document in a folder with revision logs, move or delete both `X.kame` and `X.kame.sync/`. Moving one leaves a stale copy
+on the other machine for now.
+
+### Publishing a notebook
+
+`kame-site build FOLDER` builds it as its own site, under the user's cache folder, and `kame-site sync FOLDER` also sends it to `remote`
+with `rsync --delete`. Document Properties has a *Publish* tick, and in Markdown it's `publish: true` in the front matter. `Notebook.kame`
+in the root is the home page and always publishes.
+
+URLs follow the folders, so `maritain/materialism.kame` is `/maritain/materialism/`, and a marked `Notebook.kame` in a folder is that
+folder's page. Everything in `static/` publishes at `/static/`, whether or not anything links to it, and isn't searched. Anything not for
+publication goes in another folder. A link to an unmarked document, or to a file outside `static/`, publishes as its words, and the build
+lists it. A link to something missing publishes as written, for the web server to answer.
+
+The theme is the standard one, and a file in the notebook's `theme/` takes the place of the same file in it. With no `url` there's no feed.
+
 ## Revision logs
 
 This is a trial, for a folder at a time. `kame-sync enable FOLDER` puts a `.kame-logs` file in a folder, and prints a line that every

@@ -4163,6 +4163,7 @@ name = "kame-site"
 version = "0.1.0"
 dependencies = [
  "kame-core",
+ "kame-notebook",
  "minijinja",
  "pulldown-cmark",
  "roxmltree 0.21.2",

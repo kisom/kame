@@ -177,6 +177,10 @@ impl FrontMatter<'_> {
             "title" => &mut self.metadata.title,
             "date" => &mut self.metadata.published,
             "author" | "authors" => &mut self.metadata.author,
+            "publish" => {
+                self.metadata.publish = value.eq_ignore_ascii_case("true");
+                return;
+            }
             "tags" | "keywords" => {
                 self.metadata.tags = value
                     .trim_start_matches('[')

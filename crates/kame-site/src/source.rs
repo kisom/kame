@@ -25,11 +25,16 @@ pub struct Source {
     pub date: Date,
     pub tags: Vec<Tag>,
     pub doc: Document,
+    /// Where a notebook's document publishes, as its URL follows its folders. A site's goes by slug.
+    pub page: Option<String>,
 }
 
 impl Source {
     /// Where this document publishes.
     pub fn url(&self) -> String {
+        if let Some(page) = &self.page {
+            return page.clone();
+        }
         let root = if self.draft { "drafts" } else { "k" };
         format!("/{root}/{}/", self.slug)
     }
@@ -79,8 +84,26 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
             return None;
         }
     };
-    let metadata = metadata.unwrap_or_default();
+    from_parts(
+        slug,
+        path,
+        draft,
+        doc,
+        metadata.unwrap_or_default(),
+        problems,
+    )
+}
 
+/// A document ready to publish, from what's been read of it.
+pub fn from_parts(
+    slug: &str,
+    path: &std::path::Path,
+    draft: bool,
+    doc: Document,
+    metadata: kame_core::model::Metadata,
+    problems: &mut Problems,
+) -> Option<Source> {
+    let slug = &slug.to_string();
     let stem = || {
         path.file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
@@ -109,7 +132,13 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
             problems.warnings.push(format!(
                 "\"{slug}\" has no date of its own, so it is using its file's"
             ));
-            match file_date(path) {
+            // One with only logs has no file yet, and they are as recent.
+            let logs = {
+                let mut name = path.as_os_str().to_os_string();
+                name.push(".sync");
+                std::path::PathBuf::from(name)
+            };
+            match file_date(path).or_else(|| file_date(&logs)) {
                 Some(date) => date,
                 None => {
                     problems.errors.push(format!(
@@ -140,13 +169,14 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
     let doc = kame_core::export::without_repeated_title(&doc, &title).into_owned();
     Some(Source {
         slug: slug.clone(),
-        path: path.clone(),
+        path: path.to_path_buf(),
         draft,
         title,
         author: metadata.author,
         date,
         tags,
         doc,
+        page: None,
     })
 }
 

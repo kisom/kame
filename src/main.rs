@@ -1461,6 +1461,7 @@ fn metadata_from_prompt(prompt: &MetadataPrompt) -> Metadata {
         created: prompt.created.trim().to_string(),
         published: prompt.published.trim().to_string(),
         tags: parse_tags(&prompt.tags),
+        publish: prompt.publish,
         words: {
             let mut words = prompt.words.clone();
             add_words(&mut words, &prompt.new_word);
@@ -1484,6 +1485,8 @@ struct MetadataPrompt {
     accepted: Vec<AcceptedMark>,
     /// Make this author the one new documents start with.
     default_author: bool,
+    /// Whether a notebook's site publishes this document.
+    publish: bool,
     /// Set for the frame the dialog opens on, so the first field takes the
     /// keyboard.
     focus: bool,
@@ -5245,6 +5248,7 @@ impl KameApp {
             new_word: String::new(),
             accepted: metadata.accepted.clone(),
             default_author: false,
+            publish: metadata.publish,
             focus: true,
         });
     }
@@ -5370,6 +5374,9 @@ impl KameApp {
                     &mut prompt.default_author,
                     "Use this author for new documents",
                 );
+                if self.nb.notebook.is_some() {
+                    ui.checkbox(&mut prompt.publish, "Publish on this notebook's site");
+                }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -8424,6 +8431,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
                 text: "key point".to_string(),
             }],
             default_author: false,
+            publish: true,
             focus: false,
         }
     }

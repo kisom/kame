@@ -54,7 +54,11 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies, and `logs` and `revlog` for revision logs in folders that turn them on. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
+`crates/kame-notebook` — a notebook: a folder with a `notebook.yaml`, on `kame-core` and `kame-sync`. It finds one, lists what's in it, searches it, and works out where links lead and when one can create a document. Nothing derived is stored. The app's side of it is `src/notebook.rs`, and `kame-site` builds one as a site in `notebook.rs`. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
+
 `crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
+
+`src/notebook.rs` — the app's jump list, search, browser and what links here.
 
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 

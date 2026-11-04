@@ -312,6 +312,8 @@ pub struct Metadata {
     pub words: Vec<String>,
     /// Marks the writer has said the checker is wrong about, in this document.
     pub accepted: Vec<AcceptedMark>,
+    /// Whether a notebook's site publishes this document.
+    pub publish: bool,
 }
 
 impl Metadata {

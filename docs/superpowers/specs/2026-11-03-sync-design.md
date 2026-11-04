@@ -259,11 +259,9 @@ needs a command that doesn't exist yet. Snapshots made before opting in stay in 
 title in its latest revision, and opening it builds the database, as section 7 says. For a notebook:
 
 - The list of documents counts `X.kame.sync/` with no `X.kame`.
-- A database can lag behind its logs, when another machine wrote while this one's copy was closed. So the database records how
-  much of each log it has seen, and comparing that with the logs' sizes finds the ones behind.
-- On opening a notebook, a background pass brings those up to date: building what's missing and merging what's new, into the
-  ignored database. Search then reads head rows as the notebook design says, and those it hasn't reached yet are read from the
-  logs. This writes only to databases, and never during a search.
+- A database can lag behind its logs, when another machine wrote while this one's copy was closed.
+- There is no background pass. A closed document stays behind its logs until it's opened, and search reads what this machine has,
+  as the notebook design accepts.
 
 **Reading logs is fast enough.** Measured on the real histories in `notebook-test`. The 7 seconds in section 11 was the prototype
 reloading every log for each of 400 revisions, and it isn't the cost of a read. Each log read here is well under the time a person
@@ -311,8 +309,7 @@ makes that safe. Try it on `notebook-test` first, then on one real folder, and s
 3. A database built from logs on opening or following a link, and kame reporting logs with no marked folder. Built.
 4. A real folder.
 
-The background pass, and the database recording what it has seen of each log, wait for the notebook. `kame-site` reading from
-logs follows once a published folder opts in.
+`kame-site` reading from logs follows once a published folder opts in.
 
 ## 14. What building stage 2 changed
 

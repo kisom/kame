@@ -208,7 +208,7 @@ and its database is built when it's opened.
 **What's on this machine is what's searched and published.** kame syncs only the open document, so a closed one can be behind what
 another machine wrote until it's next opened. Search, what links here and `kame-site` read what this machine has. This is accepted
 until there's a sync server made for kame: it's a matter of which machine you work from, and a background pass merging into documents
-nobody is looking at, as section 13 of `2026-11-03-sync-design.md` suggested, isn't worth what it adds.
+nobody is looking at isn't worth what it adds.
 
 **Which files are in a notebook isn't kept in a list.** Tried on `notebook-test`: renaming a document and its logs on Talos leaves Titan
 with its old database at the old path and the logs at the new path, as Syncthing carries the logs and not the database. So Titan
@@ -274,5 +274,4 @@ beside a document, and that a build publishes nothing from outside `static/` but
 
 ## 13. What's left
 
-Nothing is left to settle in this design on its own. Section 13 of the sync design still describes a background pass, and needs
-updating when this lands. The implementation plan waits on your review of this.
+Nothing is left to settle in this design on its own. The implementation plan waits on your review of this.

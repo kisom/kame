@@ -5472,21 +5472,36 @@ impl KameApp {
         }
     }
 
-    /// Asks for an image, starting in the notebook's `static/` if there is one, and inserts it
-    /// as a block after the caret's.
+    /// Asks for an image, starting in the notebook's `images/` if there is one, and inserts it
+    /// as a block after the caret's. One from outside the notebook is copied into it first.
     fn insert_image_with_dialog(&mut self) {
-        let root = self.nb.notebook.as_ref().map(|nb| nb.root.clone());
-        let directory = root
-            .as_deref()
-            .map(|root| root.join("static"))
+        let notebook = self.nb.notebook.clone();
+        let directory = notebook
+            .as_ref()
+            .map(|notebook| notebook.root.join(kame_notebook::images::IMAGES))
             .filter(|folder| folder.is_dir())
             .or_else(|| self.session.dialog_directory());
         let Some(file) = pick_image_path(directory.as_deref()) else {
             return;
         };
-        let stored = match self.session.path() {
-            Some(document) => stored_image_path(&file, document, root.as_deref()),
-            None => file.display().to_string(),
+        let document = self.session.path().map(Path::to_path_buf);
+        let stored = match (&document, &notebook) {
+            (Some(document), Some(notebook)) => {
+                match kame_notebook::images::bring_in(notebook, document, &file) {
+                    Ok(kept) => {
+                        if kept != file {
+                            self.notice = Some(format!("copied the image to {}", kept.display()));
+                        }
+                        stored_image_path(&kept, document, Some(&notebook.root))
+                    }
+                    Err(err) => {
+                        self.session.last_error = Some(err);
+                        return;
+                    }
+                }
+            }
+            (Some(document), None) => stored_image_path(&file, document, None),
+            (None, _) => file.display().to_string(),
         };
         self.session.insert_image(stored);
     }

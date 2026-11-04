@@ -21,9 +21,9 @@ pub enum Kind {
     File,
 }
 
-/// Folders in the root that hold no documents. Everything in `static/` publishes, and `theme/` is
-/// how a site looks.
-const NOT_DOCUMENTS: [&str; 2] = ["static", "theme"];
+/// Folders in the root that hold no documents. Everything in `static/` publishes, `images/` holds
+/// pictures that documents show, and `theme/` is how a site looks.
+const NOT_DOCUMENTS: [&str; 3] = ["static", "images", "theme"];
 /// The folder a build goes in, which isn't part of the notebook at all.
 const OUTPUT: &str = "output";
 

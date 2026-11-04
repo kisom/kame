@@ -27,6 +27,8 @@ pub struct Source {
     pub doc: Document,
     /// Where a notebook's document publishes, as its URL follows its folders. A site's goes by slug.
     pub page: Option<String>,
+    /// Image paths that are already where they publish, with nothing to copy beside the page.
+    pub placed_images: Vec<String>,
 }
 
 impl Source {
@@ -173,6 +175,7 @@ pub fn from_parts(
         tags,
         doc,
         page: None,
+        placed_images: Vec::new(),
     })
 }
 

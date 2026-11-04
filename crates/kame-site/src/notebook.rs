@@ -3,14 +3,17 @@
 //! is what any other site uses. See section 9 of
 //! `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use kame_core::model::{BlockKind, SpanStyle};
+use kame_notebook::images::IMAGES;
 use kame_notebook::links::{is_web_link, Follow};
 use kame_notebook::{read_document, Notebook, INDEX};
 
 use crate::config::Config;
 use crate::plan::{plan_site, Output, Plan};
+use crate::refs::percent_encode;
 use crate::source::{from_parts, Source};
 use crate::starter::FILES;
 use crate::Problems;
@@ -153,9 +156,12 @@ fn rewrite_links(
     notebook: &Notebook,
     published: &[PathBuf],
     source: &mut Source,
+    images: &mut BTreeMap<PathBuf, PathBuf>,
     problems: &mut Problems,
 ) {
     let (from, slug) = (source.path.clone(), source.slug.clone());
+    let kept = notebook.root.join(IMAGES);
+    let mut placed = Vec::new();
     for block in &mut source.doc.blocks {
         let mut spans = std::mem::take(&mut block.spans);
         spans.retain_mut(|span| {
@@ -179,12 +185,20 @@ fn rewrite_links(
         });
         block.spans = spans;
         // An image in a published document publishes too, so it has to be the notebook's to publish.
-        if let BlockKind::Image { path, .. } = &block.kind {
-            let file = from.parent().unwrap_or(Path::new("")).join(path);
-            let outside = file
-                .canonicalize()
-                .is_ok_and(|real| !real.starts_with(&notebook.root));
-            if outside {
+        if let BlockKind::Image { path, .. } = &mut block.kind {
+            let file = from.parent().unwrap_or(Path::new("")).join(&*path);
+            let real = file.canonicalize();
+            // One of the notebook's kept images publishes under `static/images/`, because this
+            // document shows it, and what's kept stays private until one does.
+            let in_kept = real.as_ref().ok().and_then(|real| {
+                let inside = real.strip_prefix(&kept).ok()?;
+                Some((inside.to_path_buf(), real.clone()))
+            });
+            if let Some((inside, real)) = in_kept {
+                *path = published_image_url(&inside);
+                placed.push(path.clone());
+                images.insert(inside, real);
+            } else if real.is_ok_and(|real| !real.starts_with(&notebook.root)) {
                 problems.warnings.push(format!(
                     "\"{slug}\": the image {path} isn't published: it's outside the notebook"
                 ));
@@ -198,6 +212,17 @@ fn rewrite_links(
             }
         }
     }
+    source.placed_images = placed;
+}
+
+/// The URL of an image kept at `inside` under the notebook's `images/`.
+fn published_image_url(inside: &Path) -> String {
+    let parts = inside
+        .components()
+        .map(|part| percent_encode(&part.as_os_str().to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("/static/images/{parts}")
 }
 
 /// The documents that publish: the contents page always, and anything marked.
@@ -291,8 +316,9 @@ pub fn plan_notebook(
         .iter()
         .filter_map(|source| source.path.canonicalize().ok())
         .collect();
+    let mut images = BTreeMap::new();
     for source in &mut sources {
-        rewrite_links(notebook, &published, source, problems);
+        rewrite_links(notebook, &published, source, &mut images, problems);
     }
     let config = Config {
         name: notebook.title(),
@@ -320,6 +346,13 @@ pub fn plan_notebook(
         plan.add(
             Path::new("static").join(&relative),
             Output::Copy(notebook.root.join("static").join(&relative)),
+            problems,
+        );
+    }
+    for (inside, file) in images {
+        plan.add(
+            Path::new("static/images").join(inside),
+            Output::Copy(file),
             problems,
         );
     }
@@ -891,6 +924,90 @@ mod tests {
             "{:?}",
             problems.warnings
         );
+    }
+
+    #[test]
+    fn a_kept_image_publishes_only_when_a_published_document_shows_it() {
+        let nb = made("nbkept", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("images/maritain/essay/shown here.png", "shown");
+        nb.file("images/maritain/essay/never.png", "never shown");
+        nb.file("images/quiet/private.png", "a private plate");
+        nb.document(
+            "maritain/essay.kame",
+            true,
+            &image("../images/maritain/essay/shown here.png"),
+        );
+        nb.document(
+            "second.kame",
+            true,
+            &image("images/maritain/essay/shown here.png"),
+        );
+        nb.document("quiet.kame", false, &image("images/quiet/private.png"));
+        nb.words("images/not-a-document.kame", true, "Not listed.");
+        let (plan, problems) = nb.plan();
+        assert_eq!(
+            page(&plan, "static/images/maritain/essay/shown here.png"),
+            "shown"
+        );
+        let page_text = page(&plan, "maritain/essay/index.html");
+        assert!(
+            page_text.contains("/static/images/maritain/essay/shown%20here.png"),
+            "{page_text}"
+        );
+        for (path, output) in &plan.files {
+            let text = match output {
+                Output::Copy(from) => std::fs::read_to_string(from).unwrap_or_default(),
+                _ => String::new(),
+            };
+            assert!(!text.contains("private plate"), "{} leaks", path.display());
+            assert!(!text.contains("never shown"), "{} leaks", path.display());
+        }
+        assert!(!plan.files.keys().any(|path| path.starts_with("images")));
+        assert!(
+            !problems.warnings.iter().any(|said| said.contains("image")),
+            "{:?}",
+            problems.warnings
+        );
+    }
+
+    #[test]
+    fn a_kept_image_cannot_carry_a_link_to_an_unmarked_document() {
+        let nb = made("nbkeptlinked", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("private-plans.kame", false, "Private.");
+        nb.file("images/plate.png", "a plate");
+        let mut doc = image("images/plate.png");
+        for block in &mut doc.blocks {
+            if let BlockKind::Image { link, .. } = &mut block.kind {
+                *link = Some("private-plans.kame".to_string());
+            }
+        }
+        nb.document("essay.kame", true, &doc);
+        let (plan, _) = nb.plan();
+        let page_text = page(&plan, "essay/index.html");
+        assert!(
+            page_text.contains("/static/images/plate.png"),
+            "{page_text}"
+        );
+        assert!(!page_text.contains("private-plans"), "{page_text}");
+    }
+
+    #[test]
+    fn a_kept_image_linking_out_of_the_notebook_is_not_published() {
+        let nb = made("nbkeptlink", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        let outside = nb.root.parent().unwrap().join("kept-private.png");
+        std::fs::write(&outside, "secret picture").unwrap();
+        nb.file("images/placeholder.png", "");
+        std::os::unix::fs::symlink(&outside, nb.root.join("images/linked.png")).unwrap();
+        nb.document("essay.kame", true, &image("images/linked.png"));
+        let (plan, problems) = nb.plan();
+        assert!(!plan.files.keys().any(|path| path.ends_with("linked.png")));
+        assert!(problems
+            .warnings
+            .iter()
+            .any(|said| said.contains("outside")));
     }
 
     #[test]

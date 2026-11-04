@@ -93,8 +93,9 @@ impl Notebook {
         };
         let mut parts = inside.components().map(|part| part.as_os_str());
         let first = parts.next();
-        if first.is_some_and(|first| first == "static" || first == "theme" || first == "output")
-            && inside.components().count() > 1
+        if first.is_some_and(|first| {
+            first == "static" || first == "images" || first == "theme" || first == "output"
+        }) && inside.components().count() > 1
         {
             return false;
         }

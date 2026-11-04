@@ -94,6 +94,7 @@ impl Images {
                 continue;
             };
             if named.contains_key(path)
+                || source.placed_images.contains(path)
                 || path.starts_with("http://")
                 || path.starts_with("https://")
             {

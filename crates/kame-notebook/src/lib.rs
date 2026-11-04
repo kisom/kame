@@ -6,7 +6,9 @@
 //! - [`list`] says what's in one
 //! - [`search`] finds text across its documents
 //! - [`links`] works out what links where, and where a link can create a document
+//! - [`images`] brings an image from outside into the notebook
 
+pub mod images;
 pub mod links;
 pub mod list;
 pub mod search;

@@ -26,7 +26,7 @@ It isn't a replacement for Obsidian, a place for all notes, or a Markdown editor
 | Stored state | none beyond `notebook.yaml`. No index and no database, so that nothing derived can go stale |
 | Search | the same matches as Ctrl-F, across the notebook, including private notes |
 | Keys | Ctrl-L to jump, Ctrl-R to search, Ctrl-Shift-O for the browser |
-| Papers and images | under `static/`, which is public and isn't searched |
+| Papers and images | under `static/`, which is public and isn't searched. Images copied in from outside go under `images/`, which publishes only what a published document shows, at `/static/images/` |
 | Markdown | minimal, page-like, edited in an external editor such as kge. Import and export are left for later |
 | On screen | nothing until asked. A jump list, a search and a hideable browser |
 | Publishing | each notebook is its own site, and only marked documents publish |
@@ -44,6 +44,7 @@ philosophy/
 ├── about.md
 ├── maritain/
 │   └── materialism.kame
+├── images/              pictures from elsewhere, public once a published document shows them
 ├── static/              papers and images, all of it public
 │   └── maritain-1953.pdf
 └── theme/               optional, for a site that differs from the standard theme

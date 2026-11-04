@@ -11,7 +11,7 @@ mod external;
 mod macos;
 mod notebook;
 
-use kame_core::links::{resolve_open_path, split_document_target};
+use kame_core::links::{image_file, resolve_open_path, split_document_target, stored_image_path};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::{edit, model, storage};
 use kame_typeset::{layout, render};
@@ -747,6 +747,16 @@ fn pick_document_link_path(directory: Option<&Path>) -> Option<PathBuf> {
         .pick_file()
 }
 
+/// The native file browser for an image to insert, or `None` if it is cancelled.
+fn pick_image_path(directory: Option<&Path>) -> Option<PathBuf> {
+    file_dialog("Insert Image", directory)
+        .add_filter(
+            "Image",
+            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"],
+        )
+        .pick_file()
+}
+
 /// The native "save as" browser for an export, starting at `suggestion`, or `None`
 /// when the author cancels it.
 fn pick_export_path(
@@ -777,14 +787,6 @@ fn pick_save_path(suggested_name: &str, directory: Option<&Path>) -> Option<Path
         .add_filter("kame document", &["kame"])
         .set_file_name(suggested_name)
         .save_file()
-}
-
-/// The "Insert image" path prompt: a text field for the image file to embed.
-struct ImagePrompt {
-    /// The path being typed.
-    path: String,
-    /// Set for the frame the prompt opens on, so the field takes the keyboard.
-    focus: bool,
 }
 
 /// The "Add link" URL prompt (C-k): the range being linked and the URL being
@@ -2005,9 +2007,14 @@ fn gap_after(block: &BlockKind, next: &BlockKind) -> f32 {
 
 /// Minimum height of a block, so an empty paragraph still has a line to click
 /// and a caret to show.
-fn block_height(block: &Block, layout: &BlockLayout, config: &LayoutConfig) -> f32 {
+fn block_height(
+    block: &Block,
+    layout: &BlockLayout,
+    config: &LayoutConfig,
+    document: Option<&Path>,
+) -> f32 {
     if let BlockKind::Image { path, .. } = &block.kind {
-        return image_height(path, config.body_width);
+        return image_height(&image_file(path, document), config.body_width);
     }
     let minimum = match block.kind {
         crate::model::BlockKind::Heading { level } => heading_size_for(config, level) * 1.4,
@@ -2022,7 +2029,7 @@ const MISSING_IMAGE_HEIGHT: f32 = 72.0;
 /// Display height of an image at `width`, preserving its aspect ratio. A file
 /// that cannot be read (or reports a zero dimension) takes a short placeholder's
 /// height, which says what is missing without leaving a blank stretch of page.
-fn image_height(path: &str, width: f32) -> f32 {
+fn image_height(path: &Path, width: f32) -> f32 {
     match image::image_dimensions(path) {
         Ok((w, h)) if w > 0 && h > 0 => width * h as f32 / w as f32,
         _ => MISSING_IMAGE_HEIGHT,
@@ -2236,8 +2243,6 @@ struct KameApp {
     snapshot_prompt: Option<SnapshotPrompt>,
     /// The "Open" path prompt (Ctrl-O), when it is open.
     open_prompt: Option<OpenPrompt>,
-    /// The "Insert image" path prompt, when it is open.
-    image_prompt: Option<ImagePrompt>,
     /// The "Add link" URL prompt (C-k), when it is open.
     link_prompt: Option<LinkPrompt>,
     /// The "Restore Snapshot" picker, when it is open. At most one of this and
@@ -2349,7 +2354,6 @@ impl KameApp {
             default_author,
             snapshot_prompt: None,
             open_prompt: None,
-            image_prompt: None,
             link_prompt: None,
             restore_picker: None,
             notice,
@@ -2438,7 +2442,6 @@ impl KameApp {
         self.snapshot_prompt.is_some()
             || self.metadata_prompt.is_some()
             || self.open_prompt.is_some()
-            || self.image_prompt.is_some()
             || self.link_prompt.is_some()
             || self.restore_picker.is_some()
             || self.replaced_prompt
@@ -2453,7 +2456,6 @@ impl KameApp {
         self.metadata_prompt = None;
         self.snapshot_prompt = None;
         self.open_prompt = None;
-        self.image_prompt = None;
         self.link_prompt = None;
         self.restore_picker = None;
         open
@@ -3823,7 +3825,7 @@ impl KameApp {
         let heights: Vec<f32> = blocks
             .iter()
             .zip(layouts.iter())
-            .map(|(block, layout)| block_height(block, layout, &config))
+            .map(|(block, layout)| block_height(block, layout, &config, None))
             .collect();
         let gap_below = |index: usize| {
             blocks
@@ -4066,7 +4068,8 @@ impl KameApp {
             if let BlockKind::Image { path, .. } = &block.kind {
                 // An image spans the measure at body width; its height keeps
                 // the source's aspect ratio (already baked into `tops`).
-                let height = image_height(path, config.body_width);
+                let file = image_file(path, self.session.path());
+                let height = image_height(&file, config.body_width);
                 let rect = Rect::from_min_size(
                     Pos2::new(body_left, tops[index]),
                     Vec2::new(config.body_width, height),
@@ -4760,6 +4763,7 @@ impl KameApp {
         // Block formatting and annotation actions live here, on the page's
         // right-click, rather than as rows of buttons in the status bar.
         let mut link_document = false;
+        let mut insert_image = false;
         let mut mark_action = None;
         let mark_menu = self.mark_menu.clone();
         response.context_menu(|ui| {
@@ -4845,10 +4849,7 @@ impl KameApp {
             }
             ui.separator();
             if ui.button("Insert image…").clicked() {
-                self.image_prompt = Some(ImagePrompt {
-                    path: String::new(),
-                    focus: true,
-                });
+                insert_image = true;
                 ui.close();
             }
             if ui.button("Link to document…").clicked() {
@@ -4856,6 +4857,9 @@ impl KameApp {
                 ui.close();
             }
         });
+        if insert_image {
+            self.insert_image_with_dialog();
+        }
         if link_document {
             self.link_document_with_dialog();
         }
@@ -5006,8 +5010,6 @@ impl KameApp {
             self.show_metadata_prompt(ctx, enter);
         } else if self.open_prompt.is_some() {
             self.show_open_prompt(ctx, enter);
-        } else if self.image_prompt.is_some() {
-            self.show_image_prompt(ctx, enter);
         } else if self.link_prompt.is_some() {
             self.show_link_prompt(ctx, enter);
         } else if self.restore_picker.is_some() {
@@ -5467,6 +5469,25 @@ impl KameApp {
         }
     }
 
+    /// Asks for an image, starting in the notebook's `static/` if there is one, and inserts it
+    /// as a block after the caret's.
+    fn insert_image_with_dialog(&mut self) {
+        let root = self.nb.notebook.as_ref().map(|nb| nb.root.clone());
+        let directory = root
+            .as_deref()
+            .map(|root| root.join("static"))
+            .filter(|folder| folder.is_dir())
+            .or_else(|| self.session.dialog_directory());
+        let Some(file) = pick_image_path(directory.as_deref()) else {
+            return;
+        };
+        let stored = match self.session.path() {
+            Some(document) => stored_image_path(&file, document, root.as_deref()),
+            None => file.display().to_string(),
+        };
+        self.session.insert_image(stored);
+    }
+
     /// Asks for a document, then links to it from the caret or selection.
     fn link_document_with_dialog(&mut self) {
         if let Some(refusal) = self.session.document_link_refusal() {
@@ -5651,7 +5672,9 @@ impl KameApp {
         if let Some(texture) = self.image_textures.get(path) {
             return Some(texture.clone());
         }
-        let decoded = image::open(path).ok()?.to_rgba8();
+        let decoded = image::open(image_file(path, self.session.path()))
+            .ok()?
+            .to_rgba8();
         let size = [decoded.width() as usize, decoded.height() as usize];
         let color = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
         let texture = ctx.load_texture(path, color, egui::TextureOptions::LINEAR);
@@ -5682,8 +5705,14 @@ impl KameApp {
             // they can still discard or cancel explicitly.
             return;
         };
+        let from = self.session.path().map(Path::to_path_buf);
         match self.session.save_as(&path) {
             Ok(()) => {
+                let notebook = kame_notebook::Notebook::find(&path).ok().flatten();
+                self.session.rehome_images(
+                    from.as_deref(),
+                    notebook.as_ref().map(|nb| nb.root.as_path()),
+                );
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
                     self.finish_close(ctx);
@@ -5959,7 +5988,6 @@ impl KameApp {
         };
         self.snapshot_prompt = None;
         self.open_prompt = None;
-        self.image_prompt = None;
         self.restore_picker = None;
         self.link_prompt = Some(LinkPrompt {
             block_id,
@@ -6031,76 +6059,6 @@ impl KameApp {
             .unwrap_or_default();
         self.link_prompt = None;
         self.session.set_link(block_id, start, end, url);
-    }
-
-    /// The "Insert image" path prompt: type an image file path, then embed it
-    /// as an image block sized to the body width. A failed path still inserts
-    /// the block (the image simply draws nothing) so the author can fix it.
-    fn show_image_prompt(&mut self, ctx: &egui::Context, enter: bool) {
-        let Some(prompt) = &self.image_prompt else {
-            return;
-        };
-        let mut buffer = prompt.path.clone();
-        let focus = prompt.focus;
-        // A chord and an Enter arriving in the same frame would otherwise
-        // insert a path nobody has finished typing.
-        let mut submit = enter && !focus;
-        let mut cancel = false;
-
-        egui::Window::new("Insert image")
-            .id(Id::unique("kame-image-prompt"))
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .collapsible(false)
-            .resizable(false)
-            .order(Order::Foreground)
-            .show(ctx, |ui| {
-                ui.label("Path of the image file:");
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut buffer)
-                        .id(Id::unique("kame-image-path"))
-                        .desired_width(360.0)
-                        .hint_text("~/Pictures/diagram.png"),
-                );
-                if focus {
-                    field.request_focus();
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Insert").clicked() {
-                        submit = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-
-        if let Some(prompt) = self.image_prompt.as_mut() {
-            prompt.path = buffer;
-            prompt.focus = false;
-        }
-        if cancel {
-            self.image_prompt = None;
-            return;
-        }
-        if !submit {
-            return;
-        }
-        let path = self
-            .image_prompt
-            .as_ref()
-            .map(|prompt| prompt.path.trim().to_string())
-            .unwrap_or_default();
-        self.image_prompt = None;
-        if path.is_empty() {
-            return;
-        }
-        let base = self
-            .session
-            .path()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        self.session
-            .insert_image(resolve_open_path(&path, &base).display().to_string());
     }
 
     /// The "Restore Snapshot" picker: choose a snapshot, then confirm that the
@@ -6898,7 +6856,7 @@ mod tests {
                 spans: Vec::new(),
             };
             let layout = renderer.layout(&block);
-            block_height(&block, &layout, &config)
+            block_height(&block, &layout, &config, None)
         };
         let (one, two, three) = (height(1), height(2), height(3));
         assert!(one > two && two > three, "{one} {two} {three}");
@@ -7027,8 +6985,22 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_image_is_measured_from_the_documents_folder() {
+        let dir = test_temp_dir().join(format!("kame-img-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("static")).unwrap();
+        std::fs::create_dir_all(dir.join("maritain")).unwrap();
+        image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 255]))
+            .save(dir.join("static/wide.png"))
+            .unwrap();
+        let document = dir.join("maritain/essay.kame");
+        let file = image_file("../static/wide.png", Some(&document));
+        assert_eq!(image_height(&file, 600.0), 300.0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_missing_image_reserves_a_short_placeholder() {
-        let height = image_height("/does/not/exist.png", 600.0);
+        let height = image_height(Path::new("/does/not/exist.png"), 600.0);
         assert_eq!(height, MISSING_IMAGE_HEIGHT);
         assert!(
             height < 120.0,
@@ -7431,7 +7403,7 @@ mod tests {
             .unwrap();
 
         // A 2:1 image at 600px wide is 300px tall.
-        assert_eq!(image_height(path.to_str().unwrap(), 600.0), 300.0);
+        assert_eq!(image_height(&path, 600.0), 300.0);
         // An unreadable path reserves a 3:2 box instead of collapsing.
     }
 
@@ -7456,7 +7428,7 @@ mod tests {
         let heights: Vec<f32> = blocks
             .iter()
             .zip(layouts.iter())
-            .map(|(block, layout)| block_height(block, layout, &config))
+            .map(|(block, layout)| block_height(block, layout, &config, None))
             .collect();
         let mut tops = Vec::new();
         let mut y = PAGE_PADDING;

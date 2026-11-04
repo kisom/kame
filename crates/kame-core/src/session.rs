@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
+use crate::links::{image_file, stored_image_path};
 use crate::model::{
     Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document, Metadata, SpanStyle,
 };
@@ -521,7 +522,7 @@ impl Session {
     /// Writes the document as Markdown to `path` and returns the path written.
     pub fn export_markdown_to(&mut self, path: &Path) -> Option<PathBuf> {
         let markdown =
-            crate::export::to_markdown_with(self.editor.document(), &self.published_metadata());
+            crate::export::to_markdown_with(&self.exported_document(), &self.published_metadata());
         self.write_export(path, &markdown)
     }
 
@@ -533,8 +534,23 @@ impl Session {
     /// Writes the document as a standalone HTML page to `path` and returns the
     /// path written.
     pub fn export_html_to(&mut self, path: &Path) -> Option<PathBuf> {
-        let html = crate::export::to_html_with(self.editor.document(), &self.published_metadata());
+        let html =
+            crate::export::to_html_with(&self.exported_document(), &self.published_metadata());
         self.write_export(path, &html)
+    }
+
+    /// The document as an export sees it. An export can land anywhere, where a path from this
+    /// document's folder would lead nowhere, so its images go by their whole paths.
+    fn exported_document(&self) -> Document {
+        let mut document = self.editor.document().clone();
+        for block in &mut document.blocks {
+            if let BlockKind::Image { path, .. } = &mut block.kind {
+                if let Some(whole) = whole_image_path(path, self.path.as_deref()) {
+                    *path = whole.display().to_string();
+                }
+            }
+        }
+        document
     }
 
     /// Saves the document to `path`, carrying its history, snapshots and metadata,
@@ -1488,6 +1504,43 @@ impl Session {
         }
     }
 
+    /// After a save as, says each image's path again for where the document is now, having been
+    /// at `from` until then. `root` is the notebook it's in now, if any. An image that can't be
+    /// found keeps what it has, since there's nothing to say about it.
+    pub fn rehome_images(&mut self, from: Option<&Path>, root: Option<&Path>) {
+        let Some(document) = self.path.clone() else {
+            return;
+        };
+        let images: Vec<(BlockId, String, Option<String>)> = self
+            .document()
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                BlockKind::Image { path, link } => Some((block.id, path.clone(), link.clone())),
+                _ => None,
+            })
+            .collect();
+        for (id, stored, link) in images {
+            let file = if Path::new(&stored).is_absolute() {
+                PathBuf::from(&stored)
+            } else {
+                match whole_image_path(&stored, from) {
+                    Some(file) => file,
+                    None => continue,
+                }
+            };
+            if !file.exists() {
+                continue;
+            }
+            let path = stored_image_path(&file, &document, root);
+            if path != stored {
+                let kind = BlockKind::Image { path, link };
+                let result = self.editor.set_block_kind(id, kind);
+                self.commit(result);
+            }
+        }
+    }
+
     /// Sets a link span over `start..end`, replacing any link already there; an
     /// empty `url` removes it.
     pub fn set_link(&mut self, block_id: BlockId, start: usize, end: usize, url: String) -> bool {
@@ -2152,6 +2205,17 @@ pub fn is_markdown_path(path: &Path) -> bool {
 
 /// How many of `document`'s images point at a local file that is not there. A
 /// remote image is not counted, since whether it exists is unknowable here.
+/// The whole path of an image stored relative to the document at `document`. `None` for one
+/// that isn't, which is to say a whole path already, a web address, or a document with no file.
+fn whole_image_path(stored: &str, document: Option<&Path>) -> Option<PathBuf> {
+    if Path::new(stored).is_absolute() || stored.contains("://") {
+        return None;
+    }
+    document?;
+    let file = image_file(stored, document);
+    Some(file.canonicalize().unwrap_or(file))
+}
+
 pub fn missing_images(document: &Document) -> usize {
     document
         .blocks
@@ -2634,6 +2698,112 @@ mod tests {
         assert_eq!(session.export_html_to(&html), Some(html.clone()));
         assert!(std::fs::read_to_string(&html).unwrap().contains("Words"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A notebook-shaped folder with one plate in it, for the tests of image paths.
+    fn plate_folder(name: &str) -> (PathBuf, PathBuf) {
+        let root = scratch_dir(name).canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("static")).unwrap();
+        std::fs::create_dir_all(root.join("maritain")).unwrap();
+        let plate = root.join("static/plate.png");
+        std::fs::write(&plate, "a plate").unwrap();
+        (root, plate)
+    }
+
+    fn image_paths(session: &Session) -> Vec<String> {
+        session
+            .document()
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                BlockKind::Image { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn saving_as_says_an_images_path_from_the_new_folder() {
+        let (root, _plate) = plate_folder("rehome");
+        let first = root.join("essay.kame");
+        let second = root.join("maritain/essay.kame");
+        let mut session = open(&first);
+        session.insert_image("static/plate.png".to_string());
+        session.save_as(&second).unwrap();
+        session.rehome_images(Some(&first), Some(&root));
+        assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        drop(session);
+        let reopened = Session::open(&second).unwrap();
+        assert_eq!(image_paths(&reopened), ["../static/plate.png"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_an_unsaved_document_into_a_notebook_shortens_its_images() {
+        let (root, plate) = plate_folder("unsaved");
+        let target = root.join("maritain/essay.kame");
+        let mut session = Session::anonymous().unwrap();
+        session.insert_image(plate.display().to_string());
+        session.save_as(&target).unwrap();
+        session.rehome_images(None, Some(&root));
+        assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_as_the_same_file_shortens_an_old_documents_images() {
+        let (root, plate) = plate_folder("sameplace");
+        let document = root.join("maritain/essay.kame");
+        let mut session = open(&document);
+        session.insert_image(plate.display().to_string());
+        session.save_as(&document).unwrap();
+        session.rehome_images(Some(&document), Some(&root));
+        assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_out_of_a_notebook_gives_an_image_its_whole_path() {
+        let (root, plate) = plate_folder("leaving");
+        let first = root.join("essay.kame");
+        let away = scratch_dir("leaving-away").canonicalize().unwrap();
+        let mut session = open(&first);
+        session.insert_image("static/plate.png".to_string());
+        session.save_as(&away.join("essay.kame")).unwrap();
+        session.rehome_images(Some(&first), None);
+        assert_eq!(image_paths(&session), [plate.display().to_string()]);
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&away).unwrap();
+    }
+
+    #[test]
+    fn saving_as_leaves_alone_an_image_it_cannot_find() {
+        let (root, _plate) = plate_folder("unfound");
+        let first = root.join("essay.kame");
+        let mut session = open(&first);
+        for stored in ["gone.png", "/files/a.png", "https://e.com/a.png"] {
+            session.insert_image(stored.to_string());
+        }
+        let before = image_paths(&session);
+        session.save_as(&root.join("maritain/essay.kame")).unwrap();
+        session.rehome_images(Some(&first), Some(&root));
+        assert_eq!(image_paths(&session), before);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_export_elsewhere_can_still_find_the_image() {
+        let (root, plate) = plate_folder("exported");
+        let document = root.join("maritain/essay.kame");
+        let mut session = open(&document);
+        session.insert_image("../static/plate.png".to_string());
+        let target = root.with_extension("md");
+        session.export_markdown_to(&target).unwrap();
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert!(written.contains(&plate.display().to_string()), "{written}");
+        assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        std::fs::remove_file(&target).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// The native dialog has already confirmed the overwrite, so nothing of the old

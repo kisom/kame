@@ -357,6 +357,10 @@ publication goes in another folder. A link to an unmarked document, or to a file
 lists it. A link to something missing under `static/` or to a folder publishes as written, for the web server to answer, and any other is its words. An image shown in a published
 document is copied beside its page, unless it's outside the notebook, which the build also lists.
 
+Insert image… on the right-click menu asks for a file, starting in `static/`. An image inside the notebook is kept as the way there from the document's folder, so it
+still shows on another machine and after the notebook moves. One outside keeps its whole path. Saving a document somewhere else says its images' paths again from there, and an export
+uses whole paths, since it can land anywhere. A document whose images already have whole paths keeps them until it's saved somewhere else.
+
 The theme is the standard one, and a file in the notebook's `theme/` takes the place of the same file in it. With no `url` there's no feed.
 
 ## Revision logs

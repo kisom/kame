@@ -879,6 +879,21 @@ mod tests {
     }
 
     #[test]
+    fn an_image_climbing_to_static_from_a_folder_is_published() {
+        let nb = made("nbclimb", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("static/plate.png", "a plate");
+        nb.document("maritain/essay.kame", true, &image("../static/plate.png"));
+        let (plan, problems) = nb.plan();
+        assert_eq!(page(&plan, "maritain/essay/plate.png"), "a plate");
+        assert!(
+            !problems.warnings.iter().any(|said| said.contains("image")),
+            "{:?}",
+            problems.warnings
+        );
+    }
+
+    #[test]
     fn a_colon_in_a_path_does_not_make_it_a_web_address() {
         let nb = made("nbcolon", "");
         nb.words("Notebook.kame", false, "Contents.");

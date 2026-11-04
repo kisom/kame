@@ -36,7 +36,7 @@ DISPLAY=:99 VK_ICD_FILENAMES=/run/current-system/sw/share/vulkan/icd.d/lvp_icd.x
 
 ## Typography
 
-Headings = Crimson Pro; body = EB Garamond; code = IBM Plex Mono. Fonts are `include_bytes!`-embedded from `crates/kame-typeset/fonts/` (10 faces: CrimsonPro Regular/Bold/Italic, EBGaramond Regular/Bold/Italic/SemiBold, IBMPlexMono Regular/Bold/Italic) — never system font paths. An installed copy of these families is taken out (`font_system`), and the system's other fonts are only for text these can't set. Body shapes with `Shaping::Advanced` + `Align::Justified`. Punctuation hangs outside the measure (`hang_line`), except in code and prose blocks, so paint and hit-test from `BlockLayout::runs`, not `buffer.layout_runs()`. Justified left-to-right paragraphs are set by kame itself (`layout/breaks.rs`), with any hyphens drawn as glyphs with `start == end` that stand for no text.
+Headings = Crimson Pro; body = EB Garamond; code = IBM Plex Mono. Fonts are `include_bytes!`-embedded from `crates/kame-typeset/fonts/` (13 faces: CrimsonPro Regular/Bold/Italic/BoldItalic, EBGaramond Regular/Bold/Italic/BoldItalic/SemiBold, IBMPlexMono Regular/Bold/Italic/BoldItalic) — never system font paths. An installed copy of these families is taken out (`font_system`), and the system's other fonts are only for text these can't set. Body shapes with `Shaping::Advanced` + `Align::Justified`. Punctuation hangs outside the measure (`hang_line`), except in code and prose blocks, so paint and hit-test from `BlockLayout::runs`, not `buffer.layout_runs()`. Justified left-to-right paragraphs are set by kame itself (`layout/breaks.rs`), with any hyphens drawn as glyphs with `start == end` that stand for no text.
 
 ## Module map
 

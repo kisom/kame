@@ -27,17 +27,23 @@ use crate::render::GlyphAtlas;
 /// face silently falls back to the body family. Embedding the files (rather
 /// than reading `fonts/` at startup) keeps a binary copied elsewhere working
 /// while still sourcing exactly the files in `fonts/`.
+///
+/// No full static of Crimson Pro's bold italic is published at the version of the other faces, 1.003,
+/// so that one is Google Fonts' variable italic set at weight 700 and named to match.
 const FONTS: &[&[u8]] = &[
     include_bytes!("../../fonts/EBGaramond-Regular.otf"),
     include_bytes!("../../fonts/EBGaramond-Bold.otf"),
     include_bytes!("../../fonts/EBGaramond-Italic.otf"),
+    include_bytes!("../../fonts/EBGaramond-BoldItalic.otf"),
     include_bytes!("../../fonts/EBGaramond-SemiBold.otf"),
     include_bytes!("../../fonts/CrimsonPro-Regular.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Bold.ttf"),
     include_bytes!("../../fonts/CrimsonPro-Italic.ttf"),
+    include_bytes!("../../fonts/CrimsonPro-BoldItalic.ttf"),
     include_bytes!("../../fonts/IBMPlexMono-Regular.ttf"),
     include_bytes!("../../fonts/IBMPlexMono-Bold.ttf"),
     include_bytes!("../../fonts/IBMPlexMono-Italic.ttf"),
+    include_bytes!("../../fonts/IBMPlexMono-BoldItalic.ttf"),
 ];
 
 /// A font system that sets a document in the bundled faces, with the system's other fonts there
@@ -1046,7 +1052,7 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AnnotationKind, BlockKind};
+    use crate::model::{AnnotationKind, BlockKind, Span, SpanStyle};
     use cosmic_text::{Family, Style, Weight};
     use uuid::Uuid;
 
@@ -1131,6 +1137,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Bold italic is a face of its own in every family, rather than an italic thickened.
+    #[test]
+    fn every_family_has_a_true_bold_italic() {
+        let renderer = GlyphRenderer::new(config());
+        for family in ["EB Garamond", "Crimson Pro", "IBM Plex Mono"] {
+            let id = face(&renderer, family, Weight::BOLD, Style::Italic);
+            let found = renderer.font_system.db().face(id).unwrap();
+            assert_eq!(found.weight, Weight::BOLD, "{family}");
+            assert_eq!(found.style, Style::Italic, "{family}");
+            assert!(is_bundled(found), "{family}");
+        }
+    }
+
+    #[test]
+    fn text_both_bold_and_italic_shapes_in_the_bold_italic_face() {
+        let mut renderer = GlyphRenderer::new(config());
+        let bold_italic = face(&renderer, "EB Garamond", Weight::BOLD, Style::Italic);
+        let mut block = paragraph("Strong words");
+        for style in [SpanStyle::Bold, SpanStyle::Italic] {
+            block.spans.push(Span {
+                start: 0,
+                end: block.text.len(),
+                style,
+            });
+        }
+        let layout = renderer.layout(&block);
+        let glyphs: Vec<_> = layout.runs.iter().flat_map(|run| &run.glyphs).collect();
+        assert!(!glyphs.is_empty());
+        assert!(glyphs.iter().all(|glyph| glyph.font_id == bold_italic));
     }
 
     fn face(renderer: &GlyphRenderer, family: &str, weight: Weight, style: Style) -> fontdb::ID {

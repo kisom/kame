@@ -328,7 +328,8 @@ mod tests {
         let source = make(&dir, "doc", false, with_images(&["a.png"]));
         let mut problems = Problems::default();
         let images = Images::resolve(&source, &dir, &mut problems);
-        assert_eq!(images.copies(), [("a.png".to_string(), dir.join("a.png"))]);
+        let file = dir.join("a.png").canonicalize().unwrap();
+        assert_eq!(images.copies(), [("a.png".to_string(), file)]);
         assert_eq!(images.relative("a.png"), "a.png");
         assert_eq!(
             images.absolute("a.png", "https://e.com", "/k/doc/"),

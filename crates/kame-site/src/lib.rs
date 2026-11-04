@@ -34,7 +34,7 @@ pub fn build(site_dir: &std::path::Path, include_drafts: bool) -> Problems {
 }
 
 const USAGE: &str =
-    "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site sync [DIR]\n  kame-site regen-theme [DIR]";
+    "usage:\n  kame-site new DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site sync [--yes] [DIR]\n  kame-site regen-theme [DIR]";
 
 /// The command line, without its program name. Returns the exit code: 1 when the work
 /// failed, and 2 when the command wasn't understood.
@@ -107,12 +107,19 @@ pub fn run(args: &[String]) -> i32 {
             i32::from(!problems.errors.is_empty())
         }
         Some("sync") => {
-            let dir = args.next().unwrap_or(".");
-            if args.next().is_some() {
-                eprintln!("{USAGE}");
-                return 2;
+            let mut go_ahead = false;
+            let mut dir = None;
+            for arg in args {
+                match arg {
+                    "--yes" => go_ahead = true,
+                    other if other.starts_with('-') || dir.is_some() => {
+                        eprintln!("{USAGE}");
+                        return 2;
+                    }
+                    other => dir = Some(other),
+                }
             }
-            let dir = std::path::Path::new(dir);
+            let dir = std::path::Path::new(dir.unwrap_or("."));
             if !notebook::is_notebook(dir) {
                 eprintln!(
                     "kame-site: sync is for a notebook, and {} has no notebook.yaml",
@@ -121,7 +128,7 @@ pub fn run(args: &[String]) -> i32 {
                 return 1;
             }
             let mut problems = Problems::default();
-            let output = notebook::sync(dir, &mut problems);
+            let output = notebook::sync(dir, go_ahead, &mut problems);
             finish_notebook(output, problems)
         }
         _ => {

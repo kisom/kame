@@ -24,6 +24,8 @@ pub enum Kind {
 /// Folders in the root that hold no documents. Everything in `static/` publishes, and `theme/` is
 /// how a site looks.
 const NOT_DOCUMENTS: [&str; 2] = ["static", "theme"];
+/// The folder a build goes in, which isn't part of the notebook at all.
+const OUTPUT: &str = "output";
 
 fn is_document_name(name: &str) -> bool {
     let lower = name.to_lowercase();
@@ -88,6 +90,9 @@ impl Notebook {
                     continue;
                 }
                 let at_root = folder == self.root;
+                if at_root && name == OUTPUT {
+                    continue;
+                }
                 let leaves_documents = at_root && NOT_DOCUMENTS.contains(&name.as_str());
                 self.walk(&path, documents_here && !leaves_documents, found);
             } else if !is_working_file(&name) {

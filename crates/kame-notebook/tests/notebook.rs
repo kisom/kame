@@ -137,6 +137,36 @@ fn a_document_with_only_logs_is_listed_and_read_from_them() {
 }
 
 #[test]
+fn a_builds_output_is_no_part_of_the_notebook() {
+    use kame_notebook::links::Follow;
+    use kame_notebook::search::search;
+    let root = folder("output");
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    document(&root.join("a.kame"), "Words.");
+    std::fs::create_dir_all(root.join("output/deep")).unwrap();
+    std::fs::write(root.join("output/index.html"), "built").unwrap();
+    std::fs::write(root.join("output/deep/page.md"), "Words.").unwrap();
+    document(
+        &root.join("deep/output/kept.kame"),
+        "A folder of that name elsewhere is fine.",
+    );
+    let found = notebook(&root);
+    let listed: Vec<String> = found
+        .entries()
+        .into_iter()
+        .map(|entry| entry.relative)
+        .collect();
+    assert_eq!(listed, ["a.kame", "deep/output/kept.kame"]);
+    let mut hits = 0;
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    search(&found, "Words", None, &cancel, |_| hits += 1);
+    assert_eq!(hits, 1);
+    let from = root.join("a.kame");
+    assert_eq!(found.follow("output/new", &from), Follow::Rotted);
+    assert_eq!(found.follow("output/", &from), Follow::Rotted);
+}
+
+#[test]
 fn a_symbolic_link_out_of_the_notebook_is_not_followed() {
     let root = folder("symlink");
     let outside = folder("outside");

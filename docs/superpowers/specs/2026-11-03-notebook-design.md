@@ -181,7 +181,9 @@ kame-site sync ~/notes/philosophy    # builds, then sends it to `remote`
   publishes as written, leaving the web server to answer.
 - **The theme** is the standard one built into `kame-site`, with a `theme/` folder in the notebook overriding it when
   wanted, so a notebook starts with no theme files at all.
-- **Output** goes outside the notebook, under the user's cache folder, so that Syncthing doesn't carry it.
+- **Output** goes in `output/` in the notebook, so that it's self-contained. In a synced folder it needs a line in `.stignore`, or two
+  machines' builds conflict. A build won't replace an `output/` it didn't make.
+- **Sending** does a dry run first, and if that would delete more than 5 files from `remote` it lists them and stops, without `--yes`.
 - **A link to an unmarked document** shows as plain text, and the build lists it, so nothing private leaks and no link
   goes dead.
 - **What doesn't change.** `site.yaml` sites and your existing essays work as they do today. RSS, dates, images, drafts

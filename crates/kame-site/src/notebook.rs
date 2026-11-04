@@ -327,35 +327,24 @@ pub fn plan_notebook(
     problems.errors.is_empty().then_some(plan)
 }
 
-/// Where a notebook's site is built: under the user's cache folder, so that a sync tool never
-/// carries it, and named for the notebook's path, so that notebooks don't share one.
-pub fn site_dir(notebook: &Notebook) -> Option<PathBuf> {
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|found| !found.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            let home = PathBuf::from(std::env::var_os("HOME")?);
-            Some(if cfg!(target_os = "macos") {
-                home.join("Library/Caches")
-            } else {
-                home.join(".cache")
-            })
-        })?;
+/// A file a build leaves in `output/`, by which the next one knows that folder is its own to
+/// replace. It isn't sent anywhere.
+const MARKER: &str = ".kame-site-output";
+/// How many files a publish can remove from the remote without asking.
+const TOO_MANY_DELETIONS: usize = 5;
+
+/// A folder to lay out the theme in while building, out of the way of the notebook, where a folder
+/// named `pages` would be taken for the site's own. It's gone when the build is done.
+fn work_dir(notebook: &Notebook) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     notebook.root.hash(&mut hasher);
-    let name = notebook
-        .root
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    Some(
-        cache
-            .join("kame-site")
-            .join(format!("{name}-{:016x}", hasher.finish())),
-    )
+    std::process::id().hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    std::env::temp_dir().join(format!("kame-site-{:016x}", hasher.finish()))
 }
 
-/// Builds the notebook at `dir`, returning where the site went, if it did.
+/// Builds the notebook at `dir` into its `output/` folder, which is replaced only if all of it
+/// succeeds, returning where that is. A folder there that a build didn't make is left alone.
 pub fn build(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
     let notebook = match Notebook::open(dir) {
         Ok(notebook) => notebook,
@@ -364,20 +353,28 @@ pub fn build(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
             return None;
         }
     };
-    let Some(site_dir) = site_dir(&notebook) else {
-        problems
-            .errors
-            .push("could not find a cache folder to build in".to_string());
-        return None;
-    };
-    let plan = plan_notebook(&notebook, &site_dir, problems)?;
-    if let Err(err) = crate::write::write_site(&plan, &site_dir) {
-        problems
-            .errors
-            .push(format!("could not write the site: {err}"));
+    let output = notebook.root.join("output");
+    let is_empty = std::fs::read_dir(&output).is_ok_and(|mut found| found.next().is_none());
+    if output.exists() && !is_empty && !output.join(MARKER).exists() {
+        problems.errors.push(format!(
+            "{} wasn't made by kame-site, so a build won't replace it",
+            output.display()
+        ));
         return None;
     }
-    Some(site_dir.join("output"))
+    let work = work_dir(&notebook);
+    let built = plan_notebook(&notebook, &work, problems).and_then(|mut plan| {
+        plan.add(PathBuf::from(MARKER), Output::Bytes(Vec::new()), problems);
+        if let Err(err) = crate::write::write_site(&plan, &notebook.root) {
+            problems
+                .errors
+                .push(format!("could not write the site: {err}"));
+            return None;
+        }
+        Some(output)
+    });
+    let _ = std::fs::remove_dir_all(&work);
+    built
 }
 
 /// Whether a remote could be read as anything but where to send a site: it has an option at its
@@ -393,8 +390,27 @@ fn bad_remote(remote: &str) -> bool {
         || remote.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// Builds the notebook at `dir` and sends it to its `remote`, as `make sync` does for a site.
-pub fn sync(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
+/// The files rsync says it would delete, from what `--itemize-changes` prints.
+fn deletions(said: &str) -> Vec<&str> {
+    said.lines()
+        .filter_map(|line| line.strip_prefix("*deleting"))
+        .map(str::trim)
+        .collect()
+}
+
+/// rsync with what every run of it needs. The source and destination follow a `--`.
+fn rsync() -> std::process::Command {
+    let mut command = std::process::Command::new("rsync");
+    command
+        .arg(format!("--exclude={MARKER}"))
+        .args(["-az", "--delete"]);
+    command
+}
+
+/// Builds the notebook at `dir` and sends it to its `remote`, as `make sync` does for a site. A
+/// dry run comes first, since `--delete` empties whatever `remote` names of everything else. If
+/// that would remove more than a few files they're listed, and nothing happens without `go_ahead`.
+pub fn sync(dir: &Path, go_ahead: bool, problems: &mut Problems) -> Option<PathBuf> {
     let remote = match Notebook::open(dir) {
         Ok(notebook) => notebook.settings.remote,
         Err(err) => {
@@ -416,10 +432,50 @@ pub fn sync(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
         return None;
     }
     let output = build(dir, problems)?;
+    let source = format!("{}/", output.display());
+    if !go_ahead {
+        let dry = rsync()
+            .args(["--dry-run", "--itemize-changes", "--"])
+            .arg(&source)
+            .arg(&remote)
+            .output();
+        let dry = match dry {
+            Ok(dry) if dry.status.success() => dry,
+            Ok(dry) => {
+                problems.errors.push(format!(
+                    "rsync's dry run failed: {}",
+                    String::from_utf8_lossy(&dry.stderr).trim()
+                ));
+                return None;
+            }
+            Err(err) => {
+                problems.errors.push(format!("could not run rsync: {err}"));
+                return None;
+            }
+        };
+        let said = String::from_utf8_lossy(&dry.stdout);
+        let doomed = deletions(&said);
+        if doomed.len() > TOO_MANY_DELETIONS {
+            const SHOWN: usize = 20;
+            let mut message = format!(
+                "this would delete {} files from {remote}, so nothing was sent. If that's right, run sync with --yes:",
+                doomed.len()
+            );
+            for file in doomed.iter().take(SHOWN) {
+                message.push_str("\n  ");
+                message.push_str(file);
+            }
+            if doomed.len() > SHOWN {
+                message.push_str(&format!("\n  and {} more", doomed.len() - SHOWN));
+            }
+            problems.errors.push(message);
+            return None;
+        }
+    }
     // The trailing slash means what's in the folder, rather than the folder.
-    let status = std::process::Command::new("rsync")
-        .args(["-avz", "--delete", "--"])
-        .arg(format!("{}/", output.display()))
+    let status = rsync()
+        .args(["-v", "--"])
+        .arg(&source)
         .arg(&remote)
         .status();
     match status {
@@ -738,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn a_build_writes_nothing_inside_the_notebook_and_comes_out_the_same_twice() {
+    fn planning_writes_nothing_inside_the_notebook_and_comes_out_the_same_twice() {
         let nb = made("nbdet", "url: https://x.example/\n");
         nb.words("Notebook.kame", false, "Contents.");
         nb.words("a.kame", true, "Words.");
@@ -956,7 +1012,7 @@ mod tests {
         let nb = made("nbdash", "remote: --rsh=touch /tmp/kame-pwned\n");
         nb.words("Notebook.kame", false, "Contents.");
         let mut problems = Problems::default();
-        assert_eq!(sync(&nb.root, &mut problems), None);
+        assert_eq!(sync(&nb.root, false, &mut problems), None);
         assert!(
             problems.errors[0].contains("remote"),
             "{:?}",
@@ -974,11 +1030,157 @@ mod tests {
         assert!(!text.contains("publish: true"));
     }
 
+    fn tree(root: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        files_under(root, Path::new(""), &mut found);
+        let mut names: Vec<String> = found
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_build_goes_in_the_notebook_and_is_all_there() {
+        let nb = made("nbbuild", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("static/paper.pdf", "a paper");
+        let mut problems = Problems::default();
+        let output = build(&nb.root, &mut problems).unwrap();
+        assert!(problems.errors.is_empty(), "{:?}", problems.errors);
+        assert_eq!(output, nb.root.join("output"));
+        assert!(output.join("index.html").is_file());
+        assert!(output.join("static/paper.pdf").is_file());
+        // Nothing else appears in the notebook, and the build leaves no working folders.
+        let names: Vec<String> = std::fs::read_dir(&nb.root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let mut names = names;
+        names.sort();
+        assert_eq!(
+            names,
+            ["Notebook.kame", "notebook.yaml", "output", "static"]
+        );
+        // And it can build again over its own output.
+        let mut problems = Problems::default();
+        assert!(
+            build(&nb.root, &mut problems).is_some(),
+            "{:?}",
+            problems.errors
+        );
+    }
+
+    #[test]
+    fn a_build_will_not_replace_an_output_folder_it_did_not_make() {
+        let nb = made("nbowned", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("output/mine.txt", "my own");
+        let mut problems = Problems::default();
+        assert_eq!(build(&nb.root, &mut problems), None);
+        assert!(
+            problems.errors[0].contains("output"),
+            "{:?}",
+            problems.errors
+        );
+        assert_eq!(
+            std::fs::read_to_string(nb.root.join("output/mine.txt")).unwrap(),
+            "my own"
+        );
+    }
+
+    #[test]
+    fn a_pages_folder_in_a_notebook_is_not_a_sites_pages() {
+        let nb = made("nbpages", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("pages/private.md", "# Private\n\nsecret page.\n");
+        let mut problems = Problems::default();
+        let output = build(&nb.root, &mut problems).unwrap();
+        assert!(!output.join("private").exists());
+        assert!(!tree(&output).iter().any(|name| name.contains("private")));
+    }
+
+    #[test]
+    fn deletions_are_read_from_what_rsync_would_do() {
+        let said = ">f+++++++++ index.html\n*deleting   old/page.html\ncd+++++++++ new/\n*deleting   gone with space.txt\n";
+        assert_eq!(deletions(said), ["old/page.html", "gone with space.txt"]);
+        assert!(deletions("").is_empty());
+    }
+
+    fn rsync_is_here() -> bool {
+        std::process::Command::new("rsync")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
+    #[test]
+    fn sending_stops_before_deleting_much_unless_told_to_go_ahead() {
+        if !rsync_is_here() {
+            return;
+        }
+        let nb = made("nbsend", "");
+        let remote = nb.root.parent().unwrap().join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        for at in 0..(TOO_MANY_DELETIONS + 3) {
+            std::fs::write(remote.join(format!("precious{at}.txt")), "keep").unwrap();
+        }
+        std::fs::write(
+            nb.root.join("notebook.yaml"),
+            format!("remote: {}/\n", remote.display()),
+        )
+        .unwrap();
+        nb.words("Notebook.kame", false, "Contents.");
+
+        let mut problems = Problems::default();
+        assert_eq!(sync(&nb.root, false, &mut problems), None);
+        assert!(
+            problems.errors[0].contains("--yes"),
+            "{:?}",
+            problems.errors
+        );
+        assert!(remote.join("precious0.txt").exists(), "nothing was touched");
+        assert!(!remote.join("index.html").exists(), "nothing was sent");
+
+        let mut problems = Problems::default();
+        assert!(
+            sync(&nb.root, true, &mut problems).is_some(),
+            "{:?}",
+            problems.errors
+        );
+        assert!(!remote.join("precious0.txt").exists());
+        assert!(remote.join("index.html").exists());
+        assert!(
+            !remote.join(MARKER).exists(),
+            "the marker isn't for publishing"
+        );
+
+        // An everyday publish, removing a page or two, goes straight through.
+        nb.words("a.kame", true, "A page.");
+        let mut problems = Problems::default();
+        assert!(
+            sync(&nb.root, false, &mut problems).is_some(),
+            "{:?}",
+            problems.errors
+        );
+        assert!(remote.join("a/index.html").exists());
+        std::fs::remove_file(nb.root.join("a.kame")).unwrap();
+        let mut problems = Problems::default();
+        assert!(
+            sync(&nb.root, false, &mut problems).is_some(),
+            "{:?}",
+            problems.errors
+        );
+        assert!(!remote.join("a/index.html").exists());
+    }
+
     #[test]
     fn sending_a_notebook_needs_a_remote() {
         let nb = made("nbremote", "");
         let mut problems = Problems::default();
-        assert_eq!(sync(&nb.root, &mut problems), None);
+        assert_eq!(sync(&nb.root, false, &mut problems), None);
         assert!(
             problems.errors[0].contains("remote"),
             "{:?}",

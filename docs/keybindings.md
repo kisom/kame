@@ -329,8 +329,12 @@ on the other machine for now.
 
 ### Publishing a notebook
 
-`kame-site build FOLDER` builds it as its own site, under the user's cache folder, and `kame-site sync FOLDER` also sends it to `remote`
-with `rsync --delete`. Document Properties has a *Publish* tick, and in Markdown it's `publish: true` in the front matter. `Notebook.kame`
+`kame-site build FOLDER` builds it as its own site, in an `output/` folder in the notebook, which the browser and search leave out. In a
+synced folder, stop that syncing with `/path/to/notebook/output` and `/path/to/notebook/.output-*` in `.stignore`, or two machines' builds
+will conflict. A build won't replace an `output/` it didn't make.
+
+`kame-site sync FOLDER` also sends it to `remote` with `rsync --delete`. A dry run comes first, and if that would delete more than 5 files
+from the remote, they're listed and nothing happens without `--yes`. Document Properties has a *Publish* tick, and in Markdown it's `publish: true` in the front matter. `Notebook.kame`
 in the root is the home page and always publishes.
 
 URLs follow the folders, so `maritain/materialism.kame` is `/maritain/materialism/`, and a marked `Notebook.kame` in a folder is that

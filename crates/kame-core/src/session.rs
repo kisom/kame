@@ -10,7 +10,7 @@ use crate::model::{
     Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document, Metadata, SpanStyle,
 };
 use crate::storage::{self, Db, DbError, SnapshotMeta};
-use crate::text::{next_boundary, next_word, prev_boundary, prev_word, word_at};
+use crate::text::{next_boundary, next_word, prev_boundary, prev_word, widen_to_words, word_at};
 
 /// The document, its durable history, and the caret — everything that exists
 /// without a window.
@@ -1785,6 +1785,13 @@ impl Session {
                 block.text.len()
             };
             let start_offset = start.offset.min(end);
+            // A footnote's number goes at the end, which must not be inside a word. A highlight
+            // keeps exactly what was selected.
+            let (start_offset, end) = if kind == AnnotationKind::Footnote {
+                widen_to_words(&block.text, start_offset, end)
+            } else {
+                (start_offset, end)
+            };
             return Some(Anchor::range(block.id, start_offset, end));
         }
 
@@ -2346,6 +2353,65 @@ mod tests {
 
     fn first_block_id(session: &Session) -> crate::model::BlockId {
         session.document().blocks[0].id
+    }
+
+    fn note_on(text: &str, from: usize, to: usize, kind: AnnotationKind) -> (usize, usize) {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(text);
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: from,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: to,
+        });
+        session
+            .annotation_anchor(kind)
+            .unwrap()
+            .byte_range()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_footnote_on_part_of_a_word_takes_the_whole_word() {
+        let text = "This has a margin note, a footnote here.";
+        let at = |word: &str| text.find(word).unwrap();
+        let (start, end) = note_on(text, at("te,"), at("tnote"), AnnotationKind::Footnote);
+        assert_eq!(&text[start..end], "note, a footnote");
+        let (start, end) = note_on(text, at("rgin"), at("rgin") + 2, AnnotationKind::Footnote);
+        assert_eq!(&text[start..end], "margin");
+    }
+
+    #[test]
+    fn a_highlight_keeps_exactly_what_was_selected() {
+        let text = "This has a margin note, a footnote here.";
+        let from = text.find("te,").unwrap();
+        let to = text.find("tnote").unwrap();
+        let (start, end) = note_on(text, from, to, AnnotationKind::Note);
+        assert_eq!(&text[start..end], "te, a foo");
+    }
+
+    #[test]
+    fn a_footnote_on_whole_words_stays_as_it_was() {
+        let text = "One two, three.";
+        let (start, end) = note_on(text, 4, 7, AnnotationKind::Footnote);
+        assert_eq!(&text[start..end], "two");
+        let (start, end) = note_on(text, 3, 8, AnnotationKind::Footnote);
+        assert_eq!(
+            &text[start..end],
+            " two,",
+            "punctuation and space stay as chosen"
+        );
+    }
+
+    #[test]
+    fn widening_a_footnote_keeps_to_characters() {
+        let text = "Le café—noir, déjà.";
+        let inside = text.find("fé").unwrap();
+        let (start, end) = note_on(text, inside, inside + "f".len(), AnnotationKind::Footnote);
+        assert_eq!(&text[start..end], "café");
     }
 
     #[test]

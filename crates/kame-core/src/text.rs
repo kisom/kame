@@ -130,6 +130,32 @@ fn char_eq_ignore_case(a: char, b: char) -> bool {
     }
 }
 
+/// Grows a range outward so that neither end is in the middle of a word. An end already between
+/// words stays where it is, so that a range of whole words, or of punctuation, doesn't change.
+pub fn widen_to_words(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let before = |at: usize| text[..at].chars().next_back().is_some_and(is_word_char);
+    let after = |at: usize| text[at..].chars().next().is_some_and(is_word_char);
+    let mut start = start.min(text.len());
+    let mut end = end.min(text.len());
+    while !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    while !text.is_char_boundary(end) {
+        end += 1;
+    }
+    if before(start) && after(start) {
+        while before(start) {
+            start = prev_boundary(text, start).unwrap_or(0);
+        }
+    }
+    if before(end) && after(end) {
+        while after(end) {
+            end = next_boundary(text, end).unwrap_or(text.len());
+        }
+    }
+    (start, end)
+}
+
 /// Case-insensitive matches of `needle` in `text`, as byte ranges of `text`. This is what finding
 /// text means everywhere in kame. Overlapping matches are reported, and an empty needle matches
 /// nothing.

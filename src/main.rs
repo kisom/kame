@@ -410,6 +410,8 @@ const COPY_CHECK_SECONDS: f32 = 5.0;
 const LOG_CHECK_SECONDS: f32 = 3.0;
 /// How long a pause in typing has to be before a revision is written or a merge shows up.
 const LOG_PAUSE_SECONDS: f32 = 5.0;
+/// A gap between frames this long means the machine slept or the window was hidden.
+const LOG_RETURN_SECONDS: f32 = 10.0;
 /// How far up from the bottom of its line a document link's underline sits, as a share
 /// of the line's height.
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
@@ -2110,6 +2112,7 @@ struct KameApp {
     next_log_check: std::time::Instant,
     last_typed: std::time::Instant,
     was_focused: bool,
+    last_log_tick: std::time::Instant,
     marks: Marks,
     /// The mark the page's right-click menu is about, while it's open.
     mark_menu: Option<(BlockId, Finding)>,
@@ -2260,6 +2263,7 @@ impl KameApp {
             next_log_check: std::time::Instant::now(),
             last_typed: std::time::Instant::now(),
             was_focused: true,
+            last_log_tick: std::time::Instant::now(),
             marks: Marks::default(),
             mark_menu: None,
             layouts: LayoutCache::new(),
@@ -2898,7 +2902,6 @@ impl KameApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(FILE_CHECK_SECONDS));
         }
         self.look_for_conflict_copies();
-        self.tick_logs(ctx);
         let new_chord = ctx.input(|input| input.events.iter().any(is_new_chord));
         if new_chord && !self.dialog_open() && !self.close_flow.prompting {
             self.request_new();
@@ -5570,8 +5573,9 @@ impl KameApp {
         }
     }
 
-    /// Keeps the revision logs up to date, on a pause in typing or on losing focus, so that a
-    /// merge never lands mid-word and nothing interrupts a dialog or an open note.
+    /// Keeps the revision logs up to date, on a pause in typing or on leaving or coming back to
+    /// the window, so that a merge never lands mid-word and nothing interrupts a dialog or an open
+    /// note.
     fn tick_logs(&mut self, ctx: &egui::Context) {
         let now = std::time::Instant::now();
         let typing = ctx.input(|input| {
@@ -5590,14 +5594,19 @@ impl KameApp {
             self.last_typed = now;
         }
         let focused = ctx.input(|input| input.focused);
-        let lost_focus = self.was_focused && !focused;
+        let focus_changed = self.was_focused != focused;
         self.was_focused = focused;
-        if now < self.next_log_check && !lost_focus {
+        // A long gap means the machine slept or the window was hidden, so this is a return too. The
+        // copy left open is about to be written in, which shouldn't start from stale text.
+        let returned = now.duration_since(self.last_log_tick).as_secs_f32() > LOG_RETURN_SECONDS;
+        self.last_log_tick = now;
+        if now < self.next_log_check && !focus_changed && !returned {
             return;
         }
         self.next_log_check = now + std::time::Duration::from_secs_f32(LOG_CHECK_SECONDS);
         let paused = self.last_typed.elapsed().as_secs_f32() >= LOG_PAUSE_SECONDS;
-        if (paused || lost_focus) && !self.dialog_open() && self.open_note.is_none() {
+        if (paused || focus_changed || returned) && !self.dialog_open() && self.open_note.is_none()
+        {
             self.sync_logs();
         }
     }
@@ -6107,6 +6116,9 @@ impl eframe::App for KameApp {
         if let Some(path) = requests.open.into_iter().next() {
             self.open_picked(path);
         }
+        // Here because eframe skips `ui` while the window is hidden, and before it so that a key
+        // pressed on coming back lands in text that's up to date.
+        self.tick_logs(ctx);
         let close_requested = ctx.input(|input| input.viewport().close_requested());
         if close_requested {
             self.save_position_now();

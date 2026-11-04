@@ -30,6 +30,9 @@ pub struct Session {
     /// Set when a write failed. Further mutations are refused until a write
     /// succeeds, so the in-memory undo cursor cannot drift from the DB cursor.
     pub save_failed: bool,
+    /// The history as it stood after another machine's words last arrived, for telling whether
+    /// anything has happened since.
+    followed_at: Option<(usize, usize)>,
     /// The file this document was imported from.
     pub source_path: Option<PathBuf>,
     /// Where the page was scrolled when this document was last left.
@@ -187,6 +190,7 @@ impl Session {
             selection: None,
             last_error,
             save_failed,
+            followed_at: None,
             source_path: None,
             restored_scroll: position.map(|position| position.scroll),
             metadata,
@@ -225,6 +229,7 @@ impl Session {
             selection: None,
             last_error: Some(error),
             save_failed: false,
+            followed_at: None,
             source_path: None,
             restored_scroll: None,
             metadata: Metadata {
@@ -261,6 +266,7 @@ impl Session {
             selection: None,
             last_error: None,
             save_failed: false,
+            followed_at: None,
             source_path: None,
             restored_scroll: None,
             metadata: Metadata {
@@ -341,6 +347,7 @@ impl Session {
             selection: None,
             last_error: None,
             save_failed: false,
+            followed_at: None,
             source_path: Some(path.clone()),
             restored_scroll: None,
             metadata,
@@ -862,6 +869,32 @@ impl Session {
         self.selection = None;
         let saved = self.record(&op);
         self.valid_caret();
+        saved
+    }
+
+    /// Replaces the whole document with what another machine wrote. Arrivals with no edit between
+    /// them join into one undo step, so that a copy left open while writing elsewhere doesn't
+    /// keep a whole document for every one of them.
+    pub fn follow_document(&mut self, new: Document) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let history = self.history();
+        let joined = if self.followed_at == Some(history) {
+            self.editor.join_replacing(new.clone())
+        } else {
+            None
+        };
+        let saved = match joined {
+            Some(op) => {
+                self.selection = None;
+                let saved = self.record(&op);
+                self.valid_caret();
+                saved
+            }
+            None => self.replace_document(new),
+        };
+        self.followed_at = Some(self.history());
         saved
     }
 

@@ -177,6 +177,26 @@ impl Editor {
         op
     }
 
+    /// Replaces the document, joining this onto the last edit if that replaced the document too,
+    /// so that undo goes back to before both. Returns the edit, or `None` if the last edit was
+    /// anything else, or undone, and this can't join on.
+    pub fn join_replacing(&mut self, new: Document) -> Option<Op> {
+        if !self.redo.is_empty() {
+            return None;
+        }
+        let Some(Op::ReplaceDocument { old, .. }) = self.undo.last() else {
+            return None;
+        };
+        let joined = Op::ReplaceDocument {
+            old: old.clone(),
+            new: Box::new(new),
+        };
+        apply(&mut self.doc, &joined);
+        *self.undo.last_mut().expect("it was just read") = joined.clone();
+        self.coalesced = true;
+        Some(joined)
+    }
+
     /// The last edit, joined up with what came before it, if that is what the last edit did.
     /// It then replaces the last entry in the log rather than adding one.
     /// The ops that led to the document as it stands, including any not yet saved.

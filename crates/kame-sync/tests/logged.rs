@@ -551,3 +551,79 @@ fn a_remembered_revision_missing_from_the_logs_starts_from_the_history_again() {
     titan.receive_from(&talos);
     assert_eq!(titan.sync(&mut here, 4).notes, 0);
 }
+
+/// The main use: left open on one machine while writing on another.
+#[test]
+fn an_idle_copy_following_along_does_not_pile_up_undo_steps_or_grow() {
+    let (talos, titan) = two_machines();
+    let mut idle = talos.session();
+    talos.sync(&mut idle, 1);
+    titan.receive_from(&talos);
+    let mut writer = titan.session();
+    titan.sync(&mut writer, 2);
+    talos.receive_from(&titan);
+    talos.sync(&mut idle, 3);
+    let start = idle.history().0;
+    let filler =
+        "A long paragraph of words that are here to give the document some weight. ".repeat(40);
+    titan.append(&mut writer, 0, &filler);
+    titan.sync(&mut writer, 4);
+    talos.receive_from(&titan);
+    talos.sync(&mut idle, 5);
+    let after_one = std::fs::metadata(&talos.path).unwrap().len();
+    for at in 0..60 {
+        titan.append(&mut writer, 1, &format!(" Sentence {at}."));
+        titan.sync(&mut writer, 6 + at);
+        talos.receive_from(&titan);
+        talos.sync(&mut idle, 106 + at);
+    }
+    assert_eq!(idle.document(), writer.document(), "it has followed along");
+    assert_eq!(idle.history().0, start + 1, "one undo step for all of it");
+    drop(idle);
+    let grown = std::fs::metadata(&talos.path).unwrap().len();
+    eprintln!("after one {after_one}, after sixty more {grown}");
+    assert!(grown < after_one * 3, "{after_one} grew to {grown}");
+    let idle = talos.session();
+    assert_eq!(
+        idle.document(),
+        writer.document(),
+        "and reads back the same"
+    );
+}
+
+#[test]
+fn undo_takes_an_idle_copy_back_before_everything_that_arrived_and_an_edit_ends_the_run() {
+    let (talos, titan) = two_machines();
+    let mut idle = talos.session();
+    talos.sync(&mut idle, 1);
+    titan.receive_from(&talos);
+    let mut writer = titan.session();
+    titan.sync(&mut writer, 2);
+    talos.receive_from(&titan);
+    talos.sync(&mut idle, 3);
+    let before = idle.document().clone();
+    let arrive = |writer: &mut Session, idle: &mut Session, words: &str, at: i64| {
+        titan.append(writer, 0, words);
+        titan.sync(writer, at);
+        talos.receive_from(&titan);
+        talos.sync(idle, at + 1);
+    };
+    arrive(&mut writer, &mut idle, " One.", 10);
+    arrive(&mut writer, &mut idle, " Two.", 20);
+    assert!(idle.undo());
+    assert_eq!(idle.document(), &before);
+    assert!(idle.redo());
+    assert!(idle.document().blocks[0].text.ends_with(" One. Two."));
+
+    // An edit here ends the run, so the next arrival can be undone apart from it.
+    talos.append(&mut idle, 1, " Here.");
+    talos.sync(&mut idle, 30);
+    titan.receive_from(&talos);
+    titan.sync(&mut writer, 31);
+    arrive(&mut writer, &mut idle, " Three.", 40);
+    let with_three = idle.document().clone();
+    assert!(with_three.blocks[0].text.ends_with("Three."));
+    assert!(idle.undo());
+    assert!(!idle.document().blocks[0].text.contains("Three"));
+    assert!(idle.document().blocks[1].text.ends_with(" Here."));
+}

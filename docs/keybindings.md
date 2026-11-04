@@ -307,7 +307,8 @@ machine's `.stignore` needs. Documents under that folder then stop syncing their
 revisions in `X.kame.sync/`, which is what syncs.
 
 kame writes a revision on a pause in typing, on losing focus and on leaving a document. What arrives from another machine shows up on
-a pause, never mid-word, as one undo step, and the status row says where it came from. Sentences both machines changed keep the later
+a pause or on coming back to the window, never mid-word, and the status row says where it came from. A copy left open follows along,
+with everything that arrives between your own edits as one undo step. Sentences both machines changed keep the later
 version in the text and the other in a note, after a snapshot. A document with only logs, as on a new machine, is built when opened.
 
 Snapshots and undo history stay on the machine that made them. To go back, remove the `.stignore` line, then delete `.kame-logs` and the

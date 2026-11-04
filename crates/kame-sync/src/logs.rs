@@ -179,7 +179,13 @@ impl Logged {
                 return Err("could not take a snapshot first, so nothing was merged".into());
             }
             let caret = carried_caret(session, &local, &synced.doc);
-            if !session.replace_document(synced.doc) {
+            // A merge bringing notes stands alone, after its snapshot, to be undone as itself.
+            let saved = if added > 0 {
+                session.replace_document(synced.doc)
+            } else {
+                session.follow_document(synced.doc)
+            };
+            if !saved {
                 return Err("could not save the merge".into());
             }
             session.set_caret(caret);

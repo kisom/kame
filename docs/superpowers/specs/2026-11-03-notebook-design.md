@@ -1,8 +1,8 @@
 # Kame notebook — design
 
 Date: 2026-11-03
-Status: draft for review, revised after two rounds of answers. Nothing is built. Section 13 lists what's left for you to
-settle, section 12 ends with the decisions made on your behalf, and section 11 says how easily each decision can be undone. The
+Status: set aside for review, revised after three rounds of answers. Nothing is built. Section 13 lists what waits on the sync
+design, section 12 ends with the decisions made on your behalf, and section 11 says how easily each decision can be undone. The
 starting notes are in `MultiKame.kame`.
 
 ## 1. Purpose
@@ -23,18 +23,18 @@ It isn't a replacement for Obsidian, a place for all notes, or a Markdown editor
 | How many | several, one open at a time. An über-notebook is possible someday and isn't designed for |
 | The app | a superset of kame, not a separate program |
 | What marks a notebook | a `notebook.yaml` file in its root |
-| Contents page | `Notebook.kame` in the root, which is also the site's home page |
+| Index documents | `Notebook.kame`, always that name. In the root it's the contents page and the site's home page, and in any other folder it's that folder's index |
 | Stored state | none beyond `notebook.yaml`. No index and no database, so that nothing derived can go stale |
 | Search | the same matches as Ctrl-F, across the notebook, including private notes |
 | Keys | Ctrl-L to jump, Ctrl-R to search, Ctrl-Shift-O for the browser |
-| Papers and images | under `static/`, kept private unless a rule below publishes them |
+| Papers and images | under `static/`, which is public and isn't searched |
 | Markdown | minimal, page-like, edited in an external editor such as kge. Import and export are left for later |
 | On screen | nothing until asked. A jump list, a search and a hideable browser |
 | Publishing | each notebook is its own site, and only marked documents publish |
 | Following a link to a missing document | creates it, only inside the notebook |
 | What links here | shown at the bottom of the document |
 | Moving a document | placement is fixed for now. A move command that repairs links comes in a later revision |
-| Syncing | no dependency on any one method. See section 10 |
+| Syncing | set by the sync design, on which this depends in the ways section 10 lists |
 
 ## 3. A notebook on disk
 
@@ -45,7 +45,7 @@ philosophy/
 ├── about.md
 ├── maritain/
 │   └── materialism.kame
-├── static/              papers and images, private unless published by a rule in section 9
+├── static/              papers and images, all of it public
 │   └── maritain-1953.pdf
 └── theme/               optional, for a site that differs from the standard theme
 ```
@@ -119,7 +119,7 @@ of blocks, so the list stops at 200 rows and says there are more. Each row shows
 match, and choosing one opens that document at the match, with Ctrl-[ going back. Rows are ordered with whole-word matches
 first, then by the number of matches in the document.
 
-Search doesn't look inside papers. A short `.kame` of notes beside a paper is searched like anything else.
+Search doesn't look in `static/`. A short `.kame` of notes on a paper, anywhere else, is searched like anything else.
 
 ## 7. The browser: Ctrl-Shift-O
 
@@ -140,11 +140,14 @@ with any folders it needs, and opens it. Ctrl-[ comes back. Four rules keep this
 
 - **Only inside the notebook.** A link leading outside it, including through `..` or a symbolic link, says the link has
   rotted, as does any link outside a notebook.
-- **Only for what could be a document.** The target must have no extension or end in `.kame`. A missing
-  `static/paper.pdf` says the link has rotted, and never makes `paper.pdf.kame`.
+- **Only for what could be a document.** The target must have no extension or end in `.kame`, or be a folder, which
+  makes that folder's `Notebook.kame`. A missing `static/paper.pdf` says the link has rotted, and never makes
+  `paper.pdf.kame`.
 - **Mistyped links leave nothing behind.** If you leave a new document without writing anything, it's removed, with its
   `-wal` and `-shm`. Only a document created this way, this session, and never edited is ever removed.
 - **A heading in the link** becomes the new document's first heading, so that the link then leads somewhere.
+
+**A link to a folder.** It opens the folder's `Notebook.kame`.
 
 **A link to a paper or image.** Inside a notebook, following a relative link to a file that isn't a document opens it in
 the system's viewer. Today, kame would try to open it as a document.
@@ -172,7 +175,9 @@ kame-site sync ~/notes/philosophy    # builds, then sends it to `remote`
   `publish: true` in the front matter. It's off by default, since notebooks hold research and working notes too.
 - **URLs follow the folders.** `maritain/materialism.kame` becomes `/maritain/materialism/`, which differs from `/k/` on
   your essays site.
-- **The home page** is `Notebook.kame` rendered as `index.html`, and it always publishes.
+- **Index pages.** `Notebook.kame` in the root becomes the home page and always publishes. In another folder it becomes
+  that folder's `index.html`, if marked like any other document. A folder without one simply has no page, and a link to it
+  publishes as written, leaving the web server to answer.
 - **The theme** is the standard one built into `kame-site`, with a `theme/` folder in the notebook overriding it when
   wanted, so a notebook starts with no theme files at all.
 - **Output** goes outside the notebook, under the user's cache folder, so that Syncthing doesn't carry it.
@@ -181,26 +186,33 @@ kame-site sync ~/notes/philosophy    # builds, then sends it to `remote`
 - **What doesn't change.** `site.yaml` sites and your existing essays work as they do today. RSS, dates, images, drafts
   and deterministic output all reuse what's there. Unmarked documents are simply never read for the site's content.
 
-**`static/` isn't published as a folder.** On a `site.yaml` site, `kame-site` copies all of `static/` to the output. A
-notebook must not, or every paper in it would go public with the first build. So:
+**`static/` is public, and all of it publishes,** at `/static/`, so that its URLs follow the folders too. That differs from a
+`site.yaml` site, which copies the contents of its `static/` to the site's root.
 
-- **An image shown in a published document** is copied beside its page, as on a `site.yaml` site.
-- **A link to a paper from a published document** shows as plain text, and the build lists it, like a link to an unmarked
-  document. See section 13.
-- **Nothing else under `static/`** reaches the output. A test has to pin this, using a private file in a made-up notebook.
-- **Files the site itself needs,** such as fonts and styles, go in `theme/static/`, which still publishes.
+- **Links into it are rewritten.** A page at `/maritain/materialism/` is further from `static/` than its document is, so a
+  relative link to a paper would break unless the build rewrites it.
+- **A link to a file that isn't there** publishes as written, leaving the web server to answer, and the build lists it.
+- **Conflict copies don't publish.** Syncthing leaves them in any folder, and `static/` is copied whole.
+- **Anything not for publication** goes in any other folder, such as `papers/`. The browser and links still reach it, and a
+  link to it from a published document shows as plain text, as with an unmarked document.
+- **Files the site itself needs,** such as fonts and styles, go in `theme/static/`, and publish to the site's root as usual.
+
+An arXiv paper isn't necessarily free to republish. Many are under arXiv's default licence, which lets arXiv distribute them
+without letting anyone else do so, while others are under Creative Commons. The listing page says which, and linking to arXiv
+is the alternative for those that aren't open.
 
 ## 10. Syncing
 
-The notebook doesn't depend on how its files move between machines, since it adds only a small text file and whatever you
-put in `static/`.
+The notebook works with Syncthing as it stands, adding only a small text file and whatever you put in `static/`. But it does
+depend on what a document is on disk, so stage 2 of `2026-11-03-sync-design.md` affects it:
 
-- **Papers and images suit Syncthing.** They're written once and rarely change, so there's nothing to conflict over.
-- **`.kame` files are the weak point,** being binary files that change on two machines, with no way for Syncthing to merge
-  them. That's what conflict copies and merging handle today.
-- **The way out is already designed.** Stage 2 of `2026-11-03-sync-design.md` keeps a text log for each document, opt-in, with
-  `*.kame` left out of sync, and stage 3 says a notebook gets its sync from those same logs. It can be tried on one document
-  and undone. It isn't part of this design, and this design leaves the `.sync` folders alone so as not to get in its way.
+- **A document with no database.** Under revision logs, `*.kame` stops syncing, so a fresh machine has only `X.kame.sync/`.
+  The list of documents, the jump list and search all assume a `.kame` to read.
+- **The cost of reading.** No index relies on reading a head row being quick. Reading logs isn't yet, at 7 seconds for 400
+  revisions in the study.
+- **Removing or moving a document.** Removing an untouched new document, and a later Move, would have to take its logs along.
+- **Where a database lives.** The alternative in that design's section 10, keeping databases in `~/.local/state`, would
+  change what a notebook's folder holds.
 
 ## 11. If this turns out wrong
 
@@ -214,8 +226,8 @@ put in `static/`.
 | The browser | easily. Nothing is stored but a preference |
 | *Publish* mark in `Metadata` | fairly easily. A field in every marked document that can simply stop being read |
 | Relative links between documents | with work. They're in the text of documents, but the format exists already, and a scan can rewrite them |
-| **URLs that follow folders** | **hard.** Once a site is public, others link to its URLs |
-| **Publishing a private file** | **not at all.** So a build publishes as little as it can, and loosening that later is easy |
+| **URLs that follow folders** | **hard.** Once a site is public, others link to its URLs. Redirects could cover a later move |
+| **Everything in `static/` being public** | **the rule easily, a published file not at all.** Whatever goes there has been published |
 
 ## 12. Stages
 
@@ -230,10 +242,9 @@ put in `static/`.
 Each is its own commit, tried in the app before it lands, and useful without the ones after it. Tests use made-up
 notebooks in scratch folders. The riskiest things to pin are the rule that only an untouched new document is ever
 removed, that a link can't create anything outside the notebook, that search and what links here never write anything
-beside a document, and that a build never publishes an unlinked private file.
+beside a document, and that a build publishes nothing from outside `static/` but marked documents and the images they show.
 
-**Not in the first version:** a command palette, moving a document with its links repaired, an index, searching inside
-papers, Markdown import and export, a graph, and asking an AI about the notebook.
+**Not in the first version:** a command palette, moving a document with its links repaired, an index, searching `static/`, Markdown import and export, a graph, and asking an AI about the notebook.
 
 **Decisions made on your behalf.**
 
@@ -245,10 +256,7 @@ papers, Markdown import and export, a graph, and asking an AI about the notebook
 - **No `url` means a site can still be built,** with links relative to the site, and it simply can't produce a full RSS feed
   until one is set.
 
-## 13. For you to settle
+## 13. What waits
 
-1. **A link to a paper from a published document.** This design publishes the text of the link and not the paper, so a reader
-   can't get it, and the build lists it. Going further later is easy, for example with a `public/` folder published whole.
-   Publishing whatever is linked would be more convenient, but one careless link to a copyrighted paper couldn't be taken back.
-2. **URLs that follow folders.** This is the least reversible decision left. The alternative is a short permanent URL, like `/k/`
-   on your essays site, which survives a move at the cost of readable addresses.
+Nothing is left to settle in this design on its own. The questions in section 10 wait on the sync design, and the implementation
+plan waits on your review of this.

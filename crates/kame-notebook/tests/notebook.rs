@@ -7,11 +7,7 @@ use kame_notebook::list::{title_of, Kind};
 use kame_notebook::Notebook;
 
 pub fn folder(name: &str) -> PathBuf {
-    let root = std::env::temp_dir()
-        .join("kame-notebook-tests")
-        .join(format!("{name}-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
-    root.canonicalize().unwrap()
+    kame_test_dir::folder(name).canonicalize().unwrap()
 }
 
 fn document(path: &Path, words: &str) {

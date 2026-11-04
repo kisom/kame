@@ -67,6 +67,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
 
+`crates/kame-test-dir` — folders for tests, only ever a dev-dependency. Each test process gets one, removed as it exits, so tests put their files here and never directly in the temporary directory.
+
 `src/notebook.rs` — the app's jump list, search, browser and what links here.
 
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.

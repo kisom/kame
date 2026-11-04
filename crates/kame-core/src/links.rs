@@ -99,25 +99,14 @@ mod tests {
     use super::*;
 
     fn notebook(name: &str) -> PathBuf {
-        let root = std::env::temp_dir()
-            .join(format!("kame-links-{name}-{}", uuid::Uuid::new_v4()))
-            .canonicalize_or_made();
+        let root = kame_test_dir::folder(&format!("links-{name}"))
+            .canonicalize()
+            .unwrap();
         std::fs::create_dir_all(root.join("static/plates")).unwrap();
         std::fs::create_dir_all(root.join("maritain/early")).unwrap();
         std::fs::write(root.join("static/plates/a.png"), "a").unwrap();
         std::fs::write(root.join("maritain/b.png"), "b").unwrap();
         root
-    }
-
-    trait Made {
-        fn canonicalize_or_made(self) -> PathBuf;
-    }
-
-    impl Made for PathBuf {
-        fn canonicalize_or_made(self) -> PathBuf {
-            std::fs::create_dir_all(&self).unwrap();
-            self.canonicalize().unwrap()
-        }
     }
 
     #[test]

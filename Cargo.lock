@@ -4117,6 +4117,7 @@ dependencies = [
  "kame-notebook",
  "kame-site",
  "kame-sync",
+ "kame-test-dir",
  "kame-typeset",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -4141,6 +4142,7 @@ dependencies = [
 name = "kame-core"
 version = "0.1.0"
 dependencies = [
+ "kame-test-dir",
  "pulldown-cmark",
  "rusqlite",
  "serde",
@@ -4154,8 +4156,8 @@ version = "0.1.0"
 dependencies = [
  "kame-core",
  "kame-sync",
+ "kame-test-dir",
  "serde",
- "uuid",
  "yaml_serde",
 ]
 
@@ -4165,6 +4167,7 @@ version = "0.1.0"
 dependencies = [
  "kame-core",
  "kame-notebook",
+ "kame-test-dir",
  "minijinja",
  "pulldown-cmark",
  "roxmltree 0.21.2",
@@ -4179,11 +4182,16 @@ name = "kame-sync"
 version = "0.1.0"
 dependencies = [
  "kame-core",
+ "kame-test-dir",
  "serde",
  "serde_json",
  "sha2",
  "uuid",
 ]
+
+[[package]]
+name = "kame-test-dir"
+version = "0.1.0"
 
 [[package]]
 name = "kame-typeset"

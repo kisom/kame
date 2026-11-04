@@ -5,36 +5,8 @@ use std::path::{Path, PathBuf};
 use kame_core::model::{Block, BlockKind, Document, Metadata};
 use kame_core::storage::Db;
 
-/// How old a test's leftovers have to be before a later run clears them. Long enough not to
-/// touch a run still going.
-const STALE: std::time::Duration = std::time::Duration::from_secs(3600);
-
-/// Clears what earlier runs left behind. Many tests write a whole site, fonts included, and
-/// the temporary directory is often held in memory, so leaving them there fills it up.
-fn clear_stale(root: &Path) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|found| found.modified())
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age > STALE);
-        if stale {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
-}
-
 pub fn temp_dir(name: &str) -> PathBuf {
-    static CLEARED: std::sync::Once = std::sync::Once::new();
-    let root = std::env::temp_dir().join("kame-site-tests");
-    CLEARED.call_once(|| clear_stale(&root));
-    let dir = root.join(format!("{name}-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    kame_test_dir::folder(name)
 }
 
 pub fn block(kind: BlockKind, text: &str) -> Block {

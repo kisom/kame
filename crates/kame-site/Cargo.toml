@@ -20,5 +20,6 @@ serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+kame-test-dir = { path = "../kame-test-dir" }
 roxmltree = "0.21"
 rusqlite = "0.41"

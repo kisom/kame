@@ -106,8 +106,7 @@ mod tests {
     }
 
     fn fixture(name: &str) -> Fixture {
-        let base =
-            std::env::temp_dir().join(format!("kame-images-{name}-{}", uuid::Uuid::new_v4()));
+        let base = kame_test_dir::folder(&format!("images-{name}"));
         std::fs::create_dir_all(base.join("notes/maritain/early")).unwrap();
         std::fs::create_dir_all(base.join("pictures")).unwrap();
         std::fs::write(base.join("notes").join(crate::SETTINGS), "").unwrap();

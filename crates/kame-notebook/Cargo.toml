@@ -11,4 +11,4 @@ serde = { version = "1", features = ["derive"] }
 yaml_serde = "0.10"
 
 [dev-dependencies]
-uuid = { version = "1", features = ["v4", "serde"] }
+kame-test-dir = { path = "../kame-test-dir" }

@@ -98,7 +98,7 @@ handling, such as Hyprland, `xdg-open` also needs the `mimetype` command
 (`Ctrl-S`) on a document with no file opens the system save-as browser; closing
 a window with unsaved anonymous text asks before it is lost.
 
-Key bindings, and how everything else is used, are in [docs/keybindings.md](docs/keybindings.md).
+The [user's guide](docs/guide.md) walks through all of it, and key bindings are listed in [docs/keybindings.md](docs/keybindings.md).
 
 ## The file format
 

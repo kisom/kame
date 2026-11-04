@@ -348,7 +348,10 @@ whole document twice: sixty arrivals took a test file from 32 KB to 49 KB. A mer
 window syncs at once, even if a key is already down, so that writing doesn't start from stale text. That also goes for a long gap
 between frames, from sleep or a hidden window, and the check runs even while `ui` is skipped.
 
-**How long a sentence takes.** About 20 seconds, measured by hand: a 5 second pause, up to 3 until the next check, Syncthing's own 10
+**Snapshots may stay behind.** They're nice to have and little used, so staying on the machine that made them is an accepted cost of
+opting in.
+
+**How long a sentence takes.** About 25 seconds in the app from Titan to Talos, timed by hand from the end of typing: a 5 second pause, up to 3 until the next check, Syncthing's own 10
 second watcher delay, then the transfer and up to 3 more on the other side. Leaving the window skips the pause.
 
 **Still unknown.** How often conflict notes appear in real writing, long offline drift, and Titan's app in daily use.

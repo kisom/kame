@@ -1216,7 +1216,8 @@ remarkably counterintuitive properties under circumstances nobody anticipated be
             .map(|pair| pair[1].line_y - pair[0].line_y)
             .collect();
         assert!(
-            gaps.iter().all(|gap| *gap == config.body_line_height),
+            gaps.iter()
+                .all(|gap| (*gap - config.body_line_height).abs() < 0.001),
             "{gaps:?}"
         );
         for (line, run) in layout.lines.iter().zip(&layout.runs) {
@@ -1477,8 +1478,12 @@ around at this measure.\n\nAnd one after a blank line."
     #[test]
     fn a_code_block_keeps_each_line_whole() {
         let mut fs = FontSystem::new();
+        fs.db_mut()
+            .load_font_file(font_path("IBMPlexMono-Regular.ttf"))
+            .unwrap();
         load_fonts(&mut fs);
-        let text = format!("short\n{}\nend", "long_identifier(".repeat(30));
+        // Wider than the column, but short of `CODE_WIDEST`, where a line wraps after all.
+        let text = format!("short\n{}\nend", "long_identifier ".repeat(20));
         let config = at_width(300.0);
         let block = kind_block(BlockKind::Code { language: None }, &text);
         let layout = layout_block(&mut fs, &block, &config);

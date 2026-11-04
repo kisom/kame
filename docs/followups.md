@@ -89,5 +89,5 @@ Open work, most pressing first. Tick items off or delete them as they land.
   footnotes on the live site start to feel like they belong in the margin, most likely as a
   `site.yaml` setting, changing only how a page lays them out and not what kame stores.
 - [ ] **A kame notebook.** The long-term goal: focused collections of writing and research, each a folder with a
-  `.knb` file, moved through with a jump list, a search and a hideable browser, and each published as its own site.
+  `notebook.yaml`, moved through with a jump list, a search and a hideable browser, and each published as its own site.
   Design in `docs/superpowers/specs/2026-11-03-notebook-design.md`, and the starting notes are in `MultiKame.kame`.

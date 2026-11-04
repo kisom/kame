@@ -7,8 +7,10 @@
 //! - [`merge`] merges two documents against the one they share
 //! - [`files`] finds that shared document from two `.kame` files
 //! - [`revlog`] carries revisions between machines in logs that each have one writer
+//! - [`logs`] brings those logs and an open document together
 
 pub mod files;
+pub mod logs;
 pub mod merge;
 pub mod revlog;
 pub mod text3;

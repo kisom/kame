@@ -436,6 +436,17 @@ impl Session {
         }
     }
 
+    /// What a sync tool last recorded for this document.
+    pub fn sync_state(&self) -> Option<String> {
+        self.db.load_sync_state()
+    }
+
+    /// Records this for a sync tool. Losing it only costs that tool some work, so a failed write
+    /// is not reported.
+    pub fn set_sync_state(&mut self, state: &str) {
+        let _ = self.db.save_sync_state(state);
+    }
+
     /// What the first save suggests calling the file: the source's name for an
     /// import, whatever title its front matter gave the document.
     pub fn suggested_file_name(&self) -> String {

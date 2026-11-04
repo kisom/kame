@@ -44,6 +44,24 @@ impl OffsetMap {
         }
     }
 
+    /// The same map for a text that is only `part` of this one's source.
+    fn within(self, part: Range<usize>) -> OffsetMap {
+        let segments = self
+            .segments
+            .into_iter()
+            .filter(|segment| segment.source.start < part.end && part.start < segment.source.end)
+            .map(|segment| {
+                let source = segment.source.start.max(part.start) - part.start
+                    ..segment.source.end.min(part.end) - part.start;
+                Segment { source, ..segment }
+            })
+            .collect();
+        OffsetMap {
+            segments,
+            merged_len: self.merged_len,
+        }
+    }
+
     /// Where something starting at `offset` starts now.
     pub fn start(&self, offset: usize) -> usize {
         for segment in &self.segments {
@@ -205,9 +223,83 @@ fn byte_range(spans: &[Range<usize>], tokens: &Range<usize>, len: usize) -> Rang
     at(tokens.start)..at(tokens.end)
 }
 
+/// The bytes `ours` and `theirs` share at each end, in whole sentences. All of one of them counts
+/// if the other merely goes on from it.
+fn shared_ends(ours: &str, theirs: &str) -> (usize, usize) {
+    let (ours_spans, theirs_spans) = (tokens(ours), tokens(theirs));
+    let same = |one: usize, other: usize| {
+        ours[ours_spans[one].clone()] == theirs[theirs_spans[other].clone()]
+    };
+    let shortest = ours_spans.len().min(theirs_spans.len());
+    let front = (0..shortest).take_while(|at| same(*at, *at)).count();
+    if front == shortest {
+        let whole = if ours_spans.len() == shortest {
+            ours.len()
+        } else {
+            theirs.len()
+        };
+        return (whole, 0);
+    }
+    let ours_sentences = sentences(ours, &ours_spans);
+    let theirs_sentences = sentences(theirs, &theirs_spans);
+    let starts = |found: &[usize], at: usize| at == 0 || found[at] != found[at - 1];
+    let lead = (0..=front)
+        .rev()
+        .find(|at| starts(&ours_sentences, *at))
+        .unwrap_or(0);
+    let prefix = ours_spans[lead].start;
+    let room = shortest - lead;
+    let back = (0..room)
+        .take_while(|at| same(ours_spans.len() - 1 - at, theirs_spans.len() - 1 - at))
+        .count();
+    // The shared end has to begin a sentence on both sides, or it would split one.
+    let suffix = (0..=back)
+        .rev()
+        .find(|tail| {
+            *tail > 0
+                && starts(&ours_sentences, ours_spans.len() - tail)
+                && starts(&theirs_sentences, theirs_spans.len() - tail)
+        })
+        .map_or(0, |tail| {
+            ours.len() - ours_spans[ours_spans.len() - tail].start
+        });
+    (prefix, suffix)
+}
+
 /// Merges `ours` and `theirs` against `base`. A conflict's text comes from `ours`, so a caller
 /// wanting the same result either way round must pass the same side first.
+///
+/// Whole sentences both sides have at the start or the end are agreed, even if `base` lacks them.
+/// That happens when `base` is older than where the two really parted, or when there is no `base`
+/// at all, and without this every sentence added since would count as a disagreement. So the merge
+/// runs against `base` with those sentences added, and maps back to `base` as it was.
 pub fn merge3(base: &str, ours: &str, theirs: &str) -> Merged3 {
+    let (prefix, suffix) = shared_ends(ours, theirs);
+    let lead = &ours[..prefix];
+    let tail = &ours[ours.len() - suffix..];
+    let lead = if base.starts_with(lead) { "" } else { lead };
+    let tail = if base.ends_with(tail) { "" } else { tail };
+    if lead.is_empty() && tail.is_empty() {
+        return merge_against(base, ours, theirs);
+    }
+    // The base may already be inside what's shared, and counting it twice would look like a cut.
+    let (agreed, part) = if let Some(at) = lead.find(base) {
+        (format!("{lead}{tail}"), at..at + base.len())
+    } else if let Some(at) = tail.find(base) {
+        let at = lead.len() + at;
+        (format!("{lead}{tail}"), at..at + base.len())
+    } else {
+        (
+            format!("{lead}{base}{tail}"),
+            lead.len()..lead.len() + base.len(),
+        )
+    };
+    let mut merged = merge_against(&agreed, ours, theirs);
+    merged.base_map = merged.base_map.within(part);
+    merged
+}
+
+fn merge_against(base: &str, ours: &str, theirs: &str) -> Merged3 {
     let (base_spans, ours_spans, theirs_spans) = (tokens(base), tokens(ours), tokens(theirs));
     let b: Vec<&str> = base_spans.iter().map(|span| &base[span.clone()]).collect();
     let o: Vec<&str> = ours_spans.iter().map(|span| &ours[span.clone()]).collect();
@@ -361,6 +453,63 @@ mod tests {
     use super::*;
 
     const BASE: &str = "One fish swims. Two birds fly. Three cats sleep.";
+
+    #[test]
+    fn sentences_both_sides_added_are_no_conflict() {
+        let merged = merge3("", "One. Two. Three.", "One. Two.");
+        assert_eq!(merged.text, "One. Two. Three.");
+        assert!(merged.conflicts.is_empty());
+        let merged = merge3("", "One. Two.", "One. Two. Three.");
+        assert_eq!(merged.text, "One. Two. Three.");
+        assert!(merged.conflicts.is_empty());
+    }
+
+    #[test]
+    fn what_differs_between_shared_sentences_is_all_that_conflicts() {
+        let merged = merge3("", "One. Mine here. Three.", "One. Theirs here. Three.");
+        assert_eq!(merged.text, "One. Mine here. Three.");
+        assert_eq!(merged.conflicts.len(), 1);
+        // An insertion belongs to the sentence after it, so that one comes along unchanged.
+        assert!(merged.conflicts[0].theirs.starts_with("Theirs here."));
+        assert!(!merged.conflicts[0].theirs.contains("One"));
+    }
+
+    #[test]
+    fn a_change_within_a_shared_sentence_is_still_a_conflict() {
+        let merged = merge3("", "The quick fox.", "The slow fox.");
+        assert_eq!(merged.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn a_base_older_than_the_shared_sentences_still_maps_back_to_itself() {
+        let merged = merge3(
+            "Old words.",
+            "New start. Old words. Mine.",
+            "New start. Old words.",
+        );
+        assert_eq!(merged.text, "New start. Old words. Mine.");
+        assert!(merged.conflicts.is_empty());
+        let words = "Old words.".find("words").unwrap();
+        assert_eq!(&merged.text[merged.base_map.start(words)..][..5], "words");
+    }
+
+    #[test]
+    fn either_order_finds_the_same_shared_ends() {
+        for (one, other) in [
+            ("One. Two. Three.", "One. Four. Three."),
+            ("Same.", "Same. More."),
+            ("Start. End.", "End."),
+            ("é — one. Two.", "é — one. Three."),
+        ] {
+            let (front, back) = shared_ends(one, other);
+            let (front_too, back_too) = shared_ends(other, one);
+            assert_eq!(
+                &one[..front.min(one.len())],
+                &other[..front_too.min(other.len())]
+            );
+            assert_eq!(back, back_too, "{one} and {other}");
+        }
+    }
 
     #[test]
     fn edits_to_different_sentences_both_land() {

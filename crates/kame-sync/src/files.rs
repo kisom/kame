@@ -168,7 +168,7 @@ fn copy_label(copy: &Path) -> String {
 }
 
 /// What an open session holds, including anything not yet saved.
-fn version_of(session: &Session) -> Version {
+pub(crate) fn version_of(session: &Session) -> Version {
     Version {
         doc: session.document().clone(),
         ops: session.editor.applied_ops().to_vec(),

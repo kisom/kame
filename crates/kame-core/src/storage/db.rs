@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
 /// Key under which the applied-op count is stored in `meta`.
 const UNDO_CURSOR_KEY: &str = "undo_cursor";
 const POSITION_KEY: &str = "position";
+const SYNC_KEY: &str = "sync";
 
 /// Where the author was in a document, kept in its file so that each document
 /// reopens where it was left.
@@ -343,6 +344,26 @@ impl Db {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
             params![POSITION_KEY, serde_json::to_string(position)?],
+        )?;
+        Ok(())
+    }
+
+    /// What a sync tool last recorded in this file, opaque to the storage layer. Like the
+    /// position, this isn't an edit, so it has no op.
+    pub fn load_sync_state(&self) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![SYNC_KEY],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    pub fn save_sync_state(&mut self, state: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![SYNC_KEY, state],
         )?;
         Ok(())
     }

@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use cosmic_text::FontSystem;
+use cosmic_text::{fontdb, FontSystem};
 use egui::{
     ColorImage, Context, Event, FontData, FontFamily, Key, Modifiers, Pos2, Rect, TextureHandle,
     TextureOptions, Vec2,
@@ -39,6 +39,47 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../../fonts/IBMPlexMono-Bold.ttf"),
     include_bytes!("../../fonts/IBMPlexMono-Italic.ttf"),
 ];
+
+/// A font system that sets a document in the bundled faces, with the system's other fonts there
+/// for text those can't set, such as Chinese or emoji.
+pub fn font_system() -> FontSystem {
+    let (locale, mut db) = FontSystem::new().into_locale_and_db();
+    load_bundled(&mut db, FONTS);
+    // Built again because it notes which faces are monospaced as it's built, and those have changed.
+    FontSystem::new_with_locale_and_db(locale, db)
+}
+
+/// Loads `faces` and takes out every other face of their families. Installed fonts come first in
+/// the database and the first of equal matches wins, so a copy on this machine would otherwise set
+/// the document, and it might not be the same version.
+fn load_bundled(db: &mut fontdb::Database, faces: &[&[u8]]) {
+    for bytes in faces {
+        db.load_font_data(bytes.to_vec());
+    }
+    let families: HashSet<String> = db
+        .faces()
+        .filter(|face| is_bundled(face))
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+        .collect();
+    let installed: Vec<fontdb::ID> = db
+        .faces()
+        .filter(|face| !is_bundled(face))
+        .filter(|face| {
+            face.families
+                .iter()
+                .any(|(name, _)| families.contains(name))
+        })
+        .map(|face| face.id)
+        .collect();
+    for id in installed {
+        db.remove_face(id);
+    }
+}
+
+/// Whether a face came from the binary, rather than from a file on this machine.
+fn is_bundled(face: &fontdb::FaceInfo) -> bool {
+    matches!(face.source, fontdb::Source::Binary(_))
+}
 
 /// Loads the bundled faces into egui so the immediate-mode text — list markers,
 /// footnote superscripts, and the UI chrome — renders in the same families as
@@ -491,12 +532,8 @@ pub struct GlyphRenderer {
 impl GlyphRenderer {
     /// A renderer with every [`FONTS`] face registered.
     pub fn new(config: LayoutConfig) -> GlyphRenderer {
-        let mut font_system = FontSystem::new();
-        for bytes in FONTS {
-            font_system.db_mut().load_font_data(bytes.to_vec());
-        }
         GlyphRenderer {
-            font_system,
+            font_system: font_system(),
             atlas: GlyphAtlas::new(),
             config,
             rasterizes_since_clear: 0,
@@ -1010,7 +1047,6 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
 mod tests {
     use super::*;
     use crate::model::{AnnotationKind, BlockKind};
-    use cosmic_text::fontdb;
     use cosmic_text::{Family, Style, Weight};
     use uuid::Uuid;
 
@@ -1042,6 +1078,58 @@ mod tests {
             kind: BlockKind::Heading { level: 1 },
             text: text.to_string(),
             spans: Vec::new(),
+        }
+    }
+
+    fn named<'a>(db: &'a fontdb::Database, family: &str) -> Vec<&'a fontdb::FaceInfo> {
+        db.faces()
+            .filter(|face| face.families.iter().any(|(name, _)| name == family))
+            .collect()
+    }
+
+    #[test]
+    fn an_installed_copy_of_a_bundled_family_gives_way() {
+        let fonts = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts");
+        let mut db = fontdb::Database::new();
+        db.load_font_file(format!("{fonts}/IBMPlexMono-Bold.ttf"))
+            .unwrap();
+        load_bundled(
+            &mut db,
+            &[include_bytes!("../../fonts/IBMPlexMono-Regular.ttf")],
+        );
+        let plex = named(&db, "IBM Plex Mono");
+        assert_eq!(plex.len(), 1);
+        assert!(is_bundled(plex[0]));
+    }
+
+    #[test]
+    fn an_installed_font_of_another_family_stays_for_fallback() {
+        let fonts = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts");
+        let mut db = fontdb::Database::new();
+        db.load_font_file(format!("{fonts}/EBGaramond-Regular.otf"))
+            .unwrap();
+        load_bundled(
+            &mut db,
+            &[include_bytes!("../../fonts/IBMPlexMono-Regular.ttf")],
+        );
+        assert_eq!(named(&db, "EB Garamond").len(), 1);
+    }
+
+    #[test]
+    fn every_family_the_page_uses_comes_from_the_binary() {
+        let renderer = GlyphRenderer::new(config());
+        let db = renderer.font_system.db();
+        for family in ["EB Garamond", "Crimson Pro", "IBM Plex Mono"] {
+            let faces = named(db, family);
+            assert!(!faces.is_empty(), "{family}");
+            for face in faces {
+                assert!(
+                    is_bundled(face),
+                    "{}: {:?}",
+                    face.post_script_name,
+                    face.source
+                );
+            }
         }
     }
 

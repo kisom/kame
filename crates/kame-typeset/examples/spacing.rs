@@ -126,12 +126,7 @@ fn main() {
     let db = Db::open_read_only(Path::new(path)).expect("a kame document");
     let doc = db.load_document().expect("a kame document");
 
-    let mut fs = FontSystem::new();
-    let fonts = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts");
-    for font in std::fs::read_dir(fonts).unwrap() {
-        fs.db_mut()
-            .load_font_data(std::fs::read(font.unwrap().path()).unwrap());
-    }
+    let mut fs = kame_typeset::render::egui_render::font_system();
     let mut config = LayoutConfig::with_body_size(size);
     if let Some(width) = args.get(3) {
         config.body_width = width.parse().expect("a width");

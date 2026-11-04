@@ -2921,10 +2921,9 @@ impl KameApp {
         if find_chord {
             self.toggle_find();
         }
-        // Ctrl-O opens the path prompt, replacing the current document. It is a
-        // window-level chord like find, so it works whether prose or a note has
-        // focus, and it clears any other file dialog so the prompt is the one
-        // thing on screen.
+        // Ctrl-O opens the system's file browser, replacing the current document. It
+        // is a window-level chord like find, so it works whether prose or a note has
+        // focus, and it clears any other file dialog first.
         let open_chord = ctx.input(|input| {
             input.events.iter().any(|event| {
                 matches!(

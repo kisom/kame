@@ -1,7 +1,8 @@
 # kame — design
 
 Date: 2026-11-01
-Status: draft — for review
+Status: built. Kept as the original design: `AGENTS.md` has the current layout, and most of section 15 has since been built,
+all but marginalia in Markdown export and collaboration.
 
 ## 1. Purpose
 

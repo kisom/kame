@@ -1,86 +1,57 @@
 # Follow-ups
 
-Open work, most pressing first. Tick items off or delete them as they land.
+Open work, most pressing first. Delete items as they land.
+
+## Annotations
+
+- [ ] **A key for adding a marginal.** Notes and footnotes have one, and a marginal is only on the
+  Annotate and right-click menus. Feedback suggested Ctrl-M, but Cmd-M minimises a window on a Mac.
+- [ ] **Moving a marginal.** The only way today is to remove it and add it again on the other block.
+- [ ] **A marginal that was never written.** Emptying a marginal removes it, but adding one and
+  pressing Close without typing leaves an empty one in the document.
+
+## Help
+
+- [ ] **The F1 dialog should be landscape, not portrait.** Some of it seems to run off the screen as
+  it is. Laying it out wide would make room without shrinking anything.
+- [ ] **The F1 dialog is missing commands:** at least Ctrl-N, Ctrl-A, Ctrl-[, F7, and typing `|` or a
+  code fence. It doesn't scroll and is already taller than the smallest window, so it needs to scroll
+  before it gets more rows.
+
+## Search
+
+- [ ] **Ctrl-F only searches the body.** Marginals, notes and footnotes are only searched by Ctrl-R,
+  which needs a notebook, so a document on its own can't search them.
+
+## Notebook
+
+Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.
+
+- [ ] **The Move command,** with the clean-up of databases a move leaves behind. Moving a document in
+  a folder with revision logs leaves a stale copy on the other machine for now.
+- [ ] **A command palette.**
+
+## Sync
+
+- [ ] **Revision logs before a real folder.** Designed in `docs/superpowers/specs/2026-11-03-sync-design.md`.
+  They're built, and in trial on `notebook-test`, opted in by folder. Still to learn: how often conflict
+  notes appear in real writing, and whether snapshots should travel in the logs.
 
 ## Typography
 
-- [x] **Word spacing.** Justified text leaves wide gaps because cosmic-text takes each line as it
-  comes and can only widen spaces. Studied through kame's own shaping at type 16, width 640, on two
-  essays (68 and 83 lines) and 586 devlog paragraphs, with a model of first fit that matched the
-  engine's breaks on all but one paragraph. Each cell reads essay / essay / devlog:
-
-  | Rule | Spaces over 1.5x | Spaces over 2x | Words typed that move an earlier line | Words removed that move a line above |
-  |---|---|---|---|---|
-  | Today | 30 / 27 / 29% | 6.7 / 7.4 / 5.7% | none | none |
-  | Spaces may close to 80% | 15 / 14 / 13% | 3.3 / 1.5 / 2.2% | none | none |
-  | Look one line ahead | 12 / 7.5 / 13% | 0 / 1.5 / 1.7% | 0.3 / 0.8 / 0.3% | 1.2 / 0 / 0.2% |
-  | Look two lines ahead | 8.3 / 6.1 / 12% | 0 / 0 / 1.5% | 1.0 / 1.7 / 0.7% | 6.4 / 6.6 / 2.4% |
-  | Best breaks over the paragraph | 5 / 6.1 / 12% | 0 / 0 / 1.5% | 2.9 / 2.8 / 1.0% | 19 / 9.4 / 3.6% |
-  | Same, with hyphens | 1.7 / 0 / 3.4% | 0 / 0 / 0.6% | 5.2 / 3.9 / 1.9% | 11 / 8.9 / 4.8% |
-
-  The last two columns skip the lines nearest the edit. On the essays one line is over 1%, so small
-  differences mean little. Looking one line ahead is the likely choice: it gets most of the gain, a
-  line depends only on the text up to a little past it, and the look-ahead is one constant to adjust.
-  Closing up alone can push a gap further down rather than remove it. All of these need kame to set
-  its own lines: shape the paragraph once on a single line, choose the breaks, and build `runs` and
-  `lines` from it. Production code reads the engine's lines only in `layout/text.rs`, though many
-  tests read them, and a fit took under a millisecond. Hyphens would be drawn without entering the
-  text, so they wouldn't touch byte offsets, but need `hypher` and a language; a word too long to fit
-  is the case only they fix, so judge them after the rest. How the movement feels can only be judged
-  in the app. The study left out the room footnote marks take. Designed in
-  `docs/superpowers/specs/2026-11-03-word-spacing-design.md`. Built and landed, so what's left
-  is to adjust the numbers in `layout/breaks.rs` with use.
-  Kyle writes at type 20 on the Mac, where the same measure holds fewer words, so there's less to work with.
-  At width 640 the essays go from 43% to 20% and 43% to 18% over 1.5x, and 5.1% to 1.3% and 13% to 0.7% over 2x.
-  At width 800 they're the same as type 16 at 640. Measure with `cargo run --release -p kame-typeset --example
-  spacing -- ESSAY.kame 20 WIDTH`.
-
-  Tuned on the two essays, which are the writing this is for, with the devlog only as a check. Best so
-  far at type 16: look one line ahead, let spaces close to no less than 90%, and charge a high cost for
-  a hyphen (50000 in the study). Spaces over 1.5x fall from 28% to 6.1% and over 2x from 6.8% to none,
-  the widest goes from 2.30x to 1.63x, and no line is tighter than 90%. It used 7 hyphens in about 2650
-  words, moved an earlier line for 0.5% of words typed and none for words removed. The devlog, which
-  played no part in choosing, goes from 29% to 11% and 5.7% to 1.0%. Type 18 gains less: 10% and 0.7%.
-  Without hyphens the same rule reaches 13% and 1.5%. The devlog also shows two-letter starts such as
-  be-tween and al-ways, so try requiring three letters before a hyphen. The stylesheet's test that says
-  kame doesn't hyphenate covers exports, which browsers break for themselves.
+- [ ] **Adjust the word spacing numbers with use.** They're in `layout/breaks.rs`. The study is in
+  section 14 of `docs/superpowers/specs/2026-11-03-word-spacing-design.md`.
 
 ## Markdown import
 
 - [ ] **Tables (deferred).** Simplified on import because the model has no equivalent.
   Tables are wanted but too complex for now, and a code block is the stopgap.
 
-## From earlier feedback
+## Export
 
-- [ ] **PDF export (on hold).** Still open in `feedback2.txt`; not required for v1.
-
-## Sync
-
-- [x] **Syncthing can replace a `.kame` file while it is open.** kame now notices, stops saving
-  to it, and asks whether to merge the two, save this copy elsewhere or open the one on disk.
-
-## Code blocks
-
-- [x] **Scroll long code lines sideways instead of wrapping.** Wrapping misleads in code. Feasible, and
-  planned after word spacing: stop wrapping code blocks, keep a sideways offset for each, add it wherever
-  the block's text, caret and selection are drawn and clicks are mapped, clip at the column, and let
-  the caret pull a long line into view. Each block is one image, so a very long pasted line could
-  exceed the graphics card's limit and would need to fall back to wrapping. The site only needs a
-  stylesheet change, keeping wrapping for print. At 70% size few of the devlog's code lines at type 16
-  are too long: 8 of 3640.
+- [ ] **PDF export (on hold).** Not required for v1.
 
 ## Ideas
-
-- [ ] **Spelling and grammar check.** Rereading is the only thing catching mistakes in an essay today, and
-  most of them are made of real words, so a spell checker alone isn't enough. Design in
-  `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`, starting with a trial of Harper.
-
-- [ ] **Sync for drift between one person's machines.** Designed and prototyped: see
-  `docs/superpowers/specs/2026-11-03-sync-design.md` and `crates/kame-sync`. It merges document
-  states by block and sentence, keeps a conflict's other version in a note, and carries revisions in
-  logs that each have one writer. The design is accepted. The app merges conflict copies and replaced
-  files, and revision logs are built and in trial on `notebook-test`, opted in by folder. Before a real folder:
-  how often conflict notes appear in real writing, and whether snapshots should travel in the logs.
 
 - [ ] **Footnotes in the site's margins.** Sidenotes beside their markers on wide screens, so
   readers don't jump to the foot and back. Held back because kame already separates the two: a
@@ -88,7 +59,3 @@ Open work, most pressing first. Tick items off or delete them as they land.
   stack and drift, and on narrow screens they'd have to fold back into the text. Worth trying if
   footnotes on the live site start to feel like they belong in the margin, most likely as a
   `site.yaml` setting, changing only how a page lays them out and not what kame stores.
-- [x] **A kame notebook.** Built as a proof of concept: focused collections of writing and research, each a folder with a
-  `notebook.yaml`, moved through with a jump list, a search and a hideable browser, and each published as its own site. Design
-  in `docs/superpowers/specs/2026-11-03-notebook-design.md`. Not built: the Move command, with the clean-up of databases a move
-  leaves behind, and a command palette. `kame-site sync` uses `rsync --delete` with nothing to catch a wrong `remote`.

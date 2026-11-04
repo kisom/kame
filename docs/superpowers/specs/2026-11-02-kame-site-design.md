@@ -1,7 +1,7 @@
 # kame-site — design
 
 Date: 2026-11-02
-Status: draft — for review
+Status: built. Publishing a notebook came later, in `2026-11-03-notebook-design.md`.
 
 ## 1. Purpose
 

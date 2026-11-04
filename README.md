@@ -12,7 +12,7 @@ itself is a structured, first-class file, never a pile of markup.
 ## Features
 
 - **Anchored marginalia** — notes in the margin that stay with their paragraph.
-- **Notes** — highlight a passage and attach an extended comment.
+- **Notes** — highlight a passage, with a comment if you want one.
 - **Footnotes** — numbered markers, collected at the foot of the page.
 - **Persistent undo** — the edit history lives in the file, so it survives
   closing and reopening, and can be shared.
@@ -21,13 +21,22 @@ itself is a structured, first-class file, never a pile of markup.
 - **Distraction-free modes** — fullscreen, hide chrome, hide margin, paragraph
   focus, typewriter.
 - **Export** — deterministic HTML with footnotes and marginalia, and Markdown with
-  footnotes. Notes are private and never export.
+  footnotes. What a note says is private and never exports.
 - **Document properties** — title, author, dates and tags, published with each
   export.
 - **Markdown import** — open a `.md` file as a new document; the status line
   says what was simplified.
-- **Headings and lists** — `Ctrl-Shift-1/2/3` for H1/H2/H3, `Ctrl-Shift-3` for
-  a list, `Ctrl-Shift-0` for body text.
+- **Headings and lists** — `Ctrl-Shift-1/2/3` for H1/H2/H3, `Ctrl-Shift-0` for
+  body text, and `- ` or `1. ` at the start of a line for a list.
+- **Code and prose blocks** — text kept exactly as typed, line breaks and spacing
+  included.
+- **Links between documents** — `[[essay]]` or File > Link to Document, and
+  clicking one opens it.
+- **Notebooks** — a folder of documents with a jump list, a search and a browser,
+  which publishes as its own site.
+- **Spelling** — optional marks for likely mistakes, checked offline.
+- **Other versions** — merges the conflict copies a sync tool leaves behind.
+  Revision logs for syncing a folder between machines are in trial.
 
 ## Building
 
@@ -66,8 +75,8 @@ make mac-app   # builds target/kame.app (ad-hoc signed, for local use)
 ```
 
 `packaging/macos/build-app.sh` assembles the bundle — the release binary, an
-`Info.plist`, and an `kame.icns` icon generated from `packaging/kame.png` —
-and ad-hoc signs it. Launch it with `open kame.app` (a bare `target/release/kame`
+`Info.plist`, and a `kame.icns` icon generated from `packaging/kame.png` —
+and ad-hoc signs it. Launch it with `open target/kame.app` (a bare `target/release/kame`
 binary runs, but has no menu bar and won't take keyboard focus). Shipping the
 app to others needs a Developer ID certificate and `notarytool` notarization.
 
@@ -77,6 +86,7 @@ app to others needs a Developer ID certificate and `notarytool` notarization.
 kame                    # an anonymous document; the first save asks for a file
 kame <document.kame>    # open (or create) a document
 kame <notes.md>         # import Markdown as a new, unsaved document
+kame <folder>           # open a notebook
 ```
 
 `make install` also drops a `kame.desktop` launcher (with an icon) into
@@ -88,7 +98,7 @@ handling, such as Hyprland, `xdg-open` also needs the `mimetype` command
 (`Ctrl-S`) on a document with no file opens the system save-as browser; closing
 a window with unsaved anonymous text asks before it is lost.
 
-Key bindings are listed in [docs/keybindings.md](docs/keybindings.md).
+Key bindings, and how everything else is used, are in [docs/keybindings.md](docs/keybindings.md).
 
 ## The file format
 
@@ -111,3 +121,6 @@ for `make sync`, which rsyncs `output/` there and deletes anything else.
 
 `kame-site regen-theme` updates a site's theme from a newer `kame-site`, moving the old one to
 `theme.old` so that nothing you edited is lost.
+
+`kame site ...` is the same tool, built into the app. A notebook builds as its own site with
+`kame-site build FOLDER`; see [Publishing a notebook](docs/keybindings.md#publishing-a-notebook).

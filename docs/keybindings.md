@@ -1,6 +1,6 @@
 # Keyboard
 
-The editing map lives in `command_for_key` (`src/render/egui_render.rs`); the
+The editing map lives in `command_for_key` (`crates/kame-typeset/src/render/egui_render.rs`); the
 view-mode map lives in `mode_for_key` (`src/main.rs`), and the file/export map
 in `file_command_for_key` (also `src/main.rs`). `Ctrl` below means `Cmd` on
 macOS (`Modifiers::command`).
@@ -84,14 +84,31 @@ type. Enter finds the next match, Shift-Enter the previous one, and Escape or
 clicking back in the text closes the bar; the page scrolls to keep the current
 match in view.
 
-Block kind is also on the page's right-click menu — body, H1–H3 and both list
-kinds — with a check beside the caret's current kind. Changing the kind is one
-undoable edit, and undo restores the previous kind (including a heading's level).
+## Block kinds
+
+Block kind is also on the page's right-click menu — body, H1–H3, both list kinds,
+block quote, code and prose — with a check beside the caret's current kind. Changing
+the kind is one undoable edit, and undo restores the previous kind (including a
+heading's level).
 
 The digit chords are matched against the physical digit as well as the typed
 character: `Shift`+1 gives `!`, which egui names `Exclamationmark`, and a
 layout where `Shift`+1 is not `!` at all still reaches H1 through the digit's
 position on the keyboard.
+
+## Notes, marginals and footnotes
+
+Ctrl-Shift-N adds a note and Ctrl-Shift-F a footnote, at the selection or the word under the
+caret. A marginal belongs to a whole block and has no key: all three are on the Annotate menu and
+the right-click menu. A note needs no words, in which case it's just a highlight.
+
+Each opens for writing as it's added. Ctrl-Enter, Close or Escape closes it, and Remove takes it
+out, along with its highlight. Emptying a marginal removes it too.
+
+## Images
+
+Insert image… on the right-click menu asks for a path, and the image is set to the width of the
+text.
 
 ## Distraction-free modes
 
@@ -260,7 +277,7 @@ there is one.
 
 The menu bar holds every command with its shortcut: File (open, save, import,
 export, snapshots, document properties, and the document's counts), Annotate, View (type size, dark
-mode and the view modes) and Help.
+mode, hyphenation, spelling, a notebook's commands and the view modes) and Help.
 
 On Linux, Alt-F, Alt-A, Alt-V and Alt-H open those menus; arrows and Enter then
 choose an item, and Escape closes it. There are no such chords on macOS, where
@@ -272,23 +289,6 @@ saved yet` if it has no file, any mode badges, and the word count.
 
 A notice shows in the row, cut to fit with the full text on hover, until the next edit or undo. An error stays until
 it is resolved.
-
-## Build
-
-`cargo` is not on the default PATH on this machine; build in a nix shell:
-
-```sh
-nix-shell -p cargo rustc gcc pkg-config libxkbcommon libx11 vulkan-loader wayland \
-  --run 'cargo build'
-```
-
-Headless run (no display), with Xvfb and the software Vulkan driver:
-
-```sh
-Xvfb :99 -screen 0 1400x1000x24 &
-DISPLAY=:99 VK_ICD_FILENAMES=/run/current-system/sw/share/vulkan/icd.d/lvp_icd.x86_64.json \
-  ./target/debug/kame /tmp/doc.kame
-```
 
 ## Other versions of a document
 

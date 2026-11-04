@@ -6,7 +6,7 @@ kame — "Kyle's Marginalia Editor" — a WYSIWYG prose editor for writing ideas
 
 ## Build & test
 
-`cargo`/`rustc` are **NOT on PATH** on the primary dev host (straylight, NixOS). Prefix every cargo command:
+On macOS and Arch the toolchain is a native install, so `cargo` is on PATH. On NixOS (straylight) `cargo`/`rustc` are **NOT on PATH**, so prefix every cargo command:
 
 ```sh
 nix-shell -p cargo rustc gcc pkg-config --run 'cargo build'
@@ -15,7 +15,16 @@ nix-shell -p cargo rustc gcc pkg-config --run 'cargo test'
 
 or use the flake devshell (`nix develop`, or `direnv allow` with the bundled `.envrc`). Packaging: `nix build .#` / `nix run .#`.
 
-Both `cargo build` and `cargo test` must pass. The test suite is headless (no display/GPU); fonts resolve via `env!("CARGO_MANIFEST_DIR")/fonts/`.
+Both `cargo build` and `cargo test` must pass (`make all` and `make test`). The test suite is headless (no display/GPU); fonts resolve via `env!("CARGO_MANIFEST_DIR")/fonts/`.
+
+To run the app with no display on NixOS, use Xvfb and the software Vulkan driver:
+
+```sh
+nix-shell -p cargo rustc gcc pkg-config libxkbcommon libx11 vulkan-loader wayland --run 'cargo build'
+Xvfb :99 -screen 0 1400x1000x24 &
+DISPLAY=:99 VK_ICD_FILENAMES=/run/current-system/sw/share/vulkan/icd.d/lvp_icd.x86_64.json \
+  ./target/debug/kame /tmp/doc.kame
+```
 
 ## Non-negotiable invariants
 
@@ -50,7 +59,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `render/` — swash glyph-atlas rasterization + egui texture upload
 - `fonts/` — the embedded faces
 
-`crates/kame-site` — the static site generator, a command line tool on `kame-core`. `config` reads `site.yaml`, `source` and `pages` read what publishes, `refs` works out where links and images lead, `plan` works out the whole site with nothing written, and `write` replaces `output/` atomically. The starting theme is under `theme/`, embedded for `kame-site new`.
+`crates/kame-site` — the static site generator, a command line tool on `kame-core` and `kame-notebook`, which the app also runs as `kame site`. `config` reads `site.yaml`, `source` and `pages` read what publishes, `refs` works out where links and images lead, `plan` works out the whole site with nothing written, and `write` replaces `output/` atomically. The starting theme is under `theme/`, embedded for `kame-site new`.
 
 `crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies, and `logs` and `revlog` for revision logs in folders that turn them on. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
@@ -60,9 +69,11 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/notebook.rs` — the app's jump list, search, browser and what links here.
 
+`src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.
+
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 
-The layering is one-way: core knows nothing of typeset or the app. Keep logic out of the app where it can go in a library. Keybindings are documented in `docs/keybindings.md`.
+The layering is one-way: core knows nothing of typeset or the app. Keep logic out of the app where it can go in a library. Keybindings, and how everything is used, are documented in `docs/keybindings.md`. Open work is in `docs/followups.md`.
 
 ## Conventions
 

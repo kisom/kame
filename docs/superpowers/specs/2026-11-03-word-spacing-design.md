@@ -229,3 +229,34 @@ show loose lines.
 Layout of the slowest paragraph takes about 2 ms in a release build, about the same as the engine, and
 34 ms against 12 ms in a debug build. Only the edited paragraph is laid out again. At type 18 and width 640,
 `AgainstBrainrot` goes from 39% to 14% over 1.5x and from 13% to 0.8% over 2x.
+
+## 14. The study, and tuning it
+
+These notes first lived in `docs/followups.md`. The study ran through kame's own shaping at type 16,
+width 640, on two essays (68 and 83 lines) and 586 devlog paragraphs, with a model of first fit that
+matched the engine's breaks on all but one paragraph. Each cell reads essay / essay / devlog:
+
+| Rule | Spaces over 1.5x | Spaces over 2x | Words typed that move an earlier line | Words removed that move a line above |
+|---|---|---|---|---|
+| Today | 30 / 27 / 29% | 6.7 / 7.4 / 5.7% | none | none |
+| Spaces may close to 80% | 15 / 14 / 13% | 3.3 / 1.5 / 2.2% | none | none |
+| Look one line ahead | 12 / 7.5 / 13% | 0 / 1.5 / 1.7% | 0.3 / 0.8 / 0.3% | 1.2 / 0 / 0.2% |
+| Look two lines ahead | 8.3 / 6.1 / 12% | 0 / 0 / 1.5% | 1.0 / 1.7 / 0.7% | 6.4 / 6.6 / 2.4% |
+| Best breaks over the paragraph | 5 / 6.1 / 12% | 0 / 0 / 1.5% | 2.9 / 2.8 / 1.0% | 19 / 9.4 / 3.6% |
+| Same, with hyphens | 1.7 / 0 / 3.4% | 0 / 0 / 0.6% | 5.2 / 3.9 / 1.9% | 11 / 8.9 / 4.8% |
+
+The last two columns skip the lines nearest the edit. On the essays one line is over 1%, so small
+differences mean little. Closing up alone can push a gap further down rather than remove it.
+
+Tuned on the two essays, which are the writing this is for, with the devlog only as a check. Best at
+type 16: look one line ahead, let spaces close to no less than 90%, and charge a high cost for a hyphen
+(50000 in the study). Spaces over 1.5x fall from 28% to 6.1% and over 2x from 6.8% to none, the widest
+goes from 2.30x to 1.63x, and no line is tighter than 90%. It used 7 hyphens in about 2650 words, moved
+an earlier line for 0.5% of words typed and none for words removed. The devlog, which played no part in
+choosing, goes from 29% to 11% and 5.7% to 1.0%. Type 18 gains less: 10% and 0.7%. Without hyphens the
+same rule reaches 13% and 1.5%.
+
+Kyle writes at type 20 on the Mac, where the same measure holds fewer words, so there's less to work
+with. At width 640 the essays go from 43% to 20% and 43% to 18% over 1.5x, and 5.1% to 1.3% and 13% to
+0.7% over 2x. At width 800 they're the same as type 16 at 640. Measure with `cargo run --release -p
+kame-typeset --example spacing -- ESSAY.kame 20 WIDTH`.

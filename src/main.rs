@@ -3831,7 +3831,7 @@ impl KameApp {
         let heights: Vec<f32> = blocks
             .iter()
             .zip(layouts.iter())
-            .map(|(block, layout)| block_height(block, layout, &config, None))
+            .map(|(block, layout)| block_height(block, layout, &config, self.session.path()))
             .collect();
         let gap_below = |index: usize| {
             blocks
@@ -6981,6 +6981,35 @@ mod tests {
         let body = BlockKind::Paragraph;
         assert!(gap_after(&body, &heading_kind(1)) > gap_after(&body, &heading_kind(2)));
         assert!(gap_after(&body, &heading_kind(2)) > gap_after(&body, &heading_kind(3)));
+    }
+
+    /// The page leaves room by this height, so reading the file from the wrong folder runs the
+    /// next block over the picture.
+    #[test]
+    fn a_relative_image_takes_its_own_height_on_the_page() {
+        let dir = test_temp_dir().join(format!("kame-img-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        image::RgbaImage::from_pixel(40, 200, image::Rgba([0, 0, 0, 255]))
+            .save(dir.join("images/tall.png"))
+            .unwrap();
+        let config = LayoutConfig::with_body_size(16.0);
+        let mut renderer = GlyphRenderer::new(config);
+        let block = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Image {
+                path: "images/tall.png".to_string(),
+                link: None,
+            },
+            text: String::new(),
+            spans: Vec::new(),
+        };
+        let layout = renderer.layout(&block);
+        let document = dir.join("essay.kame");
+        assert_eq!(
+            block_height(&block, &layout, &config, Some(&document)),
+            200.0
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

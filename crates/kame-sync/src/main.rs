@@ -12,7 +12,9 @@ const USAGE: &str = "usage:
   kame-sync merge ONE.kame OTHER.kame OUT.kame   merge two files into a new one
   kame-sync study ONE.kame                       what revisions of a real document would cost
   kame-sync trial ONE.kame [ROUNDS]              replay real edits as if on two machines
-  kame-sync step FOLDER DEVICE STATE [WORDS]     add WORDS as a sentence, sync, print the head";
+  kame-sync step FOLDER DEVICE STATE [WORDS]     add WORDS as a sentence, sync, print the head
+  kame-sync enable FOLDER                        turn on revision logs for a folder
+  kame-sync sync FILE DEVICE [BLOCK:WORDS]       sync a document with its logs, as the app does";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -30,6 +32,9 @@ fn main() -> ExitCode {
         ["trial", file, rounds] => trial(Path::new(file), rounds.parse().unwrap_or(500)),
         ["step", folder, device, state] => step(folder, device, state, None),
         ["step", folder, device, state, words] => step(folder, device, state, Some(words)),
+        ["enable", folder] => enable(Path::new(folder)),
+        ["sync", file, device] => sync_file(Path::new(file), device, None),
+        ["sync", file, device, words] => sync_file(Path::new(file), device, Some(words)),
         _ => Err(USAGE.into()),
     };
     match run {
@@ -378,6 +383,55 @@ fn step(folder: &str, device: &str, state: &str, words: Option<&str>) -> Result<
     for note in &synced.doc.annotations {
         println!("  note: {}", note.body);
     }
+    Ok(())
+}
+
+fn enable(folder: &Path) -> Result<()> {
+    match kame_sync::logs::enable(folder)? {
+        Some(line) => println!(
+            "logs are on for {}. Add this to .stignore on every machine:\n{line}",
+            folder.display()
+        ),
+        None => println!(
+            "logs are on for {}. Stop its .kame files syncing on every machine.",
+            folder.display()
+        ),
+    }
+    Ok(())
+}
+
+/// Syncs one document, optionally after adding WORDS to paragraph BLOCK. Prints counts only, unless
+/// asked to add words, since a document may be private.
+fn sync_file(file: &Path, device: &str, words: Option<&str>) -> Result<()> {
+    kame_sync::logs::build_from_logs(file)?;
+    let mut session = kame_core::session::Session::open(file).map_err(|err| err.to_string())?;
+    if let Some((block, words)) = words.and_then(|words| words.split_once(':')) {
+        let target = session
+            .document()
+            .blocks
+            .get(block.parse::<usize>()?)
+            .ok_or("no such paragraph")?;
+        let cursor = kame_core::edit::Cursor {
+            block_id: target.id,
+            offset: target.text.len(),
+        };
+        session.set_caret(cursor);
+        session.insert(words);
+    }
+    let mut logged = kame_sync::logs::Logged::open(&session, device)
+        .ok_or("this document isn't in a folder with logs turned on")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let outcome = logged.sync(&mut session, now)?;
+    println!(
+        "{device}: written {} merged {} notes {} from {} digest {}",
+        outcome.written,
+        outcome.merged,
+        outcome.notes,
+        outcome.from.as_deref().unwrap_or("-"),
+        &kame_sync::merge::document_digest(session.document())[..12],
+    );
     Ok(())
 }
 

@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use kame_core::edit::{apply_inverse, Cursor};
+use kame_core::links::{find_document, resolve_open_path};
+use kame_core::model::{Document, Metadata};
 use kame_core::session::Session;
 use kame_core::storage::Db;
 
@@ -91,6 +93,8 @@ pub struct Logged {
     replica: Replica,
     store: Store,
     last: Option<String>,
+    /// What the document and its properties were at the last sync.
+    synced: Option<(Document, Metadata)>,
 }
 
 impl Logged {
@@ -107,12 +111,21 @@ impl Logged {
             },
             store,
             last: session.sync_state(),
+            synced: None,
         })
     }
 
     /// Whether another machine's words may have arrived.
     pub fn has_news(&self) -> bool {
         self.store.has_news(&self.replica.folder)
+    }
+
+    /// Whether a sync would have anything to do, for asking often and cheaply.
+    pub fn needs_sync(&self, session: &Session) -> bool {
+        self.has_news()
+            || !self.synced.as_ref().is_some_and(|(doc, metadata)| {
+                doc == session.document() && *metadata == session.metadata
+            })
     }
 
     /// Writes down what's on the screen if it has changed, merges whatever has arrived, and puts
@@ -177,6 +190,7 @@ impl Logged {
         }
         session.set_sync_state(&synced.head);
         self.last = Some(synced.head);
+        self.synced = Some((session.document().clone(), session.metadata.clone()));
         Ok(outcome)
     }
 }
@@ -230,13 +244,9 @@ impl Logged {
 }
 
 /// Where the caret belongs after its block's text changed from `local` to `merged`.
-fn carried_caret(
-    session: &Session,
-    local: &kame_core::model::Document,
-    merged: &kame_core::model::Document,
-) -> Cursor {
+fn carried_caret(session: &Session, local: &Document, merged: &Document) -> Cursor {
     let caret = session.caret;
-    let text_of = |doc: &kame_core::model::Document| {
+    let text_of = |doc: &Document| {
         doc.blocks
             .iter()
             .find(|block| block.id == caret.block_id)
@@ -275,6 +285,52 @@ fn carried_offset(old: &str, new: &str, offset: usize) -> usize {
     } else {
         prefix
     }
+}
+
+/// This machine's host name, for naming its logs.
+pub fn this_host() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|name| name.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Turns on logs for a folder, returning the line that the sync tool's ignore file needs, on every
+/// machine, for the folder's databases to stop travelling. `None` if no ignore file was found.
+pub fn enable(folder: &Path) -> Result<Option<String>> {
+    let folder = folder.canonicalize()?;
+    std::fs::write(folder.join(MARKER), "")?;
+    Ok(folder
+        .ancestors()
+        .find(|above| above.join(".stignore").is_file())
+        .and_then(|root| folder.strip_prefix(root).ok())
+        .map(|inside| {
+            let inside = inside.display().to_string();
+            if inside.is_empty() {
+                "**.kame".to_string()
+            } else {
+                format!("/{inside}/**.kame")
+            }
+        }))
+}
+
+/// The file a document link leads to, as [`find_document`], building it first if it has only logs.
+pub fn find_or_build(path: &str, base: &Path) -> Result<Option<PathBuf>> {
+    if let Some(found) = find_document(path, base) {
+        return Ok(Some(found));
+    }
+    let mut named = resolve_open_path(path, base);
+    if named
+        .extension()
+        .is_none_or(|extension| extension != "kame")
+    {
+        let mut with_extension = named.into_os_string();
+        with_extension.push(".kame");
+        named = PathBuf::from(with_extension);
+    }
+    Ok(build_from_logs(&named)?.then_some(named))
 }
 
 /// Builds the database of a document that has logs and no file yet, as on a fresh machine,

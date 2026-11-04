@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use kame_core::edit::Cursor;
 use kame_core::session::Session;
 use kame_sync::logs::{
-    build_from_logs, device_name, display_device, log_folder, logging_root, orphaned_logs, Logged,
-    MARKER,
+    build_from_logs, device_name, display_device, find_or_build, log_folder, logging_root,
+    orphaned_logs, Logged, MARKER,
 };
 use kame_sync::revlog::Store;
 
@@ -486,4 +486,46 @@ fn a_long_shared_history_gives_a_near_ancestor_so_one_sentence_each_is_no_confli
     let text = &there.document().blocks[0].text;
     assert!(text.contains("Talos says Sentence 3"), "{text}");
     assert!(text.contains("Titan says Sentence 120"), "{text}");
+}
+
+#[test]
+fn a_sync_is_only_needed_for_an_edit_new_properties_or_news() {
+    let (talos, titan) = two_machines();
+    let (mut there, mut here) = (talos.session(), titan.session());
+    let mut logged = titan.logged(&here);
+    assert!(logged.needs_sync(&here), "nothing is known yet");
+    logged.sync(&mut here, 1).unwrap();
+    assert!(!logged.needs_sync(&here));
+
+    titan.append(&mut here, 0, " An edit.");
+    assert!(logged.needs_sync(&here));
+    logged.sync(&mut here, 2).unwrap();
+    assert!(!logged.needs_sync(&here));
+
+    let mut metadata = here.metadata.clone();
+    metadata.title = "New".to_string();
+    here.set_metadata(metadata);
+    assert!(logged.needs_sync(&here));
+    logged.sync(&mut here, 3).unwrap();
+    assert!(!logged.needs_sync(&here));
+
+    talos.sync(&mut there, 4);
+    titan.receive_from(&talos);
+    assert!(logged.needs_sync(&here));
+    logged.sync(&mut here, 5).unwrap();
+    assert!(!logged.needs_sync(&here));
+}
+
+#[test]
+fn a_link_to_a_document_with_only_logs_builds_it() {
+    let (talos, titan) = two_machines();
+    let mut there = talos.session();
+    talos.sync(&mut there, 1);
+    std::fs::remove_file(&titan.path).unwrap();
+    titan.receive_from(&talos);
+    let found = find_or_build("essay", &titan.path.with_file_name("linking.kame")).unwrap();
+    assert_eq!(found, Some(titan.path.clone()));
+    assert!(titan.path.is_file());
+    let none = find_or_build("nothing", &titan.path).unwrap();
+    assert_eq!(none, None);
 }

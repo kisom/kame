@@ -10,7 +10,7 @@ mod external;
 #[cfg(target_os = "macos")]
 mod macos;
 
-use kame_core::links::{find_document, resolve_open_path, split_document_target};
+use kame_core::links::{resolve_open_path, split_document_target};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::{edit, model, storage};
 use kame_typeset::{layout, render};
@@ -308,6 +308,16 @@ impl BackStack {
 }
 
 /// What a merge says in the status row. A note is a sentence both versions changed.
+/// What to say when another machine's words have arrived through the logs.
+fn logs_notice(from: Option<&str>, notes: usize) -> String {
+    let from = from.unwrap_or("another machine");
+    match notes {
+        0 => format!("merged from {from}"),
+        1 => format!("merged from {from}, with 1 note to look at"),
+        notes => format!("merged from {from}, with {notes} notes to look at"),
+    }
+}
+
 fn merged_notice(notes: usize) -> String {
     match notes {
         0 => "merged".to_string(),
@@ -396,6 +406,10 @@ const DOUBLE_CLICK_REACH: f32 = 6.0;
 const FILE_CHECK_SECONDS: f32 = 1.0;
 /// How often to look for a sync tool's conflict copies beside the open file.
 const COPY_CHECK_SECONDS: f32 = 5.0;
+/// How often to look at a logged document's revision logs.
+const LOG_CHECK_SECONDS: f32 = 3.0;
+/// How long a pause in typing has to be before a revision is written or a merge shows up.
+const LOG_PAUSE_SECONDS: f32 = 5.0;
 /// How far up from the bottom of its line a document link's underline sits, as a share
 /// of the line's height.
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
@@ -1568,6 +1582,9 @@ struct KameConfig {
     /// The checker's rules to leave out.
     #[serde(default)]
     rules_off: Vec<String>,
+    /// What this machine's revision logs are called, chosen when first needed and then kept.
+    #[serde(default)]
+    device: String,
 }
 
 fn default_body_size() -> f32 {
@@ -1589,6 +1606,7 @@ impl Default for KameConfig {
             check_spelling: false,
             words: Vec::new(),
             rules_off: Vec::new(),
+            device: String::new(),
         }
     }
 }
@@ -1662,6 +1680,7 @@ fn main() -> eframe::Result {
     let config_check = config.check_spelling;
     let config_words = config.words.clone();
     let config_rules_off = config.rules_off.clone();
+    let config_device = config.device.clone();
     // Two windows on one file would overwrite each other's edits, so only the first
     // running kame goes back to the last document.
     let first = config_dir().is_none_or(|dir| {
@@ -1692,6 +1711,7 @@ fn main() -> eframe::Result {
                 // still shows the author an editable (in-memory) document and the
                 // reason in the status panel, since a desktop launch has no
                 // terminal to print to.
+                let _ = kame_sync::logs::build_from_logs(&path);
                 match Session::open_any(&path) {
                     Ok(opened) => {
                         // An import has no file yet, so it is like a new document.
@@ -1706,6 +1726,7 @@ fn main() -> eframe::Result {
                                 check_spelling: config_check,
                                 words: config_words.clone(),
                                 rules_off: config_rules_off.clone(),
+                                device: config_device.clone(),
                             });
                         }
                         opened
@@ -1745,6 +1766,7 @@ fn main() -> eframe::Result {
                 check_spelling: config_check,
                 words: config_words,
                 rules_off: config_rules_off,
+                device: config_device,
             },
         )))
     });
@@ -2072,6 +2094,16 @@ struct KameApp {
     check_spelling: bool,
     my_words: Vec<String>,
     rules_off: Vec<String>,
+    /// What this machine's revision logs are called, or empty until one is needed.
+    device: String,
+    /// The open document's revision logs, if its folder has them turned on.
+    logged: Option<kame_sync::logs::Logged>,
+    /// The file `logged` is for, and whether a problem with its logs has been mentioned.
+    logged_path: Option<PathBuf>,
+    orphan_mentioned: bool,
+    next_log_check: std::time::Instant,
+    last_typed: std::time::Instant,
+    was_focused: bool,
     marks: Marks,
     /// The mark the page's right-click menu is about, while it's open.
     mark_menu: Option<(BlockId, Finding)>,
@@ -2197,6 +2229,7 @@ impl KameApp {
             check_spelling,
             words,
             rules_off,
+            device,
         } = preferences;
         cc.egui_ctx.set_visuals(if dark {
             egui::Visuals::dark()
@@ -2214,6 +2247,13 @@ impl KameApp {
             check_spelling,
             my_words: words,
             rules_off,
+            device,
+            logged: None,
+            logged_path: None,
+            orphan_mentioned: false,
+            next_log_check: std::time::Instant::now(),
+            last_typed: std::time::Instant::now(),
+            was_focused: true,
             marks: Marks::default(),
             mark_menu: None,
             layouts: LayoutCache::new(),
@@ -2477,6 +2517,7 @@ impl KameApp {
             check_spelling: self.check_spelling,
             words: self.my_words.clone(),
             rules_off: self.rules_off.clone(),
+            device: self.device.clone(),
         });
     }
 
@@ -2598,6 +2639,11 @@ impl KameApp {
     /// Replaces the session, resetting the view state that pointed into the old
     /// document (open note, find bar, typewriter anchor, caches).
     fn adopt_session(&mut self, session: Session) {
+        // The last of this document's words go in its logs before it's left.
+        self.sync_logs();
+        self.logged = None;
+        self.logged_path = None;
+        self.orphan_mentioned = false;
         self.session = session;
         self.conflict_copies.clear();
         self.next_copy_check = std::time::Instant::now();
@@ -2842,6 +2888,7 @@ impl KameApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(FILE_CHECK_SECONDS));
         }
         self.look_for_conflict_copies();
+        self.tick_logs(ctx);
         let new_chord = ctx.input(|input| input.events.iter().any(is_new_chord));
         if new_chord && !self.dialog_open() && !self.close_flow.prompting {
             self.request_new();
@@ -5328,7 +5375,8 @@ impl KameApp {
             self.go_to_heading(heading);
             return;
         }
-        let Some(found) = find_document(path, &self.session.link_base()) else {
+        let found = kame_sync::logs::find_or_build(path, &self.session.link_base());
+        let Ok(Some(found)) = found else {
             self.notice = Some(format!("no document at {path}"));
             return;
         };
@@ -5433,6 +5481,13 @@ impl KameApp {
         let path = resolve_open_path(&typed, &base);
         // Before the open, which may be of this same file.
         self.save_position_now();
+        if let Err(err) = kame_sync::logs::build_from_logs(&path) {
+            self.session.last_error = Some(format!(
+                "could not build {} from its logs — {err}",
+                path.display()
+            ));
+            return;
+        }
         match Session::open_any(&path) {
             Ok((session, note)) => {
                 self.adopt_session(session);
@@ -5502,6 +5557,85 @@ impl KameApp {
                     Some(format!("could not save {} — {err}", path.display()));
             }
         }
+    }
+
+    /// Keeps the revision logs up to date, on a pause in typing or on losing focus, so that a
+    /// merge never lands mid-word and nothing interrupts a dialog or an open note.
+    fn tick_logs(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        let typing = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Text(_)
+                        | egui::Event::Key { .. }
+                        | egui::Event::Paste(_)
+                        | egui::Event::Cut
+                        | egui::Event::Ime(_)
+                )
+            })
+        });
+        if typing {
+            self.last_typed = now;
+        }
+        let focused = ctx.input(|input| input.focused);
+        let lost_focus = self.was_focused && !focused;
+        self.was_focused = focused;
+        if now < self.next_log_check && !lost_focus {
+            return;
+        }
+        self.next_log_check = now + std::time::Duration::from_secs_f32(LOG_CHECK_SECONDS);
+        let paused = self.last_typed.elapsed().as_secs_f32() >= LOG_PAUSE_SECONDS;
+        if (paused || lost_focus) && !self.dialog_open() && self.open_note.is_none() {
+            self.sync_logs();
+        }
+    }
+
+    /// Writes what's here to the document's logs and merges whatever has arrived there.
+    fn sync_logs(&mut self) {
+        let Some(path) = self.session.path().map(Path::to_path_buf) else {
+            return;
+        };
+        if kame_sync::logs::orphaned_logs(&path) && !self.orphan_mentioned {
+            self.orphan_mentioned = true;
+            self.notice = Some(format!(
+                "this document has revision logs, but no {} above it, so it may have stopped \
+                 syncing",
+                kame_sync::logs::MARKER
+            ));
+        }
+        if self.logged_path.as_deref() != Some(&path) || self.logged.is_none() {
+            self.logged = None;
+            if kame_sync::logs::logging_root(&path).is_some() {
+                if self.device.is_empty() {
+                    self.device = kame_sync::logs::device_name(&kame_sync::logs::this_host());
+                    self.persist();
+                }
+                self.logged = kame_sync::logs::Logged::open(&self.session, &self.device);
+            }
+            self.logged_path = Some(path);
+        }
+        let Some(mut logged) = self.logged.take() else {
+            return;
+        };
+        if logged.needs_sync(&self.session) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs() as i64);
+            match logged.sync(&mut self.session, now) {
+                Ok(outcome) => {
+                    if outcome.merged {
+                        self.set_open_note(None);
+                        self.notice = Some(logs_notice(outcome.from.as_deref(), outcome.notes));
+                    }
+                }
+                Err(err) => {
+                    self.session.last_error =
+                        Some(format!("could not update this document's logs — {err}"));
+                }
+            }
+        }
+        self.logged = Some(logged);
     }
 
     /// Says so when a sync tool leaves a conflict copy of this document beside it.
@@ -5945,6 +6079,10 @@ impl eframe::App for KameApp {
         self.claim_tabs(ctx, &mut raw_input.events);
     }
 
+    fn on_exit(&mut self) {
+        self.sync_logs();
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // The OS asking to quit goes through the same close request as the window's
         // own button, and so through the unsaved-document prompt.
@@ -6083,6 +6221,7 @@ pub(crate) fn test_temp_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kame_core::links::find_document;
 
     fn temp_db_path() -> PathBuf {
         let dir = test_temp_dir().join(format!("kame-gui-test-{}", uuid::Uuid::new_v4()));
@@ -6413,6 +6552,7 @@ mod tests {
             check_spelling: true,
             words: vec!["kame".to_string()],
             rules_off: vec!["Rule".to_string()],
+            device: "talos-3f9a".to_string(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let read = serde_json::from_str::<KameConfig>(&json).unwrap();
@@ -7769,6 +7909,19 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(document_link_at(blocks, &at(3)), None);
         assert_eq!(document_link_at(blocks, &at(6)), None);
         assert_eq!(url_at(blocks, &at(4)), None);
+    }
+
+    #[test]
+    fn a_notice_says_where_merged_words_came_from_and_counts_notes() {
+        assert_eq!(logs_notice(Some("titan"), 0), "merged from titan");
+        assert_eq!(
+            logs_notice(Some("titan"), 1),
+            "merged from titan, with 1 note to look at"
+        );
+        assert_eq!(
+            logs_notice(None, 2),
+            "merged from another machine, with 2 notes to look at"
+        );
     }
 
     #[test]

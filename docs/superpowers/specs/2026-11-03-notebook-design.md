@@ -1,8 +1,7 @@
 # Kame notebook — design
 
 Date: 2026-11-03
-Status: set aside for review, revised after three rounds of answers. Nothing is built. Section 13 lists what waits on the sync
-design, section 12 ends with the decisions made on your behalf, and section 11 says how easily each decision can be undone. The
+Status: for review, revised after four rounds of answers. Nothing is built. Section 13 says what's left, section 12 ends with the decisions made on your behalf, and section 11 says how easily each decision can be undone. The
 starting notes are in `MultiKame.kame`.
 
 ## 1. Purpose
@@ -67,8 +66,9 @@ publishing. `remote` is the same idea as `UPSTREAM` in a `kame-site` Makefile. U
 nearest one wins. So there's no separate step to enter a notebook, and a notebook inside another is just its own
 notebook. `kame philosophy/` opens its `Notebook.kame`, or the browser if there isn't one.
 
-**What counts as a document.** `.kame` and `.md` files under the root, leaving out hidden folders, `static/`, `theme/`,
-the `.sync` folders of the sync design, conflict copies and retired `.merged` files.
+**What counts as a document.** `.kame` and `.md` files under the root, and a `X.kame.sync/` folder with no `X.kame` beside it,
+which is a document with only logs, as on a new machine. Hidden folders, `static/`, `theme/`, conflict copies and retired
+`.merged` files are left out.
 
 ## 4. The code, and why there's no index
 
@@ -114,10 +114,10 @@ private notes.
 moves from the app into `kame-core`, so that the two can't drift apart, and it's extended to margin notes, footnotes and
 private notes for this list. The open document is searched as it stands on screen.
 
-**Results arrive as they're found,** and a new keystroke cancels the search under way. A short search can match thousands
-of blocks, so the list stops at 200 rows and says there are more. Each row shows the document and the line around the
-match, and choosing one opens that document at the match, with Ctrl-[ going back. Rows are ordered with whole-word matches
-first, then by the number of matches in the document.
+**Results arrive as they're found,** and a new keystroke cancels the search under way. Every match is listed, with the count at the
+top: searching for `the` gets every `the`, and choosing what to search for is up to the writer. Rows come by document, in the order
+they're read. Each shows the document and the line around the match, and choosing one opens that document at the match, with Ctrl-[
+going back. The list draws only the rows in view, so its length costs little beyond the rows' text.
 
 Search doesn't look in `static/`. A short `.kame` of notes on a paper, anywhere else, is searched like anything else.
 
@@ -144,7 +144,8 @@ with any folders it needs, and opens it. Ctrl-[ comes back. Four rules keep this
   makes that folder's `Notebook.kame`. A missing `static/paper.pdf` says the link has rotted, and never makes
   `paper.pdf.kame`.
 - **Mistyped links leave nothing behind.** If you leave a new document without writing anything, it's removed, with its
-  `-wal` and `-shm`. Only a document created this way, this session, and never edited is ever removed.
+  `-wal` and `-shm`. Only a document created this way, this session, and never edited is ever removed. It writes no logs until
+  it's edited, so there's nothing to take back from another machine.
 - **A heading in the link** becomes the new document's first heading, so that the link then leads somewhere.
 
 **A link to a folder.** It opens the folder's `Notebook.kame`.
@@ -157,7 +158,7 @@ click opens one. It isn't part of the document, so it never reaches exports or t
 empty. It comes from a background read of the notebook when a document opens, so it can take a moment to appear.
 
 **Moving a document.** Placement is fixed for now. kame offers no way to move a document, and one moved by hand keeps
-its new place while links to the old one go stale. Following such a link would make a new, empty document at the old
+its new place while links to the old one go stale. In a folder with logs, section 10 says what a moved document leaves behind. Following such a link would make a new, empty document at the old
 path, which is removed again if left unwritten. A later revision adds a Move command through the command palette, which
 would read the notebook for every document linking to the old path, and rewrite those links as ordinary edits at the
 moment of the move.
@@ -199,16 +200,34 @@ kame-site sync ~/notes/philosophy    # builds, then sends it to `remote`
 
 ## 10. Syncing
 
-The notebook works with Syncthing as it stands, adding only a small text file and whatever you put in `static/`. But it does
-depend on what a document is on disk, so stage 2 of `2026-11-03-sync-design.md` affects it:
+The notebook works with plain Syncthing, or with revision logs if its folder has `.kame-logs`. These are what logs mean for it.
 
-- **A document with no database.** Under revision logs, `*.kame` stops syncing, so a fresh machine has only `X.kame.sync/`.
-  The list of documents, the jump list and search all assume a `.kame` to read.
-- **The cost of reading.** No index relies on reading a head row being quick. Reading logs isn't yet, at 7 seconds for 400
-  revisions in the study.
-- **Removing or moving a document.** Removing an untouched new document, and a later Move, would have to take its logs along.
-- **Where a database lives.** The alternative in that design's section 10, keeping databases in `~/.local/state`, would
-  change what a notebook's folder holds.
+**Reading.** A document with a database is read from its head row. One with only logs is read from them, at about 3 ms a document,
+and its database is built when it's opened.
+
+**What's on this machine is what's searched and published.** kame syncs only the open document, so a closed one can be behind what
+another machine wrote until it's next opened. Search, what links here and `kame-site` read what this machine has. This is accepted
+until there's a sync server made for kame: it's a matter of which machine you work from, and a background pass merging into documents
+nobody is looking at, as section 13 of `2026-11-03-sync-design.md` suggested, isn't worth what it adds.
+
+**Which files are in a notebook isn't kept in a list.** Tried on `notebook-test`: renaming a document and its logs on Talos leaves Titan
+with its old database at the old path and the logs at the new path, as Syncthing carries the logs and not the database. So Titan
+would list a stale document beside the moved one. A list of a notebook's files would have to be written by every machine, which is the
+conflict logs exist to avoid, and it could disagree with the folder. The documents can already say what happened:
+
+- A database that has synced before records its last revision, so one with no logs beside it had logs that went somewhere.
+- If logs elsewhere in the notebook hold the same document's id, it moved, and the database is renamed to join them, keeping its undo
+  history and snapshots.
+- If none do, it was deleted elsewhere, and the database is renamed with `.retired` added, not deleted.
+
+A database that has never synced has simply not written logs yet, and is left alone. This belongs with the Move command, and a list can
+still be added later if this falls short.
+
+**Deleting.** A document in a folder with logs is deleted by removing both `X.kame` and `X.kame.sync/`. Removing only the database
+gets it rebuilt from its logs on the next open, as the live test showed.
+
+**Timing.** Writing on one machine and then going to another takes minutes, and a sentence arrives in about 25 seconds, so a link followed
+to a document that hasn't arrived yet isn't designed for.
 
 ## 11. If this turns out wrong
 
@@ -218,6 +237,8 @@ depend on what a document is on disk, so stage 2 of `2026-11-03-sync-design.md` 
 | Keys | easily. A few lines, and some relearning |
 | `notebook.yaml` and its name | easily. Move the settings to something else and read both for a while |
 | Search matches and private notes | easily. Nothing is stored |
+| Accepting that closed documents can be behind | easily. A background pass can be added, or a sync server |
+| No list of a notebook's files | easily. A list can be added later, as nothing depends on its absence |
 | Creating on following a link | easily. Turn it off. Documents already made are ordinary documents |
 | The browser | easily. Nothing is stored but a preference |
 | *Publish* mark in `Metadata` | fairly easily. A field in every marked document that can simply stop being read |
@@ -248,11 +269,10 @@ beside a document, and that a build publishes nothing from outside `static/` but
 - **Links to a missing document always create `.kame`,** never Markdown.
 - **The file is always called `notebook.yaml`,** as with `site.yaml`, rather than being named after the notebook. So there
   can't be two in a folder.
-- **Search results stop at 200 rows,** with whole-word matches first. This is untested on real notebooks and easy to change.
 - **No `url` means a site can still be built,** with links relative to the site, and it simply can't produce a full RSS feed
   until one is set.
 
-## 13. What waits
+## 13. What's left
 
-Nothing is left to settle in this design on its own. The questions in section 10 wait on the sync design, and the implementation
-plan waits on your review of this.
+Nothing is left to settle in this design on its own. Section 13 of the sync design still describes a background pass, and needs
+updating when this lands. The implementation plan waits on your review of this.

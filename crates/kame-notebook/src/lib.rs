@@ -86,10 +86,10 @@ impl Notebook {
             .unwrap_or_else(|| "notebook".to_string())
     }
 
-    /// The contents page, if it's there.
+    /// The contents page, if it's there, which it is if it has only logs and is yet to be built.
     pub fn index(&self) -> Option<PathBuf> {
         let index = self.root.join(INDEX);
-        index.is_file().then_some(index)
+        (index.is_file() || kame_sync::logs::log_folder(&index).is_dir()).then_some(index)
     }
 }
 

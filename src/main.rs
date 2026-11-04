@@ -1371,6 +1371,7 @@ enum MarkAction {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
     ToggleBrowser,
+    NotebookHome,
     Jump,
     SearchNotebook,
     MergeConflictCopies,
@@ -3430,6 +3431,9 @@ impl KameApp {
                         if menu_item(ui, "Notebook browser", Some("Ctrl-Shift-O"), self.nb.browser_open) {
                             action = Some(MenuAction::ToggleBrowser);
                         }
+                        if menu_item(ui, "Notebook contents", Some("Ctrl-Shift-L"), false) {
+                            action = Some(MenuAction::NotebookHome);
+                        }
                         if menu_item(ui, "Jump to document", Some("Ctrl-L"), false) {
                             action = Some(MenuAction::Jump);
                         }
@@ -3520,6 +3524,7 @@ impl KameApp {
         match action {
             MenuAction::MergeConflictCopies => self.merge_conflict_copies(),
             MenuAction::ToggleBrowser => self.toggle_browser(),
+            MenuAction::NotebookHome => self.go_home(),
             MenuAction::Jump => self.toggle_jump(),
             MenuAction::SearchNotebook => self.toggle_search(),
             MenuAction::Back => self.go_back(),
@@ -5021,6 +5026,7 @@ impl KameApp {
                             ),
                             ("Ctrl-F", "find"),
                             ("Ctrl-L", "jump to a document, in a notebook"),
+                            ("Ctrl-Shift-L", "a notebook's contents page"),
                             ("Ctrl-R", "search a notebook"),
                             ("Ctrl-Shift-O", "a notebook's browser"),
                             ("Ctrl-Shift-N", "note (highlight) on the selection or word"),

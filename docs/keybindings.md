@@ -309,6 +309,7 @@ is fine. These do something only in a notebook, and are also in the View menu:
 | Key | Action |
 | --- | --- |
 | Ctrl-L | jump to a document by title or path. Letters only have to appear in order. If nothing matches, the last row offers to create it |
+| Ctrl-Shift-L | go to `Notebook.kame`, the contents page |
 | Ctrl-R | search every document, including margin notes, footnotes and private notes, matching as Ctrl-F does. Every match is listed |
 | Ctrl-Shift-O | the browser, a folder tree on the left. If the text and its margin don't fit beside it, the page hides until you choose something or close it |
 

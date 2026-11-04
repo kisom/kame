@@ -251,8 +251,9 @@ impl KameApp {
                 })
             })
         };
-        let (jump, find, browser) = (
+        let (jump, home, find, browser) = (
             pressed(egui::Key::L, false),
+            pressed(egui::Key::L, true),
             pressed(egui::Key::R, false),
             pressed(egui::Key::O, true),
         );
@@ -262,11 +263,22 @@ impl KameApp {
         if jump {
             self.toggle_jump();
         }
+        if home && !self.dialog_open() {
+            self.go_home();
+        }
         if find {
             self.toggle_search();
         }
         if browser {
             self.toggle_browser();
+        }
+    }
+
+    /// Goes to the contents page, with Ctrl-[ coming back.
+    pub(crate) fn go_home(&mut self) {
+        match self.nb.notebook.as_ref().and_then(Notebook::index) {
+            Some(index) => self.open_from_notebook(index, None),
+            None => self.notice = Some(format!("this notebook has no {}", kame_notebook::INDEX)),
         }
     }
 

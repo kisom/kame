@@ -616,3 +616,15 @@ mod lists {
         );
     }
 }
+
+#[test]
+fn the_contents_page_counts_if_it_has_only_logs() {
+    let root = folder("index");
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    assert_eq!(notebook(&root).index(), None);
+    std::fs::create_dir_all(root.join("Notebook.kame.sync")).unwrap();
+    assert_eq!(notebook(&root).index(), Some(root.join("Notebook.kame")));
+    std::fs::remove_dir_all(root.join("Notebook.kame.sync")).unwrap();
+    document(&root.join("Notebook.kame"), "Contents.");
+    assert_eq!(notebook(&root).index(), Some(root.join("Notebook.kame")));
+}

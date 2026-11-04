@@ -76,17 +76,20 @@ impl Notebook {
                 continue;
             }
             if kind.is_dir() {
-                if name.starts_with('.') {
-                    continue;
-                }
                 // A document's logs. They stand for it only if it has no file here yet.
-                if let Some(document) = name.strip_suffix(".sync") {
+                let logs_of = name
+                    .strip_prefix('.')
+                    .and_then(|rest| rest.strip_suffix(".sync"));
+                if let Some(document) = logs_of {
                     if documents_here
                         && document.to_lowercase().ends_with(".kame")
                         && !folder.join(document).exists()
                     {
                         self.push(found, folder.join(document), Kind::Document);
                     }
+                    continue;
+                }
+                if name.starts_with('.') {
                     continue;
                 }
                 let at_root = folder == self.root;

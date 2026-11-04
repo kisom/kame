@@ -93,7 +93,7 @@ SQLite cannot survive file sync, because two machines write one file. So do not 
 
 ```
 AgainstBrainrot.kame            this machine's database, ignored by Syncthing
-AgainstBrainrot.kame.sync/
+.AgainstBrainrot.kame.sync/
     talos.log                   appended to only by talos
     titan.log                   appended to only by titan
 ```
@@ -186,7 +186,7 @@ database, and 125 KB for MultiKame against 397 KB.
 | Merge states, not ops | The largest one. Text moved between blocks is seen as a cut and an insertion. Reversible, since logs and merge are separate |
 | Conflict per sentence, not word | More notes than strictly needed. One function to change |
 | Later version in the text, the other in a note | Purely which goes where |
-| `X.kame.sync/` beside the file, with the database ignored | Needs `.stignore` on every machine. The alternative is a `.kame` folder with the database in `~/.local/state`, which needs no ignore rules but changes what a `.kame` is |
+| `.X.kame.sync/` beside the file, with the database ignored | Needs `.stignore` on every machine. The alternative is a `.kame` folder with the database in `~/.local/state`, which needs no ignore rules but changes what a `.kame` is |
 | `sha2` for digests | A new dependency, which AGENTS.md says needs a spec change. This is that request, and only `kame-sync` uses it so far |
 | A prototype crate linked into nothing | None: delete `crates/kame-sync` and nothing else notices |
 
@@ -255,10 +255,10 @@ Not tried: both built from different revisions and then edited, which should giv
 Every revision's text is in the logs everywhere, so nothing written is lost with a machine, but going back to an old revision
 needs a command that doesn't exist yet. Snapshots made before opting in stay in each machine's copy of the database.
 
-**A document with only logs.** A fresh machine has `X.kame.sync/` and no `X.kame`. It's a document all the same, listed by the
+**A document with only logs.** A fresh machine has `.X.kame.sync/` and no `X.kame`. It's a document all the same, listed by the
 title in its latest revision, and opening it builds the database, as section 7 says. For a notebook:
 
-- The list of documents counts `X.kame.sync/` with no `X.kame`.
+- The list of documents counts `.X.kame.sync/` with no `X.kame`.
 - A database can lag behind its logs, when another machine wrote while this one's copy was closed.
 - There is no background pass. A closed document stays behind its logs until it's opened, and search reads what this machine has,
   as the notebook design accepts.

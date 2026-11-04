@@ -652,9 +652,9 @@ fn the_contents_page_counts_if_it_has_only_logs() {
     let root = folder("index");
     std::fs::write(root.join("notebook.yaml"), "").unwrap();
     assert_eq!(notebook(&root).index(), None);
-    std::fs::create_dir_all(root.join("Notebook.kame.sync")).unwrap();
+    std::fs::create_dir_all(root.join(".Notebook.kame.sync")).unwrap();
     assert_eq!(notebook(&root).index(), Some(root.join("Notebook.kame")));
-    std::fs::remove_dir_all(root.join("Notebook.kame.sync")).unwrap();
+    std::fs::remove_dir_all(root.join(".Notebook.kame.sync")).unwrap();
     document(&root.join("Notebook.kame"), "Contents.");
     assert_eq!(notebook(&root).index(), Some(root.join("Notebook.kame")));
 }
@@ -669,12 +669,12 @@ fn a_list_is_read_again_only_when_what_is_there_has_changed() {
     let known = listed(&found);
     assert_eq!(listed_if_changed(&found, &known), None);
     // As a new document arrives from another machine, with only its logs.
-    std::fs::create_dir_all(root.join("I like writing.kame.sync")).unwrap();
+    std::fs::create_dir_all(root.join(".I like writing.kame.sync")).unwrap();
     let again = listed_if_changed(&found, &known).expect("something arrived");
     assert_eq!(again.len(), 2);
     assert_eq!(again[0].entry.relative, "I like writing.kame");
     assert_eq!(listed_if_changed(&found, &again), None);
-    std::fs::remove_dir_all(root.join("I like writing.kame.sync")).unwrap();
+    std::fs::remove_dir_all(root.join(".I like writing.kame.sync")).unwrap();
     assert_eq!(
         listed_if_changed(&found, &again).map(|list| list.len()),
         Some(1),

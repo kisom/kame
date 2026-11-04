@@ -36,11 +36,13 @@ pub fn logging_root(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Where a document's logs live, beside it.
+/// Where a document's logs live: in a hidden folder beside it, so that a folder of documents
+/// still looks like one.
 pub fn log_folder(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
+    let mut name = std::ffi::OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
     name.push(".sync");
-    PathBuf::from(name)
+    path.with_file_name(name)
 }
 
 /// Whether a document has logs while nothing turns them on. Its folder's marker has gone astray,

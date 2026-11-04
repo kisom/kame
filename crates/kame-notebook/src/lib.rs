@@ -11,6 +11,8 @@ pub mod links;
 pub mod list;
 pub mod search;
 
+pub use kame_sync::logs::log_folder;
+
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;

@@ -324,7 +324,7 @@ Below the footnotes, "Linked from" lists the documents linking to this one. It's
 What's searched is what this machine has. With revision logs, a closed document can be behind what another machine wrote until it's next
 opened.
 
-To move or delete a document in a folder with revision logs, move or delete both `X.kame` and `X.kame.sync/`. Moving one leaves a stale copy
+To move or delete a document in a folder with revision logs, move or delete both `X.kame` and `.X.kame.sync/`. Moving one leaves a stale copy
 on the other machine for now.
 
 ### Publishing a notebook
@@ -349,7 +349,7 @@ The theme is the standard one, and a file in the notebook's `theme/` takes the p
 
 This is a trial, for a folder at a time. `kame-sync enable FOLDER` puts a `.kame-logs` file in a folder, and prints a line that every
 machine's `.stignore` needs. Documents under that folder then stop syncing their databases, and each machine keeps its own log of
-revisions in `X.kame.sync/`, which is what syncs.
+revisions in `.X.kame.sync/`, which is what syncs.
 
 kame writes a revision on a pause in typing, on losing focus and on leaving a document. What arrives from another machine shows up on
 a pause or on coming back to the window, never mid-word, and the status row says where it came from. A copy left open follows along,
@@ -357,4 +357,4 @@ with everything that arrives between your own edits as one undo step. Sentences 
 version in the text and the other in a note, after a snapshot. A document with only logs, as on a new machine, is built when opened.
 
 Snapshots and undo history stay on the machine that made them. To go back, remove the `.stignore` line, then delete `.kame-logs` and the
-`.sync` folders.
+hidden `.sync` folders.

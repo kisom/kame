@@ -133,11 +133,7 @@ pub fn from_parts(
                 "\"{slug}\" has no date of its own, so it is using its file's"
             ));
             // One with only logs has no file yet, and they are as recent.
-            let logs = {
-                let mut name = path.as_os_str().to_os_string();
-                name.push(".sync");
-                std::path::PathBuf::from(name)
-            };
+            let logs = kame_notebook::log_folder(path);
             match file_date(path).or_else(|| file_date(&logs)) {
                 Some(date) => date,
                 None => {

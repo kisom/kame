@@ -81,6 +81,18 @@ fn revisions(path: &Path) -> usize {
 }
 
 #[test]
+fn a_documents_logs_are_in_a_hidden_folder_beside_it() {
+    assert_eq!(
+        log_folder(Path::new("/notes/deep/essay.kame")),
+        Path::new("/notes/deep/.essay.kame.sync")
+    );
+    assert_eq!(
+        log_folder(Path::new("essay.kame")),
+        Path::new(".essay.kame.sync")
+    );
+}
+
+#[test]
 fn a_document_is_logged_only_under_a_marked_folder() {
     let root = common::test_folder("marker");
     let deep = root.join("a/b");

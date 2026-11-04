@@ -66,7 +66,7 @@ publishing. `remote` is the same idea as `UPSTREAM` in a `kame-site` Makefile. U
 nearest one wins. So there's no separate step to enter a notebook, and a notebook inside another is just its own
 notebook. `kame philosophy/` opens its `Notebook.kame`, or the browser if there isn't one.
 
-**What counts as a document.** `.kame` and `.md` files under the root, and a `X.kame.sync/` folder with no `X.kame` beside it,
+**What counts as a document.** `.kame` and `.md` files under the root, and a `.X.kame.sync/` folder with no `X.kame` beside it,
 which is a document with only logs, as on a new machine. Hidden folders, `static/`, `theme/`, conflict copies and retired
 `.merged` files are left out.
 
@@ -225,7 +225,7 @@ conflict logs exist to avoid, and it could disagree with the folder. The documen
 A database that has never synced has simply not written logs yet, and is left alone. This belongs with the Move command, and a list can
 still be added later if this falls short.
 
-**Deleting.** A document in a folder with logs is deleted by removing both `X.kame` and `X.kame.sync/`. Removing only the database
+**Deleting.** A document in a folder with logs is deleted by removing both `X.kame` and `.X.kame.sync/`. Removing only the database
 gets it rebuilt from its logs on the next open, as the live test showed.
 
 **Timing.** Writing on one machine and then going to another takes minutes, and a sentence arrives in about 25 seconds, so a link followed

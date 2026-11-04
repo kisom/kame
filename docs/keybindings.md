@@ -335,7 +335,8 @@ in the root is the home page and always publishes.
 URLs follow the folders, so `maritain/materialism.kame` is `/maritain/materialism/`, and a marked `Notebook.kame` in a folder is that
 folder's page. Everything in `static/` publishes at `/static/`, whether or not anything links to it, and isn't searched. Anything not for
 publication goes in another folder. A link to an unmarked document, or to a file outside `static/`, publishes as its words, and the build
-lists it. A link to something missing publishes as written, for the web server to answer.
+lists it. A link to something missing publishes as written, for the web server to answer. An image shown in a published
+document is copied beside its page, unless it's outside the notebook, which the build also lists.
 
 The theme is the standard one, and a file in the notebook's `theme/` takes the place of the same file in it. With no `url` there's no feed.
 

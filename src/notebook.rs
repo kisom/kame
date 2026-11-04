@@ -143,7 +143,7 @@ fn open_in_system_viewer(path: &Path) -> std::io::Result<()> {
 
 /// Whether a link's target is a path rather than a web address or the like.
 pub(crate) fn is_relative_link(url: &str) -> bool {
-    !url.contains(':') && !url.starts_with('#')
+    kame_notebook::links::is_relative(url)
 }
 
 impl KameApp {

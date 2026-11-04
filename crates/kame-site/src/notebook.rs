@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use kame_core::model::{BlockKind, SpanStyle};
-use kame_notebook::links::Follow;
+use kame_notebook::links::{is_relative, Follow};
 use kame_notebook::{read_document, Notebook, INDEX};
 
 use crate::config::Config;
@@ -31,13 +31,12 @@ fn url_path(text: &str) -> String {
 
 /// Where a document publishes: its folders and name, with an index as its folder's page.
 fn document_url(relative: &str) -> String {
-    let path = relative
-        .strip_suffix(INDEX)
-        .map(|folder| folder.to_string())
-        .unwrap_or_else(|| {
-            let stem = relative.rsplit_once('.').map_or(relative, |(stem, _)| stem);
-            format!("{stem}/")
-        });
+    let path = if relative == INDEX || relative.ends_with(&format!("/{INDEX}")) {
+        relative[..relative.len() - INDEX.len()].to_string()
+    } else {
+        let stem = relative.rsplit_once('.').map_or(relative, |(stem, _)| stem);
+        format!("{stem}/")
+    };
     format!("/{}", url_path(&path))
 }
 
@@ -149,9 +148,7 @@ fn rewrite_links(
         spans.retain_mut(|span| {
             let target = match &span.style {
                 SpanStyle::DocumentLink { target } => target.clone(),
-                SpanStyle::Link { url } if !url.contains(':') && !url.starts_with('#') => {
-                    url.clone()
-                }
+                SpanStyle::Link { url } if is_relative(url) => url.clone(),
                 _ => return true,
             };
             if target.starts_with('#') {
@@ -166,9 +163,22 @@ fn rewrite_links(
             }
         });
         block.spans = spans;
+        // An image in a published document publishes too, so it has to be the notebook's to publish.
+        if let BlockKind::Image { path, .. } = &block.kind {
+            let file = from.parent().unwrap_or(Path::new("")).join(path);
+            let outside = file
+                .canonicalize()
+                .is_ok_and(|real| !real.starts_with(&notebook.root));
+            if outside {
+                problems.warnings.push(format!(
+                    "\"{slug}\": the image {path} isn't published: it's outside the notebook"
+                ));
+                block.kind = BlockKind::Paragraph;
+            }
+        }
         // An image's link goes the same way as any other.
         if let BlockKind::Image { link, .. } = &mut block.kind {
-            if let Some(url) = link.clone().filter(|url| !url.contains(':')) {
+            if let Some(url) = link.clone().filter(|url| is_relative(url)) {
                 *link = published_link(notebook, published, &url, &from, &slug, problems);
             }
         }
@@ -369,10 +379,17 @@ pub fn sync(dir: &Path, problems: &mut Problems) -> Option<PathBuf> {
             .push("notebook.yaml has no remote to send this to".to_string());
         return None;
     };
+    // This file syncs from other machines, and rsync would take this as an option to obey.
+    if remote.starts_with('-') {
+        problems
+            .errors
+            .push(format!("notebook.yaml has an odd remote, \"{remote}\""));
+        return None;
+    }
     let output = build(dir, problems)?;
     // The trailing slash means what's in the folder, rather than the folder.
     let status = std::process::Command::new("rsync")
-        .args(["-avz", "--delete"])
+        .args(["-avz", "--delete", "--"])
         .arg(format!("{}/", output.display()))
         .arg(&remote)
         .status();
@@ -714,6 +731,123 @@ mod tests {
         files_under(&nb.root, Path::new(""), &mut after);
         after.sort();
         assert_eq!(before, after);
+    }
+
+    fn image(path: &str) -> Document {
+        let mut doc = Document::new("D");
+        let mut block = paragraph("");
+        block.kind = BlockKind::Image {
+            path: path.to_string(),
+            link: None,
+        };
+        doc.blocks = vec![paragraph("Words."), block];
+        doc
+    }
+
+    #[test]
+    fn an_image_from_outside_the_notebook_is_not_published() {
+        let nb = made("nbimage", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        let outside = nb.root.parent().unwrap().join("private.png");
+        std::fs::write(&outside, "secret picture").unwrap();
+        std::os::unix::fs::symlink(&outside, nb.root.join("linked.png")).unwrap();
+        nb.file("papers/figure.png", "a figure");
+        nb.document(
+            "absolute.kame",
+            true,
+            &image(&outside.display().to_string()),
+        );
+        nb.document("climbing.kame", true, &image("../private.png"));
+        nb.document("linked.kame", true, &image("linked.png"));
+        nb.document("inside.kame", true, &image("papers/figure.png"));
+        let (plan, problems) = nb.plan();
+        assert_eq!(page(&plan, "inside/figure.png"), "a figure");
+        for (path, output) in &plan.files {
+            if let Output::Copy(from) = output {
+                let text = std::fs::read_to_string(from).unwrap_or_default();
+                assert!(!text.contains("secret picture"), "{} leaks", path.display());
+            }
+        }
+        for slug in ["absolute.kame", "climbing.kame", "linked.kame"] {
+            assert!(
+                problems
+                    .warnings
+                    .iter()
+                    .any(|said| said.contains(slug) && said.contains("outside")),
+                "{slug}: {:?}",
+                problems.warnings
+            );
+            let url = document_url(slug);
+            let page_text = page(&plan, &format!("{}index.html", &url[1..]));
+            assert!(page_text.contains("Words."));
+            assert!(!page_text.contains("private.png"), "{slug}");
+            assert!(!page_text.contains("linked.png"), "{slug}");
+        }
+    }
+
+    #[test]
+    fn a_colon_in_a_path_does_not_make_it_a_web_address() {
+        let nb = made("nbcolon", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("papers/a:b.pdf", "private");
+        nb.file("static/c:d.pdf", "public");
+        for (name, url) in [
+            ("private", "papers/a:b.pdf"),
+            ("public", "static/c:d.pdf"),
+            ("web", "//example.com/x"),
+            ("mail", "mailto:a@example.com"),
+        ] {
+            nb.document(
+                &format!("{name}.kame"),
+                true,
+                &linking(
+                    "The words.",
+                    SpanStyle::Link {
+                        url: url.to_string(),
+                    },
+                ),
+            );
+        }
+        let (plan, _) = nb.plan();
+        assert!(
+            !page(&plan, "private/index.html").contains("a:b"),
+            "the private path stays out"
+        );
+        assert!(page(&plan, "public/index.html").contains("/static/c%3Ad.pdf"));
+        assert!(page(&plan, "web/index.html").contains("//example.com/x"));
+        assert!(page(&plan, "mail/index.html").contains("mailto:a@example.com"));
+    }
+
+    #[test]
+    fn only_a_file_named_notebook_kame_is_an_index() {
+        assert_eq!(
+            document_url("maritain/MyNotebook.kame"),
+            "/maritain/MyNotebook/"
+        );
+        assert_eq!(document_url("MyNotebook.kame"), "/MyNotebook/");
+    }
+
+    #[test]
+    fn a_remote_can_not_be_taken_for_an_option() {
+        let nb = made("nbdash", "remote: --rsh=touch /tmp/kame-pwned\n");
+        nb.words("Notebook.kame", false, "Contents.");
+        let mut problems = Problems::default();
+        assert_eq!(sync(&nb.root, &mut problems), None);
+        assert!(
+            problems.errors[0].contains("remote"),
+            "{:?}",
+            problems.errors
+        );
+    }
+
+    #[test]
+    fn publish_alone_is_enough_for_front_matter() {
+        let nb = made("nbpublishonly", "");
+        nb.file("about.md", "---\npublish: true\n---\n\nAbout words.\n");
+        let (plan, _) = nb.plan();
+        let text = page(&plan, "about/index.html");
+        assert!(text.contains("About words."));
+        assert!(!text.contains("publish: true"));
     }
 
     #[test]

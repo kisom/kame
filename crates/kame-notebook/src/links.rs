@@ -23,6 +23,27 @@ pub enum Follow {
     Rotted,
 }
 
+/// Whether a link is a path, rather than a web address or the like. A scheme is letters, digits
+/// and a little punctuation before the first colon, so a colon further along a path doesn't make
+/// one, and `//` leads to another host as it would in a browser.
+pub fn is_relative(link: &str) -> bool {
+    if link.is_empty() || link.starts_with('#') || link.starts_with("//") {
+        return false;
+    }
+    let Some(colon) = link.find(':') else {
+        return true;
+    };
+    let before = &link[..colon];
+    let is_scheme = before
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+        && before
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    !is_scheme
+}
+
 /// Takes out `.` and `..` by what they say, since what's named may not exist yet.
 fn tidied(path: &Path) -> PathBuf {
     let mut tidy = PathBuf::new();
@@ -71,7 +92,7 @@ impl Notebook {
     /// Where a relative link leads from the document at `base`.
     pub fn follow(&self, target: &str, base: &Path) -> Follow {
         let (path, _heading) = split_document_target(target);
-        if path.is_empty() || path.contains("://") {
+        if !is_relative(path) {
             return Follow::Rotted;
         }
         let is_folder = path.ends_with('/');

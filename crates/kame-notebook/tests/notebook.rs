@@ -401,6 +401,29 @@ mod linking {
     }
 
     #[test]
+    fn a_relative_link_is_told_from_a_web_address_by_its_scheme_alone() {
+        use kame_notebook::links::is_relative;
+        for link in [
+            "static/paper.pdf",
+            "../a.kame",
+            "papers/a:b.pdf",
+            "./c:d",
+            "~/x",
+        ] {
+            assert!(is_relative(link), "{link}");
+        }
+        for link in [
+            "https://x.example/",
+            "mailto:a@b.c",
+            "//x.example/y",
+            "#Heading",
+            "a:b",
+        ] {
+            assert!(!is_relative(link), "{link}");
+        }
+    }
+
+    #[test]
     fn a_new_document_takes_the_heading_from_its_link() {
         let (root, _) = with_notebook("heading");
         let file = root.join("a/b/new.kame");

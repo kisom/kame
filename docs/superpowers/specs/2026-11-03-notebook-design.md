@@ -197,10 +197,6 @@ kame-site sync ~/notes/philosophy    # builds, then sends it to `remote`
   link to it from a published document shows as plain text, as with an unmarked document.
 - **Files the site itself needs,** such as fonts and styles, go in `theme/static/`, and publish to the site's root as usual.
 
-An arXiv paper isn't necessarily free to republish. Many are under arXiv's default licence, which lets arXiv distribute them
-without letting anyone else do so, while others are under Creative Commons. The listing page says which, and linking to arXiv
-is the alternative for those that aren't open.
-
 ## 10. Syncing
 
 The notebook works with Syncthing as it stands, adding only a small text file and whatever you put in `static/`. But it does
@@ -227,7 +223,7 @@ depend on what a document is on disk, so stage 2 of `2026-11-03-sync-design.md` 
 | *Publish* mark in `Metadata` | fairly easily. A field in every marked document that can simply stop being read |
 | Relative links between documents | with work. They're in the text of documents, but the format exists already, and a scan can rewrite them |
 | **URLs that follow folders** | **hard.** Once a site is public, others link to its URLs. Redirects could cover a later move |
-| **Everything in `static/` being public** | **the rule easily, a published file not at all.** Whatever goes there has been published |
+| Everything in `static/` being public | easily. Change the rule. A file published by mistake is removed from the server and the site republished |
 
 ## 12. Stages
 

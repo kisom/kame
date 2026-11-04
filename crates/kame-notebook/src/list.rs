@@ -157,6 +157,18 @@ pub fn listed(notebook: &Notebook) -> Vec<Listed> {
         .collect()
 }
 
+/// The list again if what's in the notebook differs from `known`, as when something arrives from
+/// another machine. Looking costs little, since only a change means reading every document.
+pub fn listed_if_changed(notebook: &Notebook, known: &[Listed]) -> Option<Vec<Listed>> {
+    let entries = notebook.entries();
+    let same = entries.len() == known.len()
+        && entries
+            .iter()
+            .zip(known)
+            .all(|(entry, item)| *entry == item.entry);
+    (!same).then(|| listed(notebook))
+}
+
 /// How well `query`'s letters appear, in order, in `text`: lower is better. It counts the gaps
 /// between them and how far in they start.
 fn subsequence(query: &str, text: &str) -> Option<u32> {

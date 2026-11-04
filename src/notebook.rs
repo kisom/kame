@@ -11,7 +11,7 @@ use std::sync::Arc;
 use eframe::egui;
 use kame_core::model::{BlockId, Metadata};
 use kame_notebook::links::{create_document, linking_to, remove_untouched, Follow, LinkFrom, Made};
-use kame_notebook::list::{listed, narrow, rows, Kind, Listed, RowKind};
+use kame_notebook::list::{listed, listed_if_changed, narrow, rows, Kind, Listed, RowKind};
 use kame_notebook::search::{search, Hit};
 use kame_notebook::Notebook;
 
@@ -25,6 +25,8 @@ const LIST_WIDTH: f32 = 620.0;
 const LIST_HEIGHT: f32 = 380.0;
 /// How many recently opened documents the jump list remembers.
 const RECENT: usize = 20;
+/// How often a list on the screen looks for what has arrived, in seconds.
+const LIST_CHECK_SECONDS: u64 = 10;
 
 /// The jump list, open.
 pub(crate) struct JumpList {
@@ -61,6 +63,7 @@ pub(crate) struct NotebookUi {
     looked_from: Option<PathBuf>,
     listing: Vec<Listed>,
     listing_coming: Option<Receiver<Vec<Listed>>>,
+    listing_checked: Option<std::time::Instant>,
     pub(crate) jump: Option<JumpList>,
     pub(crate) search: Option<SearchList>,
     pub(crate) browser_open: bool,
@@ -101,6 +104,30 @@ impl NotebookUi {
             }
         }
         open
+    }
+
+    /// Looks for what has arrived, while something on the screen is showing the list. In a copy
+    /// left open while writing elsewhere, that may be the only way a new document would show.
+    fn check_listing(&mut self) {
+        let showing = self.browser_open || self.jump.is_some();
+        let due = self.listing_checked.is_none_or(|checked| {
+            checked.elapsed() >= std::time::Duration::from_secs(LIST_CHECK_SECONDS)
+        });
+        if !showing || !due || self.listing_coming.is_some() {
+            return;
+        }
+        let Some(notebook) = self.notebook.clone() else {
+            return;
+        };
+        self.listing_checked = Some(std::time::Instant::now());
+        let known = self.listing.clone();
+        let (send, coming) = channel();
+        self.listing_coming = Some(coming);
+        std::thread::spawn(move || {
+            if let Some(listing) = listed_if_changed(&notebook, &known) {
+                let _ = send.send(listing);
+            }
+        });
     }
 
     fn refresh_listing(&mut self) {
@@ -170,6 +197,7 @@ impl KameApp {
                 self.start_backlinks();
             }
         }
+        self.nb.check_listing();
         if let Some(coming) = &self.nb.listing_coming {
             match coming.try_recv() {
                 Ok(listing) => {

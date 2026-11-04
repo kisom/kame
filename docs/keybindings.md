@@ -313,7 +313,7 @@ is fine. These do something only in a notebook, and are also in the View menu:
 | Ctrl-R | search every document, including margin notes, footnotes and private notes, matching as Ctrl-F does. Every match is listed |
 | Ctrl-Shift-O | the browser, a folder tree on the left. If the text and its margin don't fit beside it, the page hides until you choose something or close it |
 
-Both lists take the arrows, Enter and Escape. Ctrl-[ comes back from anywhere they lead.
+Both lists take the arrows, Enter and Escape. The browser and the jump list notice what arrives from another machine within about 10 seconds of Syncthing delivering it. Ctrl-[ comes back from anywhere they lead.
 
 Following a link to a document that isn't there creates it, inside the notebook only, as a `.kame` with any folders it needs. A heading in
 the link becomes its first heading, and a link to a folder makes that folder's `Notebook.kame`. Leave it unwritten and it's removed again.

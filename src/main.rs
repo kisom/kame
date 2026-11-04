@@ -1303,6 +1303,12 @@ struct NoticeTracker {
 }
 
 impl NoticeTracker {
+    /// A notice about to be set is news even if it reads the same as the last one, as a second
+    /// merge's does. Without this, the change it reports would clear it at once.
+    fn announced(&mut self) {
+        self.seen = None;
+    }
+
     fn update(&mut self, notice: &mut Option<String>, history: (usize, usize)) {
         if *notice != self.seen {
             self.seen = notice.clone();
@@ -5631,6 +5637,7 @@ impl KameApp {
                 Ok(outcome) => {
                     if outcome.merged {
                         self.set_open_note(None);
+                        self.notice_tracker.announced();
                         self.notice = Some(logs_notice(outcome.from.as_deref(), outcome.notes));
                     }
                 }
@@ -5683,6 +5690,7 @@ impl KameApp {
         }
         self.set_open_note(None);
         if merged > 0 {
+            self.notice_tracker.announced();
             self.notice = Some(merged_notice(notes));
         }
     }
@@ -7914,6 +7922,23 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(document_link_at(blocks, &at(3)), None);
         assert_eq!(document_link_at(blocks, &at(6)), None);
         assert_eq!(url_at(blocks, &at(4)), None);
+    }
+
+    #[test]
+    fn the_same_notice_again_for_a_new_change_is_not_taken_for_the_old_one() {
+        let mut tracker = NoticeTracker::default();
+        let mut notice = Some("merged from titan".to_string());
+        tracker.update(&mut notice, (1, 0));
+        tracker.update(&mut notice, (1, 0));
+        // Another merge, saying just the same, and changing the history again.
+        tracker.announced();
+        notice = Some("merged from titan".to_string());
+        tracker.update(&mut notice, (2, 0));
+        assert_eq!(notice.as_deref(), Some("merged from titan"));
+        tracker.update(&mut notice, (2, 0));
+        assert_eq!(notice.as_deref(), Some("merged from titan"));
+        tracker.update(&mut notice, (3, 0));
+        assert_eq!(notice, None, "the next edit still clears it");
     }
 
     #[test]

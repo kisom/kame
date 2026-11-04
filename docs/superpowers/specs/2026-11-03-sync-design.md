@@ -2,8 +2,8 @@
 
 Date: 2026-11-03
 Status: accepted 2026-11-03, including `sha2`. A working proof of concept is in `crates/kame-sync`. Written overnight without
-a chance to ask, so section 10 lists every decision made on your behalf. Section 13 is a second pass on what stage 2 needs,
-which is a draft for your review.
+a chance to ask, so section 10 lists every decision made on your behalf. Section 13 is a second pass on what stage 2 needs.
+Stage 2 is built, and in trial on `notebook-test`, with section 14 saying what building it changed.
 
 ## 1. Purpose
 
@@ -230,8 +230,10 @@ machines. So what's logged and what's ignored have to be the same set, which mea
 - A notebook is then simply a folder that may have this file. The sync design doesn't need a notebook, and a notebook doesn't
   need logs.
 - If the line is missing on a machine, its database keeps travelling too. That's today's situation, with `file-guard` and merging
-  as the net, so nothing is lost, but it's noisy. If the file is missing and the line isn't, documents stop moving with no
-  warning, so kame should warn when a document's database is older than a log beside it. That needs testing.
+  as the net, so nothing is lost, but it's noisy.
+- If the file is missing and the line isn't, documents stop moving. A document with logs and no file above it says so in the
+  status row, since it may have stopped syncing. A document that never had logs in that folder can't be told apart, so `kame-sync
+  enable` prints the line to add, and removing the two together is the way back.
 
 **The database stays beside the document.** The alternative in section 10, a `.kame` folder with the database in
 `~/.local/state`, needs no ignore rule, but it changes what a `.kame` is, and can't be tried on one folder and taken back.
@@ -304,9 +306,40 @@ makes that safe. Try it on `notebook-test` first, then on one real folder, and s
 
 ### Stage 2, in order
 
-1. In `kame-sync`: the two linear fixes, reading only what's new, device names, and the database recording what it has seen.
-2. `.kame-logs`, with the app writing revisions and merging when a document is open. Tried on `notebook-test` on Talos and Titan.
-3. A database built from logs on opening, and kame warning when a log is newer than expected.
+1. In `kame-sync`: the two linear fixes, reading only what's new, and device names. Built.
+2. `.kame-logs`, with the app writing revisions and merging when a document is open. Built, and in trial on `notebook-test`.
+3. A database built from logs on opening or following a link, and kame reporting logs with no marked folder. Built.
 4. A real folder.
 
-The background pass waits for the notebook. `kame-site` reading from logs follows once a published folder opts in.
+The background pass, and the database recording what it has seen of each log, wait for the notebook. `kame-site` reading from
+logs follows once a published folder opts in.
+
+## 14. What building stage 2 changed
+
+**Machines need an ancestor from the start.** Two machines opting in separately had no shared revision, so any edit looked like a
+conflict, and even a machine's unchanged text did when a document's history began empty. So a machine's first sync now writes
+checkpoints through the document's history: every 50 ops, then every op after the last of those. They hold no device or time, so
+machines sharing a past write the same revisions, and two that were in step when they opted in share one right up to that point.
+This costs each log one pass through the history, and doubles a log's weight if two machines write it before seeing each other's.
+
+**Sentences both sides have are agreed.** A base can be older than where two machines parted, or missing. Whole sentences both have
+at the start or end of a block now count as agreed even if the base lacks them, in `merge3`, which helps every merge. An edit inside
+a shared sentence is still a conflict.
+
+**Live test.** Over real Syncthing between Talos and Titan, on `notebook-test`, through the command line:
+
+| Step | Result | Agreed after |
+|---|---|---:|
+| First sync of three documents already in step | no notes | at once |
+| Edits to different paragraphs at one moment | merged, no notes | 26 s |
+| Edits to the end of one paragraph at one moment | one identical note on both | 68 s |
+| Database deleted on Titan, then rebuilt from logs | same text, and Talos kept its own | 9 s |
+
+The databases then differed on the two machines and stayed apart, with no conflict copies. The times are mostly Syncthing's and the
+test's own polling. Logs came to 348 to 556 KB, about twice the single-machine weight, from both machines having written their
+checkpoints at once.
+
+**In the app.** With a script playing the other machine: words arrived on a pause and said where from, nothing landed during typing,
+and the last words reached the log on closing. Reopening a file with news waiting showed the news.
+
+**Still unknown.** How often conflict notes appear in real writing, long offline drift, and Titan's app in daily use.

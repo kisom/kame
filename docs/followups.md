@@ -79,7 +79,8 @@ Open work, most pressing first. Tick items off or delete them as they land.
   `docs/superpowers/specs/2026-11-03-sync-design.md` and `crates/kame-sync`. It merges document
   states by block and sentence, keeps a conflict's other version in a note, and carries revisions in
   logs that each have one writer. The design is accepted. The app merges conflict copies and replaced
-  files; revision logs are the next stage.
+  files, and revision logs are built and in trial on `notebook-test`, opted in by folder. Before a real folder:
+  how often conflict notes appear in real writing, and whether snapshots should travel in the logs.
 
 - [ ] **Footnotes in the site's margins.** Sidenotes beside their markers on wide screens, so
   readers don't jump to the foot and back. Held back because kame already separates the two: a

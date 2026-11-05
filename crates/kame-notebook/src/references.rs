@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use kame_core::references::{cited, valid_key, Reference, References};
+use kame_core::session::{is_markdown_path, Session};
 
 use crate::{read_document, Notebook};
 
@@ -162,6 +163,74 @@ pub fn citing(notebook: &Notebook) -> BTreeMap<String, Vec<PathBuf>> {
         }
     }
     found
+}
+
+/// What a rename did to the documents that cite the old key.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Renamed {
+    /// The documents now citing the new key.
+    pub rewritten: Vec<PathBuf>,
+    /// The documents left citing the old one, each with why.
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+/// Rewrites the citations in one `.kame` document, returning whether any changed.
+fn rewrite(path: &Path, old: &str, new: &str) -> Result<bool, String> {
+    if is_markdown_path(path) {
+        return Err("a Markdown document can't be written by kame".to_string());
+    }
+    let mut session = Session::open(path).map_err(|err| err.to_string())?;
+    if session.newer {
+        return Err("it has changes from a newer version of kame".to_string());
+    }
+    let changed = session.rename_citation(old, new);
+    if session.save_failed {
+        return Err("it could not be saved".to_string());
+    }
+    Ok(changed > 0)
+}
+
+/// Renames the reference `old` to `new`, and the citations of it in every document that has
+/// them except `open`, which the app rewrites through its own session. The new file is written
+/// first and the old one removed last, so an interruption leaves both and loses nothing. A key
+/// that differs from `old` or any other only in case is refused, as is a damaged file for either.
+/// A document that can't be rewritten is named in the result and the rest still are.
+pub fn rename(
+    notebook: &Notebook,
+    old: &str,
+    new: &str,
+    open: Option<&Path>,
+) -> Result<Renamed, String> {
+    if !valid_key(new) {
+        return Err(format!("{new:?} is not a valid key"));
+    }
+    let reference = load(notebook)
+        .references
+        .get(old)
+        .cloned()
+        .ok_or_else(|| format!("there is no reference {old:?}"))?;
+    let taken = format!("{new}{EXTENSION}").to_lowercase();
+    if files(notebook)
+        .iter()
+        .any(|(name, _)| name.to_lowercase() == taken)
+    {
+        return Err(format!("{new:?} is already a reference"));
+    }
+    let citing = citing(notebook).remove(old).unwrap_or_default();
+    save(notebook, new, &reference)?;
+    let mut renamed = Renamed::default();
+    for path in citing {
+        if open == Some(path.as_path()) {
+            continue;
+        }
+        match rewrite(&path, old, new) {
+            Ok(true) => renamed.rewritten.push(path),
+            Ok(false) => {}
+            Err(why) => renamed.failed.push((path, why)),
+        }
+    }
+    remove(notebook, old)?;
+    Ok(renamed)
 }
 
 /// The name, time and length of each reference file, so that a change to the list shows without
@@ -433,5 +502,143 @@ mod tests {
         assert_eq!(found["alpha"], [one.clone(), two]);
         assert_eq!(found["beta"], std::slice::from_ref(&one));
         assert_eq!(found["gamma"], std::slice::from_ref(&one));
+    }
+
+    fn text_of(path: &Path) -> String {
+        read_document(path).unwrap().0.blocks[0].text.clone()
+    }
+
+    fn body_of(path: &Path) -> String {
+        read_document(path).unwrap().0.annotations[0].body.clone()
+    }
+
+    #[test]
+    fn renaming_rewrites_each_document_and_moves_the_file() {
+        let notebook = notebook("ref-rename");
+        save(&notebook, "old", &article()).unwrap();
+        let one = notebook.root.join("one.kame");
+        let two = notebook.root.join("two.kame");
+        let bystander = notebook.root.join("bystander.kame");
+        write_document(
+            &one,
+            "see [old]",
+            &[(AnnotationKind::Footnote, "also [old]")],
+        );
+        write_document(&two, "and [old] again", &[]);
+        write_document(&bystander, "no [other] here", &[]);
+        let renamed = rename(&notebook, "old", "fresh", None).unwrap();
+        assert_eq!(renamed.failed, []);
+        assert_eq!(renamed.rewritten, [one.clone(), two.clone()]);
+        assert_eq!(text_of(&one), "see [fresh]");
+        assert_eq!(body_of(&one), "also [fresh]");
+        assert_eq!(text_of(&two), "and [fresh] again");
+        assert_eq!(text_of(&bystander), "no [other] here");
+        let loaded = load(&notebook);
+        assert_eq!(loaded.references.keys().collect::<Vec<_>>(), ["fresh"]);
+        assert_eq!(loaded.references.get("fresh"), Some(&article()));
+        assert!(!folder(&notebook).join("old.yaml").exists());
+    }
+
+    #[test]
+    fn renaming_skips_the_open_document_and_says_nothing_of_it() {
+        let notebook = notebook("ref-rename-open");
+        save(&notebook, "old", &article()).unwrap();
+        let open = notebook.root.join("open.kame");
+        let other = notebook.root.join("other.kame");
+        write_document(&open, "[old]", &[]);
+        write_document(&other, "[old]", &[]);
+        let renamed = rename(&notebook, "old", "fresh", Some(&open)).unwrap();
+        assert_eq!(renamed.rewritten, std::slice::from_ref(&other));
+        assert_eq!(renamed.failed, []);
+        assert_eq!(text_of(&open), "[old]");
+        assert_eq!(text_of(&other), "[fresh]");
+        assert!(folder(&notebook).join("fresh.yaml").exists());
+    }
+
+    #[test]
+    fn renaming_names_a_markdown_document_it_cant_write_and_keeps_going() {
+        let notebook = notebook("ref-rename-markdown");
+        save(&notebook, "old", &article()).unwrap();
+        let note = notebook.root.join("a.md");
+        let kame = notebook.root.join("b.kame");
+        std::fs::write(&note, "Cites [old].\n").unwrap();
+        write_document(&kame, "[old]", &[]);
+        let renamed = rename(&notebook, "old", "fresh", None).unwrap();
+        assert_eq!(renamed.rewritten, std::slice::from_ref(&kame));
+        assert_eq!(renamed.failed.len(), 1, "{:?}", renamed.failed);
+        assert_eq!(renamed.failed[0].0, note);
+        assert!(
+            renamed.failed[0].1.contains("Markdown"),
+            "{:?}",
+            renamed.failed
+        );
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), "Cites [old].\n");
+        assert_eq!(text_of(&kame), "[fresh]");
+    }
+
+    #[test]
+    fn renaming_names_a_document_that_wont_open() {
+        let notebook = notebook("ref-rename-broken");
+        save(&notebook, "old", &article()).unwrap();
+        let good = notebook.root.join("a.kame");
+        write_document(&good, "[old]", &[]);
+        // A document that cites it, as far as reading goes, but is read-only here.
+        let newer = notebook.root.join("b.kame");
+        write_document(&newer, "[old]", &[]);
+        let connection = rusqlite::Connection::open(&newer).unwrap();
+        let head: String = connection
+            .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let future = head.replacen("\"spans\":[]", "\"spans\":[],\"future\":1", 1);
+        assert_ne!(future, head);
+        connection
+            .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&future])
+            .unwrap();
+        drop(connection);
+        let renamed = rename(&notebook, "old", "fresh", None).unwrap();
+        assert_eq!(renamed.rewritten, std::slice::from_ref(&good));
+        assert_eq!(renamed.failed.len(), 1, "{:?}", renamed.failed);
+        assert_eq!(renamed.failed[0].0, newer);
+        assert!(
+            renamed.failed[0].1.contains("newer"),
+            "{:?}",
+            renamed.failed
+        );
+        assert_eq!(text_of(&good), "[fresh]");
+    }
+
+    #[test]
+    fn renaming_to_a_taken_key_changes_nothing() {
+        let notebook = notebook("ref-rename-taken");
+        save(&notebook, "old", &article()).unwrap();
+        save(&notebook, "Taken", &article()).unwrap();
+        let doc = notebook.root.join("one.kame");
+        write_document(&doc, "[old]", &[]);
+        for new in [
+            "Taken", "taken", "TAKEN", "old", "OLD", "1bad", "", "no way",
+        ] {
+            assert!(rename(&notebook, "old", new, None).is_err(), "{new:?}");
+        }
+        assert!(rename(&notebook, "missing", "fresh", None).is_err());
+        assert_eq!(text_of(&doc), "[old]");
+        let names: Vec<String> = stamp(&notebook).into_iter().map(|(n, ..)| n).collect();
+        assert_eq!(names, ["Taken.yaml", "old.yaml"]);
+    }
+
+    #[test]
+    fn a_renamed_document_in_a_logged_folder_keeps_the_rename_after_it_syncs() {
+        let notebook = notebook("ref-rename-logged");
+        std::fs::write(notebook.root.join(kame_sync::logs::MARKER), "").unwrap();
+        save(&notebook, "old", &article()).unwrap();
+        let doc = notebook.root.join("one.kame");
+        write_document(&doc, "see [old]", &[]);
+        rename(&notebook, "old", "fresh", None).unwrap();
+        let mut session = kame_core::session::Session::open(&doc).unwrap();
+        let mut logged = kame_sync::logs::Logged::open(&session, "talos-aaaa").unwrap();
+        logged.sync(&mut session, 1_000).unwrap();
+        drop(session);
+        assert_eq!(text_of(&doc), "see [fresh]");
     }
 }

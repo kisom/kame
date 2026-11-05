@@ -143,8 +143,18 @@ pub(crate) fn sqlite_files(path: &Path) -> [PathBuf; 2] {
     })
 }
 
+/// A file going from `old` to `new`, and if it's a database, what SQLite keeps beside it going with
+/// it, after it, so that no `-wal` is ever anywhere ahead of its database.
+fn with_side_files(old: &Path, new: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut files = vec![(old.to_path_buf(), new.to_path_buf())];
+    if is_database(old) {
+        files.extend(sqlite_files(old).into_iter().zip(sqlite_files(new)));
+    }
+    files
+}
+
 /// Deletes a document, and with it what belongs to it: what SQLite keeps beside the file, its
-/// conflicting and retired copies, by id, and its logs. A file that can't be removed is an error before
+/// conflicting and retired copies, by id, with what SQLite keeps beside each, and its logs. A file that can't be removed is an error before
 /// the logs are touched, so that a document left in place keeps them. A stranded database has no
 /// logs of its own, and one whose logs can't be shown to be its own may not: what's at its log
 /// folder stays, as removing it could remove another document on every machine. This returns whether
@@ -166,6 +176,10 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
         }
         _ => {}
     }
+    let belonging = belonging
+        .iter()
+        .flat_map(|file| with_side_files(file, file))
+        .map(|(file, _)| file);
     for file in sqlite_files(path).into_iter().chain(belonging) {
         match std::fs::remove_file(&file) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
@@ -541,13 +555,18 @@ fn belonging_file_after(file: &Path, from: &Path, to: &Path) -> PathBuf {
 }
 
 /// A retired database going to `.X.retired.kame`, or a numbered one, takes the next number if
-/// that's taken, since it's never put over another. Any other path is as it was.
+/// that's taken, or if what SQLite keeps beside a database is there, since it's never put over
+/// another, nor beside a `-wal` that would be read as its own. Any other path is as it was.
 fn free_retired_name(new: PathBuf, old: &Path) -> PathBuf {
     let name = new
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let is_free = |path: &Path| path.symlink_metadata().is_err() || same_file(path, old);
+    let is_free = |path: &Path| {
+        with_side_files(old, path)
+            .iter()
+            .all(|(old, new)| new.symlink_metadata().is_err() || same_file(new, old))
+    };
     let Some((before, _)) = name.rsplit_once(".retired") else {
         return new;
     };
@@ -566,52 +585,71 @@ fn free_retired_name(new: PathBuf, old: &Path) -> PathBuf {
 /// the file arriving, and a log folder would be taken for its logs.
 fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String> {
     let mut moves = vec![(from.to_path_buf(), to.to_path_buf())];
+    // Each with where it would go if that's free. Where a copy goes is settled as it moves, and
+    // what SQLite keeps beside it goes there too.
+    let mut copies = Vec::new();
     if is_database(from) {
         moves.extend(sqlite_files(from).into_iter().zip(sqlite_files(to)));
         moves.push((log_folder(from), log_folder(to)));
         for file in belonging_files(from) {
             let after = belonging_file_after(&file, from, to);
-            moves.push((file, after));
+            copies.push((file, after));
         }
     }
-    if moves.iter().all(|(old, _)| old.symlink_metadata().is_err()) {
+    let settled = |(old, new): &(PathBuf, PathBuf)| {
+        let new = free_retired_name(new.clone(), old);
+        with_side_files(old, &new)
+    };
+    let everything: Vec<(PathBuf, PathBuf)> = moves
+        .iter()
+        .cloned()
+        .chain(copies.iter().flat_map(settled))
+        .collect();
+    if everything
+        .iter()
+        .all(|(old, _)| old.symlink_metadata().is_err())
+    {
         return Err(format!(
             "there's nothing at {}",
             relative_in(notebook, from)
         ));
     }
-    for (old, new) in &moves {
-        let new = free_retired_name(new.clone(), old);
-        if new.symlink_metadata().is_ok() && !same_file(&new, old) {
+    for (old, new) in &everything {
+        if new.symlink_metadata().is_ok() && !same_file(new, old) {
             return Err(format!(
                 "something is already at {}; delete it first",
-                relative_in(notebook, &new)
+                relative_in(notebook, new)
             ));
         }
     }
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for (old, new) in moves {
-        if old.symlink_metadata().is_err() {
-            continue;
-        }
-        let new = free_retired_name(new, &old);
-        if let Err(err) = std::fs::rename(&old, &new) {
-            let mut why = format!(
-                "could not move {} to {}: {err}",
-                relative_in(notebook, &old),
-                relative_in(notebook, &new)
-            );
-            for (old, new) in moved.iter().rev() {
-                if let Err(err) = std::fs::rename(new, old) {
-                    why.push_str(&format!(
-                        ", and {} couldn't go back: {err}",
-                        relative_in(notebook, new)
-                    ));
-                }
+    for group in moves
+        .into_iter()
+        .map(|one| vec![one])
+        .chain(copies.iter().map(settled))
+    {
+        for (old, new) in group {
+            if old.symlink_metadata().is_err() {
+                continue;
             }
-            return Err(why);
+            if let Err(err) = std::fs::rename(&old, &new) {
+                let mut why = format!(
+                    "could not move {} to {}: {err}",
+                    relative_in(notebook, &old),
+                    relative_in(notebook, &new)
+                );
+                for (old, new) in moved.iter().rev() {
+                    if let Err(err) = std::fs::rename(new, old) {
+                        why.push_str(&format!(
+                            ", and {} couldn't go back: {err}",
+                            relative_in(notebook, new)
+                        ));
+                    }
+                }
+                return Err(why);
+            }
+            moved.push((old, new));
         }
-        moved.push((old, new));
     }
     Ok(())
 }

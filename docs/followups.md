@@ -49,8 +49,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
   and fine for small logs.
 - [ ] **`.X.moving-N.kame` doesn't go with its document.** A temporary name left by a crash isn't in `belonging_files`, so a
   delete or move leaves it.
-- [ ] **A retired copy's `-wal` stays behind.** `belonging_files` doesn't list what SQLite keeps beside a retired copy, so if a
-  crash left one, a delete leaves it, and a move leaves the words in it under the old name.
 - [ ] **A rename shadowing a link.** A link `b` that led to `b.md`, or offered to create `b.kame`, opens the moved
   document after something is renamed to `b.kame`.
 - [ ] **A command palette.**

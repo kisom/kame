@@ -1540,3 +1540,126 @@ fn a_database_on_another_documents_logs_is_listed_and_they_stay() {
     assert!(report.left[0].why.contains("another document's"));
     assert_eq!(files_in(&log_folder(&path)), logs);
 }
+
+/// Puts a copy of the document at `of`, with `words` put at its start, at `at`, with the words
+/// only in its `-wal`, as a crash would leave a database. `of` may be a database of another
+/// document's, kept elsewhere.
+fn copy_with_words_in_its_wal(of: &Path, at: &Path, words: &str) {
+    let live = kame_test_dir::folder("wal-copy").join("live.kame");
+    std::fs::copy(of, &live).unwrap();
+    let mut session = Session::open(&live).unwrap();
+    session.insert(words);
+    let wal = PathBuf::from(format!("{}-wal", live.display()));
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    std::fs::copy(&live, at).unwrap();
+    std::fs::copy(&wal, format!("{}-wal", at.display())).unwrap();
+}
+
+/// The words a database holds, as read with what's in its `-wal`.
+fn words_in(path: &Path) -> String {
+    Db::open_read_only(path)
+        .unwrap()
+        .load_document()
+        .unwrap()
+        .blocks[0]
+        .text
+        .clone()
+}
+
+#[test]
+fn deleting_takes_what_sqlite_keeps_beside_a_retired_copy_and_leaves_a_neighbours() {
+    let root = folder("delete-retired-wal");
+    let x = root.join("X.kame");
+    document(&x, "X.");
+    copy_with_words_in_its_wal(&x, &root.join(".X.retired.kame"), "Never synced. ");
+    std::fs::write(root.join(".X.retired.kame-shm"), "").unwrap();
+    let elsewhere = folder("delete-retired-wal-other").join("other.kame");
+    document(&elsewhere, "Another document.");
+    copy_with_words_in_its_wal(&elsewhere, &root.join(".X.retired-2.kame"), "Its own. ");
+    let xy = root.join("XY.kame");
+    document(&xy, "XY.");
+    copy_with_words_in_its_wal(&xy, &root.join(".XY.retired.kame"), "Neighbour's. ");
+
+    delete_document(&x).unwrap();
+
+    let mut left: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            ".X.retired-2.kame",
+            ".X.retired-2.kame-wal",
+            ".XY.retired.kame",
+            ".XY.retired.kame-wal",
+            "XY.kame"
+        ]
+    );
+    assert_eq!(
+        words_in(&root.join(".X.retired-2.kame")),
+        "Its own. Another document."
+    );
+    assert_eq!(words_in(&root.join(".XY.retired.kame")), "Neighbour's. XY.");
+}
+
+#[test]
+fn a_retired_copy_moves_with_what_sqlite_keeps_beside_it() {
+    let (root, nb) = plain_notebook("move-retired-wal");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    copy_with_words_in_its_wal(&a, &root.join(".a.retired.kame"), "Never synced. ");
+    copy_with_words_in_its_wal(&a, &root.join(".a.retired-2.kame"), "Nor these. ");
+    // The first free name for the second is taken, so it gets the next, and its -wal has to
+    // follow it there.
+    let elsewhere = folder("move-retired-wal-other").join("other.kame");
+    document(&elsewhere, "Another document.");
+    copy_with_words_in_its_wal(&elsewhere, &root.join(".b.retired.kame"), "Its own. ");
+    let xy = root.join("ab.kame");
+    document(&xy, "AB.");
+    copy_with_words_in_its_wal(&xy, &root.join(".ab.retired.kame"), "Neighbour's. ");
+
+    make_move(&nb, &a, &root.join("b.kame"));
+
+    assert_eq!(
+        words_in(&root.join(".b.retired.kame")),
+        "Its own. Another document."
+    );
+    let moved = [".b.retired-2.kame", ".b.retired-3.kame"].map(|name| words_in(&root.join(name)));
+    assert!(moved.contains(&"Never synced. A.".to_string()), "{moved:?}");
+    assert!(moved.contains(&"Nor these. A.".to_string()), "{moved:?}");
+    for name in [".b.retired-2.kame-wal", ".b.retired-3.kame-wal"] {
+        assert!(root.join(name).is_file(), "{name}");
+    }
+    for gone in [
+        ".a.retired.kame",
+        ".a.retired.kame-wal",
+        ".a.retired-2.kame-wal",
+    ] {
+        assert!(!root.join(gone).exists(), "{gone}");
+    }
+    assert_eq!(words_in(&root.join(".ab.retired.kame")), "Neighbour's. AB.");
+    assert!(root.join(".ab.retired.kame-wal").is_file());
+}
+
+#[test]
+fn a_side_file_left_at_a_retired_name_is_not_taken_for_a_moving_copys() {
+    let (root, nb) = plain_notebook("move-retired-wal-in-way");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    copy_with_words_in_its_wal(&a, &root.join(".a.retired.kame"), "Never synced. ");
+    std::fs::write(root.join(".b.retired.kame-wal"), "left by something else").unwrap();
+
+    make_move(&nb, &a, &root.join("b.kame"));
+
+    assert_eq!(
+        std::fs::read(root.join(".b.retired.kame-wal")).unwrap(),
+        b"left by something else"
+    );
+    assert!(!root.join(".b.retired.kame").exists());
+    assert_eq!(
+        words_in(&root.join(".b.retired-2.kame")),
+        "Never synced. A."
+    );
+}

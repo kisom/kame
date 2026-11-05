@@ -31,7 +31,7 @@ A reader that must change nothing, such as a site build, has three cases:
 | `-wal` and `-shm` | A writer may have it open, with newer text | Open read-only as usual |
 | `-wal` alone | Left by a crash or a sync | Copy the file and the `-wal` somewhere private, and read the copy |
 
-A reader should also refuse a `user_version` above 1, and treat a missing `ops`, `metadata` or `snapshots` table as empty, since read-only opens don't add them. kame's read-only path does neither: it reads a newer file without complaint, and an older one lacking a table gives an error when that table is read.
+A reader must also refuse a `user_version` above 1, and should treat a missing `ops`, `metadata` or `snapshots` table as empty, since read-only opens don't add them. kame gives an error when such a table is read.
 
 ### 1.3 Schema
 
@@ -400,7 +400,7 @@ Version 1 has grown by adding things that older readers can skip:
 - `depth`, `link`, `align`, `language`, `removed`, `old_spans` and `clipped`, all optional on reading and mostly left out when empty.
 - Range anchors on marginal notes, from before whole-block anchors.
 
-A change that older readers could misread must raise `user_version`. Older builds then refuse the file with a clear message when opening it to write. kame's read-only path doesn't check, so its site build, notebook listing and sync tools can misread such a file (section 1.2).
+A change that older readers could misread must raise `user_version`. Older builds then refuse the file with a clear message.
 
 A new optional field must be left out when it holds its default. Revision logs hash these bytes, and [merging, section 9](merging.md) sets out what happens otherwise.
 

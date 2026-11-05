@@ -221,7 +221,23 @@ impl Db {
     /// neither. With a `-wal` and a `-shm`, a writer has it open and may have newer text, so
     /// it is read as usual, adding nothing. A `-wal` alone is left by a crash or a sync, and
     /// reading that in place would create a `-shm`, so a private copy is read instead.
+    ///
+    /// A file from a newer build is refused here too, since it could be misread.
     pub fn open_read_only(path: &Path) -> Result<Db, DbError> {
+        let db = Self::open_read_only_unchecked(path)?;
+        let version: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(DbError::SchemaTooNew {
+                found: version,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        Ok(db)
+    }
+
+    fn open_read_only_unchecked(path: &Path) -> Result<Db, DbError> {
         let sibling = |suffix: &str| {
             let mut name = path.as_os_str().to_os_string();
             name.push(suffix);
@@ -757,6 +773,20 @@ mod tests {
             "shm survived a clean close: {}",
             shm.display()
         );
+    }
+
+    #[test]
+    fn a_newer_file_is_refused_when_only_reading_it() {
+        let path = temp_db_path();
+        {
+            let mut db = Db::open(&path).unwrap();
+            db.save_document(&sample_document()).unwrap();
+            db.conn.pragma_update(None, "user_version", 99_i64).unwrap();
+        }
+        assert!(matches!(
+            Db::open_read_only(&path),
+            Err(DbError::SchemaTooNew { found: 99, .. })
+        ));
     }
 
     #[test]

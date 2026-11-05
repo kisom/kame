@@ -20,6 +20,9 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **Save As tells a saved document what exists on this machine (accepted for now).** A relative `Link` is rewritten only if what it names is there, and
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
+- [ ] **`cargo test` replaces the person's settings.** `KameApp::persist` writes `config.json` under the real `$HOME` whenever an
+  app test changes a setting or names this machine for revision logs, as a move or a rename does, so a test run leaves the
+  defaults and a new device name there. Tests should keep their settings in their own folder.
 
 ## Annotations
 

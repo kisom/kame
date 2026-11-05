@@ -245,23 +245,29 @@ impl Editor {
     /// Takes the most recent edit back out of the history, as if it had never been made, with
     /// nothing for a redo to return to. An edit waiting for a redo was made on top of it, so this
     /// does nothing then, or if it has nothing to take back or the step doesn't fit, as for
-    /// [`Editor::undo`]. Returns whether it did.
+    /// [`Editor::undo`]. Returns the edit if it did.
     ///
-    /// Persist with `Db::forget_last_edit(document(), cursor())`.
-    pub fn forget_last_edit(&mut self) -> bool {
+    /// Persist with `Db::forget_last_edit(document(), cursor())`. If that fails, the edit is still
+    /// on disk, and [`Editor::put_back`] brings memory back to match.
+    pub fn forget_last_edit(&mut self) -> Option<Op> {
         if !self.redo.is_empty() {
-            return false;
+            return None;
         }
-        let Some(op) = self.undo.last() else {
-            return false;
-        };
+        let op = self.undo.last()?;
         if !try_apply_inverse(&mut self.doc, op) {
             self.refused = true;
-            return false;
+            return None;
         }
-        self.undo.pop();
         self.coalesced = false;
-        true
+        self.undo.pop()
+    }
+
+    /// Puts back the edit [`Editor::forget_last_edit`] just took out. It fits, as the document is
+    /// as that edit found it.
+    pub fn put_back(&mut self, op: Op) {
+        if try_apply(&mut self.doc, &op) {
+            self.undo.push(op);
+        }
     }
 
     /// Redoes the most recently undone edit, returning the op that was applied.

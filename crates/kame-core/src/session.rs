@@ -2193,7 +2193,8 @@ impl Session {
     /// what it was added with. The add leaves the history as well, so that nothing is left to
     /// redo, unless words written in it and undone are still waiting for a redo, when the add is
     /// undone instead. A marginal that was written in, or anything else, is left, and the caret
-    /// and selection stay as they are. Returns whether it went.
+    /// and selection stay as they are. So is a marginal the file wouldn't let go, with the failed
+    /// write reported. Returns whether it went.
     pub fn discard_unwritten_marginal(&mut self, id: AnnotationId) -> bool {
         let unwritten = match self.editor.applied_ops().last() {
             Some(Op::AddAnnotation { annotation }) => {
@@ -2220,10 +2221,10 @@ impl Session {
             self.selection = selection;
             return true;
         }
-        if !self.editor.forget_last_edit() {
+        let Some(op) = self.editor.forget_last_edit() else {
             self.report_refused("undo");
             return false;
-        }
+        };
         self.check_file();
         if !self.replaced && !self.newer {
             let forgotten = self
@@ -2231,7 +2232,14 @@ impl Session {
                 .forget_last_edit(self.editor.document(), self.editor.cursor());
             match forgotten {
                 Ok(()) => self.clear_save_error(),
-                Err(err) => self.mark_save_failed(err),
+                Err(err) => {
+                    // The file still has the add, so memory goes back to having it too: the log
+                    // and the redo stack have to agree, for what's typed next to join the right
+                    // step. Closing the marginal again can try again.
+                    self.editor.put_back(op);
+                    self.mark_save_failed(err);
+                    return false;
+                }
             }
         }
         true
@@ -3172,6 +3180,105 @@ mod tests {
         assert!(session.redo());
         assert!(session.redo());
         assert_eq!(session.document().annotations[0].body, "said something");
+    }
+
+    /// A session on `path` holding `a` and a marginal added after it, whose discard has just been
+    /// refused by the file, once.
+    fn session_after_a_failed_discard(path: &Path) -> (Session, AnnotationId) {
+        let mut session = open(path);
+        session.insert("a");
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        let outside = rusqlite::Connection::open(path).unwrap();
+        outside
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE DELETE ON ops \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        session.discard_unwritten_marginal(id);
+        outside.execute_batch("DROP TRIGGER refuse").unwrap();
+        assert!(session.save_failed);
+        (session, id)
+    }
+
+    /// That what the session holds is what its file holds: the same document, the same place in
+    /// the history, and a log of just the steps it can undo and redo.
+    fn assert_agrees_with_its_file(session: &Session) {
+        let (undo, redo) = session.history();
+        assert_eq!(session.db.load_ops().unwrap().len(), undo + redo);
+        assert_eq!(session.db.cursor().unwrap(), undo);
+        assert_eq!(&session.db.load_document().unwrap(), session.document());
+    }
+
+    #[test]
+    fn a_failed_discard_leaves_the_marginal_in_memory_as_on_disk() {
+        let path = temp_db_path();
+        let (session, _) = session_after_a_failed_discard(&path);
+        assert_agrees_with_its_file(&session);
+        assert_eq!(session.document().annotations.len(), 1);
+        assert_eq!(session.history(), (2, 0));
+    }
+
+    #[test]
+    fn a_failed_discard_retried_and_typed_after_keeps_the_log_true() {
+        let path = temp_db_path();
+        let (mut session, _) = session_after_a_failed_discard(&path);
+        assert!(session.retry_or_dismiss());
+        assert!(!session.save_failed);
+        session.insert("b");
+        assert_agrees_with_its_file(&session);
+        assert_eq!(session.document().blocks[0].text, "ab");
+        let (document, history) = (session.document().clone(), session.history());
+
+        drop(session);
+        let mut reopened = open(&path);
+        assert_agrees_with_its_file(&reopened);
+        assert_eq!(reopened.document(), &document);
+        assert_eq!(reopened.history(), history);
+        assert!(!reopened.redo());
+        assert_eq!(reopened.document().blocks[0].text, "ab");
+    }
+
+    #[test]
+    fn a_failed_discard_retried_leaves_nothing_to_redo_after_a_reopen() {
+        let path = temp_db_path();
+        let (mut session, _) = session_after_a_failed_discard(&path);
+        assert!(session.retry_or_dismiss());
+        assert_agrees_with_its_file(&session);
+        let document = session.document().clone();
+
+        drop(session);
+        let mut reopened = open(&path);
+        assert_eq!(reopened.history().1, 0);
+        assert!(!reopened.redo());
+        assert_eq!(reopened.document(), &document);
+    }
+
+    #[test]
+    fn a_failed_discard_never_retried_reopens_with_the_marginal() {
+        let path = temp_db_path();
+        let (session, _) = session_after_a_failed_discard(&path);
+        let (document, history) = (session.document().clone(), session.history());
+
+        drop(session);
+        let reopened = open(&path);
+        assert_agrees_with_its_file(&reopened);
+        assert_eq!(reopened.document(), &document);
+        assert_eq!(reopened.history(), history);
+        assert_eq!(reopened.document().annotations.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_discard_can_be_tried_again_once_the_write_is_retried() {
+        let path = temp_db_path();
+        let (mut session, id) = session_after_a_failed_discard(&path);
+        assert!(session.retry_or_dismiss());
+
+        assert!(session.discard_unwritten_marginal(id));
+
+        assert!(session.document().annotations.is_empty());
+        assert_eq!(session.history(), (1, 0));
+        assert_agrees_with_its_file(&session);
     }
 
     #[test]

@@ -121,7 +121,15 @@ pub fn retargeted(target: &str, from: &Path, to: &Path) -> String {
     };
     // What follows the path, as it was written, which is the `#` and the heading if there are any.
     let after = &target[path.len()..];
-    format!("{}{after}", path_between(&to_folder, &file))
+    let way = path_between(&to_folder, &file);
+    // A way of nothing is the document's own folder, and an empty path would name the document.
+    if way.is_empty() {
+        format!("./{after}")
+    } else if path.ends_with('/') {
+        format!("{way}/{after}")
+    } else {
+        format!("{way}{after}")
+    }
 }
 
 /// What a link to a folder means, as kame_notebook::INDEX has it, which core can't name.
@@ -284,6 +292,40 @@ mod tests {
             moved_target("a/", &root.join("a/other.kame"), &doc),
             "a/other.kame"
         );
+    }
+
+    #[test]
+    fn a_link_to_a_folder_stays_one_from_anywhere() {
+        let root = kame_test_dir::folder("retargeted-folder")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        let (at_root, in_a) = (root.join("doc.kame"), root.join("a/doc.kame"));
+        assert_eq!(retargeted("../", &in_a, &at_root), "./");
+        assert_eq!(retargeted("..", &in_a, &at_root), "./");
+        assert_eq!(retargeted("../#Part", &in_a, &at_root), "./#Part");
+        assert_eq!(retargeted("b/", &in_a, &at_root), "a/b/");
+        assert_eq!(retargeted("a/b/", &at_root, &in_a), "b/");
+        assert_eq!(retargeted("./", &at_root, &in_a), "../");
+        assert_eq!(retargeted("a/#Part", &at_root, &in_a), "./#Part");
+        assert_eq!(
+            own_target_after_move("../#Part", &in_a, &at_root),
+            "./#Part"
+        );
+        // Without its slash, it's written as it was.
+        assert_eq!(retargeted("a/b", &at_root, &in_a), "b");
+    }
+
+    /// The way to a file always has the file's name in it, so it's never empty.
+    #[test]
+    fn a_moved_target_beside_the_document_is_never_empty() {
+        let root = kame_test_dir::folder("moved-target-beside")
+            .canonicalize()
+            .unwrap();
+        let (doc, new) = (root.join("doc.kame"), root.join("new.kame"));
+        assert_eq!(moved_target("./", &new, &doc), "new.kame");
+        assert_eq!(moved_target("../#Part", &new, &doc), "new.kame#Part");
+        assert_eq!(moved_target("old", &new, &new), "new.kame");
     }
 
     #[test]

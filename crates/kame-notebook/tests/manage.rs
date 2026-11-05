@@ -1001,7 +1001,6 @@ fn a_file_in_the_way_stops_the_move_and_is_not_overwritten() {
     let (root, nb) = plain_notebook("move-in-the-way");
     let a = root.join("a.kame");
     document(&a, "A.");
-    std::fs::write(root.join("a.kame-wal"), "").unwrap();
     // Left over from a `b` that's gone. Beside a new `b.kame`, SQLite could read it as its log.
     std::fs::write(root.join("b.kame-wal"), "stale").unwrap();
     let b = root.join("b.kame");
@@ -1009,9 +1008,185 @@ fn a_file_in_the_way_stops_the_move_and_is_not_overwritten() {
     let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
     assert_eq!(err, "something is already at b.kame-wal; delete it first");
     assert!(a.is_file());
-    assert!(root.join("a.kame-wal").is_file());
     assert!(!b.exists());
     assert_eq!(std::fs::read(root.join("b.kame-wal")).unwrap(), b"stale");
+}
+
+#[test]
+fn a_real_log_left_at_the_new_path_does_not_replace_the_moved_words() {
+    let (root, nb) = plain_notebook("move-stale-log");
+    let a = root.join("a.kame");
+    document(&a, "The words of a.");
+    let b = root.join("b.kame");
+    let gone = folder("move-stale-log-gone").join("gone.kame");
+    {
+        let mut session = Session::open(&gone).unwrap();
+        session.insert("Stale words from a deleted b.");
+        let wal = PathBuf::from(format!("{}-wal", gone.display()));
+        std::fs::copy(&wal, root.join("b.kame-wal")).unwrap();
+    }
+    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
+    assert!(carry_out(&nb, plan, None, DEVICE, NOW).is_err());
+    assert!(!b.exists());
+    assert_eq!(read(&a).blocks[0].text, "The words of a.");
+}
+
+#[test]
+fn logs_in_the_way_stop_a_move_with_none_of_its_own_to_bring() {
+    let (root, nb) = plain_notebook("move-logs-in-the-way");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let b = root.join("b.kame");
+    std::fs::create_dir_all(log_folder(&b)).unwrap();
+    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    assert_eq!(err, "something is already at .b.kame.sync; delete it first");
+    assert!(a.is_file());
+    assert!(!b.exists());
+}
+
+#[test]
+fn a_document_that_is_not_there_is_an_error() {
+    let (root, nb) = plain_notebook("move-nothing");
+    let gone = root.join("gone.kame");
+    let plan = plan_move(&nb, &gone, &root.join("b.kame"), None, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    assert_eq!(err, "there's nothing at gone.kame");
+    assert!(!root.join("b.kame").exists());
+}
+
+/// The revisions that hadn't arrived were written for the old folder, so their links are too.
+#[test]
+fn a_moved_document_behind_its_logs_has_all_its_links_and_images_fixed() {
+    let (root, nb) = logged_notebook("move-own-behind");
+    let own = root.join("own.kame");
+    document(&own, "Words.");
+    sync(&own);
+    let sib = root.join("sib.kame");
+    document(&sib, "Sib.");
+    std::fs::write(root.join("p.png"), "p").unwrap();
+    let copy = second_machine(&root, &own, "move-own-behind-there");
+    write_and_send(&copy, &own, |session| {
+        let mut doc = session.document().clone();
+        let block = &mut doc.blocks[0];
+        let start = block.text.len();
+        block.text.push_str(" Link.");
+        block.spans.push(Span {
+            start,
+            end: block.text.len(),
+            style: document_link("sib.kame"),
+        });
+        assert!(session.replace_document(doc));
+        assert!(session.insert_image("p.png".to_string()));
+    });
+
+    let to = root.join("deep/er/own.kame");
+    let report = make_move(&nb, &own, &to);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert_eq!(report.changed, ["deep/er/own.kame"]);
+    for doc in [read(&to), head(&to).0] {
+        assert_eq!(links_of(&doc), ["../../sib.kame"]);
+        assert!(doc.blocks.iter().any(|block| matches!(
+            &block.kind,
+            BlockKind::Image { path, .. } if path == "../../p.png"
+        )));
+    }
+    assert_follows(&nb, "../../sib.kame", &to, &sib);
+}
+
+#[test]
+fn a_folder_link_into_the_folder_it_moves_to_still_leads_there() {
+    let (root, nb) = plain_notebook("move-into-linked-folder");
+    let index = root.join("Notebook.kame");
+    document(&index, "Contents.");
+    let inner = root.join("sub/inner/Notebook.kame");
+    document(&inner, "Inner.");
+    let own = root.join("sub/own.kame");
+    document(&own, "");
+    link(&own, "up", document_link("../"));
+    link(&own, "part", document_link("../#Part"));
+    link(&own, "down", document_link("inner/"));
+
+    let to = root.join("own.kame");
+    let report = make_move(&nb, &own, &to);
+    assert_eq!(report.changed, ["own.kame"]);
+    assert_eq!(links_of(&read(&to)), ["./", "./#Part", "sub/inner/"]);
+    assert_follows(&nb, "./", &to, &index);
+    assert_follows(&nb, "./#Part", &to, &index);
+    assert_follows(&nb, "sub/inner/", &to, &inner);
+}
+
+#[test]
+fn a_stranded_document_is_refused_and_another_documents_logs_stay() {
+    let (root, nb) = logged_notebook("move-stranded-itself");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    sync(&a);
+    // Another machine deleted `a` and made a new one, whose logs arrive at the same path.
+    let other = root.join("other.kame");
+    document(&other, "Another document.");
+    sync(&other);
+    std::fs::remove_dir_all(log_folder(&a)).unwrap();
+    std::fs::rename(log_folder(&other), log_folder(&a)).unwrap();
+    let revisions = Store::load(&log_folder(&a)).unwrap().revision_count();
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    let bytes = std::fs::read(&a).unwrap();
+
+    let b = root.join("b.kame");
+    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    assert_eq!(
+        err,
+        "this document was moved or deleted on another machine, so it can't be moved until that's settled"
+    );
+    assert_eq!(std::fs::read(&a).unwrap(), bytes);
+    assert!(!b.exists());
+    assert!(!log_folder(&b).exists());
+    assert_eq!(
+        Store::load(&log_folder(&a)).unwrap().revision_count(),
+        revisions
+    );
+    assert_eq!(links_of(&read(&linker)), ["a.kame"]);
+}
+
+/// Nothing above it turns logs on, so nothing will ever settle it, and the sync state means nothing.
+#[test]
+fn a_database_that_once_synced_can_move_where_logs_are_off() {
+    let (root, nb) = logged_notebook("move-logs-off");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    sync(&a);
+    std::fs::remove_dir_all(log_folder(&a)).unwrap();
+    std::fs::remove_file(root.join(MARKER)).unwrap();
+    let b = root.join("b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert!(b.is_file());
+    assert!(!a.exists());
+}
+
+/// Its properties are saved on their own, where a failure shows only as a message on the session.
+#[test]
+fn a_title_that_could_not_be_saved_is_listed() {
+    let (root, nb) = plain_notebook("move-title-unsaved");
+    let a = root.join("a.kame");
+    {
+        let mut session = Session::open(&a).unwrap();
+        let mut doc = session.document().clone();
+        doc.title = "Mine".to_string();
+        assert!(session.replace_document(doc));
+        assert_eq!(session.metadata.title, "a");
+    }
+    std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let b = root.join("b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert!(b.is_file());
+    assert_eq!(report.left.len(), 1, "{:?}", report.left);
+    assert_eq!(report.left[0].relative, "b.kame");
+    std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(Session::open(&b).unwrap().metadata.title, "a");
 }
 
 #[test]

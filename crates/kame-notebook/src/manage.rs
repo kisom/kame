@@ -228,20 +228,29 @@ fn links_leading_to(
         .collect()
 }
 
+/// Whether the database at `path`, in a folder with logs, has lost them, as read from its file. One
+/// with only logs or never synced has no state to lose. Nothing above it turning logs on means
+/// its state says nothing, and nothing would ever settle it.
+fn is_stranded_database(path: &Path) -> bool {
+    if logging_root(path).is_none() {
+        return false;
+    }
+    let last = Db::open_read_only(path)
+        .ok()
+        .and_then(|db| db.load_sync_state());
+    is_stranded(last.as_deref(), &log_folder(path))
+}
+
 /// The latest versions in a logged document's logs. There are none to read if it has no logs, or
 /// if what's at its log folder isn't its logs, since those say nothing about this document.
 fn versions_in_logs(path: &Path) -> Vec<Document> {
     if logging_root(path).is_none() {
         return Vec::new();
     }
-    let folder = log_folder(path);
-    let last = Db::open_read_only(path)
-        .ok()
-        .and_then(|db| db.load_sync_state());
-    if is_stranded(last.as_deref(), &folder) {
+    if is_stranded_database(path) {
         return Vec::new();
     }
-    let Ok(store) = Store::load(&folder) else {
+    let Ok(store) = Store::load(&log_folder(path)) else {
         return Vec::new();
     };
     store
@@ -277,19 +286,26 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
     Ok((session, Some(logged)))
 }
 
-/// Changes a closed document, and sends the change to its logs if it has them.
+/// Changes a closed document, and sends the change to its logs if it has them. What's in the logs
+/// comes in first, since if it were merged after the change, it would bring back what the change
+/// took out, and be left unchanged itself.
 fn edit_closed<T>(
     path: &Path,
     device: &str,
     now: i64,
     change: impl FnOnce(&mut Session) -> Result<T, String>,
 ) -> Result<T, String> {
-    let (mut session, logged) = open_to_change(path, device)?;
+    let (mut session, mut logged) = open_to_change(path, device)?;
+    if let Some(logged) = &mut logged {
+        logged
+            .sync(&mut session, now)
+            .map_err(|err| format!("could not sync it with its logs: {err}"))?;
+    }
     let result = change(&mut session)?;
     if session.save_failed {
         return Err("could not save the change".to_string());
     }
-    if let Some(mut logged) = logged {
+    if let Some(logged) = &mut logged {
         logged
             .sync(&mut session, now)
             .map_err(|err| format!("it changed, but its logs couldn't be written: {err}"))?;
@@ -411,10 +427,8 @@ pub fn plan_move(
         for version in &versions {
             targets.extend(links_leading_to(notebook, version, &entry.path, from));
         }
-        // Merging after the rewrite could bring an old link back from what hadn't arrived, so a
-        // document to be rewritten first comes together with its logs. This is for any
-        // difference, and not only a link its database lacks, as another use of the same link
-        // would be missed. If it fails, the rewrite is left to fail for the same reason, and say so.
+        // A document to be rewritten comes together with its logs, and is planned from the result.
+        // If that fails, the rewrite is left to fail for the same reason, and say so.
         let behind = versions.iter().any(|version| version != document);
         if !targets.is_empty()
             && behind
@@ -489,9 +503,10 @@ fn free_retired_name(new: PathBuf, old: &Path) -> PathBuf {
         .unwrap_or(new)
 }
 
-/// Moves the document's files, or leaves them all where they were and says why. Nothing is put
-/// over anything already there, not even what SQLite left beside a file now gone, since it could
-/// be read as the log of the file arriving.
+/// Moves the document's files, or leaves them all where they were and says why. Nothing goes over
+/// anything already there. That's checked for every path this could use, whether or not there's
+/// anything to go to it, as a `-wal` that a file now gone left behind would be read as the log of
+/// the file arriving, and a log folder would be taken for its logs.
 fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String> {
     let mut moves = vec![(from.to_path_buf(), to.to_path_buf())];
     if is_database(from) {
@@ -502,27 +517,33 @@ fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String>
             moves.push((file, after));
         }
     }
+    if moves.iter().all(|(old, _)| old.symlink_metadata().is_err()) {
+        return Err(format!(
+            "there's nothing at {}",
+            relative_in(notebook, from)
+        ));
+    }
+    for (old, new) in &moves {
+        let new = free_retired_name(new.clone(), old);
+        if new.symlink_metadata().is_ok() && !same_file(&new, old) {
+            return Err(format!(
+                "something is already at {}; delete it first",
+                relative_in(notebook, &new)
+            ));
+        }
+    }
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (old, new) in moves {
         if old.symlink_metadata().is_err() {
             continue;
         }
         let new = free_retired_name(new, &old);
-        let failed = if new.symlink_metadata().is_ok() && !same_file(&new, &old) {
-            Some(format!(
-                "something is already at {}; delete it first",
+        if let Err(err) = std::fs::rename(&old, &new) {
+            let mut why = format!(
+                "could not move {} to {}: {err}",
+                relative_in(notebook, &old),
                 relative_in(notebook, &new)
-            ))
-        } else {
-            std::fs::rename(&old, &new).err().map(|err| {
-                format!(
-                    "could not move {} to {}: {err}",
-                    relative_in(notebook, &old),
-                    relative_in(notebook, &new)
-                )
-            })
-        };
-        if let Some(mut why) = failed {
+            );
             for (old, new) in moved.iter().rev() {
                 if let Err(err) = std::fs::rename(new, old) {
                     why.push_str(&format!(
@@ -534,12 +555,6 @@ fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String>
             return Err(why);
         }
         moved.push((old, new));
-    }
-    if moved.is_empty() {
-        return Err(format!(
-            "there's nothing at {}",
-            relative_in(notebook, from)
-        ));
     }
     Ok(())
 }
@@ -575,6 +590,14 @@ pub fn carry_out(
     }
     if from == to {
         return Ok(report);
+    }
+    // What's at its log folder may be another document's by now, and that mustn't go with it.
+    if is_database(&from) && is_stranded_database(&from) {
+        return Err(
+            "this document was moved or deleted on another machine, so it can't be moved until \
+             that's settled"
+                .to_string(),
+        );
     }
     move_files(notebook, &from, &to)?;
 
@@ -622,8 +645,17 @@ pub fn carry_out(
         }
         let changed = session.history() != history;
         if let (Some(old), Some(new)) = (from.file_stem(), to.file_stem()) {
+            let (old, new) = (old.to_string_lossy(), new.to_string_lossy());
             if old != new {
-                session.follow_rename(&old.to_string_lossy(), &new.to_string_lossy());
+                let follows = session.metadata.title == old;
+                session.follow_rename(&old, &new);
+                // The session has the new title even if saving it failed, so ask the file.
+                let saved = Db::open_read_only(&to)
+                    .ok()
+                    .and_then(|db| db.load_metadata().ok().flatten());
+                if follows && saved.is_none_or(|metadata| metadata.title != new) {
+                    return Err(format!("its title couldn't be changed to {new}"));
+                }
             }
         }
         Ok(changed)

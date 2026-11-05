@@ -60,13 +60,13 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `render/` — swash glyph-atlas rasterization + egui texture upload
 - `fonts/` — the embedded faces
 
-`crates/kame-site` — the static site generator, a command line tool on `kame-core` and `kame-notebook`, which the app also runs as `kame site`. `config` reads `site.yaml`, `source` and `pages` read what publishes, `refs` works out where links and images lead, `plan` works out the whole site with nothing written, and `write` replaces `output/` atomically. The starting theme is under `theme/`, embedded for `kame-site new`.
+`crates/kame-site` — the static site generator, a command line tool on `kame-core` and `kame-notebook`, which the app also runs as `kame site`. `config` reads `site.yaml`, `source` and `pages` read what publishes, `refs` works out where links and images lead, `plan` works out the whole site with nothing written, and `write` replaces `output/` atomically. A notebook's site ends each page with the references it cites and warns about keys that look lost, and a `site.yaml` site has no references. The starting theme is under `theme/`, embedded for `kame-site new`.
 
 `crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies, and `logs` and `revlog` for revision logs in folders that turn them on. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
 `crates/kame-notebook` — a notebook: a folder with a `notebook.yaml`, on `kame-core` and `kame-sync`. It finds one, lists what's in it (a `.yaml` file directly in the root's `references/` is a reference, not an entry, and is read and written there as `KEY.yaml`), searches it, works out where links lead and when one can create a document, and copies images in from outside. `manage` checks where a document may go, moves or renames one and rewrites the links to it, and deletes one. `stranded` settles databases left behind when a document was moved or deleted on another machine. Nothing derived is stored. The app's side of it is `src/notebook.rs`, and `kame-site` builds one as a site in `notebook.rs`. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
-`crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
+`crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw, and skipping citations as it skips bare URLs. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
 
 `crates/kame-test-dir` — folders for tests, only ever a dev-dependency. Each test process gets one, removed as it exits, so tests put their files here and never directly in the temporary directory.
 

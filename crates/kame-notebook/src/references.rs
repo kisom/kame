@@ -895,6 +895,37 @@ mod tests {
         assert_eq!(text_of(&kame), "[fresh]");
     }
 
+    #[test]
+    fn a_key_that_synced_away_can_be_added_again_and_renamed() {
+        let notebook = notebook("ref-rename-add-again");
+        // What another machine has: the new file, and a document still citing the old key.
+        save(&notebook, "fresh", &article()).unwrap();
+        let doc = notebook.root.join("one.kame");
+        write_document(&doc, "see [old]", &[]);
+        assert_eq!(
+            rename(&notebook, "old", "fresh", None),
+            Err("there is no reference \"old\"".to_string())
+        );
+
+        // With other contents it could be another source, so it's refused.
+        let other = Reference {
+            title: "Something else".to_string(),
+            ..article()
+        };
+        save(&notebook, "old", &other).unwrap();
+        assert!(rename(&notebook, "old", "fresh", None).is_err());
+        assert_eq!(text_of(&doc), "see [old]");
+
+        save(&notebook, "old", &article()).unwrap();
+        let renamed = rename(&notebook, "old", "fresh", None).unwrap();
+        assert_eq!(renamed.failed, []);
+        assert_eq!(renamed.rewritten, std::slice::from_ref(&doc));
+        assert!(!renamed.old_kept);
+        assert_eq!(text_of(&doc), "see [fresh]");
+        assert!(!folder(&notebook).join("old.yaml").exists());
+        assert_eq!(load(&notebook).references.get("fresh"), Some(&article()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_rename_that_cant_remove_the_old_file_keeps_what_it_did() {

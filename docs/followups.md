@@ -69,6 +69,38 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 - [ ] **File > Link to Document… in a notebook.** It writes `~/...` for anything under the home folder,
   which breaks when the notebook moves. It could keep the way from the document, as images now do.
 
+## References
+
+Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-04-references-design.md`.
+
+- [ ] **Stale `.saving-` files** left by a crash are never cleaned up (`crates/kame-notebook/src/references.rs:157`).
+- [ ] **The form's preview isn't italic.** It shows the entry as plain text, unlike an export.
+- [ ] **A capitalised `References/` on macOS** is both listed as entries and loaded as references.
+- [ ] **Citations a rename can't see.** One only in another log head or unmerged logs stays `[old]`.
+- [ ] **An empty `.x.kame.sync` folder** keeps an old key's file forever, as it can't be read to check.
+- [ ] **Feed citations use fragment-only links,** as its footnotes do, so they lead nowhere off the page.
+- [ ] **`page_blocks` clones the blocks every frame** when one holds a citation. It hasn't been measured.
+- [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
+- [ ] **`cite` says it couldn't** when the key went in and only the write failed (`src/references.rs`).
+- [ ] **A long year in a suggested key** can pass the 64-byte limit, as only the name is capped.
+- [ ] **An unquoted `2.10` in a reference file** reads as `2.1`, since YAML takes it for a number.
+- [ ] **A title ending in a period** gets a comma after it too, as `etc.,` in a quoted title.
+- [ ] **An italic title with spaces at its edges** shows a literal `*` in Markdown.
+- [ ] **A selection wholly inside a key** comes out of a rename as an empty selection.
+- [ ] **A zero-width anchor inside a key** widens when the key is renamed.
+- [ ] **Renaming `missing` to `MISSING`** says "already a reference", not that there's no such key.
+- [ ] **Typing straight after an inserted key** joins its undo step.
+- [ ] **The browser panel and File > Open** close a form and lose what's typed in it.
+- [ ] **A note opened over a form:** Escape closes the form first.
+- [ ] **Clicking a form under a link prompt** puts it on top, and Enter still applies the prompt.
+- [ ] **A followed link refused during a rename** leaves a junk stop on the way back.
+- [ ] **`stamp` and `load` run on the UI thread,** and a page's export works out `cited` twice.
+- [ ] **What's wrong with a reference file** can vanish from `last_error` or go stale there.
+- [ ] **The Markdown export's notice** can name a key cited only in a footnote it dropped.
+- [ ] **A clicked citation's entry** stays where it opened while the page scrolls.
+- [ ] **A name holding a semicolon,** possible only by hand in its file, splits on Save from the form.
+- [ ] **Test gaps:** `kame_css` always having `REFERENCES_STYLE`, paste leaving no note, `chmod` as root.
+
 ## Sync
 
 - [ ] **Revision logs before a real folder.** Designed in `docs/superpowers/specs/2026-11-03-sync-design.md`.

@@ -118,7 +118,7 @@ Closing a `[key]` that has the shape of a key but no reference shows a passing n
 
 **The new reference window has two tabs:**
 
-- **Structured:** a kind, then its fields, with a live preview of the IEEE entry. Names are comma-separated and kept as typed.
+- **Structured:** a kind, then its fields, with a live preview of the IEEE entry. Names are comma-separated and kept as typed, or semicolon-separated if there's a semicolon in the box, so that a name can hold a comma.
 - **Freeform:** a key and a box of text, which goes into the References section exactly as typed. This is the catch-all for anything the form doesn't fit.
 
 A key is suggested from the first author's last name and the year, adding `a`, `b` and so on if it's taken, and can be changed. Characters that can't be in a key are dropped. If that leaves nothing, the person types one.
@@ -130,7 +130,7 @@ A key is suggested from the first author's last name and the year, adding `a`, `
 **A References… window** in a notebook lists every reference, with how many documents cite it, for browsing, editing, renaming and deleting.
 
 - **Deleting** says how many documents cite it first. They then hold plain `[key]` text.
-- **Renaming** rewrites `[old]` to `[new]` everywhere it counts as a citation in each document citing it: prose, footnotes and marginals, as an ordinary edit in that document. A note isn't touched. A document that can't be rewritten, or can't be read to see whether it cites the key, is named in the result, not skipped silently, and the old key is then kept so that `[old]` still resolves. Running the rename again once the problem is fixed finishes it.
+- **Renaming** rewrites `[old]` to `[new]` everywhere it counts as a citation in each document citing it: prose, footnotes and marginals, as an ordinary edit in that document. A note isn't touched. A document that can't be rewritten, or can't be read to see whether it cites the key, is named in the result, not skipped silently, and the old key is then kept so that `[old]` still resolves. Running the rename again once the problem is fixed finishes it. The old key's file is removed last, after the open document has followed, so a crash along the way leaves both.
 
 ### Exporting
 
@@ -148,7 +148,7 @@ Entries are sorted by key, ignoring case, then by bytes. The output depends only
 
 A section a person wrote by hand isn't looked for. They'd get two.
 
-**A key with no reference.** This is where dropping numbered citations costs something: `[sic]` and a lost `[smith2020]` are the same text, so an export can't warn about every bracket. So it warns only about ones shaped like the suggested keys, letters followed by four digits and an optional letter. Others stay as typed with no warning. Either way, the text is never dropped. Warnings use the site's existing report (`Problems`) and the app's export notice.
+**A key with no reference.** This is where dropping numbered citations costs something: `[sic]` and a lost `[smith2020]` are the same text, so an export can't warn about every bracket. So it warns only about ones shaped like the suggested keys, letters of either case followed by four digits and an optional letter. Others stay as typed with no warning. Either way, the text is never dropped. Warnings use the site's existing report (`Problems`) and the app's export notice.
 
 ### IEEE format
 
@@ -203,7 +203,7 @@ The layering stays one-way, and there are no new dependencies (`kame-notebook` a
 - **Unresolved keys** are only warned about when they're shaped like a suggested key.
 - **A mistyped key in a footnote** looks the same as a right one on the page, and shows up only at export.
 - **Two machines changing the same reference while apart** still gives a sync conflict for that one file. The conflict copy is skipped by kame like any other.
-- **Renaming a key** edits documents that aren't open. It reaches another machine only after this machine next opens each rewritten document, and the old key's file can be gone there sooner, leaving `[old]` as plain text until then or until a rename is run again by hand.
+- **Renaming a key** edits documents that aren't open. In a folder with revision logs, that reaches another machine only after this machine next opens each rewritten document, and the old key's file can be gone there sooner, leaving `[old]` as plain text. A rename can't be run there as it stands, since the old key has no file. Wait for the rewritten documents to arrive, or add the old key again with the same contents and rename it, which the rule for running a rename again allows.
 - **Renaming while a second kame has a citing document open:** that window keeps its old copy and can overwrite the rename. There's no per-document lock, and two programs writing one file isn't something kame is trying to support, so this doesn't get one.
 
 ## Testing

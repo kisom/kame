@@ -61,7 +61,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 
 Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-04-references-design.md`.
 
-- [ ] **`page_blocks` clones the blocks every frame** when one holds a citation. It hasn't been measured.
 - [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
 
 ## Performance
@@ -79,6 +78,9 @@ keystroke in the page, a little more for a long paragraph, and nothing yet is cl
 - [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs
   far from the screen would make opening independent of length.
 - [ ] **Every frame fingerprints every block, twice,** even when nothing changed. A revision number on the document would skip it.
+- [ ] **In a notebook with references, every frame looks for citations in every block,** in `page_blocks`: 0.04 ms at 2,500
+  words, and 0.4 ms of a 0.56 ms idle frame at 26,000 words. Copying the blocks that hold one costs nothing beside it. The same
+  revision number would skip it.
 
 ## Sync
 

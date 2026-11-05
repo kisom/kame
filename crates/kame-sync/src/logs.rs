@@ -149,7 +149,9 @@ pub fn is_where_it_synced(path: &Path, place: Option<&str>) -> bool {
 /// belong to another document now. This is the case after a document is deleted or moved on another
 /// machine. Being wrong here hides someone's document, so it's false anywhere else, as for a copy
 /// made by hand, and when it can't be told, for logs that can't be read, that came from a newer kame,
-/// or with a line that can't be checked, as the revision may be in it. Nothing is done on a guess.
+/// or with a corrupt line, as the revision may be in it. Nothing is done on a guess. A line that only
+/// fails its check says what it held, so it counts as holding that revision, which is what keeps a
+/// document in an older format from being taken for stranded.
 ///
 /// Every part of kame asking this asks here, with what the database says about itself.
 pub fn is_stranded(path: &Path, revision: Option<&str>, place: Option<&str>) -> bool {
@@ -172,10 +174,10 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
     if store.holds_newer() {
         return None;
     }
-    if store.contains(revision) {
+    if store.could_hold(revision) {
         return Some(false);
     }
-    (!store.dropped_lines()).then_some(true)
+    (!store.corrupt_lines()).then_some(true)
 }
 
 /// Whether what's beside a database can be taken for its logs: there's nothing there, they hold the
@@ -197,7 +199,7 @@ pub fn logs_can_be_its_own(path: &Path, document: uuid::Uuid, revision: Option<&
         return false;
     }
     Store::load(&folder).is_ok_and(|store| {
-        revision.is_some_and(|revision| store.contains(revision)) || store.can_be_for(document)
+        revision.is_some_and(|revision| store.could_hold(revision)) || store.can_be_for(document)
     })
 }
 
@@ -295,7 +297,7 @@ impl Logged {
             && self
                 .last
                 .as_ref()
-                .is_some_and(|last| !self.store.contains(last));
+                .is_some_and(|last| !self.store.could_hold(last));
         if self.last.is_some()
             && (!self.replica.folder.exists() || self.has_news() || not_held)
             && is_stranded(&self.path, self.last.as_deref(), self.place.as_deref())
@@ -311,7 +313,7 @@ impl Logged {
         if self
             .last
             .as_ref()
-            .is_some_and(|last| !self.store.contains(last) && !self.store.can_be_for(local.id))
+            .is_some_and(|last| !self.store.could_hold(last) && !self.store.can_be_for(local.id))
         {
             return Ok(Outcome {
                 others_logs: true,

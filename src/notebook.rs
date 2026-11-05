@@ -18,7 +18,7 @@ use kame_notebook::list::{listed, listed_if_changed, narrow, rows, Entry, Kind, 
 use kame_notebook::log_folder;
 use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
 use kame_notebook::search::{search, Hit};
-use kame_notebook::stranded::{apply, decide, find_stranded, Done, Healthy, Steps};
+use kame_notebook::stranded::{apply, decide, find_stranded, Done, Healthy, Steps, Unsettled};
 use kame_notebook::Notebook;
 
 use super::{follow_move, now_unix, same_document, same_place, BackStop, KameApp};
@@ -141,6 +141,8 @@ pub(crate) struct NotebookUi {
     stranded_seen: HashMap<PathBuf, Instant>,
     /// Which databases needn't have their logs read again. It's with the pass while one is reading.
     stranded_healthy: Healthy,
+    /// What was last said about databases that couldn't be settled.
+    stranded_unsettled: Option<Unsettled>,
     stranded_checked: Option<Instant>,
     /// Whether a pass is wanted whatever the time: a notebook just found, or a different listing.
     stranded_due: bool,
@@ -314,6 +316,30 @@ pub(crate) fn stranded_notice(done: &[Done]) -> String {
         parts.push(format!("and {} more.", ordered.len() - NOTICE_NAMES));
     }
     parts.join(" ")
+}
+
+/// What a pass says when it has been stopped from settling what has waited.
+pub(crate) fn unsettled_notice(unsettled: &Unsettled) -> String {
+    let what = match unsettled.waiting {
+        1 => "1 document looks".to_string(),
+        count => format!("{count} documents look"),
+    };
+    format!(
+        "{what} left behind, and can't be settled because {}'s logs can't all be read",
+        unsettled.because
+    )
+}
+
+/// What a pass has to say about what it couldn't settle, if that isn't what was said last.
+pub(crate) fn new_to_say(
+    said: &mut Option<Unsettled>,
+    now: Option<Unsettled>,
+) -> Option<Unsettled> {
+    if *said == now {
+        return None;
+    }
+    said.clone_from(&now);
+    now
 }
 
 fn what_was_done(done: &Done) -> String {
@@ -590,12 +616,17 @@ impl KameApp {
                     self.nb.stranded_healthy = healthy;
                     // The next frame works out when the next pass is.
                     ctx.request_repaint();
+                    let unsettled = steps.unsettled().cloned();
                     let done = apply(&notebook, steps, self.session.path());
                     if !done.is_empty() {
                         self.nb.refresh_listing();
                         self.nb.stranded_due = true;
                         self.notice_tracker.announced();
                         self.notice = Some(stranded_notice(&done));
+                    } else if let Some(new) = new_to_say(&mut self.nb.stranded_unsettled, unsettled)
+                    {
+                        self.notice_tracker.announced();
+                        self.notice = Some(unsettled_notice(&new));
                     }
                 }
                 Err(TryRecvError::Disconnected) => self.nb.stranded_coming = None,
@@ -1884,6 +1915,44 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(there_to_open(&path));
         assert!(path.exists(), "built from its logs");
+    }
+
+    #[test]
+    fn a_notice_says_what_cannot_be_settled_and_why() {
+        let one = Unsettled {
+            waiting: 1,
+            because: "essays/a.kame".to_string(),
+        };
+        assert_eq!(
+            unsettled_notice(&one),
+            "1 document looks left behind, and can't be settled because essays/a.kame's logs \
+             can't all be read"
+        );
+        let two = Unsettled { waiting: 2, ..one };
+        assert_eq!(
+            unsettled_notice(&two),
+            "2 documents look left behind, and can't be settled because essays/a.kame's logs \
+             can't all be read"
+        );
+    }
+
+    #[test]
+    fn what_cannot_be_settled_is_said_only_when_there_is_something_new_to_say() {
+        let one = Unsettled {
+            waiting: 1,
+            because: "a.kame".to_string(),
+        };
+        let two = Unsettled {
+            waiting: 2,
+            ..one.clone()
+        };
+        let mut said = None;
+        assert_eq!(new_to_say(&mut said, Some(one.clone())), Some(one.clone()));
+        assert_eq!(new_to_say(&mut said, Some(one.clone())), None);
+        assert_eq!(new_to_say(&mut said, Some(two.clone())), Some(two));
+        assert_eq!(new_to_say(&mut said, None), None);
+        assert_eq!(new_to_say(&mut said, None), None);
+        assert_eq!(new_to_say(&mut said, Some(one.clone())), Some(one));
     }
 
     #[test]

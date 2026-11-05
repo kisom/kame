@@ -69,23 +69,16 @@ pub struct Store {
     unflushed: Unflushed,
 }
 
-/// What's known of the lines that were passed over: which documents they say they're of, and whether
-/// any says nothing.
+/// What's known of the whole lines that were passed over.
 #[derive(Debug, Default)]
 struct Dropped {
+    /// The ids of lines that parse and fail their check. Every line written before a field was added
+    /// to a revision is one, and it still says what it held, as a database's state names that id.
+    unchecked: HashSet<String>,
+    /// The documents passed-over lines say they're of.
     documents: HashSet<Uuid>,
-    nameless: bool,
-}
-
-impl Dropped {
-    fn add(&mut self, document: Option<Uuid>) {
-        match document {
-            Some(document) => {
-                self.documents.insert(document);
-            }
-            None => self.nameless = true,
-        }
-    }
+    /// Whether a line doesn't parse, and isn't torn, so that what it held can't be known.
+    corrupt: bool,
 }
 
 /// The document a line says it's of, when it doesn't parse as a line, if that can still be read.
@@ -184,13 +177,19 @@ impl Store {
                     Ok(line) => line,
                     Err(err) => {
                         self.newer |= err.to_string().contains("unknown variant");
-                        self.dropped.add(document_named_in(raw));
+                        // A tear can't hold a revision a database remembers. The state is saved only
+                        // after its line is flushed, and a line is never joined on to a tear.
+                        if !err.is_eof() {
+                            self.dropped.corrupt = true;
+                            self.dropped.documents.extend(document_named_in(raw));
+                        }
                         continue;
                     }
                 };
                 self.newer |= drops_something(raw, &line);
                 if line.revision.id() != line.id {
-                    self.dropped.add(Some(line.revision.document));
+                    self.dropped.documents.insert(line.revision.document);
+                    self.dropped.unchecked.insert(line.id);
                     continue;
                 }
                 for block in line.blocks {
@@ -216,12 +215,10 @@ impl Store {
         self.newer
     }
 
-    /// Whether a whole line was passed over since it couldn't be checked: its id doesn't match, or
-    /// it doesn't parse. Whatever it held can't be known, so a revision that's missing may be in
-    /// one. This doesn't stop anything else: such a line may be from a build with another idea of
-    /// what a revision is, and everything that can be read is used as ever.
-    pub fn dropped_lines(&self) -> bool {
-        self.dropped.nameless || !self.dropped.documents.is_empty()
+    /// Whether a line doesn't parse, and isn't one torn by a crash, so that a revision that's missing
+    /// may be in it. This doesn't stop anything else, and everything that can be read is used as ever.
+    pub fn corrupt_lines(&self) -> bool {
+        self.dropped.corrupt
     }
 
     /// Whether the logs in `folder` differ from when they were last read.
@@ -386,18 +383,37 @@ impl Store {
         self.revisions.contains_key(id)
     }
 
+    /// Whether a revision is in these logs, as far as a line says: one that can be read, or one that
+    /// fails its check and carries that id. Which of them doesn't matter to where a revision is, only
+    /// to whether it can be used.
+    pub fn could_hold(&self, id: &str) -> bool {
+        self.contains(id) || self.dropped.unchecked.contains(id)
+    }
+
+    fn names(&self, document: Uuid) -> bool {
+        self.dropped.documents.contains(&document)
+            || self
+                .revisions
+                .values()
+                .any(|revision| revision.document == document)
+    }
+
+    fn names_anyone(&self) -> bool {
+        !self.revisions.is_empty() || !self.dropped.documents.is_empty()
+    }
+
+    /// Whether a corrupt line here could be holding a revision of this document: a line says these
+    /// logs are this document's, or no line says whose they are.
+    pub fn may_hide(&self, document: Uuid) -> bool {
+        self.dropped.corrupt && (self.names(document) || !self.names_anyone())
+    }
+
     /// Whether these logs can be taken as this document's: a line says it's of this document, even
     /// one that can't be checked, as a line in an older format can't, or there's nothing here to
     /// lose. A line that can't say whose it is shows nothing, and that isn't enough to write to these
     /// logs or to take them away.
     pub fn can_be_for(&self, document: Uuid) -> bool {
-        let nothing_here = self.revisions.is_empty() && !self.dropped_lines();
-        nothing_here
-            || self.dropped.documents.contains(&document)
-            || self
-                .revisions
-                .values()
-                .any(|revision| revision.document == document)
+        self.names(document) || (!self.names_anyone() && !self.dropped.corrupt)
     }
 }
 
@@ -1058,44 +1074,80 @@ mod tests {
         assert!(!log_holding("newer-not-older", &older).holds_newer());
     }
 
-    #[test]
-    fn a_line_that_cannot_be_checked_is_remembered() {
-        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
-        assert!(!log_holding("dropped-not-ours", &ours).dropped_lines());
-        assert!(!log_holding("dropped-not-empty", "").dropped_lines());
-        // Still being written, so it isn't a line yet, and blank ones hold nothing.
-        let half = format!("{ours}{{\"id\":\"half");
-        let store = log_holding("dropped-not-half", &half);
-        assert!(!store.dropped_lines());
-        assert_eq!(store.revision_count(), 1);
-        assert!(!log_holding("dropped-not-blank", &format!("\n\n{ours}\n")).dropped_lines());
-
-        let nonsense = log_holding("dropped-nonsense", &format!("nonsense\n{ours}"));
-        assert!(nonsense.dropped_lines());
-        assert!(!nonsense.holds_newer(), "it isn't from a newer build");
-        assert_eq!(nonsense.revision_count(), 1, "and the rest is read");
-        let id = ours.replacen("{\"id\":\"", "{\"id\":\"0", 1);
-        assert!(log_holding("dropped-id", &id).dropped_lines());
-        // A line that's whole now, since another was written after half of one.
-        let joined = format!("{{\"id\":\"half\n{ours}");
-        assert!(log_holding("dropped-torn", &joined).dropped_lines());
-    }
-
-    #[test]
-    fn a_line_from_before_a_field_was_added_is_dropped_and_not_taken_for_a_newer_build() {
+    /// A line as a build from before `Metadata::publish` wrote it. This build parses it, and works
+    /// out another id for it, so that it fails its check. Also says the id it carries.
+    fn line_from_before_a_field_was_added() -> (String, String) {
         let ours = line_from_a_newer_build(r#""Paragraph""#, "");
         let revision_start = ours.find("\"revision\":").unwrap() + "\"revision\":".len();
         let revision_end = ours.rfind(",\"blocks\":").unwrap();
         let older = ours[revision_start..revision_end].replace(",\"publish\":false", "");
+        let id = digest(older.as_bytes());
         let line = format!(
-            "{{\"id\":\"{}\",\"revision\":{older}{}",
-            digest(older.as_bytes()),
+            "{{\"id\":\"{id}\",\"revision\":{older}{}",
             &ours[revision_end..]
         );
-        let store = log_holding("dropped-older", &line);
-        assert!(store.dropped_lines());
-        assert!(!store.holds_newer());
+        (line, id)
+    }
+
+    #[test]
+    fn a_line_that_fails_its_check_still_says_what_it_held() {
+        let (line, id) = line_from_before_a_field_was_added();
+        let store = log_holding("could-hold-older", &line);
         assert_eq!(store.revision_count(), 0);
+        assert!(!store.contains(&id));
+        assert!(store.could_hold(&id));
+        assert!(!store.could_hold("something else"));
+        assert!(!store.corrupt_lines());
+        assert!(!store.holds_newer());
+    }
+
+    #[test]
+    fn a_torn_line_counts_for_nothing() {
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        // Still being written, so it isn't a line yet.
+        let still_going = log_holding("torn-tail", &format!("{ours}{{\"id\":\"half"));
+        assert!(!still_going.corrupt_lines());
+        assert_eq!(still_going.revision_count(), 1);
+        // Whole now, as another was written after half of one.
+        let joined = format!("{{\"id\":\"half\n{ours}");
+        let written_after = log_holding("torn-joined", &joined);
+        assert!(!written_after.corrupt_lines());
+        assert_eq!(written_after.revision_count(), 1);
+        let cut_in_a_revision = ours.split("\"title\"").next().unwrap().to_string() + "\n";
+        assert!(!log_holding("torn-revision", &cut_in_a_revision).corrupt_lines());
+        assert!(!log_holding("torn-blank", &format!("\n\n{ours}\n")).corrupt_lines());
+    }
+
+    #[test]
+    fn a_line_that_says_nothing_of_what_it_held_is_corrupt() {
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        assert!(!log_holding("corrupt-not-ours", &ours).corrupt_lines());
+        assert!(!log_holding("corrupt-not-empty", "").corrupt_lines());
+        let nonsense = log_holding("corrupt-nonsense", &format!("nonsense\n{ours}"));
+        assert!(nonsense.corrupt_lines());
+        assert!(!nonsense.holds_newer(), "it isn't from a newer build");
+        assert_eq!(nonsense.revision_count(), 1, "and the rest is read");
+    }
+
+    /// Whether it could be of a document is what lets a corrupt line stop only what it could affect.
+    #[test]
+    fn a_corrupt_line_may_hide_a_revision_only_of_a_document_it_could_be_of() {
+        let (one, other) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        assert!(!log_holding("hide-clean", &ours).may_hide(one));
+
+        let beside_one = log_holding("hide-beside", &format!("nonsense\n{ours}"));
+        assert!(beside_one.may_hide(one));
+        assert!(!beside_one.may_hide(other));
+
+        let alone = log_holding("hide-alone", "nonsense\n");
+        assert!(alone.may_hide(one));
+        assert!(alone.may_hide(other));
+
+        let (older, _) = line_from_before_a_field_was_added();
+        let beside_older = log_holding("hide-older", &format!("nonsense\n{older}"));
+        assert!(beside_older.may_hide(one));
+        assert!(!beside_older.may_hide(other));
     }
 
     #[test]
@@ -1149,7 +1201,7 @@ mod tests {
             .unwrap();
         assert_eq!(again.written, 1);
         let store = Store::load(&folder).unwrap();
-        assert!(store.dropped_lines());
+        assert!(store.corrupt_lines());
         assert!(!store.holds_newer());
         assert_eq!(store.heads(), vec![again.head]);
     }

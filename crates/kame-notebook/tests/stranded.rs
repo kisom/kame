@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use kame_core::session::Session;
 use kame_core::storage::Db;
 use kame_notebook::manage::{carry_out, delete_document, plan_move};
-use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done, Healthy};
+use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done, Healthy, Unsettled};
 use kame_notebook::Notebook;
 use kame_sync::logs::{build_from_logs, log_folder, place_of, Logged, MARKER};
 use kame_sync::revlog::Store;
@@ -973,8 +973,9 @@ fn logs_from_a_newer_kame_could_be_its_home_so_nothing_is_done() {
     assert!(a.is_file());
 }
 
+/// A home it has found needs nothing ruled out.
 #[test]
-fn a_retired_database_waits_too_while_some_logs_are_from_a_newer_kame() {
+fn a_retired_database_comes_back_while_some_logs_are_from_a_newer_kame() {
     let (root, nb) = logged_notebook("stranded-newer-return");
     let (a, b, other) = (
         root.join("a.kame"),
@@ -989,8 +990,8 @@ fn a_retired_database_waits_too_while_some_logs_are_from_a_newer_kame() {
     std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
     add_newer_line(&other);
 
-    assert!(reconcile(&nb, &[], None).is_empty());
-    assert!(root.join(".a.retired.kame").is_file());
+    assert_eq!(reconcile(&nb, &[], None).len(), 1);
+    assert!(b.is_file());
 }
 
 #[test]
@@ -2074,23 +2075,310 @@ fn a_document_last_synced_before_a_field_was_added_is_not_retired_and_heals() {
     assert!(text_of(&a).contains("Words."));
 }
 
+/// It could be anyone's, this document's home included. So this one retirement waits, and says so.
 #[test]
-fn a_line_that_cannot_be_checked_could_be_its_home_so_nothing_is_done() {
-    let (root, nb) = logged_notebook("stranded-dropped-home");
+fn a_corrupt_line_that_could_be_this_documents_vetoes_its_retirement_and_says_so() {
+    let (root, nb) = logged_notebook("stranded-corrupt-veto");
+    let (a, z) = (root.join("a.kame"), root.join("z.kame"));
+    synced(&a, "Words.");
+    remove_logs(&a);
+    add_line_that_cannot_be_checked(&z);
+
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+    let steps = decide(&nb, just(&a));
+    assert_eq!(
+        steps.unsettled(),
+        Some(&Unsettled {
+            waiting: 1,
+            because: "z.kame".to_string()
+        })
+    );
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(a.is_file());
+}
+
+/// Its own lines are there, with a corrupt line beside them, so that may be where the revision was.
+#[test]
+fn a_corrupt_line_beside_this_documents_lines_vetoes_its_retirement() {
+    let (root, nb) = logged_notebook("stranded-corrupt-same-document");
+    let (a, copy) = (root.join("a.kame"), root.join("copy.kame"));
+    synced(&a, "Words.");
+    let early = Session::open(&a).unwrap().sync_state().unwrap();
+    {
+        let mut session = Session::open(&a).unwrap();
+        session.insert(" More.");
+        sync(&mut session);
+    }
+    // Logs of the same document elsewhere that don't say they hold what it remembers.
+    copy_logs(&a, &copy);
+    let remembered = Session::open(&a).unwrap().sync_state().unwrap();
+    assert_ne!(remembered, early);
+    let log = only_log(&copy);
+    let lacking: String = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.contains(&remembered))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&log, lacking + "nonsense\n").unwrap();
+    remove_logs(&a);
+
+    let steps = decide(&nb, just(&a));
+    assert_eq!(steps.unsettled().map(|found| found.waiting), Some(1));
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(a.is_file());
+}
+
+/// What's beside the corrupt line is another document, so it can't be hiding this one's revision.
+#[test]
+fn a_corrupt_line_in_another_documents_logs_does_not_veto_a_retirement() {
+    let (root, nb) = logged_notebook("stranded-corrupt-other");
     let (a, other) = (root.join("a.kame"), root.join("other.kame"));
     synced(&a, "Words.");
     synced(&other, "Other words.");
     remove_logs(&a);
     add_line_that_cannot_be_checked(&other);
 
-    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
-    assert!(reconcile(&nb, just(&a), None).is_empty());
-    assert!(a.is_file());
+    let steps = decide(&nb, just(&a));
+    assert_eq!(steps.unsettled(), None);
+    assert_eq!(apply(&nb, steps, None).len(), 1);
+    assert!(root.join(".a.retired.kame").is_file());
 }
 
 #[test]
-fn a_retired_database_waits_too_while_some_lines_cannot_be_checked() {
-    let (root, nb) = logged_notebook("stranded-dropped-return");
+fn a_corrupt_line_elsewhere_does_not_veto_a_move() {
+    let (root, nb) = logged_notebook("stranded-corrupt-move");
+    let (a, b, z) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("z.kame"),
+    );
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    add_line_that_cannot_be_checked(&z);
+
+    let steps = decide(&nb, just(&a));
+    assert_eq!(steps.unsettled(), None);
+    assert_eq!(
+        apply(&nb, steps, None),
+        [Done::Moved {
+            from: a.clone(),
+            to: b.clone()
+        }]
+    );
+}
+
+#[test]
+fn a_corrupt_line_elsewhere_does_not_veto_a_retirement_with_the_document_opened_there() {
+    let (root, nb) = logged_notebook("stranded-corrupt-opened");
+    let (a, b, z) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("z.kame"),
+    );
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    add_line_that_cannot_be_checked(&z);
+
+    assert!(matches!(
+        reconcile(&nb, just(&a), None)[..],
+        [Done::Retired {
+            opened_there: true,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn a_corrupt_line_elsewhere_lets_a_retired_database_come_back() {
+    let (root, nb) = logged_notebook("stranded-corrupt-return");
+    let (a, b, z) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("z.kame"),
+    );
+    synced(&a, "Words.");
+    let elsewhere = root.join(".carried");
+    std::fs::rename(log_folder(&a), &elsewhere).unwrap();
+    reconcile(&nb, just(&a), None);
+    std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
+    add_line_that_cannot_be_checked(&z);
+
+    assert_eq!(reconcile(&nb, &[], None).len(), 1);
+    assert!(b.is_file());
+}
+
+/// One document in the older format, healed or not, keeps those lines for good, and that says nothing
+/// about any other document.
+#[test]
+fn a_line_in_the_older_format_elsewhere_stops_nothing() {
+    let (root, nb) = logged_notebook("stranded-older-elsewhere");
+    let (a, b, c, other) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("c.kame"),
+        root.join("other.kame"),
+    );
+    synced(&a, "Goes.");
+    synced(&b, "Moves.");
+    synced(&other, "Older.");
+    let state = Session::open(&other).unwrap().sync_state().unwrap();
+    let aged = age_logs(&log_folder(&other), &state);
+    Session::open(&other).unwrap().set_sync_state(&aged);
+    remove_logs(&a);
+    move_logs(&b, &c);
+
+    let steps = decide(&nb, &[a.clone(), b.clone()]);
+    assert_eq!(steps.unsettled(), None);
+    assert_eq!(apply(&nb, steps, None).len(), 2);
+    assert!(root.join(".a.retired.kame").is_file());
+    assert!(c.is_file());
+
+    // And still nothing once it has healed.
+    sync(&mut Session::open(&other).unwrap());
+    let (d, e) = (root.join("d.kame"), root.join("e.kame"));
+    synced(&d, "Later.");
+    move_logs(&d, &e);
+    assert_eq!(reconcile(&nb, just(&d), None).len(), 1);
+}
+
+#[test]
+fn a_database_parked_by_a_crash_comes_back_with_older_lines_about() {
+    let (root, nb) = logged_notebook("stranded-parked-older");
+    let (a, b, other) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("other.kame"),
+    );
+    synced(&a, "Words.");
+    synced(&other, "Older.");
+    let state = Session::open(&other).unwrap().sync_state().unwrap();
+    age_logs(&log_folder(&other), &state);
+    let parked = root.join(".a.moving-1.kame");
+    std::fs::rename(&a, &parked).unwrap();
+    move_logs(&a, &b);
+
+    assert_eq!(
+        reconcile(&nb, &[], None),
+        [Done::Returned {
+            from: parked,
+            to: b.clone()
+        }]
+    );
+    assert!(text_of(&b).contains("Words."));
+}
+
+#[test]
+fn a_retired_database_comes_back_to_logs_in_the_older_format() {
+    let (root, nb) = logged_notebook("stranded-return-older");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    let state = Session::open(&a).unwrap().sync_state().unwrap();
+    let aged = age_logs(&log_folder(&a), &state);
+    Session::open(&a).unwrap().set_sync_state(&aged);
+    let elsewhere = root.join(".carried");
+    std::fs::rename(log_folder(&a), &elsewhere).unwrap();
+    reconcile(&nb, just(&a), None);
+    let retired = root.join(".a.retired.kame");
+    assert!(retired.is_file());
+    std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
+
+    assert_eq!(
+        reconcile(&nb, &[], None),
+        [Done::Returned {
+            from: retired,
+            to: b.clone()
+        }]
+    );
+}
+
+/// Its revision is held only in a line that can't be read, so what it holds can't be compared.
+#[test]
+fn a_retirement_with_its_revision_only_in_an_older_line_counts_as_unsynced() {
+    let (root, nb) = logged_notebook("stranded-unsynced-older");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    let state = Session::open(&a).unwrap().sync_state().unwrap();
+    let aged = age_logs(&log_folder(&a), &state);
+    Session::open(&a).unwrap().set_sync_state(&aged);
+    move_logs(&a, &b);
+    // A database at the new home that's in step with those logs, as far as it can be told.
+    std::fs::copy(&a, &b).unwrap();
+    {
+        let mut session = Session::open(&b).unwrap();
+        session.set_sync_place(&place_of(&b).unwrap());
+    }
+
+    assert_eq!(
+        reconcile(&nb, just(&a), None),
+        [Done::Retired {
+            from: a.clone(),
+            to: root.join(".a.retired.kame"),
+            opened_there: true,
+            unsynced: true,
+        }]
+    );
+}
+
+#[test]
+fn logs_that_cannot_be_read_or_are_from_a_newer_kame_say_why_a_retirement_waits() {
+    let (root, nb) = logged_notebook("stranded-says-why");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Words.");
+    synced(&other, "Other words.");
+    remove_logs(&a);
+    add_newer_line(&other);
+    let unsettled = Unsettled {
+        waiting: 1,
+        because: "other.kame".to_string(),
+    };
+    assert_eq!(decide(&nb, just(&a)).unsettled(), Some(&unsettled));
+
+    std::fs::remove_file(log_folder(&other).join("new-0000.log")).unwrap();
+    let log = only_log(&other);
+    set_mode(&log, 0o000);
+    let found = decide(&nb, just(&a)).unsettled().cloned();
+    set_mode(&log, 0o644);
+    assert_eq!(found, Some(unsettled));
+    assert_eq!(decide(&nb, just(&a)).unsettled(), None);
+}
+
+#[test]
+fn a_folder_that_cannot_be_read_says_why_a_retirement_waits() {
+    let (root, nb) = logged_notebook("stranded-says-why-folder");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    let shut = root.join("shut");
+    std::fs::create_dir_all(&shut).unwrap();
+    set_mode(&shut, 0o000);
+    let found = decide(&nb, just(&a)).unsettled().cloned();
+    set_mode(&shut, 0o755);
+    assert_eq!(
+        found,
+        Some(Unsettled {
+            waiting: 1,
+            because: "shut".to_string()
+        })
+    );
+}
+
+/// Nothing has waited, so there's nothing to say, whatever can't be read.
+#[test]
+fn nothing_is_said_of_logs_that_cannot_be_read_if_nothing_has_waited() {
+    let (root, nb) = logged_notebook("stranded-says-nothing");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Words.");
+    synced(&other, "Other words.");
+    remove_logs(&a);
+    add_newer_line(&other);
+    assert_eq!(decide(&nb, &[]).unsettled(), None);
+}
+
+#[test]
+fn a_move_goes_ahead_while_some_logs_are_from_a_newer_kame() {
+    let (root, nb) = logged_notebook("stranded-newer-move");
     let (a, b, other) = (
         root.join("a.kame"),
         root.join("b.kame"),
@@ -2098,14 +2386,11 @@ fn a_retired_database_waits_too_while_some_lines_cannot_be_checked() {
     );
     synced(&a, "Words.");
     synced(&other, "Other words.");
-    let elsewhere = root.join(".carried");
-    std::fs::rename(log_folder(&a), &elsewhere).unwrap();
-    reconcile(&nb, just(&a), None);
-    std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
-    add_line_that_cannot_be_checked(&other);
+    move_logs(&a, &b);
+    add_newer_line(&other);
 
-    assert!(reconcile(&nb, &[], None).is_empty());
-    assert!(root.join(".a.retired.kame").is_file());
+    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert!(b.is_file());
 }
 
 #[test]
@@ -2186,7 +2471,7 @@ fn half_a_line_still_being_written_does_not_stop_a_pass() {
 }
 
 /// Tries to move a database, and then to delete it, and shows that its logs stayed each time.
-fn assert_logs_are_kept(nb: &Notebook, path: &Path) {
+fn assert_logs_are_kept(nb: &Notebook, path: &Path, refused_for: &str) {
     let logs = log_folder(path);
     let before = words_in_logs(&logs);
     let plan = plan_move(
@@ -2198,7 +2483,7 @@ fn assert_logs_are_kept(nb: &Notebook, path: &Path) {
         100,
     );
     let err = carry_out(nb, plan, None, DEVICE, 100).unwrap_err();
-    assert!(err.contains("another document's"), "{err}");
+    assert!(err.contains(refused_for), "{err}");
     assert!(path.is_file());
     assert_eq!(words_in_logs(&logs), before);
 
@@ -2208,9 +2493,10 @@ fn assert_logs_are_kept(nb: &Notebook, path: &Path) {
 }
 
 /// A database at its recorded place, with what's there now another document's, in the older format.
-/// Every line parses and fails its check, and each still says which document it's of.
+/// Every line parses and fails its check, and each says what it held and whose it is, which isn't
+/// what this one remembers, so it's as sure as it is with lines that check.
 #[test]
-fn another_documents_aged_logs_at_its_recorded_place_are_not_taken_for_its_own() {
+fn another_documents_aged_logs_at_its_recorded_place_leave_it_stranded() {
     let (root, nb) = logged_notebook("stranded-aged-others");
     let (a, other) = (root.join("a.kame"), root.join("other.kame"));
     synced(&a, "Old words.");
@@ -2224,6 +2510,33 @@ fn another_documents_aged_logs_at_its_recorded_place_are_not_taken_for_its_own()
     assert_eq!(Store::load(&log_folder(&a)).unwrap().revision_count(), 0);
     let before = words_in_logs(&log_folder(&a));
 
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+    let mut session = Session::open(&a).unwrap();
+    session.insert(" Typed here.");
+    let outcome = sync(&mut session);
+    assert!(outcome.stranded);
+    assert_eq!(outcome.written, 0);
+    drop(session);
+    assert_eq!(words_in_logs(&log_folder(&a)), before);
+
+    assert_logs_are_kept(&nb, &a, "moved or deleted");
+}
+
+/// The same with no place, as an older kame leaves it, so it isn't stranded, and they still aren't its.
+#[test]
+fn another_documents_aged_logs_are_not_taken_by_a_database_with_no_place() {
+    let (root, nb) = logged_notebook("stranded-aged-others-no-place");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Old words.");
+    synced(&other, "A different document.");
+    let state = Session::open(&other).unwrap().sync_state().unwrap();
+    remove_logs(&a);
+    move_logs(&other, &a);
+    std::fs::remove_file(&other).unwrap();
+    age_logs(&log_folder(&a), &state);
+    as_an_older_kame_left_it(&a);
+    let before = words_in_logs(&log_folder(&a));
+
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(reconcile(&nb, just(&a), None).is_empty());
     let mut session = Session::open(&a).unwrap();
@@ -2234,7 +2547,7 @@ fn another_documents_aged_logs_at_its_recorded_place_are_not_taken_for_its_own()
     drop(session);
     assert_eq!(words_in_logs(&log_folder(&a)), before);
 
-    assert_logs_are_kept(&nb, &a);
+    assert_logs_are_kept(&nb, &a, "another document's");
 }
 
 /// Its own lines in the older format say they're its own, so its logs still go with it.
@@ -2277,7 +2590,7 @@ fn logs_holding_only_lines_that_name_no_document_are_kept_and_not_written_to() {
     drop(session);
     assert_eq!(words_in_logs(&log_folder(&a)), before);
 
-    assert_logs_are_kept(&nb, &a);
+    assert_logs_are_kept(&nb, &a, "another document's");
 }
 
 /// One line it can't check is no reason to stop, with its own revisions there to say whose they are.
@@ -2318,7 +2631,7 @@ fn a_database_that_never_synced_keeps_its_hands_off_another_documents_logs() {
     assert!(outcome.merged);
     drop(session);
 
-    assert_logs_are_kept(&nb, &a);
+    assert_logs_are_kept(&nb, &a, "another document's");
 }
 
 #[test]

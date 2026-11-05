@@ -3,9 +3,9 @@
 //! finds out only by its logs having gone. See "The other machines" in
 //! `docs/superpowers/specs/2026-11-04-notebook-file-operations-design.md`.
 //!
-//! This runs with nobody looking, so it only ever renames, never over anything, and does nothing
-//! at all if some logs that might change the answer can't be read. What it doesn't settle on one
-//! pass, it sees again on the next.
+//! This runs with nobody looking, so it only ever renames, never over anything, and doesn't retire
+//! a database as having no home if some logs that might be its home can't be read, and says so.
+//! What it doesn't settle on one pass, it sees again on the next.
 //!
 //! It comes in two parts, since reading every log is slow, and a rename mustn't be on another thread
 //! from whatever opens documents. [`decide`] only reads, and can be on any thread. [`apply`] does
@@ -58,6 +58,7 @@ pub struct Steps {
     retiring: Vec<Retiring>,
     moving: Vec<Going>,
     returning: Vec<Going>,
+    unsettled: Option<Unsettled>,
 }
 
 #[derive(Debug)]
@@ -91,6 +92,22 @@ struct Going {
 struct LastSync {
     revision: String,
     place: Option<String>,
+}
+
+/// Why databases that have waited can't be settled, for saying so.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unsettled {
+    /// How many.
+    pub waiting: usize,
+    /// From the notebook's root, the first thing in the way.
+    pub because: String,
+}
+
+impl Steps {
+    /// What has waited long enough to be settled and can't be, if anything.
+    pub fn unsettled(&self) -> Option<&Unsettled> {
+        self.unsettled.as_ref()
+    }
 }
 
 /// How many numbered names to try for a retired or moving database before leaving it for now.
@@ -149,12 +166,17 @@ pub fn find_stranded(notebook: &Notebook, healthy: &mut Healthy) -> Vec<PathBuf>
 /// What to do about the databases in `may_act_on`, each of which is looked at again first, and any
 /// retired database whose logs have appeared. There's no clock here: the caller says what has
 /// waited long enough. This changes nothing.
+///
+/// Having found a home settles a move, a retirement because the document's already been opened
+/// there, and a return, whatever else can't be read. Only a retirement for having no home needs all
+/// of them, and what stops one is said in [`Steps::unsettled`].
 pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
     let mut steps = Steps {
         root: notebook.root.clone(),
         retiring: Vec::new(),
         moving: Vec::new(),
         returning: Vec::new(),
+        unsettled: None,
     };
     let mut to_settle = may_act_on.to_vec();
     to_settle.sort();
@@ -170,14 +192,12 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
     if to_settle.is_empty() && !may_come_back {
         return steps;
     }
-    // A home in what can't be read can't be ruled out, and that would make a retirement a guess.
-    if !walked.whole {
-        return steps;
-    }
-    let Some(logs) = log_folders(&walked.documents) else {
-        return steps;
-    };
+    let mut logs = log_folders(&walked.documents);
+    logs.cannot_read.append(&mut walked.unreadable);
+    logs.cannot_read.sort();
 
+    let mut waiting = 0;
+    let mut because = None;
     for path in to_settle {
         let Some(last) = last_sync(&path) else {
             continue;
@@ -195,10 +215,18 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
                 unsynced,
             }),
             Some(Verdict::Move { home }) => steps.moving.push(Going { path, last, home }),
+            Some(Verdict::CantRuleOutAHome { because: this }) => {
+                waiting += 1;
+                because.get_or_insert(this);
+            }
             None => {}
         }
     }
-    steps.returning = those_coming_back(notebook, &walked.set_aside, &logs);
+    steps.unsettled = because.map(|because| Unsettled {
+        waiting,
+        because: relative_to(&notebook.root, &because),
+    });
+    steps.returning = those_coming_back(notebook, &walked.set_aside, &logs.read);
     steps
 }
 
@@ -300,23 +328,14 @@ fn record_place(path: &Path) {
 }
 
 /// What a walk of the notebook found.
+#[derive(Default)]
 struct Walked {
     /// The document each log folder stands for.
     documents: Vec<PathBuf>,
     /// Retired databases, and any left in a temporary name by a crash.
     set_aside: Vec<PathBuf>,
-    /// Whether every folder it should have seen could be read.
-    whole: bool,
-}
-
-impl Default for Walked {
-    fn default() -> Walked {
-        Walked {
-            documents: Vec::new(),
-            set_aside: Vec::new(),
-            whole: true,
-        }
-    }
+    /// The folders it should have seen and couldn't read.
+    unreadable: Vec<PathBuf>,
 }
 
 /// Goes through the folders `Notebook::entries` finds documents in, the same way: symbolic links
@@ -324,16 +343,16 @@ impl Default for Walked {
 /// sync tool's `.stversions` from being taken for a home.
 fn walk(notebook: &Notebook, folder: &Path, walked: &mut Walked) {
     let Ok(entries) = std::fs::read_dir(folder) else {
-        walked.whole = false;
+        walked.unreadable.push(folder.to_path_buf());
         return;
     };
     for entry in entries {
         let Ok(entry) = entry else {
-            walked.whole = false;
+            walked.unreadable.push(folder.to_path_buf());
             continue;
         };
         let Ok(kind) = entry.file_type() else {
-            walked.whole = false;
+            walked.unreadable.push(folder.to_path_buf());
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -364,35 +383,81 @@ struct Logs {
     store: Store,
 }
 
-/// The logs of each of these documents. `None` if any can't be read, or hold lines from a newer kame
-/// or that can't be checked, which are skipped when read, since any of them could be holding the
-/// revision being looked for.
-fn log_folders(documents: &[PathBuf]) -> Option<Vec<Logs>> {
-    documents
-        .iter()
-        .map(|document| {
-            let folder = log_folder(document);
-            std::fs::read_dir(&folder).ok()?;
-            let store = Store::load(&folder).ok()?;
-            (!store.holds_newer() && !store.dropped_lines()).then(|| Logs {
-                document: document.clone(),
-                store,
-            })
-        })
+/// What reading every log folder found.
+struct AllLogs {
+    read: Vec<Logs>,
+    /// What can't be read, or holds lines from a newer kame that were skipped, and could be holding
+    /// any revision.
+    cannot_read: Vec<PathBuf>,
+}
+
+/// The logs of each of these documents.
+fn log_folders(documents: &[PathBuf]) -> AllLogs {
+    let mut all = AllLogs {
+        read: Vec::new(),
+        cannot_read: Vec::new(),
+    };
+    for document in documents {
+        let folder = log_folder(document);
+        let store = std::fs::read_dir(&folder)
+            .ok()
+            .and_then(|_| Store::load(&folder).ok());
+        match store {
+            Some(store) => {
+                if store.holds_newer() {
+                    all.cannot_read.push(document.clone());
+                }
+                all.read.push(Logs {
+                    document: document.clone(),
+                    store,
+                });
+            }
+            None => all.cannot_read.push(document.clone()),
+        }
+    }
+    all.read
+        .sort_by(|one, other| one.document.cmp(&other.document));
+    all
+}
+
+/// The documents whose logs hold a revision, as far as their lines say.
+fn homes_of<'a>(revision: &str, logs: &'a [Logs]) -> Vec<&'a Path> {
+    logs.iter()
+        .filter(|logs| logs.store.could_hold(revision))
+        .map(|logs| logs.document.as_path())
         .collect()
 }
 
-/// The documents whose logs hold a revision.
-fn homes_of<'a>(revision: &str, logs: &'a [Logs]) -> Vec<&'a Path> {
-    logs.iter()
-        .filter(|logs| logs.store.contains(revision))
-        .map(|logs| logs.document.as_path())
-        .collect()
+/// What could be hiding a home for this database: anything that can't be read, or logs with a corrupt
+/// line that could be of its document. A database whose document can't be read could be of any.
+fn what_could_hide_its_home(path: &Path, logs: &AllLogs) -> Option<PathBuf> {
+    if let Some(first) = logs.cannot_read.first() {
+        return Some(first.clone());
+    }
+    let document = Db::open_read_only(path)
+        .and_then(|db| db.load_document())
+        .ok()
+        .map(|document| document.id);
+    logs.read
+        .iter()
+        .find(|logs| match document {
+            Some(document) => logs.store.may_hide(document),
+            None => logs.store.corrupt_lines(),
+        })
+        .map(|logs| logs.document.clone())
+}
+
+fn relative_to(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(inside) if !inside.as_os_str().is_empty() => inside.display().to_string(),
+        _ => path.display().to_string(),
+    }
 }
 
 enum Verdict {
     Retire { opened_there: bool, unsynced: bool },
     Move { home: PathBuf },
+    CantRuleOutAHome { because: PathBuf },
 }
 
 /// What's to be done with a stranded database, or `None` to leave it alone: it has more than one
@@ -401,15 +466,20 @@ fn what_to_do(
     path: &Path,
     revision: &str,
     contents: Option<&Contents>,
-    logs: &[Logs],
+    all: &AllLogs,
 ) -> Option<Verdict> {
+    let logs = &all.read[..];
     let homes = homes_of(revision, logs);
     let home = match homes[..] {
         [] => {
-            return Some(Verdict::Retire {
-                opened_there: false,
-                unsynced: true,
-            })
+            // Having no home has to be sure, or a retirement would be a guess.
+            return Some(match what_could_hide_its_home(path, all) {
+                Some(because) => Verdict::CantRuleOutAHome { because },
+                None => Verdict::Retire {
+                    opened_there: false,
+                    unsynced: true,
+                },
+            });
         }
         [home] if home != path => home,
         _ => return None,
@@ -548,7 +618,8 @@ fn those_coming_back(notebook: &Notebook, set_aside: &[PathBuf], logs: &[Logs]) 
 }
 
 /// What each stranded database remembers, going by logs that have already been read. A database
-/// with no logs among them has none that hold its revision.
+/// with no logs among them has none that hold its revision, as far as this can tell, and it keeps the
+/// home for itself, which at worst leaves a retired one waiting.
 fn revisions_of_stranded(notebook: &Notebook, logs: &[Logs]) -> Vec<String> {
     notebook
         .documents()
@@ -561,7 +632,8 @@ fn revisions_of_stranded(notebook: &Notebook, logs: &[Logs]) -> Vec<String> {
                 return None;
             }
             let own = logs.iter().find(|logs| logs.document == path);
-            (!own.is_some_and(|logs| logs.store.contains(&last.revision))).then_some(last.revision)
+            (!own.is_some_and(|logs| logs.store.could_hold(&last.revision)))
+                .then_some(last.revision)
         })
         .collect()
 }

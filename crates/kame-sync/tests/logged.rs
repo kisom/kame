@@ -1091,9 +1091,10 @@ fn a_document_last_synced_before_a_field_was_added_is_not_stranded_and_heals() {
     drop(session);
 
     let store = Store::load(&folder).unwrap();
-    assert!(store.dropped_lines());
+    assert!(!store.corrupt_lines());
     assert!(!store.holds_newer());
     assert!(!store.contains(&aged));
+    assert!(store.could_hold(&aged));
     assert!(!stranded_there(&talos.path, &aged));
 
     let mut session = talos.session();
@@ -1123,4 +1124,26 @@ fn half_a_line_says_nothing_so_a_revision_missing_beside_it_is_missing() {
         std::fs::write(entry.path(), "{\"id\":\"half").unwrap();
     }
     assert!(stranded_there(&talos.path, &state));
+}
+
+/// It says what it held, and that isn't what's remembered.
+#[test]
+fn another_documents_aged_logs_leave_a_database_at_its_place_stranded() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().unwrap();
+    drop(session);
+    let other = another_document(&talos, "different.kame");
+    let other_state = Session::open(&other).unwrap().sync_state().unwrap();
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    std::fs::rename(log_folder(&other), &folder).unwrap();
+    age_logs(&folder, &other_state);
+    let before = std::fs::read_dir(&folder).unwrap().count();
+    assert!(stranded_there(&talos.path, &state));
+
+    let mut session = talos.session();
+    assert!(talos.sync(&mut session, 3).stranded);
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), before);
 }

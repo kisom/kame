@@ -1238,6 +1238,8 @@ impl KameApp {
         } else {
             "Edit reference"
         };
+        // Under another dialog, a click here would bring the form over it.
+        let covered = self.other_dialog_open();
         let references = &self.refs.list;
         let error_ink = self.palette.error_ink;
         egui::Window::new(title)
@@ -1247,28 +1249,31 @@ impl KameApp {
             .resizable(false)
             .default_width(480.0)
             .order(Order::Foreground)
+            .interactable(!covered)
             .show(ctx, |ui| {
-                draw_form(ui, &mut window, focus, references);
-                let problem = window.form.problem(references);
-                if let Some(problem) = &problem {
-                    ui.weak(problem);
-                }
-                if let Some(failed) = &window.failed {
-                    ui.colored_label(error_ink, failed);
-                }
-                ui.horizontal(|ui| {
-                    let save_button = match (is_new, cites) {
-                        (true, true) => "Add and cite",
-                        (true, false) => "Add",
-                        (false, _) => "Save",
-                    };
-                    let button = egui::Button::new(save_button);
-                    if ui.add_enabled(problem.is_none(), button).clicked() {
-                        submit = true;
+                ui.add_enabled_ui(!covered, |ui| {
+                    draw_form(ui, &mut window, focus, references);
+                    let problem = window.form.problem(references);
+                    if let Some(problem) = &problem {
+                        ui.weak(problem);
                     }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
+                    if let Some(failed) = &window.failed {
+                        ui.colored_label(error_ink, failed);
                     }
+                    ui.horizontal(|ui| {
+                        let save_button = match (is_new, cites) {
+                            (true, true) => "Add and cite",
+                            (true, false) => "Add",
+                            (false, _) => "Save",
+                        };
+                        let button = egui::Button::new(save_button);
+                        if ui.add_enabled(problem.is_none(), button).clicked() {
+                            submit = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
                 });
             });
         if cancel {
@@ -4063,6 +4068,24 @@ mod tests {
         assert_eq!(page.app.refs.shown, None);
         let window = page.app.refs.window.as_ref().expect("the list stays");
         assert!(window.confirming.is_some(), "and so does what it's asking");
+    }
+
+    #[test]
+    fn clicking_a_form_under_a_prompt_leaves_the_prompt_on_top() {
+        let mut page = typed_form_over_a_citation();
+        select(&mut page, 0, 3, 3);
+        ctrl_k(&mut page);
+        page.frame(Vec::new());
+        assert!(page.app.link_prompt.is_some());
+        let prompt = page.top_layer();
+        let centre = page.ctx.content_rect().center();
+
+        // Left of the prompt, where only the form is.
+        page.click(centre - Vec2::new(235.0, 0.0));
+        page.frame(Vec::new());
+
+        assert_eq!(page.top_layer(), prompt);
+        assert!(page.app.link_prompt.is_some());
     }
 
     #[test]

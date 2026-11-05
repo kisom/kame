@@ -6792,6 +6792,12 @@ impl Headless {
         output.drop_without_applying_deltas();
     }
 
+    /// The window on top of the others.
+    pub(crate) fn top_layer(&self) -> Option<egui::LayerId> {
+        self.ctx
+            .memory(|memory| memory.areas().top_layer_id(egui::Order::Foreground))
+    }
+
     /// A press and a release at `pos`, with the pointer having come there first.
     fn press_and_release(&mut self, pos: Pos2) {
         self.frame(vec![egui::Event::PointerMoved(pos)]);

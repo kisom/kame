@@ -345,7 +345,7 @@ impl Editor {
             })
             .collect();
         if moved.is_empty() {
-            return Ok(self.apply_edit(insert));
+            return self.insert_as_step(cursor, text);
         }
         let new_spans = old_spans.iter().cloned().chain(moved).collect();
         Ok(self.apply_edit(Op::Batch {

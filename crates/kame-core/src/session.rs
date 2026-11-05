@@ -1205,10 +1205,11 @@ impl Session {
         self.insert_with(text, |editor, caret| editor.insert_as_step(caret, text))
     }
 
-    /// [`Session::insert`], with `spans` on the words, their offsets being within `text`.
+    /// [`Session::insert_as_step`], with `spans` on the words, their offsets being within `text`.
+    /// It is a step of its own either way, as a paste is.
     fn insert_styled(&mut self, text: &str, spans: &[Span]) -> bool {
         if spans.is_empty() {
-            return self.insert(text);
+            return self.insert_as_step(text);
         }
         self.insert_with(text, |editor, caret| {
             editor.insert_styled(caret, text, spans)
@@ -2019,7 +2020,7 @@ impl Session {
             .block_index(caret.block_id)
             .is_some_and(|index| self.document().blocks[index].kind.is_verbatim());
         if verbatim {
-            return self.insert(&normalised);
+            return self.insert_as_step(&normalised);
         }
         let mut changed = false;
         for (index, line) in normalised.split('\n').enumerate() {
@@ -2027,7 +2028,7 @@ impl Session {
                 changed |= self.split();
             }
             if !line.is_empty() {
-                changed |= self.insert(line);
+                changed |= self.insert_as_step(line);
             }
         }
         changed
@@ -4176,6 +4177,27 @@ mod tests {
         assert!(session.redo());
         assert_eq!(session.document().blocks[0].text, "see [é]now");
         assert_eq!(session.caret.offset, "see [é]now".len());
+    }
+
+    #[test]
+    fn typing_after_a_paste_stays_a_step_apart() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("see ");
+        assert!(session.paste("one two"));
+        assert!(session.insert("!"));
+        assert_eq!(session.document().blocks[0].text, "see one two!");
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].text, "see one two");
+
+        // The last line of a paste over several blocks is apart from what is typed after it.
+        assert!(session.paste("a\nbc"));
+        assert!(session.insert("d"));
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[1].text, "bc");
+        assert!(session.paste_clipped("xy", None));
+        assert!(session.insert("z"));
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[1].text, "bcxy");
     }
 
     #[test]

@@ -84,6 +84,15 @@ pub(crate) fn percent_encode(text: &str) -> String {
     out
 }
 
+/// Whether an image's path leads to another machine, so that it publishes as written. `file://`
+/// is this machine, and goes no further than a path does.
+fn is_remote(path: &str) -> bool {
+    let local = path
+        .get(..7)
+        .is_some_and(|start| start.eq_ignore_ascii_case("file://"));
+    !local && (path.contains("://") || path.starts_with("//"))
+}
+
 impl Images {
     /// Works out where each image block's file goes, in reading order, so that two files
     /// sharing a name are told apart the same way on every build.
@@ -96,11 +105,7 @@ impl Images {
             let BlockKind::Image { path, .. } = &block.kind else {
                 continue;
             };
-            if named.contains_key(path)
-                || source.placed_images.contains(path)
-                || path.starts_with("http://")
-                || path.starts_with("https://")
-            {
+            if named.contains_key(path) || source.placed_images.contains(path) || is_remote(path) {
                 continue;
             }
             if path.starts_with('/')
@@ -160,7 +165,7 @@ impl Images {
         }
         Some(match self.named.get(path) {
             Some(name) => format!("{site_url}{doc_url}{}", percent_encode(name)),
-            None if path.starts_with('/') => format!("{site_url}{path}"),
+            None if path.starts_with('/') && !is_remote(path) => format!("{site_url}{path}"),
             None => path.to_string(),
         })
     }
@@ -366,6 +371,54 @@ mod tests {
             images.absolute(url, "https://x.com", "/k/doc/").as_deref(),
             Some(url)
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_remote_image_of_any_kind_publishes_as_written() {
+        let dir = temp_dir("remote");
+        for url in [
+            "HTTPS://e.com/a.png",
+            "Http://e.com/a.png",
+            "ftp://e.com/a.png",
+            "//cdn.e.com/a.png",
+        ] {
+            let source = make(&dir, "doc", false, with_images(&[url]));
+            let mut problems = Problems::default();
+            let images = Images::resolve(&source, &dir, &mut problems);
+            assert!(images.copies().is_empty(), "{url}");
+            assert!(problems.warnings.is_empty(), "{url}");
+            assert_eq!(images.relative(url).as_deref(), Some(url));
+            assert_eq!(
+                images.absolute(url, "https://x.com", "/k/doc/").as_deref(),
+                Some(url)
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_url_is_a_local_path_and_stays_off_the_page() {
+        let dir = temp_dir("fileurl");
+        let url = "File:///home/you/gone.png";
+        let source = make(&dir, "doc", false, with_images(&[url]));
+        let mut problems = Problems::default();
+        let images = Images::resolve(&source, &dir, &mut problems);
+        assert_eq!(images.relative(url), None);
+        assert!(problems.warnings[0].contains(url));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_site_root_image_that_cannot_be_found_stays_missing() {
+        let dir = temp_dir("rootmissing");
+        let path = "/files/x.png";
+        let source = make(&dir, "doc", false, with_images(&[path]));
+        let mut problems = Problems::default();
+        let images = Images::resolve(&source, &dir, &mut problems);
+        assert_eq!(images.relative(path), None);
+        assert_eq!(images.absolute(path, "https://x.com", "/k/doc/"), None);
+        assert!(problems.warnings[0].contains(path));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

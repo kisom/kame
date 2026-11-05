@@ -11,12 +11,13 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
+use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Id, Order, Pos2, Vec2};
 use kame_core::export::markdown_unresolved;
 use kame_core::model::{Block, Document};
 use kame_core::references::{
-    block_citation_ranges, citation_at, cited, key_of, plain, suggest_key, unresolved, valid_key,
-    with_citation_spans, Kind, Reference, References,
+    block_citation_ranges, citation_at, cited, entry, key_of, plain, suggest_key, unresolved,
+    valid_key, with_citation_spans, Kind, Reference, References, RunStyle,
 };
 use kame_notebook::references::{citing, load, remove, rename, save, stamp, Renamed};
 use kame_notebook::Notebook;
@@ -431,6 +432,21 @@ impl ReferenceForm {
     /// The entry as it would read.
     pub(crate) fn preview(&self) -> String {
         plain(&self.built())
+    }
+
+    /// The entry as it would read, with the runs an export italicises in italics.
+    pub(crate) fn preview_job(&self, color: egui::Color32, font: egui::FontId) -> LayoutJob {
+        let mut job = LayoutJob::default();
+        for run in entry(&self.built()) {
+            let format = TextFormat {
+                font_id: font.clone(),
+                color,
+                italics: run.style == RunStyle::Italic,
+                ..TextFormat::default()
+            };
+            job.append(&run.text, 0.0, format);
+        }
+        job
     }
 
     /// Fills in a key from the fields, unless the key is the person's.
@@ -1495,7 +1511,12 @@ fn draw_form(ui: &mut egui::Ui, window: &mut FormWindow, focus: bool, references
     match form.tab {
         Tab::Structured => {
             ui.separator();
-            ui.weak(form.preview());
+            let style = ui.style();
+            let job = form.preview_job(
+                style.visuals.weak_text_color(),
+                egui::TextStyle::Body.resolve(style),
+            );
+            ui.label(job);
         }
         Tab::Freeform => {
             let field = ui.add(
@@ -2239,6 +2260,29 @@ mod tests {
             ["Alpha", "knuth1981", "zeta"],
             "everything, with nothing typed"
         );
+    }
+
+    #[test]
+    fn the_preview_sets_a_book_title_and_a_journal_name_in_italics() {
+        for kind in [Kind::Book, Kind::Article] {
+            let mut form = ReferenceForm::new(Some("k".to_string()));
+            form.reference.kind = kind;
+            form.reference.title = "A Title".to_string();
+            form.reference.published_in = "A Journal".to_string();
+            form.authors_text = "D. E. Knuth".to_string();
+
+            let job = form.preview_job(egui::Color32::GRAY, egui::FontId::default());
+
+            let italic: Vec<&str> = job
+                .sections
+                .iter()
+                .filter(|section| section.format.italics)
+                .map(|section| &job.text[section.byte_range.start.0..section.byte_range.end.0])
+                .collect();
+            assert!(!italic.is_empty(), "{kind:?} has an italic section");
+            assert!(job.sections.iter().any(|section| !section.format.italics));
+            assert_eq!(job.text, form.preview());
+        }
     }
 
     #[test]

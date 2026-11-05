@@ -579,12 +579,13 @@ fn close_delimiter(style: &SpanStyle) -> String {
 
 /// A link to a heading as what goes between a Markdown destination's angle brackets, which keep
 /// the spaces a heading has. A renderer decodes character references and backslash escapes here,
-/// and a line break can't be in one at all.
+/// a line break can't be in one at all, and importing it decodes percent signs.
 fn heading_destination(target: &str) -> String {
     let mut out = String::with_capacity(target.len());
     for c in target.chars() {
         match c {
             '&' => out.push_str("&amp;"),
+            '%' => out.push_str("%25"),
             '\\' | '<' | '>' => {
                 out.push('\\');
                 out.push(c);
@@ -1638,6 +1639,9 @@ mod tests {
             "#Q&A: <now> \\ (then)",
             "#été à Paris",
             "#a&amp;b",
+            "#50% off",
+            "#a%20b",
+            "#a\nb",
         ] {
             let doc = with_heading_link("See ", "this", target);
             let exported = to_markdown(&doc);
@@ -1671,6 +1675,10 @@ mod tests {
             crate::import::markdown::from_markdown(source, std::path::Path::new("/"), "t").document;
         let exported = to_markdown(&doc);
         assert_eq!(exported, "[![](/a.png)](#The%20Intro)\n");
+        let back =
+            crate::import::markdown::from_markdown(&exported, std::path::Path::new("/"), "t")
+                .document;
+        assert_eq!(back.blocks[0].kind, doc.blocks[0].kind);
     }
 
     fn with_code(text: &str, ranges: &[(usize, usize)]) -> Document {

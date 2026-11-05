@@ -431,7 +431,7 @@ impl<'a> Builder<'a> {
                 // A link to a heading is one to a heading here, as typing it makes.
                 let url = dest_url.to_string();
                 self.open_style(if url.starts_with('#') {
-                    link_style(url)
+                    link_style(percent_decoded(&url))
                 } else {
                     SpanStyle::Link { url }
                 });
@@ -672,6 +672,48 @@ fn outline(document: &Document) -> Vec<(crate::model::BlockKind, String)> {
         .collect()
 }
 
+/// `text` with each `%XX` decoded, as a browser reads a link to a heading. Only ASCII is looked at,
+/// so a character in `text` is never cut. A `%` that isn't followed by two hex digits, and bytes
+/// that don't decode to whole characters, stay as they were written.
+fn percent_decoded(text: &str) -> String {
+    let encoded_at = |at: usize| {
+        text.as_bytes()[at] == b'%'
+            && text
+                .get(at + 1..at + 3)
+                .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < text.len() {
+        if !encoded_at(at) {
+            // Up to the next `%`, which isn't this one if this is one.
+            let from = at + usize::from(text.as_bytes()[at] == b'%');
+            let next = text[from..]
+                .find('%')
+                .map_or(text.len(), |found| from + found);
+            out.push_str(&text[at..next]);
+            at = next;
+            continue;
+        }
+        // A run of them, since a character can take several.
+        let start = at;
+        let mut bytes = Vec::new();
+        while at < text.len() && encoded_at(at) {
+            bytes.push(u8::from_str_radix(&text[at + 1..at + 3], 16).expect("hex digits"));
+            at += 3;
+        }
+        let mut done = 0;
+        for chunk in bytes.utf8_chunks() {
+            out.push_str(chunk.valid());
+            done += chunk.valid().len();
+            let invalid = chunk.invalid().len();
+            out.push_str(&text[start + done * 3..start + (done + invalid) * 3]);
+            done += invalid;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +859,48 @@ mod tests {
             .spans
             .iter()
             .all(|span| matches!(span.style, SpanStyle::Link { .. })));
+    }
+
+    #[test]
+    fn a_percent_encoded_link_to_a_heading_names_the_heading() {
+        for (source, target) in [
+            ("[y](#The%20Intro)", "#The Intro"),
+            ("[y](#%C3%A9t%C3%A9%20%C3%A0)", "#été à"),
+            ("[y](#été%20à)", "#été à"),
+            // What isn't an encoding, or isn't whole characters, stays as it was written.
+            ("[y](#50%)", "#50%"),
+            ("[y](#50%2)", "#50%2"),
+            ("[y](#50%zz)", "#50%zz"),
+            ("[y](#%C3)", "#%C3"),
+            ("[y](#%C3%20x)", "#%C3 x"),
+            ("[y](#a%FFb%20c)", "#a%FFb c"),
+        ] {
+            let doc = import(source).document;
+            assert_eq!(
+                doc.blocks[0].spans[0].style,
+                SpanStyle::DocumentLink {
+                    target: target.to_string()
+                },
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_link_to_a_heading_is_percent_decoded() {
+        let doc = import("[y](a%20b.md) [z](https://e.com/#a%20b)").document;
+        let urls: Vec<&SpanStyle> = doc.blocks[0].spans.iter().map(|span| &span.style).collect();
+        assert_eq!(
+            urls,
+            [
+                &SpanStyle::Link {
+                    url: "a%20b.md".to_string()
+                },
+                &SpanStyle::Link {
+                    url: "https://e.com/#a%20b".to_string()
+                },
+            ]
+        );
     }
 
     #[test]

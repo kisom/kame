@@ -126,13 +126,13 @@ pub fn belonging_files(path: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn is_database(path: &Path) -> bool {
+pub(crate) fn is_database(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("kame"))
 }
 
 /// What SQLite keeps beside a database.
-fn sqlite_files(path: &Path) -> [PathBuf; 2] {
+pub(crate) fn sqlite_files(path: &Path) -> [PathBuf; 2] {
     ["-wal", "-shm"].map(|suffix| {
         let mut beside = path.as_os_str().to_owned();
         beside.push(suffix);
@@ -231,7 +231,7 @@ fn links_leading_to(
 /// Whether the database at `path`, in a folder with logs, has lost them, as read from its file. One
 /// with only logs or never synced has no state to lose. Nothing above it turning logs on means
 /// its state says nothing, and nothing would ever settle it.
-fn is_stranded_database(path: &Path) -> bool {
+pub(crate) fn is_stranded_database(path: &Path) -> bool {
     if logging_root(path).is_none() {
         return false;
     }

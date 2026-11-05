@@ -23,9 +23,9 @@ pub enum Kind {
 
 /// Folders in the root that hold no documents. Everything in `static/` publishes, `images/` holds
 /// pictures that documents show, and `theme/` is how a site looks.
-const NOT_DOCUMENTS: [&str; 3] = ["static", "images", "theme"];
+pub(crate) const NOT_DOCUMENTS: [&str; 3] = ["static", "images", "theme"];
 /// The folder a build goes in, which isn't part of the notebook at all.
-const OUTPUT: &str = "output";
+pub(crate) const OUTPUT: &str = "output";
 
 fn is_document_name(name: &str) -> bool {
     let lower = name.to_lowercase();

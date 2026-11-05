@@ -21,10 +21,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
 
-## Annotations
-
-- [ ] **Moving a marginal.** The only way today is to remove it and add it again on the other block.
-
 ## Search
 
 - [ ] **Ctrl-F only searches the body.** Marginals, notes and footnotes are only searched by Ctrl-R,

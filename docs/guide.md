@@ -100,7 +100,7 @@ These are the reason for kame's name. Each attaches to the selection, or to the 
 - A **marginal** (Ctrl-Shift-M) sits in the margin beside its paragraph. It publishes in HTML, and is left out of Markdown, which has nowhere to put it.
 - A **footnote** (Ctrl-Shift-F) is numbered and collected at the foot of the page, and publishes in both formats. Its selection grows to whole words.
 
-Adding one opens a small box for its words, and Escape closes that box. Click a note's marker to open it again, or a footnote's words to edit them. The box has a Remove button. Clicking a footnote's number moves between the footnote and its place in the text.
+Adding one opens a small box for its words, and Escape closes that box. Click a note's marker to open it again, or a footnote's words to edit them. The box has a Remove button. Clicking a footnote's number moves between the footnote and its place in the text. To move a marginal to another paragraph, put the caret there, right-click the marginal and choose Move to the caret's block. One undo puts it back.
 
 ## Getting around and keeping focus
 

@@ -1212,6 +1212,37 @@ impl Editor {
         Ok(self.apply_edit(Op::RemoveAnnotation { annotation }))
     }
 
+    /// Moves the marginal `annotation_id` to the block `block_id`, keeping its id and body, as one
+    /// step: a batch that removes it and adds it again on the other block. An id naming no
+    /// marginal is [`EditError::AnnotationNotFound`], and a block the document doesn't hold is
+    /// [`EditError::BlockNotFound`].
+    pub fn move_marginal(
+        &mut self,
+        annotation_id: AnnotationId,
+        block_id: BlockId,
+    ) -> Result<Op, EditError> {
+        let annotation = self
+            .doc
+            .annotations
+            .iter()
+            .find(|annotation| {
+                annotation.id == annotation_id && annotation.kind == AnnotationKind::Marginal
+            })
+            .cloned()
+            .ok_or(EditError::AnnotationNotFound)?;
+        self.block(block_id)?;
+        let moved = Annotation {
+            anchor: Anchor::block(block_id),
+            ..annotation.clone()
+        };
+        Ok(self.apply_edit(Op::Batch {
+            ops: vec![
+                Op::RemoveAnnotation { annotation },
+                Op::AddAnnotation { annotation: moved },
+            ],
+        }))
+    }
+
     // --- caret helpers -----------------------------------------------------
 
     fn block(&self, block_id: BlockId) -> Result<&Block, EditError> {

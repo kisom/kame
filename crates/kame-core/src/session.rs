@@ -2493,6 +2493,25 @@ impl Session {
         self.commit(result)
     }
 
+    /// Moves the marginal `id` to the block `to`, as one undo step. Returns whether it moved:
+    /// nothing changes and no step is taken when it's already on that block, when `id` is no
+    /// marginal or `to` no block, or when the document can't be written.
+    pub fn move_marginal(&mut self, id: AnnotationId, to: BlockId) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let already_there = self
+            .document()
+            .annotations
+            .iter()
+            .any(|annotation| annotation.id == id && annotation.anchor == Anchor::block(to));
+        if already_there {
+            return false;
+        }
+        let result = self.editor.move_marginal(id, to);
+        self.commit(result)
+    }
+
     /// The anchor for a new annotation of `kind`: marginalia anchor to a whole
     /// block, notes and footnotes to the selection (clamped to its first block,
     /// since an anchor lives in one block) or the word under the caret.
@@ -5695,6 +5714,115 @@ mod tests {
 
         assert!(session.set_annotation_body(id, ""));
         assert!(session.document().annotations.is_empty());
+    }
+
+    /// A session on a file holding two paragraphs, with a marginal on the first, and the ids of
+    /// both blocks and the marginal.
+    fn marginal_on_the_first_of_two(path: &Path) -> (Session, BlockId, BlockId, AnnotationId) {
+        let mut session = open(path);
+        session.insert("First");
+        session.split();
+        session.insert("Second");
+        let (first, second) = (
+            session.document().blocks[0].id,
+            session.document().blocks[1].id,
+        );
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.set_annotation_body(id, "Said beside."));
+        (session, first, second, id)
+    }
+
+    fn marginal_anchor(session: &Session, id: AnnotationId) -> Anchor {
+        let annotation = session
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .expect("the marginal is there");
+        assert_eq!(annotation.body, "Said beside.");
+        annotation.anchor.clone()
+    }
+
+    #[test]
+    fn moving_a_marginal_takes_it_to_another_block_as_one_undo_step() {
+        let path = temp_db_path();
+        let (mut session, first, second, id) = marginal_on_the_first_of_two(&path);
+        let (undo, _) = session.history();
+
+        assert!(session.move_marginal(id, second));
+
+        assert_eq!(marginal_anchor(&session, id), Anchor::block(second));
+        assert_eq!(session.document().annotations.len(), 1);
+        assert_eq!(session.history(), (undo + 1, 0));
+        assert!(session.undo());
+        assert_eq!(marginal_anchor(&session, id), Anchor::block(first));
+        assert_eq!(session.history(), (undo, 1));
+        assert!(session.redo());
+        assert_eq!(marginal_anchor(&session, id), Anchor::block(second));
+        drop(session);
+
+        let mut reopened = open(&path);
+        assert_eq!(marginal_anchor(&reopened, id), Anchor::block(second));
+        assert!(reopened.undo(), "the move is in the file's history");
+        assert_eq!(marginal_anchor(&reopened, id), Anchor::block(first));
+    }
+
+    #[test]
+    fn a_marginal_moved_to_its_own_block_stays_and_takes_no_step() {
+        let path = temp_db_path();
+        let (mut session, first, _, id) = marginal_on_the_first_of_two(&path);
+        let before = (session.document().clone(), session.history());
+
+        assert!(!session.move_marginal(id, first));
+
+        assert_eq!((session.document().clone(), session.history()), before);
+        assert_eq!(session.last_error, None);
+    }
+
+    #[test]
+    fn a_marginal_moved_beside_another_keeps_both() {
+        let path = temp_db_path();
+        let (mut session, _, second, id) = marginal_on_the_first_of_two(&path);
+        session.set_caret(Cursor {
+            block_id: second,
+            offset: 0,
+        });
+        let other = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.set_annotation_body(other, "Already here."));
+
+        assert!(session.move_marginal(id, second));
+
+        assert_eq!(marginal_anchor(&session, id), Anchor::block(second));
+        let on_second: Vec<&str> = session
+            .document()
+            .annotations
+            .iter()
+            .filter(|annotation| annotation.anchor == Anchor::block(second))
+            .map(|annotation| annotation.body.as_str())
+            .collect();
+        assert_eq!(on_second.len(), 2);
+        assert!(on_second.contains(&"Already here."));
+    }
+
+    #[test]
+    fn a_marginal_goes_nowhere_that_is_not_a_block_and_nothing_else_moves() {
+        let path = temp_db_path();
+        let (mut session, first, second, id) = marginal_on_the_first_of_two(&path);
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        let footnote = session.add_annotation(AnnotationKind::Footnote).unwrap();
+        let before = (session.document().clone(), session.history());
+
+        assert!(!session.move_marginal(id, uuid::Uuid::new_v4()));
+        assert!(!session.move_marginal(footnote, second), "only a marginal");
+
+        assert_eq!((session.document().clone(), session.history()), before);
     }
 
     /// Backspacing the space before a footnote re-anchors the footnote instead

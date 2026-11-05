@@ -109,6 +109,10 @@ three are on the Annotate menu and the right-click menu. A note needs no words, 
 Each opens for writing as it's added, with any starting words selected so that typing replaces them. Ctrl-Enter, Close or Escape closes it, and Remove takes it
 out, along with its highlight. Emptying a marginal removes it too, and so does closing one that nothing was written in, which leaves nothing to undo or redo.
 
+Right-clicking a marginal offers Move to the caret's block, which moves it, words and all, to the block the caret is in,
+as one undo step. It's greyed out when the marginal is already there. Any block can hold a marginal, and one moved beside
+another stacks below it.
+
 ## Centered headings
 
 Right-click a heading for Centered, which sets it in the middle of the line, on the page and in HTML, as one undoable edit, and a second click turns it off. Changing the heading's level keeps it, and turning it into body text drops it. If the document's title is centered, its byline is too, and on a site so are the title the page prints and the line under it. Markdown has no form for this, so it exports and imports headings at the left.

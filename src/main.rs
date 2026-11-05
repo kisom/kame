@@ -2477,6 +2477,10 @@ struct KameApp {
     /// The block the page's menu was opened on, for its rows about that block in particular. The
     /// others change the caret's block, and a right-click doesn't move the caret.
     menu_block: Option<BlockId>,
+    /// The marginal the page's menu was opened on.
+    marginal_menu: Option<AnnotationId>,
+    /// Where each marginal was drawn on the last frame.
+    marginals_drawn: Vec<(AnnotationId, Rect)>,
     /// Whether justified paragraphs can hyphenate words.
     hyphenate: bool,
     renderer: GlyphRenderer,
@@ -2648,6 +2652,8 @@ impl KameApp {
             link_menu: None,
             clipped: None,
             menu_block: None,
+            marginal_menu: None,
+            marginals_drawn: Vec::new(),
             page: references::Page::default(),
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
@@ -4884,6 +4890,7 @@ impl KameApp {
             .map(|annotation| (annotation.id, annotation))
             .collect();
         let mut markers: Vec<(AnnotationId, Rect)> = Vec::new();
+        self.marginals_drawn.clear();
         // Each checked annotation as drawn: its layout's origin, the column it's set in, and what
         // comes before its body.
         let mut drawn_notes: Vec<(Block, Pos2, f32, String, Rect)> = Vec::new();
@@ -4934,6 +4941,7 @@ impl KameApp {
                         // The body is the hit target, so a marginal can be
                         // reopened and revised once its popover has closed.
                         markers.push((annotation.id, rect));
+                        self.marginals_drawn.push((annotation.id, rect));
                         if let Some(block) = annotation_block(annotation) {
                             drawn_notes.push((block, origin, margin_column, String::new(), rect));
                         }
@@ -5130,7 +5138,13 @@ impl KameApp {
             self.mark_menu = None;
             self.menu_block = None;
             self.link_menu = None;
+            self.marginal_menu = None;
             if let Some(pos) = response.interact_pointer_pos() {
+                self.marginal_menu = self
+                    .marginals_drawn
+                    .iter()
+                    .find(|(_, rect)| rect.contains(pos))
+                    .map(|(id, _)| *id);
                 if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
                 {
@@ -5359,6 +5373,27 @@ impl KameApp {
         let mut edit_link = false;
         response.context_menu(|ui| {
             ui.set_min_width(180.0);
+            let caret = self.session.valid_caret();
+            let marginal = self.marginal_menu.and_then(|id| {
+                let annotation = self
+                    .session
+                    .document()
+                    .annotations
+                    .iter()
+                    .find(|annotation| annotation.id == id)?;
+                Some((id, annotation.anchor.block_id() == caret.block_id))
+            });
+            if let Some((id, there)) = marginal {
+                let row = ui.add_enabled_ui(!there, |ui| {
+                    ui.button("Move to the caret's block")
+                        .on_disabled_hover_text("It's on the caret's block.")
+                });
+                if row.inner.clicked() {
+                    self.session.move_marginal(id, caret.block_id);
+                    ui.close();
+                }
+                ui.separator();
+            }
             if let Some(menu) = &link_menu {
                 if ui.button("Open link").clicked() {
                     open_link = true;
@@ -5435,7 +5470,6 @@ impl KameApp {
                 ui.separator();
             }
             // The caret's block, since that is the one these rows change.
-            let caret = self.session.valid_caret();
             let current = self
                 .session
                 .block_index(caret.block_id)
@@ -7507,10 +7541,14 @@ impl Headless {
         let Some(bounds) = bounds else {
             panic!("nothing saying {label:?}");
         };
-        let pos = Pos2::new(
+        self.right_click_at(Pos2::new(
             (bounds.x0 + bounds.x1) as f32 / 2.0,
             (bounds.y0 + bounds.y1) as f32 / 2.0,
-        );
+        ));
+    }
+
+    /// Right-clicks at `pos`, for the menu what's there has.
+    pub(crate) fn right_click_at(&mut self, pos: Pos2) {
         self.time += 1.0;
         self.frame(vec![egui::Event::PointerMoved(pos)]);
         for pressed in [true, false] {
@@ -11005,6 +11043,97 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         page.frame(Vec::new());
         type_letters(&mut page, " Two.");
         assert_eq!(page.app.session.document().annotations[0].body, "One. Two.");
+    }
+
+    /// A page with two paragraphs, a marginal written on the first and the caret on the second,
+    /// with the ids of both blocks and the marginal.
+    fn page_with_a_marginal_to_move() -> (Headless, BlockId, BlockId, AnnotationId) {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("First");
+        session.split();
+        session.insert("Second");
+        let (first, second) = (
+            session.document().blocks[0].id,
+            session.document().blocks[1].id,
+        );
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.set_annotation_body(id, "Said beside."));
+        session.set_caret(Cursor {
+            block_id: second,
+            offset: 0,
+        });
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        (page, first, second, id)
+    }
+
+    fn right_click_marginal(page: &mut Headless, id: AnnotationId) {
+        let rect = page
+            .app
+            .marginals_drawn
+            .iter()
+            .find(|(drawn, _)| *drawn == id)
+            .map(|(_, rect)| *rect)
+            .expect("the marginal is drawn");
+        page.right_click_at(rect.center());
+    }
+
+    fn block_of(page: &Headless, id: AnnotationId) -> BlockId {
+        page.app
+            .session
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .expect("the marginal is there")
+            .anchor
+            .block_id()
+    }
+
+    #[test]
+    fn a_marginals_menu_moves_it_to_the_carets_block_as_one_undo_step() {
+        let (mut page, first, second, id) = page_with_a_marginal_to_move();
+        let (undo, _) = page.app.session.history();
+
+        right_click_marginal(&mut page, id);
+        page.press("Move to the caret's block");
+
+        assert_eq!(block_of(&page, id), second);
+        assert_eq!(page.app.session.history(), (undo + 1, 0));
+        assert!(page.app.session.undo());
+        assert_eq!(block_of(&page, id), first);
+        assert!(page.app.session.redo());
+        assert_eq!(block_of(&page, id), second);
+    }
+
+    #[test]
+    fn a_marginal_on_the_carets_block_cannot_be_moved_there() {
+        let (mut page, first, _, id) = page_with_a_marginal_to_move();
+        page.app.session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        let before = page.app.session.history();
+
+        right_click_marginal(&mut page, id);
+
+        assert!(page.sees("Move to the caret's block"));
+        assert!(!page.can_press("Move to the caret's block"));
+        assert_eq!(page.app.session.history(), before);
+    }
+
+    #[test]
+    fn the_page_away_from_a_marginal_has_no_row_to_move_one() {
+        let (mut page, _, _, _) = page_with_a_marginal_to_move();
+        let at = Pos2::new(page.body_left() + 10.0, PAGE_PADDING + 10.0);
+        page.right_click_at(at);
+        assert!(page.sees("Body"), "the page's menu is up");
+        assert!(!page.sees("Move to the caret's block"));
     }
 
     #[test]

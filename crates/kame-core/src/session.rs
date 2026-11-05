@@ -1640,6 +1640,91 @@ impl Session {
         self.commit(result)
     }
 
+    /// Sets a link's words and address together, as one step. Empty words show the address. An
+    /// empty address takes the link away, and if the words are empty too, they stay as they were.
+    /// Only the words that differ are replaced, so that notes on the rest stay where they are.
+    pub fn edit_link(
+        &mut self,
+        block_id: BlockId,
+        start: usize,
+        end: usize,
+        words: &str,
+        url: &str,
+    ) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let Some(index) = self.block_index(block_id) else {
+            return false;
+        };
+        let block = &self.document().blocks[index];
+        let fits = start < end
+            && end <= block.text.len()
+            && block.text.is_char_boundary(start)
+            && block.text.is_char_boundary(end);
+        if !fits {
+            return false;
+        }
+        let url = url.trim();
+        let current = &block.text[start..end];
+        let words = if !words.trim().is_empty() {
+            words
+        } else if !url.is_empty() {
+            url
+        } else {
+            current
+        };
+        if words == current {
+            return self.set_link(block_id, start, end, url.to_string());
+        }
+        let spans = spans_after_replacing(&block.spans, start, end, words.len());
+        let prefix: usize = current
+            .chars()
+            .zip(words.chars())
+            .take_while(|(one, other)| one == other)
+            .map(|(one, _)| one.len_utf8())
+            .sum();
+        let suffix: usize = current[prefix..]
+            .chars()
+            .rev()
+            .zip(words[prefix..].chars().rev())
+            .take_while(|(one, other)| one == other)
+            .map(|(one, _)| one.len_utf8())
+            .sum();
+        let at = |offset| Cursor { block_id, offset };
+        let (changed_start, changed_end) = (start + prefix, end - suffix);
+        let added = &words[prefix..words.len() - suffix];
+        // Worked out on a copy, so that the whole of it is one step.
+        let mut draft = Editor::new(self.document().clone());
+        if changed_start < changed_end
+            && draft
+                .delete_selection(&Selection {
+                    start: at(changed_start),
+                    end: at(changed_end),
+                })
+                .is_err()
+        {
+            return false;
+        }
+        if !added.is_empty() && draft.insert_text(&at(changed_start), added).is_err() {
+            return false;
+        }
+        if draft.set_spans_of(block_id, spans).is_err() {
+            return false;
+        }
+        let new_end = start + words.len();
+        if !url.is_empty()
+            && draft
+                .set_link(block_id, start, new_end, url.to_string())
+                .is_err()
+        {
+            return false;
+        }
+        let saved = self.replace_document(draft.document().clone());
+        self.set_caret(at(new_end));
+        saved
+    }
+
     /// The range C-k should link — the current selection, or the link under the
     /// caret when nothing is selected — plus that link's current URL, if any,
     /// so the prompt can pre-fill it for editing.
@@ -2193,6 +2278,43 @@ pub struct Clipped {
     pub spans: Vec<Span>,
     /// What its relative links are relative to.
     pub from: PathBuf,
+}
+
+/// `spans` once `start..end` has been replaced by `new_len` bytes, with any link overlapping it gone.
+/// Formatting over all of the old words is over all of the new ones. Formatting over only some of
+/// them keeps whatever part lies outside.
+fn spans_after_replacing(spans: &[Span], start: usize, end: usize, new_len: usize) -> Vec<Span> {
+    let moved = |offset: usize| offset - (end - start) + new_len;
+    spans
+        .iter()
+        .filter_map(|span| {
+            let overlaps = span.start < end && start < span.end;
+            let is_link = matches!(
+                span.style,
+                SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
+            );
+            let (from, to) = if span.end <= start {
+                (span.start, span.end)
+            } else if span.start >= end {
+                (moved(span.start), moved(span.end))
+            } else if is_link && overlaps {
+                return None;
+            } else if span.start <= start && span.end >= end {
+                (span.start, moved(span.end))
+            } else if span.start < start {
+                (span.start, start)
+            } else if span.end > end {
+                (start + new_len, moved(span.end))
+            } else {
+                return None;
+            };
+            Some(Span {
+                start: from,
+                end: to,
+                style: span.style.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Readable and writable by the owner alone.
@@ -5553,6 +5675,152 @@ mod tests {
     fn nothing_selected_means_nothing_clipped() {
         let session = linked("A link", 2, 6, "https://l.example/");
         assert_eq!(session.clipped(), None);
+    }
+
+    #[test]
+    fn editing_a_link_changes_its_words_and_address_as_one_step() {
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        let block = session.document().blocks[0].id;
+        let (depth, _) = session.history();
+        assert!(session.edit_link(block, 8, 13, "study", "https://s.example/"));
+        assert_eq!(session.document().blocks[0].text, "See the study now.");
+        assert_eq!(
+            links_of(&session, 0),
+            [("study".to_string(), "https://s.example/".to_string())]
+        );
+        assert_eq!(session.history().0, depth + 1);
+        assert_eq!(session.caret.offset, 13);
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].text, "See the paper now.");
+        assert_eq!(
+            links_of(&session, 0),
+            [("paper".to_string(), "https://p.example/".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_link_with_no_words_shows_its_address() {
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        let block = session.document().blocks[0].id;
+        assert!(session.edit_link(block, 8, 13, "", "https://p.example/"));
+        assert_eq!(
+            session.document().blocks[0].text,
+            "See the https://p.example/ now."
+        );
+        assert_eq!(
+            links_of(&session, 0),
+            [(
+                "https://p.example/".to_string(),
+                "https://p.example/".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn an_empty_address_takes_the_link_away_and_keeps_words() {
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        let block = session.document().blocks[0].id;
+        assert!(session.edit_link(block, 8, 13, "study", ""));
+        assert_eq!(session.document().blocks[0].text, "See the study now.");
+        assert!(links_of(&session, 0).is_empty());
+
+        // With both empty there's nothing to show instead, so the words stay.
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        assert!(session.edit_link(block_of(&session), 8, 13, "", ""));
+        assert_eq!(session.document().blocks[0].text, "See the paper now.");
+        assert!(links_of(&session, 0).is_empty());
+    }
+
+    fn block_of(session: &Session) -> BlockId {
+        session.document().blocks[0].id
+    }
+
+    #[test]
+    fn formatting_around_a_link_survives_editing_its_words() {
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        let block = block_of(&session);
+        let spans = vec![
+            Span {
+                start: 8,
+                end: 13,
+                style: SpanStyle::Link {
+                    url: "https://p.example/".to_string(),
+                },
+            },
+            Span {
+                start: 8,
+                end: 13,
+                style: SpanStyle::Bold,
+            },
+            Span {
+                start: 4,
+                end: 18,
+                style: SpanStyle::Italic,
+            },
+            Span {
+                start: 14,
+                end: 17,
+                style: SpanStyle::Code,
+            },
+        ];
+        let set = session.editor.set_spans_of(block, spans);
+        session.commit(set);
+        assert!(session.edit_link(block, 8, 13, "longer words", "https://p.example/"));
+        let document = session.document();
+        let text = &document.blocks[0].text;
+        let on = |style: SpanStyle| {
+            document.blocks[0]
+                .spans
+                .iter()
+                .find(|span| span.style == style)
+                .map(|span| text[span.start..span.end].to_string())
+        };
+        assert_eq!(on(SpanStyle::Bold).as_deref(), Some("longer words"));
+        assert_eq!(
+            on(SpanStyle::Italic).as_deref(),
+            Some("the longer words now.")
+        );
+        assert_eq!(on(SpanStyle::Code).as_deref(), Some("now"));
+    }
+
+    #[test]
+    fn editing_part_of_a_links_words_keeps_a_note_on_the_rest() {
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        let block = block_of(&session);
+        let note = session.editor.add_annotation(
+            AnnotationKind::Note,
+            Anchor::range(block, 8, 11),
+            "kept",
+        );
+        session.commit(note);
+        assert!(session.edit_link(block, 8, 13, "paper!", "https://p.example/"));
+        assert_eq!(session.document().annotations.len(), 1);
+        assert_eq!(session.document().blocks[0].text, "See the paper! now.");
+        assert_eq!(
+            session.document().annotations[0].anchor,
+            Anchor::range(block, 8, 11)
+        );
+    }
+
+    #[test]
+    fn editing_a_links_address_alone_is_a_small_step() {
+        let mut session = linked("A link", 2, 6, "https://l.example/");
+        let block = block_of(&session);
+        assert!(session.edit_link(block, 2, 6, "link", "https://other.example/"));
+        assert!(matches!(
+            session.editor.applied_ops().last(),
+            Some(Op::SetSpans { .. })
+        ));
+    }
+
+    #[test]
+    fn multibyte_words_in_a_link_are_counted_in_bytes() {
+        let mut session = linked("Voilà été là", 7, 12, "https://e.example/");
+        assert_eq!(links_of(&session, 0)[0].0, "été");
+        let block = block_of(&session);
+        assert!(session.edit_link(block, 7, 12, "épée", "https://e.example/"));
+        assert_eq!(session.document().blocks[0].text, "Voilà épée là");
+        assert_eq!(links_of(&session, 0)[0].0, "épée");
     }
 
     #[test]

@@ -791,14 +791,17 @@ fn pick_save_path(suggested_name: &str, directory: Option<&Path>) -> Option<Path
         .save_file()
 }
 
-/// The "Add link" URL prompt (C-k): the range being linked and the URL being
-/// typed.
+/// The link prompt (C-k): the range being linked, its words and the URL being typed.
 struct LinkPrompt {
     block_id: BlockId,
     start: usize,
     end: usize,
+    /// The words the link shows. Left empty, it shows its URL.
+    words: String,
     /// The URL being typed, pre-filled with the existing link's URL, if any.
     url: String,
+    /// Whether there's a link already, rather than one being added.
+    editing: bool,
     /// Set for the frame the prompt opens on, so the field takes the keyboard.
     focus: bool,
 }
@@ -6099,6 +6102,23 @@ impl KameApp {
             self.notice = Some("select text to link, or place the caret inside a link".into());
             return;
         };
+        self.open_link_prompt(block_id, start, end, current);
+    }
+
+    /// Opens the link prompt on `start..end`, with the words there and the link's URL, if any.
+    fn open_link_prompt(
+        &mut self,
+        block_id: BlockId,
+        start: usize,
+        end: usize,
+        current: Option<String>,
+    ) {
+        let words = self
+            .session
+            .block_index(block_id)
+            .and_then(|index| self.session.document().blocks[index].text.get(start..end))
+            .unwrap_or_default()
+            .to_string();
         self.snapshot_prompt = None;
         self.open_prompt = None;
         self.restore_picker = None;
@@ -6106,6 +6126,8 @@ impl KameApp {
             block_id,
             start,
             end,
+            words,
+            editing: current.is_some(),
             url: current.unwrap_or_default(),
             focus: true,
         });
@@ -6118,17 +6140,30 @@ impl KameApp {
             return;
         };
         let mut buffer = prompt.url.clone();
+        let mut words = prompt.words.clone();
+        let title = if prompt.editing {
+            "Edit link"
+        } else {
+            "Add link"
+        };
         let focus = prompt.focus;
         let mut submit = enter && !focus;
         let mut cancel = false;
 
-        egui::Window::new("Add link")
+        egui::Window::new(title)
             .id(Id::unique("kame-link-prompt"))
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
             .order(Order::Foreground)
             .show(ctx, |ui| {
+                ui.label("Text:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut words)
+                        .id(Id::unique("kame-link-words"))
+                        .desired_width(360.0)
+                        .hint_text("The link itself, if left empty"),
+                );
                 ui.label("Link URL:");
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut buffer)
@@ -6151,6 +6186,7 @@ impl KameApp {
 
         if let Some(prompt) = self.link_prompt.as_mut() {
             prompt.url = buffer;
+            prompt.words = words;
             prompt.focus = false;
         }
         if cancel {
@@ -6160,18 +6196,15 @@ impl KameApp {
         if !submit {
             return;
         }
-        let (block_id, start, end) = self
-            .link_prompt
-            .as_ref()
-            .map(|prompt| (prompt.block_id, prompt.start, prompt.end))
-            .unwrap_or((BlockId::nil(), 0, 0));
-        let url = self
-            .link_prompt
-            .as_ref()
-            .map(|prompt| prompt.url.trim().to_string())
-            .unwrap_or_default();
-        self.link_prompt = None;
-        self.session.set_link(block_id, start, end, url);
+        if let Some(prompt) = self.link_prompt.take() {
+            self.session.edit_link(
+                prompt.block_id,
+                prompt.start,
+                prompt.end,
+                &prompt.words,
+                &prompt.url,
+            );
+        }
     }
 
     /// The "Restore Snapshot" picker: choose a snapshot, then confirm that the

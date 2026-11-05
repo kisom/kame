@@ -4710,6 +4710,24 @@ mod tests {
     }
 
     #[test]
+    fn the_replaced_file_prompt_doesnt_take_away_a_form() {
+        let (mut page, opened) = page_with_form();
+        let path = opened.clone().unwrap();
+        let other = other_document(&page, "other.kame", "from another machine");
+        std::fs::rename(&other, &path).unwrap();
+        page.app.session.check_file();
+        page.app.replaced_prompt = true;
+        page.app.merge_with_replacement();
+        assert_form_kept(&page, &opened);
+        assert!(page.app.session.replaced);
+        page.app.notice = None;
+        page.app.open_replacement(&path);
+        assert_form_kept(&page, &opened);
+        assert!(page.app.session.replaced);
+        assert!(page.app.replaced_prompt);
+    }
+
+    #[test]
     fn a_new_document_doesnt_take_away_a_form() {
         let (mut page, opened) = page_with_form();
         page.app.request_new();

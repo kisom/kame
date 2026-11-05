@@ -6714,9 +6714,10 @@ impl KameApp {
     }
 
     /// Merges what is on the screen with the file that replaced this one, and carries on in that
-    /// file. On failure these words stay on the screen, with the prompt still up.
+    /// file. On failure, or while a form or the Cite search is up, these words stay on the screen,
+    /// with the prompt still up.
     fn merge_with_replacement(&mut self) {
-        if self.held_by_rename() {
+        if self.say_if_reference_form_up() || self.held_by_rename() {
             return;
         }
         match kame_sync::files::merge_replaced(&self.session) {
@@ -6730,6 +6731,16 @@ impl KameApp {
             }
             Err(err) => self.session.last_error = Some(format!("could not merge — {err}")),
         }
+    }
+
+    /// Leaves these words for the file that replaced this one, at `path`, unless a form or the
+    /// Cite search is up, which would go with them.
+    fn open_replacement(&mut self, path: &Path) {
+        if self.say_if_reference_form_up() {
+            return;
+        }
+        self.replaced_prompt = false;
+        self.open_document(path.display().to_string());
     }
 
     /// What to do about a file replaced on disk: merge the two, keep these words under a new
@@ -6784,8 +6795,7 @@ impl KameApp {
             self.save_with_dialog(ctx, false);
             self.replaced_prompt = self.session.replaced;
         } else if open {
-            self.replaced_prompt = false;
-            self.open_document(path.display().to_string());
+            self.open_replacement(&path);
         } else if later {
             self.replaced_prompt = false;
         }

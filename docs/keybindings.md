@@ -364,7 +364,7 @@ The theme is the standard one, and a file in the notebook's `theme/` takes the p
 
 ## Revision logs
 
-This is a trial, for a folder at a time. `kame-sync enable FOLDER` puts a `.kame-logs` file in a folder, and prints a line that every
+This is a trial, for a folder at a time. `kame-sync enable FOLDER` puts a `.kame-logs` file in a folder, and prints the lines that every
 machine's `.stignore` needs. Documents under that folder then stop syncing their databases, and each machine keeps its own log of
 revisions in `.X.kame.sync/`, which is what syncs.
 
@@ -373,5 +373,5 @@ a pause or on coming back to the window, never mid-word, and the status row says
 with everything that arrives between your own edits as one undo step. Sentences both machines changed keep the later
 version in the text and the other in a note, after a snapshot. A document with only logs, as on a new machine, is built when opened.
 
-Snapshots and undo history stay on the machine that made them. To go back, remove the `.stignore` line, then delete `.kame-logs` and the
+Snapshots and undo history stay on the machine that made them. To go back, remove the folder's `.stignore` line, then delete `.kame-logs` and the
 hidden `.sync` folders.

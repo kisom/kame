@@ -6,8 +6,8 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **`kame-sync enable` prints too little.** It leaves out `*.kame-wal` and `*.kame-shm`. Also,
-  check `.stignore` on each machine. `merging.md`, section 6.1.
+- [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
+  them now, but folders already turned on won't have been told.
 - [ ] **New fields stop older builds reading logs, with no message.** A centered or right-aligned image
   now does this, and any new field or kind will. Needs a decision on how logs handle versions.
   `merging.md`, section 9.

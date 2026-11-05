@@ -177,7 +177,7 @@ garden/
 **The carrier's job.** Anything that copies files can carry logs, and logs ask very little of it:
 
 - Copy `.kame-logs` and the `.sync` folders, and don't touch the logs' contents.
-- Don't copy `*.kame` files in a logged folder, or their `-wal` and `-shm`. With Syncthing, that takes three lines in `.stignore` on every machine: `/writing/garden/**.kame`, `*.kame-wal` and `*.kame-shm`. `kame-sync enable FOLDER` prints only the first, and only if it finds a `.stignore` there or above.
+- Don't copy `*.kame` files in a logged folder, or their `-wal` and `-shm`. With Syncthing, that takes three lines in `.stignore` on every machine: `/writing/garden/**.kame`, `*.kame-wal` and `*.kame-shm`. `kame-sync enable FOLDER` prints them if it finds a `.stignore` there or above.
 - Deliver a log by appending to it, or by replacing it atomically with one that extends it. A log that arrives late or out of order is fine, and an unfinished last line waits. Bytes changed before the read position, such as a same-length replacement, aren't seen until the document is reopened. A log replaced by a shorter one is read again from its start.
 - Move `.NAME.sync` along with any rename, because logs are found by the file's name.
 - Don't copy the app's config between machines, since the device name lives there, and two machines sharing it would be two writers on one log.
@@ -296,7 +296,6 @@ These describe the code as it stands, and aren't rules to copy.
 
 - **Nothing checks `revision.document`.** Logs from a different document at the same name merge in, and the result takes the id of ours.
 - **A sync stops silently if the logs can't be read at open.** `Logged::open` returns nothing, and the app shows no message.
-- **`kame-sync enable` prints too little.** It leaves out the `-wal` and `-shm` lines (section 6.1), and the sync design records a mispaired `-wal` overriding a file.
 - **A new field can stop revisions being read, with no message.** Digests and ids are recomputed from what a reader parsed, and readers drop fields they don't know. So when a newer build writes a field an older one doesn't know, the older one's digest differs. Tested at this commit: with a new field in a block, the line is read but the revision never becomes usable, and with a new field in metadata, the line is skipped. Everything built on that revision waits too. The `align` field on images does this for any centered or right-aligned image, until every machine has a build that knows it. A new variant of a block kind, style or annotation kind fails parsing, so that line is skipped.
 - **A new field must be left out when empty, or old revisions break.** If a new field were always written, a reader would add it when re-serializing old lines. In a revision or its metadata, the ids would stop matching and the lines would be skipped. In a block, the digest would change and the revision would stay unusable. `Metadata` writes all its fields, so a new metadata field needs a `skip_serializing_if`. Any change to how the JSON is written has the same effect.
 - **Sentences are English-shaped.** Abbreviations such as `e.g.` end a sentence if a space follows, which only makes conflicts coarser or finer and loses nothing. Text without those marks, such as Chinese with `。`, counts as one sentence until a line feed.

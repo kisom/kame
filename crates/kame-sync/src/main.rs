@@ -388,12 +388,13 @@ fn step(folder: &str, device: &str, state: &str, words: Option<&str>) -> Result<
 
 fn enable(folder: &Path) -> Result<()> {
     match kame_sync::logs::enable(folder)? {
-        Some(line) => println!(
-            "logs are on for {}. Add this to .stignore on every machine:\n{line}",
-            folder.display()
+        Some(lines) => println!(
+            "logs are on for {}. Add these to .stignore on every machine, if they aren't there:\n{}",
+            folder.display(),
+            lines.join("\n")
         ),
         None => println!(
-            "logs are on for {}. Stop its .kame files syncing on every machine.",
+            "logs are on for {}. Stop its .kame, .kame-wal and .kame-shm files syncing on every machine.",
             folder.display()
         ),
     }

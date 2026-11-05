@@ -309,9 +309,11 @@ pub fn this_host() -> String {
         .unwrap_or_default()
 }
 
-/// Turns on logs for a folder, returning the line that the sync tool's ignore file needs, on every
-/// machine, for the folder's databases to stop travelling. `None` if no ignore file was found.
-pub fn enable(folder: &Path) -> Result<Option<String>> {
+/// Turns on logs for a folder, returning the lines that the sync tool's ignore file needs, on every
+/// machine, for the folder's databases to stop travelling. That has to include what SQLite keeps
+/// beside them, since a `-wal` from another machine would override the file it lands beside. `None`
+/// if no ignore file was found.
+pub fn enable(folder: &Path) -> Result<Option<Vec<String>>> {
     let folder = folder.canonicalize()?;
     std::fs::write(folder.join(MARKER), "")?;
     Ok(folder
@@ -320,11 +322,16 @@ pub fn enable(folder: &Path) -> Result<Option<String>> {
         .and_then(|root| folder.strip_prefix(root).ok())
         .map(|inside| {
             let inside = inside.display().to_string();
-            if inside.is_empty() {
+            let databases = if inside.is_empty() {
                 "**.kame".to_string()
             } else {
                 format!("/{inside}/**.kame")
-            }
+            };
+            vec![
+                databases,
+                "*.kame-wal".to_string(),
+                "*.kame-shm".to_string(),
+            ]
         }))
 }
 
@@ -381,6 +388,27 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabling_logs_says_every_line_the_ignore_file_needs() {
+        let root = kame_test_dir::folder("logs-enable");
+        std::fs::write(root.join(".stignore"), "").unwrap();
+        let inner = root.join("writing/garden");
+        std::fs::create_dir_all(&inner).unwrap();
+        let lines = enable(&inner).unwrap().unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                "/writing/garden/**.kame".to_string(),
+                "*.kame-wal".to_string(),
+                "*.kame-shm".to_string(),
+            ]
+        );
+        assert!(inner.join(MARKER).is_file());
+        let at_root = enable(&root).unwrap().unwrap();
+        assert_eq!(at_root[0], "**.kame");
+        assert_eq!(at_root.len(), 3);
+    }
 
     /// A file whose history can't be rewound still syncs, starting from the text it has.
     #[test]

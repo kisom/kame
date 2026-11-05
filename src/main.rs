@@ -484,6 +484,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
         "select the next spelling or grammar mark, when checking is on",
     ),
     ("Ctrl-[", "back to where a link was followed from"),
+    ("Ctrl-J", "jump to a heading in this document"),
     ("Ctrl-L", "jump to a document, in a notebook"),
     ("Ctrl-Shift-L", "a notebook's contents page"),
     ("Ctrl-R", "search a notebook"),
@@ -1571,6 +1572,7 @@ enum MarkAction {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MenuAction {
+    JumpToHeading,
     NewNotebook,
     ToggleBrowser,
     NotebookHome,
@@ -3856,6 +3858,10 @@ impl KameApp {
                         }
                         ui.separator();
                     }
+                    if menu_item(ui, "Jump to heading", Some("Ctrl-J"), false) {
+                        action = Some(MenuAction::JumpToHeading);
+                    }
+                    ui.separator();
                     if menu_item(ui, "Check spelling", None, self.check_spelling) {
                         action = Some(MenuAction::ToggleCheck);
                     }
@@ -3969,6 +3975,7 @@ impl KameApp {
             MenuAction::ToggleBrowser => self.toggle_browser(),
             MenuAction::NotebookHome => self.go_home(),
             MenuAction::Jump => self.toggle_jump(),
+            MenuAction::JumpToHeading => self.toggle_headings(),
             MenuAction::SearchNotebook => self.toggle_search(),
             MenuAction::Back => self.go_back(),
             MenuAction::CompactHistory => match self.session.compact_history() {
@@ -6155,15 +6162,18 @@ impl KameApp {
             return;
         };
         match self.session.heading_cursor(heading) {
-            Some(cursor) => {
-                self.session.set_caret(cursor);
-                self.notice = None;
-                // The place this document was left doesn't apply when a link names one.
-                self.session.restored_scroll = None;
-                self.reveal_caret = true;
-            }
+            Some(cursor) => self.go_to_cursor(cursor),
             None => self.notice = Some(format!("no heading \"{heading}\" in this document")),
         }
+    }
+
+    /// Puts the caret at `cursor` and brings it into view.
+    fn go_to_cursor(&mut self, cursor: crate::edit::Cursor) {
+        self.session.set_caret(cursor);
+        self.notice = None;
+        // The place this document was left doesn't apply when something names one.
+        self.session.restored_scroll = None;
+        self.reveal_caret = true;
     }
 
     /// Opens a file chosen in a dialog, holding at the Open prompt's confirmation

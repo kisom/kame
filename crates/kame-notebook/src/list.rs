@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use kame_core::model::{BlockId, BlockKind, Document};
+
 use crate::{read_document, Notebook};
 
 /// One file a notebook holds.
@@ -255,6 +257,43 @@ pub fn narrow(query: &str, all: &[Listed], recent: &[PathBuf]) -> Vec<usize> {
         found.sort_by_key(|(score, how_recent, at)| (score / 8, *how_recent, *score, *at));
     }
     found.into_iter().map(|(_, _, at)| at).collect()
+}
+
+/// A heading of a document, as a list of them shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heading {
+    pub block: BlockId,
+    pub level: u8,
+    pub text: String,
+}
+
+/// The headings in `document` with words in them that match `query`: in reading order with nothing
+/// typed, and otherwise best first, with equals in reading order.
+pub fn narrow_headings(query: &str, document: &Document) -> Vec<Heading> {
+    let mut found: Vec<(u32, usize, Heading)> = document
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(at, block)| {
+            let BlockKind::Heading { level } = block.kind else {
+                return None;
+            };
+            if block.text.trim().is_empty() {
+                return None;
+            }
+            let score = rank(query, &block.text, "")?;
+            let heading = Heading {
+                block: block.id,
+                level,
+                text: block.text.clone(),
+            };
+            Some((score, at, heading))
+        })
+        .collect();
+    if !query.is_empty() {
+        found.sort_by_key(|(score, at, _)| (score / 8, *at));
+    }
+    found.into_iter().map(|(_, _, heading)| heading).collect()
 }
 
 /// A row of the browser.

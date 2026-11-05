@@ -882,3 +882,45 @@ fn the_list_and_the_loader_agree_which_folder_holds_the_references() {
         "a file is a reference or an entry, and only one of them"
     );
 }
+
+fn outline(headings: &[(u8, &str)]) -> kame_core::model::Document {
+    let mut document = kame_core::model::Document::new("t");
+    document.blocks = headings
+        .iter()
+        .map(|(level, text)| kame_core::model::Block {
+            id: uuid::Uuid::new_v4(),
+            kind: kame_core::model::BlockKind::Heading { level: *level },
+            text: text.to_string(),
+            spans: Vec::new(),
+        })
+        .collect();
+    document
+}
+
+fn heading_texts(query: &str, document: &kame_core::model::Document) -> Vec<String> {
+    kame_notebook::list::narrow_headings(query, document)
+        .into_iter()
+        .map(|heading| heading.text)
+        .collect()
+}
+
+#[test]
+fn headings_come_in_reading_order_with_nothing_typed() {
+    let document = outline(&[(2, "Zebra"), (1, "Apple")]);
+    assert_eq!(heading_texts("", &document), ["Zebra", "Apple"]);
+}
+
+#[test]
+fn the_better_match_of_two_headings_comes_first() {
+    let document = outline(&[(1, "A long way to intro"), (1, "Intro")]);
+    assert_eq!(
+        heading_texts("intro", &document),
+        ["Intro", "A long way to intro"]
+    );
+}
+
+#[test]
+fn a_heading_with_multibyte_words_can_be_found() {
+    let document = outline(&[(1, "Überblick über Kröten")]);
+    assert_eq!(heading_texts("kröt", &document).len(), 1);
+}

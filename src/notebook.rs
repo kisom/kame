@@ -14,7 +14,9 @@ use eframe::egui;
 use kame_core::model::{BlockId, Metadata};
 use kame_core::session::Session;
 use kame_notebook::links::{create_document, linking_to, remove_untouched, Follow, LinkFrom, Made};
-use kame_notebook::list::{listed, listed_if_changed, narrow, rows, Entry, Kind, Listed, RowKind};
+use kame_notebook::list::{
+    listed, listed_if_changed, narrow, narrow_headings, rows, Entry, Kind, Listed, RowKind,
+};
 use kame_notebook::log_folder;
 use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
 use kame_notebook::search::{search, Hit};
@@ -45,6 +47,13 @@ const STRANDED_RECHECK: Duration = Duration::from_secs(60);
 
 /// The jump list, open.
 pub(crate) struct JumpList {
+    query: String,
+    selected: usize,
+    focus: bool,
+}
+
+/// The list of the open document's headings, open.
+pub(crate) struct HeadingList {
     query: String,
     selected: usize,
     focus: bool,
@@ -155,6 +164,7 @@ pub(crate) struct NotebookUi {
     /// are made when it arrives, on the main thread.
     stranded_coming: Option<(Notebook, Receiver<StrandedPass>)>,
     pub(crate) jump: Option<JumpList>,
+    pub(crate) headings: Option<HeadingList>,
     pub(crate) search: Option<SearchList>,
     pub(crate) browser_open: bool,
     pub(crate) browser_folders: HashSet<String>,
@@ -185,12 +195,13 @@ impl NotebookUi {
     }
 
     pub(crate) fn list_open(&self) -> bool {
-        self.jump.is_some() || self.search.is_some()
+        self.jump.is_some() || self.headings.is_some() || self.search.is_some()
     }
 
     pub(crate) fn close_lists(&mut self) -> bool {
         let open = self.list_open();
         self.jump = None;
+        self.headings = None;
         if let Some(search) = self.search.take() {
             if let Some(running) = search.running {
                 running.cancel.store(true, Ordering::Relaxed);
@@ -727,6 +738,12 @@ impl KameApp {
                 })
             })
         };
+        // The open document's headings don't take a notebook. The caret's going elsewhere would
+        // leave a note's box behind, so it's for the page.
+        let in_a_note = ctx.memory(|memory| memory.has_focus(super::note_body_edit_id()));
+        if pressed(egui::Key::J, false) && !self.close_flow.prompting && !in_a_note {
+            self.toggle_headings();
+        }
         let (jump, home, find, browser) = (
             pressed(egui::Key::L, false),
             pressed(egui::Key::L, true),
@@ -783,6 +800,18 @@ impl KameApp {
         if !open && !self.dialog_open() {
             self.nb.refresh_listing();
             self.nb.jump = Some(JumpList {
+                query: String::new(),
+                selected: 0,
+                focus: true,
+            });
+        }
+    }
+
+    pub(crate) fn toggle_headings(&mut self) {
+        let open = self.nb.headings.is_some();
+        self.nb.close_lists();
+        if !open && !self.dialog_open() {
+            self.nb.headings = Some(HeadingList {
                 query: String::new(),
                 selected: 0,
                 focus: true,
@@ -1049,6 +1078,7 @@ impl KameApp {
     /// The jump list and search, over the page.
     pub(crate) fn show_notebook_lists(&mut self, ctx: &egui::Context) {
         self.show_jump_list(ctx);
+        self.show_heading_list(ctx);
         self.show_search_list(ctx);
     }
 
@@ -1126,6 +1156,57 @@ impl KameApp {
         }
         if !close {
             self.nb.jump = Some(jump);
+        }
+    }
+
+    /// The open document's headings, to jump to one, with Ctrl-[ coming back.
+    fn show_heading_list(&mut self, ctx: &egui::Context) {
+        let Some(mut list) = self.nb.headings.take() else {
+            return;
+        };
+        let headings = narrow_headings(&list.query, self.session.document());
+        let (close, confirm) = list_keys(ctx, &mut list.selected, headings.len());
+        let mut clicked = None;
+        let none_at_all = list.query.is_empty() && headings.is_empty();
+        list_window(ctx, "kame-headings", |ui| {
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut list.query)
+                    .hint_text("Jump to a heading")
+                    .return_key(None)
+                    .desired_width(f32::INFINITY),
+            );
+            focus_field(&edit, &mut list.focus);
+            if edit.changed() {
+                list.selected = 0;
+            }
+            ui.separator();
+            if none_at_all {
+                ui.weak("No headings in this document.");
+            }
+            list_rows(ui, headings.len(), list.selected, |ui, row, selected| {
+                let heading = &headings[row];
+                let indent = "    ".repeat(usize::from(heading.level.saturating_sub(1)));
+                let shown = format!("{indent}{}", heading.text);
+                if list_row(ui, selected, &shown, "").clicked() {
+                    clicked = Some(row);
+                }
+            });
+        });
+        let chosen = clicked.or(confirm.then_some(list.selected));
+        if let Some(heading) = chosen.and_then(|row| headings.get(row)) {
+            self.back.push(BackStop {
+                path: self.session.path().map(Path::to_path_buf),
+                caret: self.session.caret,
+                scroll: self.page_scroll,
+            });
+            self.go_to_cursor(kame_core::edit::Cursor {
+                block_id: heading.block,
+                offset: 0,
+            });
+            return;
+        }
+        if !close {
+            self.nb.headings = Some(list);
         }
     }
 
@@ -1782,6 +1863,239 @@ impl KameApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{test_temp_dir, Headless};
+    use kame_core::model::{Block, BlockKind, Document};
+
+    fn heading_block(level: u8, text: &str) -> Block {
+        Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Heading { level },
+            text: text.to_string(),
+            spans: Vec::new(),
+        }
+    }
+
+    fn paragraph_block(text: &str) -> Block {
+        Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: text.to_string(),
+            spans: Vec::new(),
+        }
+    }
+
+    /// A page outside any notebook holding `blocks`, with the caret where it starts.
+    fn page_of(blocks: Vec<Block>) -> Headless {
+        let folder = test_temp_dir().join(format!("headings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut session = Session::open(&folder.join("doc.kame")).unwrap();
+        let mut document = Document::new("t");
+        document.blocks = blocks;
+        assert!(session.replace_document(document));
+        let first = session.document().blocks[0].id;
+        session.set_caret(kame_core::edit::Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page
+    }
+
+    fn outline() -> Vec<Block> {
+        vec![
+            paragraph_block("Opening words."),
+            heading_block(1, "Intro"),
+            paragraph_block("Some words."),
+            heading_block(2, "Method"),
+            paragraph_block("More words."),
+            heading_block(2, "Intro"),
+        ]
+    }
+
+    fn press(page: &mut Headless, key: egui::Key, modifiers: egui::Modifiers) {
+        for pressed in [true, false] {
+            page.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            }]);
+        }
+    }
+
+    fn jump_chord(page: &mut Headless) {
+        press(page, egui::Key::J, egui::Modifiers::COMMAND);
+        page.frame(Vec::new());
+    }
+
+    fn type_text(page: &mut Headless, text: &str) {
+        for character in text.chars() {
+            page.frame(vec![egui::Event::Text(character.to_string())]);
+        }
+    }
+
+    fn caret_block(page: &Headless) -> usize {
+        let caret = page.app.session.caret;
+        page.app
+            .session
+            .document()
+            .blocks
+            .iter()
+            .position(|block| block.id == caret.block_id)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_key_lists_a_documents_headings_outside_a_notebook() {
+        let mut page = page_of(outline());
+        assert!(page.app.nb.notebook.is_none());
+
+        jump_chord(&mut page);
+
+        assert!(page.app.dialog_open());
+        assert!(page.can_press("Intro"));
+        assert!(page.can_press("    Method"));
+        assert!(page.can_press("    Intro"));
+    }
+
+    #[test]
+    fn enter_goes_to_the_first_heading_that_fits_what_is_typed() {
+        let mut page = page_of(outline());
+        jump_chord(&mut page);
+
+        type_text(&mut page, "mth");
+        press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
+
+        assert_eq!(caret_block(&page), 3);
+        assert_eq!(page.app.session.caret.offset, 0);
+        assert!(!page.app.dialog_open());
+        assert_eq!(page.app.session.document().blocks[0].text, "Opening words.");
+    }
+
+    #[test]
+    fn two_headings_with_the_same_words_are_told_apart() {
+        let mut page = page_of(outline());
+        jump_chord(&mut page);
+
+        press(&mut page, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press(&mut page, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
+
+        assert_eq!(caret_block(&page), 5);
+    }
+
+    #[test]
+    fn a_click_goes_to_its_heading() {
+        let mut page = page_of(outline());
+        jump_chord(&mut page);
+
+        page.press("    Method");
+
+        assert_eq!(caret_block(&page), 3);
+        assert!(!page.app.dialog_open());
+    }
+
+    #[test]
+    fn back_returns_from_a_heading_jumped_to() {
+        let mut page = page_of(outline());
+        jump_chord(&mut page);
+        page.press("    Method");
+        assert_eq!(caret_block(&page), 3);
+
+        page.app.go_back();
+
+        assert_eq!(caret_block(&page), 0);
+    }
+
+    #[test]
+    fn escape_leaves_the_caret_and_no_stop_to_come_back_to() {
+        let mut page = page_of(outline());
+        let stops = page.app.back.stops.len();
+        jump_chord(&mut page);
+
+        press(&mut page, egui::Key::Escape, egui::Modifiers::NONE);
+
+        assert_eq!(caret_block(&page), 0);
+        assert!(!page.app.dialog_open());
+        assert_eq!(page.app.back.stops.len(), stops);
+    }
+
+    #[test]
+    fn the_key_again_closes_the_list() {
+        let mut page = page_of(outline());
+        jump_chord(&mut page);
+        jump_chord(&mut page);
+        assert!(!page.app.dialog_open());
+    }
+
+    #[test]
+    fn typing_goes_to_the_list_and_not_the_document() {
+        let mut page = page_of(outline());
+        jump_chord(&mut page);
+
+        type_text(&mut page, "xyz");
+
+        assert_eq!(page.app.session.document().blocks[0].text, "Opening words.");
+        assert!(!page.can_press("Intro"), "nothing fits");
+    }
+
+    #[test]
+    fn a_document_with_no_headings_says_so() {
+        let mut page = page_of(vec![paragraph_block("Only words.")]);
+        jump_chord(&mut page);
+        assert!(page.sees("No headings in this document."));
+
+        press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
+
+        assert_eq!(caret_block(&page), 0);
+    }
+
+    #[test]
+    fn a_heading_with_no_words_is_left_out() {
+        let mut page = page_of(vec![heading_block(1, "   ")]);
+        jump_chord(&mut page);
+        assert!(page.sees("No headings in this document."));
+    }
+
+    #[test]
+    fn the_key_waits_behind_another_dialog() {
+        let mut page = page_of(outline());
+        page.app.begin_properties();
+        page.frame(Vec::new());
+
+        jump_chord(&mut page);
+
+        assert!(page.app.nb.headings.is_none());
+        assert!(page.app.metadata_prompt.is_some());
+    }
+
+    #[test]
+    fn the_key_waits_for_the_close_prompt() {
+        let mut page = page_of(outline());
+        page.app.close_flow.prompting = true;
+
+        jump_chord(&mut page);
+
+        assert!(page.app.nb.headings.is_none());
+    }
+
+    #[test]
+    fn the_key_waits_in_a_notes_box() {
+        let mut page = page_of(outline());
+        press(
+            &mut page,
+            egui::Key::M,
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        );
+        page.frame(Vec::new());
+        assert!(page.app.open_note.is_some());
+
+        jump_chord(&mut page);
+
+        assert!(page.app.nb.headings.is_none());
+    }
 
     /// Runs the field for a frame in a window, as the dialog does, with `events` as what arrived.
     fn field_frame(

@@ -88,6 +88,8 @@ Formatting applies as you type, and undoes as one step.
 
 The right-click menu changes the kind of the block under the caret, adds annotations, and has Insert image…, which asks for a file and shows the picture at its own size, or at the body's width if it's wider. Right-click a picture for Align, to put it at the left, center or right of its line. It's on a line of its own, whichever you choose, and Markdown exports leave the alignment out. "Where to put papers and images" below says where the file ends up.
 
+**Ctrl-J** lists the headings of the open document, in or out of a notebook, indented by level. Type a few letters to narrow them, and press Enter to go there. Ctrl-[ comes back.
+
 To link to another document, type `[[essay]]`, `[[notes/essay#The Intro]]` or `[[notes/essay#The Intro|the intro]]`, where the words after `|` are what shows. Paths start from the folder of the document holding the link. File > Link to Document… picks the file for you, but under your home folder it writes the path as `~/...`, which breaks if the notebook moves or reaches a machine with a different home folder. In a notebook, typing the link is safer. Clicking a document link opens it, and Ctrl-[ takes you back, as many links as you went.
 
 ## The margin: notes, marginals and footnotes
@@ -321,6 +323,7 @@ kame's settings are in `config.json`, at `~/.config/kame/` on Linux and `~/Libra
 - Ctrl-Shift-L: the notebook's contents page
 - Ctrl-Shift-O: the notebook's browser
 - Ctrl-[: back
+- Ctrl-J: jump to a heading in this document
 - Ctrl-Shift-S: snapshot
 - Ctrl-Shift-E and Ctrl-Shift-B: export Markdown and HTML
 - F1: help

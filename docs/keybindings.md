@@ -230,6 +230,9 @@ tried. `#The Intro` goes to the first heading with exactly that text, and on its
 means a heading in this document. If a link has rotted, the status row says so and nothing
 opens.
 
+Ctrl-J, or View > Jump to heading, lists the open document's headings, indented by level, in any document. The letters you type only
+have to appear in order, and the arrows, Enter and Escape work as they do in the notebook's lists. Ctrl-[ comes back.
+
 Ctrl-[, or File > Back, returns to where you followed the link from, as many links back as you
 went.
 

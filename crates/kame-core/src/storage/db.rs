@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
 const UNDO_CURSOR_KEY: &str = "undo_cursor";
 const POSITION_KEY: &str = "position";
 const SYNC_KEY: &str = "sync";
+const SYNC_PLACE_KEY: &str = "sync_place";
 
 /// Where the author was in a document, kept in its file so that each document
 /// reopens where it was left.
@@ -384,10 +385,32 @@ impl Db {
         Ok(())
     }
 
+    /// Where a sync tool last synced this file, opaque to the storage layer like the state beside
+    /// it. A file last synced by a build that didn't record this has none.
+    pub fn load_sync_place(&self) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![SYNC_PLACE_KEY],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    pub fn save_sync_place(&mut self, place: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![SYNC_PLACE_KEY, place],
+        )?;
+        Ok(())
+    }
+
     /// Forgets what a sync tool recorded, for a file that is not the one it recorded it for.
     pub fn clear_sync_state(&mut self) -> Result<(), DbError> {
-        self.conn
-            .execute("DELETE FROM meta WHERE key = ?1", params![SYNC_KEY])?;
+        self.conn.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            params![SYNC_KEY, SYNC_PLACE_KEY],
+        )?;
         Ok(())
     }
 
@@ -1411,6 +1434,21 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.load_metadata().unwrap(), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_sync_place_round_trips_and_is_cleared_with_the_state() {
+        let mut db = Db::open_in_memory().unwrap();
+        assert_eq!(db.load_sync_place(), None);
+        db.save_sync_state("r").unwrap();
+        db.save_sync_place("essays/a.kame").unwrap();
+        assert_eq!(db.load_sync_state().as_deref(), Some("r"));
+        assert_eq!(db.load_sync_place().as_deref(), Some("essays/a.kame"));
+        db.save_sync_place("b.kame").unwrap();
+        assert_eq!(db.load_sync_place().as_deref(), Some("b.kame"));
+        db.clear_sync_state().unwrap();
+        assert_eq!(db.load_sync_state(), None);
+        assert_eq!(db.load_sync_place(), None);
     }
 
     #[test]

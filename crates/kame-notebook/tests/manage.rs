@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use kame_core::links::image_file;
 use kame_core::model::{BlockKind, Document, ImageAlign, Metadata, Span, SpanStyle};
 use kame_core::session::Session;
+use kame_core::storage::Db;
 use kame_notebook::links::Follow;
 use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
 use kame_notebook::Notebook;
@@ -1425,4 +1426,117 @@ fn a_stranded_document_is_listed_and_no_logs_come_back_for_it() {
     assert!(report.left[0].why.contains("moved or deleted"));
     assert!(!log_folder(&linker).exists());
     assert_eq!(links_of(&read(&linker)), ["a.kame"]);
+}
+
+fn place_in(path: &Path) -> Option<String> {
+    Db::open_read_only(path).unwrap().load_sync_place()
+}
+
+#[test]
+fn a_rename_with_nothing_else_to_change_records_the_new_place() {
+    let (root, nb) = logged_notebook("move-records-place");
+    let a = root.join("a.kame");
+    document(&a, "Words.");
+    sync(&a);
+    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+    let revisions = Store::load(&log_folder(&a)).unwrap().revision_count();
+
+    let b = root.join("deep/b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert_eq!(place_in(&b).as_deref(), Some("deep/b.kame"));
+    assert!(Store::load(&log_folder(&b)).unwrap().revision_count() >= revisions);
+
+    // It's recognised if the logs now leave it.
+    std::fs::remove_dir_all(log_folder(&b)).unwrap();
+    let plan = plan_move(&nb, &b, &root.join("c.kame"), None, DEVICE, NOW);
+    assert!(carry_out(&nb, plan, None, DEVICE, NOW).is_err());
+    assert!(b.is_file());
+}
+
+/// A database with a sync state from somewhere else is a document like any other here.
+#[test]
+fn a_hand_copy_is_changed_moved_and_deleted_like_any_document() {
+    let (root, nb) = logged_notebook("move-hand-copy");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    let copy = root.join("deep/copy.kame");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::copy(&linker, &copy).unwrap();
+    let original = std::fs::read(&linker).unwrap();
+
+    // Its link is relative, so from its own folder it leads here.
+    let target = root.join("deep/a.kame");
+    document(&target, "A second a.");
+    let report = make_move(&nb, &target, &root.join("deep/b.kame"));
+    assert_eq!(report.changed, ["deep/copy.kame"]);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert_eq!(links_of(&head(&copy).0), ["b.kame"]);
+    assert_eq!(std::fs::read(&linker).unwrap(), original);
+
+    let moved = root.join("moved.kame");
+    let report = make_move(&nb, &copy, &moved);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert!(moved.is_file());
+    assert!(log_folder(&moved).is_dir());
+    assert_eq!(place_in(&moved).as_deref(), Some("moved.kame"));
+
+    assert!(!delete_document(&moved).unwrap());
+    assert!(!moved.exists());
+    assert!(!log_folder(&moved).exists());
+}
+
+/// A database from elsewhere, on logs that were never its, with those logs another document's.
+fn on_another_documents_logs(root: &Path) -> (PathBuf, Vec<(std::ffi::OsString, Vec<u8>)>) {
+    let (one, other) = (root.join("one.kame"), root.join("other.kame"));
+    document(&one, "One.");
+    sync(&one);
+    document(&other, "The other.");
+    sync(&other);
+    std::fs::remove_file(&other).unwrap();
+    std::fs::rename(&one, &other).unwrap();
+    std::fs::remove_dir_all(log_folder(&one)).unwrap();
+    let logs = files_in(&log_folder(&other));
+    (other, logs)
+}
+
+#[test]
+fn deleting_a_database_on_another_documents_logs_leaves_them() {
+    let (root, _nb) = logged_notebook("delete-on-others-logs");
+    let (path, logs) = on_another_documents_logs(&root);
+    assert!(delete_document(&path).unwrap(), "it says it left the logs");
+    assert!(!path.exists());
+    assert_eq!(files_in(&log_folder(&path)), logs);
+}
+
+#[test]
+fn moving_a_database_on_another_documents_logs_is_refused_and_they_stay() {
+    let (root, nb) = logged_notebook("move-on-others-logs");
+    let (path, logs) = on_another_documents_logs(&root);
+    let to = root.join("to.kame");
+    let plan = plan_move(&nb, &path, &to, None, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    assert!(err.contains("another document's"), "{err}");
+    assert!(path.is_file());
+    assert!(!to.exists());
+    assert_eq!(files_in(&log_folder(&path)), logs);
+}
+
+#[test]
+fn a_database_on_another_documents_logs_is_listed_and_they_stay() {
+    let (root, nb) = logged_notebook("rewrite-on-others-logs");
+    let (path, logs) = on_another_documents_logs(&root);
+    link(&path, "one", document_link("a.kame"));
+    let a = root.join("a.kame");
+    document(&a, "A.");
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty());
+    assert_eq!(report.left[0].relative, "other.kame");
+    assert!(report.left[0].why.contains("another document's"));
+    assert_eq!(files_in(&log_folder(&path)), logs);
 }

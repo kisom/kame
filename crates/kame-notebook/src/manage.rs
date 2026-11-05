@@ -8,7 +8,10 @@ use kame_core::links::{moved_target, own_target_after_move};
 use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::storage::Db;
-use kame_sync::logs::{build_from_logs, is_stranded, log_folder, logging_root, Logged};
+use kame_sync::logs::{
+    build_from_logs, is_on_others_logs, is_stranded, is_where_it_synced, log_folder, logging_root,
+    Logged,
+};
 use kame_sync::revlog::Store;
 
 use crate::links::{is_relative, tidied, Follow};
@@ -144,9 +147,10 @@ pub(crate) fn sqlite_files(path: &Path) -> [PathBuf; 2] {
 /// Deletes a document, and with it what belongs to it: what SQLite keeps beside the file, its
 /// conflicting and retired copies, by id, and its logs. A file that can't be removed is an error before
 /// the logs are touched, so that a document left in place keeps them. A stranded database has no
-/// logs of its own: what's at its log folder, if anything, is another document's, and stays, as
-/// removing it would remove that document on every machine. This returns whether it left logs
-/// there, since the document at that path still lists, and a second delete would take them.
+/// logs of its own, nor has one on another document's logs: what's at its log folder, if anything,
+/// is another document's, and stays, as removing it would remove that document on every machine.
+/// This returns whether it left logs there, since the document at that path still lists, and a
+/// second delete would take them.
 pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     if !is_database(path) {
         std::fs::remove_file(path)?;
@@ -155,7 +159,7 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     // Found first, since which copies are this document's is told by reading it.
     let belonging = belonging_files(path);
     // Before the file goes, since it's the file that says.
-    let stranded = is_stranded_database(path);
+    let not_its_own = !logs_are_its_own(path);
     // A document this machine hasn't opened yet has only its logs.
     match std::fs::remove_file(path) {
         Err(err) if err.kind() != std::io::ErrorKind::NotFound || !log_folder(path).is_dir() => {
@@ -173,10 +177,10 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     if !logs.is_dir() {
         return Ok(false);
     }
-    if !stranded {
+    if !not_its_own {
         std::fs::remove_dir_all(&logs)?;
     }
-    Ok(stranded)
+    Ok(not_its_own)
 }
 
 /// A document a move couldn't change, and why.
@@ -205,6 +209,7 @@ pub struct MoveReport {
 }
 
 const NEWER: &str = "it has changes from a newer version of kame";
+const OTHERS_LOGS: &str = "the logs at its path are another document's, and it isn't syncing";
 
 /// Every link in a document: web links and document links in its text, and an image's link.
 fn links_in(document: &Document) -> Vec<&str> {
@@ -245,16 +250,35 @@ fn links_leading_to(
 }
 
 /// Whether the database at `path`, in a folder with logs, has lost them, as read from its file. One
-/// with only logs or never synced has no state to lose. Nothing above it turning logs on means
-/// its state says nothing, and nothing would ever settle it.
+/// with only logs or never synced has no state to lose, and one copied here was never at its logs.
+/// Nothing above it turning logs on means its state says nothing, and nothing would ever settle it.
 pub(crate) fn is_stranded_database(path: &Path) -> bool {
-    if logging_root(path).is_none() {
+    let Ok(db) = Db::open_read_only(path) else {
         return false;
-    }
-    let last = Db::open_read_only(path)
-        .ok()
-        .and_then(|db| db.load_sync_state());
-    is_stranded(last.as_deref(), &log_folder(path))
+    };
+    is_stranded(
+        path,
+        db.load_sync_state().as_deref(),
+        db.load_sync_place().as_deref(),
+    )
+}
+
+/// Whether the database at `path` sits on another document's logs, as read from its file.
+pub(crate) fn is_on_others_logs_database(path: &Path) -> bool {
+    let Ok(db) = Db::open_read_only(path) else {
+        return false;
+    };
+    let (revision, place) = (db.load_sync_state(), db.load_sync_place());
+    // Most are where they synced, which saves reading the document to find its id.
+    !is_where_it_synced(path, place.as_deref())
+        && db.load_document().is_ok_and(|document| {
+            is_on_others_logs(path, document.id, revision.as_deref(), place.as_deref())
+        })
+}
+
+/// Whether what's at a database's log folder can be taken for its logs, to read, delete or move.
+fn logs_are_its_own(path: &Path) -> bool {
+    !is_stranded_database(path) && !is_on_others_logs_database(path)
 }
 
 /// The latest versions in a logged document's logs. There are none to read if it has no logs, or
@@ -263,7 +287,7 @@ fn versions_in_logs(path: &Path) -> Vec<Document> {
     if logging_root(path).is_none() {
         return Vec::new();
     }
-    if is_stranded_database(path) {
+    if !logs_are_its_own(path) {
         return Vec::new();
     }
     let Ok(store) = Store::load(&log_folder(path)) else {
@@ -295,8 +319,17 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
     if store.holds_newer() {
         return Err(NEWER.to_string());
     }
-    if is_stranded(session.sync_state().as_deref(), &folder) {
+    let (revision, place) = (session.sync_state(), session.sync_place());
+    if is_stranded(path, revision.as_deref(), place.as_deref()) {
         return Err("it was moved or deleted on another machine, and isn't syncing".to_string());
+    }
+    if is_on_others_logs(
+        path,
+        session.document().id,
+        revision.as_deref(),
+        place.as_deref(),
+    ) {
+        return Err(OTHERS_LOGS.to_string());
     }
     let logged = Logged::open(&session, device).ok_or("could not read its logs")?;
     Ok((session, Some(logged)))
@@ -614,6 +647,9 @@ pub fn carry_out(
              that's settled"
                 .to_string(),
         );
+    }
+    if is_database(&from) && is_on_others_logs_database(&from) {
+        return Err(OTHERS_LOGS.to_string());
     }
     move_files(notebook, &from, &to)?;
 

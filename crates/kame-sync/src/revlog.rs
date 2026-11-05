@@ -345,6 +345,15 @@ impl Store {
     pub fn contains(&self, id: &str) -> bool {
         self.revisions.contains_key(id)
     }
+
+    /// Whether there are revisions here and none of them are of this document.
+    pub fn holds_only_others(&self, document: Uuid) -> bool {
+        !self.revisions.is_empty()
+            && self
+                .revisions
+                .values()
+                .all(|revision| revision.document != document)
+    }
 }
 
 /// Merges two sets of document properties field by field: a field only one side changed takes

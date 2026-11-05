@@ -18,12 +18,14 @@ use std::path::{Path, PathBuf};
 
 use kame_core::model::Metadata;
 use kame_core::storage::Db;
-use kame_sync::logs::{log_folder, logging_root, stranded_verdict};
+use kame_sync::logs::{
+    is_set_aside, is_where_it_synced, log_folder, logging_root, place_of, stranded_verdict,
+};
 use kame_sync::merge::document_digest;
 use kame_sync::revlog::Store;
 
 use crate::list::{NOT_DOCUMENTS, OUTPUT};
-use crate::manage::{is_database, is_stranded_database, sqlite_files};
+use crate::manage::{is_database, is_on_others_logs_database, is_stranded_database, sqlite_files};
 use crate::search::same_file;
 use crate::Notebook;
 
@@ -61,7 +63,7 @@ pub struct Steps {
 #[derive(Debug)]
 struct Retiring {
     path: PathBuf,
-    revision: String,
+    last: LastSync,
     /// What it held when `unsynced` was worked out. A stranded document stays editable and saves
     /// no new revision, so its revision can't say whether this has changed.
     contents: Option<Contents>,
@@ -76,12 +78,19 @@ struct Contents {
     metadata: Metadata,
 }
 
-/// A database with a home to go to, and the revision it had when that was worked out.
+/// A database with a home to go to, and what it remembered when that was worked out.
 #[derive(Debug)]
 struct Going {
     path: PathBuf,
-    revision: String,
+    last: LastSync,
     home: PathBuf,
+}
+
+/// What a database remembers of its last sync: the revision, and where it was.
+#[derive(Clone, Debug, PartialEq)]
+struct LastSync {
+    revision: String,
+    place: Option<String>,
 }
 
 /// How many numbered names to try for a retired or moving database before leaving it for now.
@@ -97,17 +106,17 @@ pub struct Healthy {
     databases: HashMap<PathBuf, LooksHealthy>,
 }
 
-/// What a database's healthy verdict rests on: the revision it remembers, and each log's name and
-/// size. Logs are only ever added to, so this comes from looking at them, with no reading.
+/// What a database's healthy verdict rests on: what it remembers of its last sync, and each log's
+/// name and size. Logs are only ever added to, so this comes from looking at them, with no reading.
 #[derive(Debug, PartialEq)]
 struct LooksHealthy {
-    revision: String,
+    last: LastSync,
     logs: Vec<(PathBuf, u64)>,
 }
 
 /// The databases in the notebook that have lost their logs, for now at least. A database's logs are
 /// read only if it has no verdict in `healthy` that still holds. So that's only one that's stranded,
-/// or has logs or a revision new since the last look.
+/// or has logs, a revision or a place new since the last look.
 pub fn find_stranded(notebook: &Notebook, healthy: &mut Healthy) -> Vec<PathBuf> {
     let known = std::mem::take(&mut healthy.databases);
     let mut stranded = Vec::new();
@@ -118,20 +127,17 @@ pub fn find_stranded(notebook: &Notebook, healthy: &mut Healthy) -> Vec<PathBuf>
             continue;
         }
         // With no revision it has no state to lose.
-        let Some(revision) = recorded_revision(&path) else {
+        let Some(last) = last_sync(&path) else {
             continue;
         };
-        let folder = log_folder(&path);
+        let (revision, place) = (last.revision.clone(), last.place.clone());
         // Before any reading, so that logs added to meanwhile are read again next time.
-        let looks = Store::log_sizes(&folder).map(|logs| LooksHealthy {
-            revision: revision.clone(),
-            logs,
-        });
+        let looks = Store::log_sizes(&log_folder(&path)).map(|logs| LooksHealthy { last, logs });
         if looks.is_some() && looks.as_ref() == known.get(&path) {
             healthy.databases.extend(looks.map(|looks| (path, looks)));
             continue;
         }
-        match stranded_verdict(Some(&revision), &folder) {
+        match stranded_verdict(&path, Some(&revision), place.as_deref()) {
             Some(true) => stranded.push(path),
             Some(false) => healthy.databases.extend(looks.map(|looks| (path, looks))),
             None => {}
@@ -173,26 +179,22 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
     };
 
     for path in to_settle {
-        let Some(revision) = recorded_revision(&path) else {
+        let Some(last) = last_sync(&path) else {
             continue;
         };
         let contents = contents_of(&path);
-        match what_to_do(&path, &revision, contents.as_ref(), &logs) {
+        match what_to_do(&path, &last.revision, contents.as_ref(), &logs) {
             Some(Verdict::Retire {
                 opened_there,
                 unsynced,
             }) => steps.retiring.push(Retiring {
                 path,
-                revision,
+                last,
                 contents,
                 opened_there,
                 unsynced,
             }),
-            Some(Verdict::Move { home }) => steps.moving.push(Going {
-                path,
-                revision,
-                home,
-            }),
+            Some(Verdict::Move { home }) => steps.moving.push(Going { path, last, home }),
             None => {}
         }
     }
@@ -212,13 +214,12 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
         return Vec::new();
     }
     let is_open = |path: &Path| open.is_some_and(|open| same_file(open, path));
-    let as_it_was = |path: &Path, revision: &str| {
-        !is_open(path) && recorded_revision(path).as_deref() == Some(revision)
-    };
+    let as_it_was =
+        |path: &Path, last: &LastSync| !is_open(path) && last_sync(path).as_ref() == Some(last);
 
     let mut done = Vec::new();
     for step in steps.retiring {
-        if !as_it_was(&step.path, &step.revision) || contents_of(&step.path) != step.contents {
+        if !as_it_was(&step.path, &step.last) || contents_of(&step.path) != step.contents {
             continue;
         }
         if let Some(to) = retired_name(&step.path) {
@@ -236,16 +237,17 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
     let movers = steps
         .moving
         .into_iter()
-        .filter(|mover| as_it_was(&mover.path, &mover.revision))
+        .filter(|mover| as_it_was(&mover.path, &mover.last))
         .collect();
     done.extend(carry_out_moves(movers, &is_open));
     // After the moves, since a database moving is the document as it is now, and a retired one
     // isn't.
     for step in steps.returning {
-        if as_it_was(&step.path, &step.revision)
+        if as_it_was(&step.path, &step.last)
             && !is_open(&step.home)
             && arrive(&step.path, &step.home)
         {
+            record_place(&step.home);
             done.push(Done::Returned {
                 from: step.path,
                 to: step.home,
@@ -280,9 +282,21 @@ fn is_still_stranded(notebook: &Notebook, path: &Path) -> bool {
         && is_stranded_database(path)
 }
 
-/// The revision a database remembers syncing with last.
-fn recorded_revision(path: &Path) -> Option<String> {
-    Db::open_read_only(path).ok()?.load_sync_state()
+/// What a database remembers of its last sync, if it has synced.
+fn last_sync(path: &Path) -> Option<LastSync> {
+    let db = Db::open_read_only(path).ok()?;
+    Some(LastSync {
+        revision: db.load_sync_state()?,
+        place: db.load_sync_place(),
+    })
+}
+
+/// Says where a database has just been put, so that it's recognised if its logs move on before it's
+/// next opened. If this fails, it's left saying somewhere else, and is merely not stranded.
+fn record_place(path: &Path) {
+    if let (Some(place), Ok(mut db)) = (place_of(path), Db::open(path)) {
+        let _ = db.save_sync_place(&place);
+    }
 }
 
 /// What a walk of the notebook found.
@@ -342,24 +356,6 @@ fn walk(notebook: &Notebook, folder: &Path, walked: &mut Walked) {
             walked.set_aside.push(entry.path());
         }
     }
-}
-
-/// Whether a file's name is `.X.retired.kame`, `.X.retired-2.kame` or `.X.moving-1.kame`.
-fn is_set_aside(name: &str) -> bool {
-    let Some(inner) = name
-        .strip_prefix('.')
-        .and_then(|name| name.strip_suffix(".kame"))
-    else {
-        return false;
-    };
-    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
-    if let Some((stem, number)) = inner.rsplit_once(".moving-") {
-        return !stem.is_empty() && is_number(number);
-    }
-    let Some((stem, rest)) = inner.rsplit_once(".retired") else {
-        return false;
-    };
-    !stem.is_empty() && (rest.is_empty() || rest.strip_prefix('-').is_some_and(is_number))
 }
 
 /// One log folder, read.
@@ -426,6 +422,9 @@ fn what_to_do(
             if is_stranded_database(home) {
                 // It may be leaving too, and if it isn't, this waits for it.
                 Some(moves_in)
+            } else if is_on_others_logs_database(home) {
+                // A copy of something else, put there by hand, doesn't mean this was opened there.
+                None
             } else {
                 Some(Verdict::Retire {
                     opened_there: true,
@@ -496,6 +495,7 @@ fn carry_out_moves(movers: Vec<Going>, is_open: &impl Fn(&Path) -> bool) -> Vec<
     let mut done = Vec::new();
     for (mover, temporary) in parked {
         if arrive(&temporary, &mover.home) {
+            record_place(&mover.home);
             done.push(Done::Moved {
                 from: mover.path,
                 to: mover.home,
@@ -514,14 +514,15 @@ fn carry_out_moves(movers: Vec<Going>, is_open: &impl Fn(&Path) -> bool) -> Vec<
 fn those_coming_back(notebook: &Notebook, set_aside: &[PathBuf], logs: &[Logs]) -> Vec<Going> {
     let mut wanting: Vec<Going> = Vec::new();
     for path in set_aside {
-        let Some(revision) = recorded_revision(path) else {
+        let Some(last) = last_sync(path) else {
             continue;
         };
-        if let [home] = homes_of(&revision, logs)[..] {
+        if let [home] = homes_of(&last.revision, logs)[..] {
+            let home = home.to_path_buf();
             wanting.push(Going {
                 path: path.clone(),
-                revision,
-                home: home.to_path_buf(),
+                last,
+                home,
             });
         }
     }
@@ -554,9 +555,12 @@ fn revisions_of_stranded(notebook: &Notebook, logs: &[Logs]) -> Vec<String> {
         .map(|entry| entry.path)
         .filter(|path| is_database(path) && path.is_file() && logging_root(path).is_some())
         .filter_map(|path| {
-            let revision = recorded_revision(&path)?;
+            let last = last_sync(&path)?;
+            if !is_where_it_synced(&path, last.place.as_deref()) {
+                return None;
+            }
             let own = logs.iter().find(|logs| logs.document == path);
-            (!own.is_some_and(|logs| logs.store.contains(&revision))).then_some(revision)
+            (!own.is_some_and(|logs| logs.store.contains(&last.revision))).then_some(last.revision)
         })
         .collect()
 }
@@ -656,32 +660,5 @@ mod tests {
         assert!(!arrive(&gone, &to));
         assert!(wal.is_file());
         assert!(!sqlite_files(&to)[0].exists());
-    }
-
-    #[test]
-    fn retired_and_temporary_names_are_told_whole() {
-        for name in [
-            ".a.retired.kame",
-            ".a.retired-2.kame",
-            ".a.moving-1.kame",
-            ".v1.2.retired.kame",
-            ".a.retired.retired.kame",
-        ] {
-            assert!(is_set_aside(name), "{name}");
-        }
-        for name in [
-            "a.retired.kame",
-            ".a.kame",
-            ".retired.kame",
-            ".moving-1.kame",
-            ".a.retired-.kame",
-            ".a.retired-x.kame",
-            ".a.retiredx.kame",
-            ".a.moving-.kame",
-            ".a.moving.kame",
-            ".a.retired.kame-wal",
-        ] {
-            assert!(!is_set_aside(name), "{name}");
-        }
     }
 }

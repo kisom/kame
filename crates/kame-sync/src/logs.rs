@@ -1,7 +1,7 @@
 //! Revision logs meeting an open document: which documents are logged, and bringing a session and
 //! its logs together. See section 13 of `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use kame_core::edit::{try_apply_inverse, Cursor};
 use kame_core::links::{find_document, resolve_open_path};
@@ -34,6 +34,30 @@ pub fn logging_root(path: &Path) -> Option<PathBuf> {
         .skip(1)
         .find(|folder| folder.join(MARKER).is_file())
         .map(Path::to_path_buf)
+}
+
+/// Where a document is, as a sync records it: its path from its logging root, with `/` between
+/// folders. `None` if nothing above it turns logs on. It's relative so that a database carried to
+/// another machine, where the notebook may be somewhere else, is still in the same place.
+pub fn place_of(path: &Path) -> Option<String> {
+    let root = logging_root(path)?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let inside = absolute.strip_prefix(root).ok()?;
+    let mut parts: Vec<String> = Vec::new();
+    for part in inside.components() {
+        match part {
+            Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                parts.pop();
+            }
+            _ => {}
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Where a document's logs live: in a hidden folder beside it, so that a folder of documents
@@ -77,25 +101,86 @@ pub fn display_device(device: &str) -> &str {
     }
 }
 
-/// Whether a database has lost the logs it was syncing with: it remembers a revision that the
-/// logs beside it don't hold, because they're gone or belong to another document now. This is the
-/// case after a document is deleted or moved on another machine. It's false when that can't be
-/// told, for logs that can't be read or that came from a newer kame, since nothing is done on a
-/// guess.
-pub fn is_stranded(last: Option<&str>, folder: &Path) -> bool {
-    stranded_verdict(last, folder).unwrap_or(false)
+/// Whether a file's name is one the clean-up sets a database aside under: `.X.retired.kame`,
+/// `.X.retired-2.kame` or `.X.moving-1.kame`.
+pub fn is_set_aside(name: &str) -> bool {
+    let Some(inner) = name
+        .strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".kame"))
+    else {
+        return false;
+    };
+    let is_number = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    if let Some((stem, number)) = inner.rsplit_once(".moving-") {
+        return !stem.is_empty() && is_number(number);
+    }
+    let Some((stem, rest)) = inner.rsplit_once(".retired") else {
+        return false;
+    };
+    !stem.is_empty() && (rest.is_empty() || rest.strip_prefix('-').is_some_and(is_number))
+}
+
+/// Whether a database is where it says it last synced, `place`, in a folder with logs. This is what
+/// tells logs having left a database from a database having been copied somewhere there were none.
+/// One that's been set aside counts wherever it says: it isn't a document any more, and logs of its
+/// own would go to every machine and be taken there for a home.
+pub fn is_where_it_synced(path: &Path, place: Option<&str>) -> bool {
+    let Some(here) = place_of(path) else {
+        return false;
+    };
+    place == Some(here.as_str())
+        || path
+            .file_name()
+            .is_some_and(|name| is_set_aside(&name.to_string_lossy()))
+}
+
+/// Whether a database has lost the logs it was syncing with: it remembers a revision, it's at the
+/// place it last synced, and the logs beside it don't hold that revision, because they're gone or
+/// belong to another document now. This is the case after a document is deleted or moved on another
+/// machine. Being wrong here hides someone's document, so it's false anywhere else, as for a copy
+/// made by hand, and when it can't be told, for logs that can't be read or that came from a newer
+/// kame, since nothing is done on a guess.
+///
+/// Every part of kame asking this asks here, with what the database says about itself.
+pub fn is_stranded(path: &Path, revision: Option<&str>, place: Option<&str>) -> bool {
+    stranded_verdict(path, revision, place).unwrap_or(false)
 }
 
 /// The same, with `None` for when it can't be told, for a caller that remembers the answer.
-pub fn stranded_verdict(last: Option<&str>, folder: &Path) -> Option<bool> {
-    let Some(last) = last else {
+pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>) -> Option<bool> {
+    let Some(revision) = revision else {
         return Some(false);
     };
+    if !is_where_it_synced(path, place) {
+        return Some(false);
+    }
+    let folder = log_folder(path);
     if !folder.exists() {
         return Some(true);
     }
-    let store = Store::load(folder).ok()?;
-    (!store.holds_newer()).then(|| !store.contains(last))
+    let store = Store::load(&folder).ok()?;
+    (!store.holds_newer()).then(|| !store.contains(revision))
+}
+
+/// Whether the logs beside a database are another document's and it has never been here: it isn't
+/// where it last synced, those logs don't hold its revision, and they hold only other documents. It
+/// isn't stranded, so nothing retires it. But writing its history there would bring one document's
+/// words into another's logs, on every machine, so it doesn't sync, and they aren't its to delete or
+/// move. A database that has never synced has no history here to bring, and merges as ever.
+pub fn is_on_others_logs(
+    path: &Path,
+    document: uuid::Uuid,
+    revision: Option<&str>,
+    place: Option<&str>,
+) -> bool {
+    let Some(revision) = revision else {
+        return false;
+    };
+    if logging_root(path).is_none() || is_where_it_synced(path, place) {
+        return false;
+    }
+    Store::load(&log_folder(path))
+        .is_ok_and(|store| !store.contains(revision) && store.holds_only_others(document))
 }
 
 /// What a sync did.
@@ -103,6 +188,9 @@ pub fn stranded_verdict(last: Option<&str>, folder: &Path) -> Option<bool> {
 pub struct Outcome {
     /// Whether the logs no longer belong to this database, so that nothing was written.
     pub stranded: bool,
+    /// Whether the logs at its path are another document's, and this one was never at that path, so
+    /// that nothing was written. It isn't stranded, and the clean-up leaves it alone.
+    pub others_logs: bool,
     /// Revisions written to this machine's log.
     pub written: usize,
     /// Whether the document changed because of what arrived.
@@ -118,6 +206,11 @@ pub struct Logged {
     replica: Replica,
     store: Store,
     last: Option<String>,
+    /// Where the database says it last synced.
+    place: Option<String>,
+    /// Where it is now, by name and as a place.
+    path: PathBuf,
+    here: String,
     /// What the document and its properties were at the last sync.
     synced: Option<(Document, Metadata)>,
 }
@@ -126,7 +219,7 @@ impl Logged {
     /// `None` unless `session` is a document in a marked folder, and one whose logs can be read.
     pub fn open(session: &Session, device: &str) -> Option<Logged> {
         let path = session.path()?;
-        logging_root(path)?;
+        let here = place_of(path)?;
         let folder = log_folder(path);
         let store = Store::load(&folder).ok()?;
         Some(Logged {
@@ -136,6 +229,9 @@ impl Logged {
             },
             store,
             last: session.sync_state(),
+            place: session.sync_place(),
+            path: path.to_path_buf(),
+            here,
             synced: None,
         })
     }
@@ -183,7 +279,7 @@ impl Logged {
                 .is_some_and(|last| !self.store.contains(last));
         if self.last.is_some()
             && (!self.replica.folder.exists() || self.has_news() || not_held)
-            && is_stranded(self.last.as_deref(), &self.replica.folder)
+            && is_stranded(&self.path, self.last.as_deref(), self.place.as_deref())
         {
             return Ok(Outcome {
                 stranded: true,
@@ -193,10 +289,20 @@ impl Logged {
         self.store.refresh(&self.replica.folder)?;
         let local = session.document().clone();
         let metadata = session.metadata.clone();
+        if self.last.as_ref().is_some_and(|last| {
+            !self.store.contains(last)
+                && !is_where_it_synced(&self.path, self.place.as_deref())
+                && self.store.holds_only_others(local.id)
+        }) {
+            return Ok(Outcome {
+                others_logs: true,
+                ..Outcome::default()
+            });
+        }
         // A first sync of text that's already here builds on it. Otherwise it starts from this
         // document's history, which is shared with any machine sharing that past.
-        // What's remembered may not be in these logs, after Save As or with the logs cleared, or
-        // may be missing what it needs.
+        // What's remembered may not be in these logs, for a database copied here or last synced by
+        // a kame that recorded no place, or may be missing what it needs.
         self.last = self.last.take().filter(|last| self.store.is_usable(last));
         if self.last.is_none() {
             self.last = self.store.heads().into_iter().find(|head| {
@@ -256,7 +362,13 @@ impl Logged {
         if synced.metadata != metadata {
             session.set_metadata(synced.metadata);
         }
+        // The state first. Were the place to get there alone, a crash would leave a database at its
+        // place naming a revision from somewhere else, which reads as the logs having left.
         session.set_sync_state(&synced.head);
+        if self.place.as_deref() != Some(self.here.as_str()) {
+            session.set_sync_place(&self.here);
+            self.place = Some(self.here.clone());
+        }
         self.last = Some(synced.head);
         self.synced = Some((session.document().clone(), session.metadata.clone()));
         Ok(outcome)
@@ -433,6 +545,9 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
         db.save_document(&store.document(head))?;
         db.save_metadata(&store.metadata(head))?;
         db.save_sync_state(head)?;
+        if let Some(place) = place_of(path) {
+            db.save_sync_place(&place)?;
+        }
     }
     // Closing has folded the log into the file, and the name stays free of these if it hasn't.
     for suffix in ["-wal", "-shm"] {
@@ -447,6 +562,33 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_and_temporary_names_are_told_whole() {
+        for name in [
+            ".a.retired.kame",
+            ".a.retired-2.kame",
+            ".a.moving-1.kame",
+            ".v1.2.retired.kame",
+            ".a.retired.retired.kame",
+        ] {
+            assert!(is_set_aside(name), "{name}");
+        }
+        for name in [
+            "a.retired.kame",
+            ".a.kame",
+            ".retired.kame",
+            ".moving-1.kame",
+            ".a.retired-.kame",
+            ".a.retired-x.kame",
+            ".a.retiredx.kame",
+            ".a.moving-.kame",
+            ".a.moving.kame",
+            ".a.retired.kame-wal",
+        ] {
+            assert!(!is_set_aside(name), "{name}");
+        }
+    }
 
     #[test]
     fn enabling_logs_says_every_line_the_ignore_file_needs() {

@@ -6042,6 +6042,15 @@ impl KameApp {
                                 .to_string(),
                         );
                     }
+                    if outcome.others_logs && !self.stranded_mentioned {
+                        self.stranded_mentioned = true;
+                        self.notice_tracker.announced();
+                        self.notice = Some(
+                            "the logs at this path are another document's, so this one isn't \
+                             syncing. Save As gives it logs of its own"
+                                .to_string(),
+                        );
+                    }
                     if outcome.merged {
                         self.set_open_note(None);
                         self.notice_tracker.announced();

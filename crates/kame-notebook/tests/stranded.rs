@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use kame_core::session::Session;
+use kame_core::storage::Db;
 use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done, Healthy};
 use kame_notebook::Notebook;
 use kame_sync::logs::{build_from_logs, log_folder, Logged, MARKER};
@@ -70,6 +71,18 @@ fn copy_logs(from: &Path, to: &Path) {
     for entry in std::fs::read_dir(from).unwrap().flatten() {
         std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
     }
+}
+
+/// What a kame from before places were recorded leaves: a sync state, and no place.
+fn as_an_older_kame_left_it(path: &Path) {
+    let state = Db::open_read_only(path).unwrap().load_sync_state().unwrap();
+    let mut db = Db::open(path).unwrap();
+    db.clear_sync_state().unwrap();
+    db.save_sync_state(&state).unwrap();
+}
+
+fn place_in(path: &Path) -> Option<String> {
+    Db::open_read_only(path).unwrap().load_sync_place()
 }
 
 /// A log holding a line from a kame newer than this one.
@@ -508,8 +521,16 @@ fn two_databases_with_the_same_home_are_left_alone() {
         root.join("b.kame"),
     );
     synced(&a, "Words.");
+    // Each synced where it is, at the same revision, so that each is stale once the logs have left.
     std::fs::copy(&a, &copy).unwrap();
+    copy_logs(&a, &copy);
+    sync(&mut Session::open(&copy).unwrap());
+    remove_logs(&copy);
     move_logs(&a, &b);
+    assert_eq!(
+        find_stranded(&nb, &mut Healthy::default()),
+        [a.clone(), copy.clone()]
+    );
 
     assert!(reconcile(&nb, &[a.clone(), copy.clone()], None).is_empty());
     assert!(a.is_file());
@@ -1452,46 +1473,6 @@ fn a_retirement_goes_ahead_if_the_database_was_only_opened_after_it_was_decided(
     ));
 }
 
-/// A copy made before Save As cleared the state still names the original's revision, so it can't be
-/// told from a stale copy, and is retired. Renaming the retired file doesn't bring it back, as it
-/// still names that revision. Save As does, as it clears that.
-#[test]
-fn an_old_copy_retired_by_mistake_comes_back_by_save_as_and_not_by_a_rename() {
-    let (root, nb) = logged_notebook("stranded-old-copy");
-    let (a, z) = (root.join("a.kame"), root.join("z.kame"));
-    synced(&a, "Words.");
-    std::fs::copy(&a, &z).unwrap();
-    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&z));
-    let retired = root.join(".z.retired.kame");
-    assert_eq!(
-        reconcile(&nb, just(&z), None),
-        [Done::Retired {
-            from: z.clone(),
-            to: retired.clone(),
-            opened_there: true,
-            unsynced: false,
-        }]
-    );
-
-    let renamed = root.join("renamed.kame");
-    std::fs::rename(&retired, &renamed).unwrap();
-    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&renamed));
-    std::fs::rename(&renamed, &retired).unwrap();
-
-    let saved = root.join("saved.kame");
-    let mut session = Session::open(&retired).unwrap();
-    session.save_as(&saved).unwrap();
-    session.insert(" More.");
-    let outcome = sync(&mut session);
-    assert!(!outcome.stranded);
-    assert!(log_folder(&saved).is_dir());
-    drop(session);
-    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(text_of(&a).contains("Words."));
-    assert!(!words_in_logs(&log_folder(&a)).contains("More."));
-    assert!(words_in_logs(&log_folder(&saved)).contains("More."));
-}
-
 /// A document's one log.
 fn only_log(path: &Path) -> PathBuf {
     let logs: Vec<PathBuf> = std::fs::read_dir(log_folder(path))
@@ -1643,6 +1624,366 @@ fn logs_from_a_newer_kame_are_not_remembered_as_healthy() {
         .unwrap()
         .replace(&revision, &format!("_{}", &revision[1..]));
     std::fs::write(&log, spoiled).unwrap();
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+/// The case that found the rule: a byte-identical copy with the original's sync state and no logs.
+#[test]
+fn a_hand_copy_is_not_stranded_and_starts_its_own_logs() {
+    let (root, nb) = logged_notebook("stranded-hand-copy");
+    let (other_root, other_nb) = logged_notebook("stranded-hand-copy-other");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let (original, its_logs) = (std::fs::read(&a).unwrap(), words_in_logs(&log_folder(&a)));
+
+    let copies = [
+        (root.join("deep/down/a.kame"), "deep/down/a.kame"),
+        (root.join("z.kame"), "z.kame"),
+        (other_root.join("deep/a.kame"), "deep/a.kame"),
+        (other_root.join("z.kame"), "z.kame"),
+    ];
+    for (copy, _) in &copies {
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::copy(&a, copy).unwrap();
+    }
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(find_stranded(&other_nb, &mut Healthy::default()).is_empty());
+    let all: Vec<PathBuf> = copies.iter().map(|(copy, _)| copy.clone()).collect();
+    assert!(reconcile(&nb, &all, None).is_empty());
+    assert!(listed(&nb).contains(&"z.kame".to_string()));
+    assert!(root.join("z.kame").is_file());
+
+    for (copy, place) in &copies {
+        let mut session = Session::open(copy).unwrap();
+        let outcome = sync(&mut session);
+        assert!(!outcome.stranded, "{place}");
+        assert!(outcome.written > 0, "its history, as new logs");
+        assert!(words_in_logs(&log_folder(copy)).contains("Words."));
+        assert_eq!(session.sync_place().as_deref(), Some(*place));
+        session.insert(" More.");
+        assert!(sync(&mut session).written > 0, "and it syncs from then on");
+    }
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(find_stranded(&other_nb, &mut Healthy::default()).is_empty());
+    assert_eq!(std::fs::read(&a).unwrap(), original);
+    assert_eq!(words_in_logs(&log_folder(&a)), its_logs);
+}
+
+/// The path from the logging root is all a sync records, so that a database that travelled is still
+/// recognised. A copy put at the same path in another notebook, with no logs, can't be told from one.
+#[test]
+fn a_hand_copy_to_the_same_path_in_another_notebook_is_taken_for_a_stale_one() {
+    let (root, _) = logged_notebook("stranded-hand-copy-same-path");
+    let (other_root, other_nb) = logged_notebook("stranded-hand-copy-same-path-other");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let copy = other_root.join("a.kame");
+    std::fs::copy(&a, &copy).unwrap();
+    assert_eq!(
+        find_stranded(&other_nb, &mut Healthy::default()),
+        just(&copy)
+    );
+}
+
+/// The logs went with it, so it has what it remembers beside it, and just says where it is now.
+#[test]
+fn a_move_by_hand_with_its_logs_carries_on() {
+    let (root, nb) = logged_notebook("stranded-hand-move");
+    let (a, b) = (root.join("a.kame"), root.join("deep/b.kame"));
+    synced(&a, "Words.");
+    std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+    std::fs::rename(&a, &b).unwrap();
+    move_logs(&a, &b);
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+
+    let mut session = Session::open(&b).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert_eq!(outcome.written, 0);
+    assert_eq!(session.sync_place().as_deref(), Some("deep/b.kame"));
+}
+
+/// The logs stayed, so it starts its own, as a copy does, and the old ones have no database.
+#[test]
+fn a_move_by_hand_without_its_logs_is_like_a_copy() {
+    let (root, nb) = logged_notebook("stranded-hand-move-alone");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    std::fs::rename(&a, &b).unwrap();
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+
+    let mut session = Session::open(&b).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert!(outcome.written > 0);
+    assert!(log_folder(&a).is_dir());
+    assert!(log_folder(&b).is_dir());
+}
+
+#[test]
+fn a_database_with_no_recorded_place_is_not_stranded() {
+    let (root, nb) = logged_notebook("stranded-no-place");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    as_an_older_kame_left_it(&a);
+    assert_eq!(place_in(&a), None);
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(a.is_file());
+
+    let mut session = Session::open(&a).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert!(outcome.written > 0);
+    drop(session);
+    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+
+    remove_logs(&a);
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+}
+
+#[test]
+fn a_retired_file_renamed_back_by_hand_syncs_again() {
+    let (root, nb) = logged_notebook("stranded-renamed-back");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    let retired = root.join(".a.retired.kame");
+
+    // Under the name it left, it's in the place it last synced, with the logs still gone.
+    std::fs::rename(&retired, &a).unwrap();
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+
+    let back = root.join("back.kame");
+    std::fs::rename(&a, &back).unwrap();
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    let mut session = Session::open(&back).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert!(outcome.written > 0);
+    assert!(words_in_logs(&log_folder(&back)).contains("Words."));
+    session.insert(" More.");
+    assert!(sync(&mut session).written > 0);
+    drop(session);
+    assert!(!log_folder(&a).exists());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+}
+
+/// A log folder for a name like this would be carried to every machine, and be taken there for a
+/// document's home. So a set-aside database that's opened stays out of the logs, whatever its place.
+#[test]
+fn a_retired_file_opened_where_it_is_writes_no_logs() {
+    let (root, nb) = logged_notebook("stranded-retired-opened");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    let retired = root.join(".a.retired.kame");
+
+    let mut session = Session::open(&retired).unwrap();
+    session.insert(" Typed in the retired file.");
+    let outcome = sync(&mut session);
+    assert!(outcome.stranded);
+    assert_eq!(outcome.written, 0);
+    assert!(!log_folder(&retired).exists());
+    drop(session);
+    assert!(text_of(&retired).contains("Typed in the retired file."));
+}
+
+#[test]
+fn a_copy_on_a_reused_path() {
+    let (root, nb) = logged_notebook("stranded-copy-on-reused-path");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Old words.");
+    synced(&other, "A different document.");
+    remove_logs(&a);
+    move_logs(&other, &a);
+    std::fs::remove_file(&other).unwrap();
+    let before = words_in_logs(&log_folder(&a));
+    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+    let mut session = Session::open(&a).unwrap();
+    assert!(sync(&mut session).stranded);
+    drop(session);
+    assert_eq!(words_in_logs(&log_folder(&a)), before);
+}
+
+/// Not stranded, by the rule, since it was never synced here. But its history mustn't reach them.
+#[test]
+fn a_database_from_elsewhere_on_another_documents_logs_is_listed_and_writes_nothing() {
+    let (root, nb) = logged_notebook("stranded-others-logs");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Old words.");
+    synced(&other, "A different document.");
+    remove_logs(&a);
+    move_logs(&other, &a);
+    std::fs::remove_file(&other).unwrap();
+    as_an_older_kame_left_it(&a);
+    let before = words_in_logs(&log_folder(&a));
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(listed(&nb).contains(&"a.kame".to_string()));
+
+    let mut session = Session::open(&a).unwrap();
+    session.insert(" Typed here.");
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert!(outcome.others_logs);
+    assert_eq!(outcome.written, 0);
+    drop(session);
+    assert_eq!(words_in_logs(&log_folder(&a)), before);
+    assert!(text_of(&a).contains("Typed here."));
+    assert_eq!(place_in(&a), None, "it hasn't synced here");
+}
+
+#[test]
+fn a_database_that_arrives_at_a_new_home_is_recognised_if_that_moves_too() {
+    let (root, nb) = logged_notebook("stranded-second-move");
+    let (a, b, c) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("c.kame"),
+    );
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(place_in(&b).as_deref(), Some("b.kame"));
+
+    move_logs(&b, &c);
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&b));
+    assert_eq!(
+        reconcile(&nb, just(&b), None),
+        [Done::Moved {
+            from: b.clone(),
+            to: c.clone()
+        }]
+    );
+    assert_eq!(place_in(&c).as_deref(), Some("c.kame"));
+}
+
+#[test]
+fn a_retired_database_found_by_its_revision_records_its_new_place_on_arrival() {
+    let (root, nb) = logged_notebook("stranded-return-place");
+    let (a, b, c) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("c.kame"),
+    );
+    synced(&a, "Words.");
+    let carried = root.join(".carried");
+    std::fs::rename(log_folder(&a), &carried).unwrap();
+    reconcile(&nb, just(&a), None);
+    let retired = root.join(".a.retired.kame");
+    assert_eq!(place_in(&retired).as_deref(), Some("a.kame"), "as it was");
+
+    std::fs::rename(&carried, log_folder(&b)).unwrap();
+    assert_eq!(
+        reconcile(&nb, &[], None),
+        [Done::Returned {
+            from: retired,
+            to: b.clone()
+        }]
+    );
+    assert_eq!(place_in(&b).as_deref(), Some("b.kame"));
+
+    move_logs(&b, &c);
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&b));
+}
+
+/// Then it's merely not stranded, which is what the rule falls back on.
+#[test]
+fn a_place_that_cannot_be_written_on_arrival_does_not_stop_the_move() {
+    let (root, nb) = logged_notebook("stranded-place-unwritable");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    set_mode(&a, 0o444);
+    assert_eq!(
+        reconcile(&nb, just(&a), None),
+        [Done::Moved {
+            from: a.clone(),
+            to: b.clone()
+        }]
+    );
+    set_mode(&b, 0o644);
+    assert_eq!(place_in(&b).as_deref(), Some("a.kame"));
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+}
+
+#[test]
+fn a_hand_copy_does_not_keep_a_retired_database_from_its_home() {
+    let (root, nb) = logged_notebook("stranded-copy-and-retired");
+    let (a, b, z) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("z.kame"),
+    );
+    synced(&a, "Words.");
+    std::fs::copy(&a, &z).unwrap();
+    let retired = root.join(".a.retired.kame");
+    std::fs::rename(&a, &retired).unwrap();
+    move_logs(&a, &b);
+
+    assert_eq!(
+        reconcile(&nb, &[], None),
+        [Done::Returned {
+            from: retired,
+            to: b.clone()
+        }]
+    );
+    assert!(z.is_file());
+}
+
+/// That copy has nothing to do with the document whose logs came there, so it hasn't been opened.
+#[test]
+fn a_hand_copy_of_another_document_at_a_new_home_leaves_the_stale_one_alone() {
+    let (root, nb) = logged_notebook("stranded-copy-at-home");
+    let (a, b, other) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("other.kame"),
+    );
+    synced(&a, "Words of a.");
+    synced(&other, "Words of the other.");
+    std::fs::copy(&other, &b).unwrap();
+    move_logs(&a, &b);
+    let before = std::fs::read(&b).unwrap();
+
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(a.is_file());
+    assert_eq!(std::fs::read(&b).unwrap(), before);
+}
+
+#[test]
+fn a_step_is_skipped_if_the_place_it_found_has_changed() {
+    let (root, nb) = logged_notebook("stranded-changed-place");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    let steps = decide(&nb, just(&a));
+    Session::open(&a).unwrap().set_sync_place("elsewhere.kame");
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(a.is_file());
+}
+
+#[test]
+fn another_recorded_place_is_read_again() {
+    let (root, nb) = logged_notebook("stranded-healthy-place");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    Session::open(&a).unwrap().set_sync_place("elsewhere.kame");
+    spoil_at_the_same_size(&a);
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+
+    Session::open(&a).unwrap().set_sync_place("a.kame");
 
     assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
 }

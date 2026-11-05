@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 
 use kame_core::edit::Cursor;
 use kame_core::session::Session;
+use kame_core::storage::Db;
 use kame_sync::logs::{
     build_from_logs, device_name, display_device, find_or_build, is_stranded, log_folder,
-    logging_root, orphaned_logs, Logged, MARKER,
+    logging_root, orphaned_logs, place_of, Logged, MARKER,
 };
 use kame_sync::revlog::Store;
 
@@ -549,14 +550,16 @@ fn a_remembered_revision_missing_from_the_logs_starts_from_the_history_again() {
     original.sync(&mut there, 1);
     let checkpoints = revisions(&original.path);
     assert!(checkpoints > 1);
-    // After Save As the copy has logs of its own, which the original's don't stand in for.
+    drop(there);
+    // A copy has logs of its own, which the original's don't stand in for.
     let talos = Machine {
         path: original.path.with_file_name("copy.kame"),
         device: original.device.clone(),
     };
-    there.save_as(&talos.path).unwrap();
-    assert_eq!(there.sync_state(), None);
-    talos.sync(&mut there, 2);
+    std::fs::copy(&original.path, &talos.path).unwrap();
+    let mut there = talos.session();
+    assert!(there.sync_state().is_some());
+    assert!(!talos.sync(&mut there, 2).stranded);
     assert_eq!(
         revisions(&talos.path),
         checkpoints,
@@ -567,6 +570,25 @@ fn a_remembered_revision_missing_from_the_logs_starts_from_the_history_again() {
     titan.sync(&mut here, 3);
     titan.receive_from(&talos);
     assert_eq!(titan.sync(&mut here, 4).notes, 0);
+}
+
+/// Save As leaves nothing remembered, and its logs start the same way.
+#[test]
+fn a_save_as_starts_from_the_history_again() {
+    let (original, _) = two_machines();
+    let mut there = original.session();
+    original.sync(&mut there, 1);
+    let checkpoints = revisions(&original.path);
+    let copy = Machine {
+        path: original.path.with_file_name("copy.kame"),
+        device: original.device.clone(),
+    };
+    there.save_as(&copy.path).unwrap();
+    assert_eq!(there.sync_state(), None);
+    assert_eq!(there.sync_place(), None);
+    copy.sync(&mut there, 2);
+    assert_eq!(revisions(&copy.path), checkpoints);
+    assert_eq!(there.sync_place().as_deref(), Some("copy.kame"));
 }
 
 /// The main use: left open on one machine while writing on another.
@@ -645,8 +667,16 @@ fn undo_takes_an_idle_copy_back_before_everything_that_arrived_and_an_edit_ends_
     assert!(idle.document().blocks[1].text.ends_with(" Here."));
 }
 
-fn missing_folder() -> PathBuf {
-    common::test_folder("stranded-missing").join(".gone.kame.sync")
+/// Whether a database at `path` that last synced there, and remembers `state`, is stranded.
+fn stranded_there(path: &Path, state: &str) -> bool {
+    is_stranded(path, Some(state), place_of(path).as_deref())
+}
+
+/// A path in a marked folder, with no logs.
+fn path_with_no_logs() -> PathBuf {
+    let root = common::test_folder("stranded-missing");
+    std::fs::write(root.join(MARKER), "").unwrap();
+    root.join("gone.kame")
 }
 
 /// A second document for the same machine, with logs of its own.
@@ -660,12 +690,26 @@ fn another_document(machine: &Machine, name: &str) -> PathBuf {
 
 #[test]
 fn a_database_without_a_sync_state_is_never_stranded() {
-    assert!(!is_stranded(None, &missing_folder()));
+    let path = path_with_no_logs();
+    assert!(!is_stranded(&path, None, place_of(&path).as_deref()));
 }
 
 #[test]
 fn a_recorded_revision_with_no_logs_is_stranded() {
-    assert!(is_stranded(Some("r"), &missing_folder()));
+    assert!(stranded_there(&path_with_no_logs(), "r"));
+}
+
+#[test]
+fn a_recorded_revision_with_no_logs_and_no_place_or_another_is_not_stranded() {
+    let path = path_with_no_logs();
+    assert!(!is_stranded(&path, Some("r"), None));
+    assert!(!is_stranded(&path, Some("r"), Some("elsewhere.kame")));
+}
+
+#[test]
+fn nothing_is_stranded_with_nothing_above_it_turning_logs_on() {
+    let path = common::test_folder("stranded-no-marker").join("a.kame");
+    assert!(!is_stranded(&path, Some("r"), Some("a.kame")));
 }
 
 #[test]
@@ -674,7 +718,7 @@ fn a_recorded_revision_in_the_logs_beside_it_is_not_stranded() {
     let mut session = talos.session();
     talos.sync(&mut session, 1);
     let state = session.sync_state().expect("a sync leaves its state");
-    assert!(!is_stranded(Some(&state), &log_folder(&talos.path)));
+    assert!(!stranded_there(&talos.path, &state));
 }
 
 #[test]
@@ -684,7 +728,7 @@ fn logs_that_belong_to_another_document_leave_it_stranded() {
     talos.sync(&mut session, 1);
     let state = session.sync_state().unwrap();
     let other = another_document(&talos, "different.kame");
-    assert!(is_stranded(Some(&state), &log_folder(&other)));
+    assert!(stranded_there(&other, &state));
 }
 
 #[test]
@@ -704,7 +748,7 @@ fn logs_that_cannot_be_read_do_not_count_as_stranded() {
     for log in &logs {
         std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o000)).unwrap();
     }
-    let stranded = is_stranded(Some(&state), &folder);
+    let stranded = stranded_there(&talos.path, &state);
     for log in &logs {
         std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
@@ -736,7 +780,7 @@ fn logs_from_a_newer_version_do_not_count_as_stranded() {
     let store = Store::load(&folder).unwrap();
     assert!(store.holds_newer());
     assert!(!store.contains(&state));
-    assert!(!is_stranded(Some(&state), &folder));
+    assert!(!stranded_there(&talos.path, &state));
 }
 
 #[test]
@@ -822,4 +866,173 @@ fn a_first_sync_is_not_stranded() {
     let outcome = talos.sync(&mut session, 1);
     assert!(!outcome.stranded);
     assert!(revisions(&talos.path) > 0);
+}
+
+#[test]
+fn a_place_is_the_path_from_the_logging_root() {
+    let root = common::test_folder("place");
+    let deep = root.join("a/b");
+    std::fs::create_dir_all(&deep).unwrap();
+    assert_eq!(place_of(&deep.join("essay.kame")), None);
+    std::fs::write(root.join(MARKER), "").unwrap();
+    assert_eq!(
+        place_of(&deep.join("essay.kame")).as_deref(),
+        Some("a/b/essay.kame")
+    );
+    assert_eq!(
+        place_of(&root.join("essay.kame")).as_deref(),
+        Some("essay.kame")
+    );
+    assert_eq!(
+        place_of(&deep.join("../essay.kame")).as_deref(),
+        Some("a/essay.kame")
+    );
+    std::fs::write(deep.join(MARKER), "").unwrap();
+    assert_eq!(
+        place_of(&deep.join("essay.kame")).as_deref(),
+        Some("essay.kame"),
+        "the nearest marker"
+    );
+}
+
+#[test]
+fn a_sync_and_a_build_record_the_place() {
+    let (talos, titan) = two_machines();
+    let mut there = talos.session();
+    assert_eq!(there.sync_place(), None);
+    talos.sync(&mut there, 1);
+    assert_eq!(there.sync_place().as_deref(), Some("essay.kame"));
+
+    std::fs::remove_file(&titan.path).unwrap();
+    titan.receive_from(&talos);
+    assert!(build_from_logs(&titan.path).unwrap());
+    assert_eq!(titan.session().sync_place().as_deref(), Some("essay.kame"));
+}
+
+/// As an older kame leaves one.
+fn forget_the_place(path: &Path) {
+    let state = Db::open_read_only(path).unwrap().load_sync_state().unwrap();
+    let mut db = Db::open(path).unwrap();
+    db.clear_sync_state().unwrap();
+    db.save_sync_state(&state).unwrap();
+}
+
+#[test]
+fn a_database_with_no_place_and_no_logs_starts_them_again() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    drop(session);
+    forget_the_place(&talos.path);
+    std::fs::remove_dir_all(log_folder(&talos.path)).unwrap();
+
+    let mut session = talos.session();
+    let outcome = talos.sync(&mut session, 2);
+    assert!(!outcome.stranded);
+    assert!(outcome.written > 0);
+    assert_eq!(session.sync_place().as_deref(), Some("essay.kame"));
+}
+
+/// Once it has synced here, it's somewhere it can be left behind.
+#[test]
+fn logs_going_after_a_first_sync_at_a_new_place_stop_the_writing() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    drop(session);
+    let copy = Machine {
+        path: talos.path.with_file_name("copy.kame"),
+        device: talos.device.clone(),
+    };
+    std::fs::copy(&talos.path, &copy.path).unwrap();
+
+    let mut session = copy.session();
+    let mut logged = copy.logged(&session);
+    assert!(!logged.sync(&mut session, 2).unwrap().stranded);
+    let folder = log_folder(&copy.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    copy.append(&mut session, 0, " More words.");
+    assert!(logged.sync(&mut session, 3).unwrap().stranded);
+    assert!(!folder.exists());
+}
+
+fn hand_copy_on_another_documents_logs(talos: &Machine) -> (Machine, PathBuf) {
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    drop(session);
+    let other = another_document(talos, "different.kame");
+    std::fs::remove_file(&other).unwrap();
+    std::fs::copy(&talos.path, &other).unwrap();
+    let folder = log_folder(&other);
+    (
+        Machine {
+            path: other,
+            device: talos.device.clone(),
+        },
+        folder,
+    )
+}
+
+/// Not stranded, since it never synced here, and these logs still aren't its.
+#[test]
+fn a_hand_copy_on_another_documents_logs_writes_nothing() {
+    let (talos, _) = two_machines();
+    let (copy, folder) = hand_copy_on_another_documents_logs(&talos);
+    let before = revisions(&copy.path);
+
+    let mut session = copy.session();
+    copy.append(&mut session, 0, " Typed in the copy.");
+    let outcome = copy.sync(&mut session, 3);
+
+    assert!(!outcome.stranded);
+    assert!(outcome.others_logs);
+    assert_eq!(outcome.written, 0);
+    assert!(!outcome.merged);
+    assert_eq!(revisions(&copy.path), before);
+    assert_eq!(session.sync_place(), Some("essay.kame".to_string()));
+    let store = Store::load(&folder).unwrap();
+    for head in store.heads() {
+        assert!(!store.document(&head).blocks[0].text.contains("shared"));
+    }
+}
+
+/// The same with no place at all, as a database last synced by an older kame has.
+#[test]
+fn a_database_with_no_place_on_another_documents_logs_writes_nothing() {
+    let (talos, _) = two_machines();
+    let (copy, _) = hand_copy_on_another_documents_logs(&talos);
+    forget_the_place(&copy.path);
+    let before = revisions(&copy.path);
+
+    let mut session = copy.session();
+    let outcome = copy.sync(&mut session, 3);
+
+    assert!(!outcome.stranded);
+    assert!(outcome.others_logs);
+    assert_eq!(revisions(&copy.path), before);
+}
+
+/// Logs of the same document have nothing foreign to bring in, as when another machine started
+/// them again.
+#[test]
+fn a_database_with_no_place_on_logs_of_its_own_document_merges_with_them() {
+    let (talos, titan) = two_machines();
+    let mut there = talos.session();
+    talos.append(&mut there, 0, " From talos.");
+    talos.sync(&mut there, 1);
+    let mut here = titan.session();
+    titan.append(&mut here, 1, " From titan.");
+    titan.sync(&mut here, 2);
+    drop(here);
+    forget_the_place(&titan.path);
+    std::fs::remove_dir_all(log_folder(&titan.path)).unwrap();
+    titan.receive_from(&talos);
+
+    let mut here = titan.session();
+    let outcome = titan.sync(&mut here, 3);
+    assert!(!outcome.stranded);
+    assert!(!outcome.others_logs);
+    assert_eq!(outcome.notes, 0);
+    assert!(here.document().blocks[0].text.ends_with(" From talos."));
+    assert!(here.document().blocks[1].text.ends_with(" From titan."));
 }

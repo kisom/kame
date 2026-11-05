@@ -485,6 +485,16 @@ impl Session {
         let _ = self.db.save_sync_state(state);
     }
 
+    /// Where a sync tool last synced this document, in its own terms.
+    pub fn sync_place(&self) -> Option<String> {
+        self.db.load_sync_place()
+    }
+
+    /// Records this for a sync tool. A failed write isn't reported, as with the state.
+    pub fn set_sync_place(&mut self, place: &str) {
+        let _ = self.db.save_sync_place(place);
+    }
+
     /// What the first save suggests calling the file: the source's name for an
     /// import, whatever title its front matter gave the document.
     pub fn suggested_file_name(&self) -> String {
@@ -2950,10 +2960,13 @@ mod tests {
         let path = temp_db_path();
         let mut session = open(&path);
         session.set_sync_state("x");
+        session.set_sync_place("here.kame");
         assert_eq!(session.sync_state().as_deref(), Some("x"));
+        assert_eq!(session.sync_place().as_deref(), Some("here.kame"));
         let other = path.with_file_name("other.kame");
         session.save_as(&other).unwrap();
         assert_eq!(session.sync_state(), None);
+        assert_eq!(session.sync_place(), None);
     }
 
     fn first_block_id(session: &Session) -> crate::model::BlockId {

@@ -9863,6 +9863,59 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         assert_eq!(page.app.session.history(), (1, 1));
     }
 
+    /// A page with a word on it and a marginal just added to it, as Annotate > Marginal leaves it.
+    fn page_with_unwritten_marginal() -> (Headless, Document) {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let before = session.document().clone();
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+        (page, before)
+    }
+
+    #[test]
+    fn closing_an_unwritten_marginal_with_ctrl_enter_leaves_none() {
+        let (mut page, before) = page_with_unwritten_marginal();
+        let modifiers = egui::Modifiers {
+            command: true,
+            ..egui::Modifiers::NONE
+        };
+        page.frame(vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+        ]);
+        assert_eq!(page.app.open_note, None);
+        assert_eq!(page.app.session.document(), &before);
+    }
+
+    #[test]
+    fn closing_an_unwritten_marginal_with_escape_leaves_none() {
+        let (mut page, before) = page_with_unwritten_marginal();
+        page.frame(
+            [true, false]
+                .map(|pressed| egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .to_vec(),
+        );
+        assert_eq!(page.app.open_note, None);
+        assert_eq!(page.app.session.document(), &before);
+    }
+
     #[test]
     fn closing_a_marginal_that_was_written_in_keeps_it() {
         let mut session = Session::anonymous().unwrap();

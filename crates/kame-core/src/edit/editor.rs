@@ -1091,8 +1091,8 @@ impl Editor {
     /// leaves the document and the history untouched.
     ///
     /// A body that is already `new_body` still produces an op — the caller owns
-    /// the choice of whether that is an edit worth logging (the GUI compares
-    /// before calling, so per-keystroke commits only record real changes).
+    /// the choice of whether that is an edit worth logging, and
+    /// `Session::set_annotation_body` doesn't ask for one.
     pub fn set_annotation_body(
         &mut self,
         annotation_id: AnnotationId,

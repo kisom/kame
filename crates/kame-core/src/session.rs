@@ -2194,7 +2194,8 @@ impl Session {
         unwritten && self.undo()
     }
 
-    /// Replaces a note's body and persists it as one undoable edit.
+    /// Replaces a note's body and persists it as one undoable edit. A body the note already has
+    /// is no edit, and nothing is logged for it.
     ///
     /// Returns whether the write landed; a refused edit leaves `last_error` set
     /// so the popover's caller can see why nothing was saved.
@@ -2202,12 +2203,19 @@ impl Session {
         if self.save_failed {
             return false;
         }
+        let annotation = self
+            .editor
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id);
         // An emptied marginalia note is removed rather than kept as an empty
         // margin entry.
         let is_empty_marginal = body.trim().is_empty()
-            && self.editor.document().annotations.iter().any(|annotation| {
-                annotation.id == id && annotation.kind == AnnotationKind::Marginal
-            });
+            && annotation.is_some_and(|annotation| annotation.kind == AnnotationKind::Marginal);
+        if !is_empty_marginal && annotation.is_some_and(|annotation| annotation.body == body) {
+            return true;
+        }
         let result = if is_empty_marginal {
             self.editor.remove_annotation(id)
         } else {
@@ -3020,6 +3028,24 @@ mod tests {
 
     fn open(path: &Path) -> Session {
         Session::open(path).expect("open a session")
+    }
+
+    #[test]
+    fn saying_what_a_note_already_says_is_not_an_edit() {
+        for kind in [
+            AnnotationKind::Note,
+            AnnotationKind::Footnote,
+            AnnotationKind::Marginal,
+        ] {
+            let mut session = Session::anonymous().unwrap();
+            session.insert("word");
+            let id = session.add_annotation(kind).unwrap();
+            let body = session.document().annotations[0].body.clone();
+            let history = session.history();
+            assert!(session.set_annotation_body(id, &body));
+            assert_eq!(session.history(), history);
+            assert_eq!(session.db.load_ops().unwrap().len(), history.0);
+        }
     }
 
     fn linked_document() -> Session {

@@ -1461,6 +1461,8 @@ enum MenuAction {
     Properties,
     File(FileCommand),
     Annotate(AnnotationKind),
+    Cite,
+    References,
     TypeSize(f32),
     ToggleDark,
     ToggleHyphenate,
@@ -2538,7 +2540,7 @@ impl KameApp {
             || self.nb.file_op.is_some()
             || self.nb.move_report.is_some()
             || self.publishing.report.is_some()
-            || self.refs.shown.is_some()
+            || self.refs.window_open()
     }
 
     /// Closes whichever file dialog is open. Returns whether one was closed, so
@@ -2554,7 +2556,7 @@ impl KameApp {
         self.link_prompt = None;
         self.restore_picker = None;
         self.publishing.report = None;
-        self.refs.shown = None;
+        self.refs.dismiss();
         open
     }
 
@@ -2775,6 +2777,9 @@ impl KameApp {
 
     /// Replaces the current document with an empty one.
     fn start_new(&mut self) {
+        if self.held_by_rename() {
+            return;
+        }
         self.save_position_now();
         match Session::anonymous() {
             Ok(session) => {
@@ -2825,7 +2830,7 @@ impl KameApp {
         self.open_note_body = String::new();
         self.open_note_focus = false;
         self.find = None;
-        self.refs.shown = None;
+        self.refs.close_windows();
         self.typewriter_anchor = None;
         // The scroll area remembers its offset, which belonged to the old document.
         self.pending_scroll = Some(0.0);
@@ -3080,6 +3085,25 @@ impl KameApp {
         });
         if link_chord {
             self.begin_link();
+        }
+        // Ctrl-Shift-C cites, on the page only: in a dialog's field or a note's box the keys are
+        // that field's.
+        let cite_chord = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::C,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if modifiers.command && modifiers.shift
+                )
+            })
+        });
+        if cite_chord && self.page_has_keyboard(ctx) {
+            self.begin_cite();
         }
         // Ctrl-S saves. A document already on disk is saved continuously, so
         // this is a no-op there; an anonymous document prompts for a file first.
@@ -3538,6 +3562,18 @@ impl KameApp {
                             action = Some(MenuAction::Annotate(kind));
                         }
                     }
+                    ui.separator();
+                    let in_notebook = self.nb.notebook.is_some();
+                    let cite = ui.add_enabled_ui(in_notebook, |ui| {
+                        menu_entry(ui, "Cite…", Some("Ctrl-Shift-C"), false)
+                            .on_disabled_hover_text("Citing needs a notebook.")
+                    });
+                    if cite.inner.clicked() {
+                        action = Some(MenuAction::Cite);
+                    }
+                    if in_notebook && menu_item(ui, "References…", None, false) {
+                        action = Some(MenuAction::References);
+                    }
                 });
                 let view_menu = ui.menu_button("View", |ui| {
                     ui.set_min_width(240.0);
@@ -3714,6 +3750,8 @@ impl KameApp {
                     self.open_note_pos = None;
                 }
             }
+            MenuAction::Cite => self.begin_cite(),
+            MenuAction::References => self.open_references(),
             MenuAction::TypeSize(step) => self.adjust_font_size(step),
             MenuAction::ToggleDark => self.apply_dark_toggle(ctx),
             MenuAction::ToggleCheck => {
@@ -4924,6 +4962,7 @@ impl KameApp {
         // right-click, rather than as rows of buttons in the status bar.
         let mut link_document = false;
         let mut insert_image = false;
+        let mut cite = false;
         let mut mark_action = None;
         let mark_menu = self.mark_menu.clone();
         let link_menu = self.link_menu.clone();
@@ -5051,6 +5090,10 @@ impl KameApp {
                     ui.close();
                 }
             }
+            if self.nb.notebook.is_some() && ui.button("Cite…").clicked() {
+                cite = true;
+                ui.close();
+            }
             ui.separator();
             if ui.button("Insert image…").clicked() {
                 insert_image = true;
@@ -5076,6 +5119,9 @@ impl KameApp {
             .and_then(|menu| menu.link)
         {
             self.open_link_prompt(link.block_id, link.start, link.end, Some(link.url));
+        }
+        if cite {
+            self.begin_cite();
         }
         if insert_image {
             self.insert_image_with_dialog();
@@ -5287,6 +5333,7 @@ impl KameApp {
                             ),
                             ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
                             ("Ctrl-Shift-F", "footnote on the selection or word"),
+                            ("Ctrl-Shift-C", "cite a reference, in a notebook"),
                             ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
                             ("Ctrl-Shift-0", "back to body text"),
                             ("#  ##  ###", "heading, typed at the start of a line"),
@@ -5867,6 +5914,9 @@ impl KameApp {
     /// surfaces the reason through `Session::last_error`.
     fn open_document(&mut self, typed: String) {
         let heading = self.pending_heading.take();
+        if self.held_by_rename() {
+            return;
+        }
         if typed.is_empty() {
             self.notice = None;
             self.session.last_error = Some("no path given".to_string());
@@ -6130,6 +6180,9 @@ impl KameApp {
     /// Merges what is on the screen with the file that replaced this one, and carries on in that
     /// file. On failure these words stay on the screen, with the prompt still up.
     fn merge_with_replacement(&mut self) {
+        if self.held_by_rename() {
+            return;
+        }
         match kame_sync::files::merge_replaced(&self.session) {
             Ok((session, result)) => {
                 let (caret, scroll) = (self.session.caret, self.page_scroll);
@@ -6619,6 +6672,7 @@ impl eframe::App for KameApp {
         self.show_replaced_prompt(ui.ctx());
         self.show_site_report(ui.ctx());
         self.show_citation(ui.ctx());
+        self.show_reference_windows(ui.ctx());
         self.remember_document();
         self.keep_position(ui.ctx());
     }
@@ -6637,6 +6691,8 @@ pub(crate) struct Headless {
     pub(crate) app: KameApp,
     ctx: egui::Context,
     time: f64,
+    /// What the last frame drew, as a screen reader is told it, for finding a window's buttons.
+    drawn: Option<egui::accesskit::TreeUpdate>,
 }
 
 #[cfg(test)]
@@ -6645,12 +6701,14 @@ impl Headless {
 
     pub(crate) fn new(session: Session) -> Headless {
         let ctx = egui::Context::default();
+        ctx.enable_accesskit();
         let creation = eframe::CreationContext::_new_kittest(ctx.clone());
         let app = KameApp::new(&creation, session, None, KameConfig::default());
         Headless {
             app,
             ctx,
             time: 0.0,
+            drawn: None,
         }
     }
 
@@ -6668,7 +6726,7 @@ impl Headless {
         };
         let app = &mut self.app;
         app.notebook_tick(&self.ctx);
-        let output = self.ctx.run_ui(input, |ui| {
+        let mut output = self.ctx.run_ui(input, |ui| {
             app.handle_input(ui.ctx());
             let history = app.session.history();
             app.notice_tracker.update(&mut app.notice, history);
@@ -6680,7 +6738,9 @@ impl Headless {
                         .show(ui, |ui| app.draw_surface(ui));
                 });
             app.show_citation(ui.ctx());
+            app.show_reference_windows(ui.ctx());
         });
+        self.drawn = output.platform_output.accesskit_update.take();
         output.drop_without_applying_deltas();
     }
 
@@ -6706,6 +6766,49 @@ impl Headless {
     pub(crate) fn double_click(&mut self, pos: Pos2) {
         self.click(pos);
         self.press_and_release(pos);
+    }
+
+    /// Whether the last frame drew words holding `text`.
+    pub(crate) fn sees(&self, text: &str) -> bool {
+        self.drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .any(|(_, node)| {
+                [node.label(), node.value()]
+                    .into_iter()
+                    .flatten()
+                    .any(|words| words.contains(text))
+            })
+    }
+
+    /// Whether the last frame drew something saying `label` that can be pressed.
+    pub(crate) fn can_press(&self, label: &str) -> bool {
+        self.drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .any(|(_, node)| {
+                node.label() == Some(label) && node.bounds().is_some() && !node.is_disabled()
+            })
+    }
+
+    /// Clicks the button saying `label`, wherever it's drawn. A centred window goes by its size
+    /// on the frame before, so it takes a couple to settle after growing.
+    pub(crate) fn press(&mut self, label: &str) {
+        for _ in 0..2 {
+            self.frame(Vec::new());
+        }
+        let bounds = self
+            .drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .find_map(|(_, node)| node.bounds().filter(|_| node.label() == Some(label)));
+        let Some(bounds) = bounds else {
+            panic!("no button saying {label:?}");
+        };
+        self.click(Pos2::new(
+            (bounds.x0 + bounds.x1) as f32 / 2.0,
+            (bounds.y0 + bounds.y1) as f32 / 2.0,
+        ));
     }
 
     /// Where the text starts across the page.

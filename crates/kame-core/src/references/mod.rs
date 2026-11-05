@@ -30,7 +30,7 @@ pub enum Kind {
 
 impl Kind {
     /// The fields other than `kind` that this kind has.
-    fn fields(self) -> &'static [&'static str] {
+    pub fn fields(self) -> &'static [&'static str] {
         match self {
             Kind::Article => &[
                 "authors",

@@ -1,22 +1,26 @@
 //! A notebook's references, from the app: keeping up with its list, what a key looks like on the
-//! page, and the notes that come of keys with no reference. The page and the caret keys shape
-//! `with_citation_spans` of a block, a copy that is never edited, so a known key is coloured,
-//! kept whole and clicked on as any link is. See
+//! page, the notes that come of keys with no reference, and the windows for citing and looking
+//! after them. The page and the caret keys shape `with_citation_spans` of a block, a copy that is
+//! never edited, so a known key is coloured, kept whole and clicked on as any link is. See
 //! `docs/superpowers/specs/2026-11-04-references-design.md`.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
-use egui::{Id, Order, Pos2, Vec2};
+use egui::{Align2, Id, Order, Pos2, Vec2};
 use kame_core::model::{Block, Document};
 use kame_core::references::{
-    block_citation_ranges, key_of, plain, unresolved, with_citation_spans, References,
+    block_citation_ranges, citation_at, cited, key_of, plain, suggest_key, unresolved, valid_key,
+    with_citation_spans, Kind, Reference, References,
 };
-use kame_notebook::references::{load, stamp};
+use kame_notebook::references::{citing, load, remove, rename, save, stamp, Renamed};
 use kame_notebook::Notebook;
 
+use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window};
 use super::KameApp;
 
 /// How long to go without looking for a change to the reference files, since the page asks every
@@ -24,6 +28,10 @@ use super::KameApp;
 const CHECK_EVERY: Duration = Duration::from_secs(1);
 /// How far below a click its reference's window starts, to leave the line clicked on showing.
 const BELOW_CLICK: f32 = 16.0;
+/// How much of an entry a row of the search shows.
+const SHOWN_OF_ENTRY: usize = 60;
+/// How often to look for what a background thread has found.
+const LOOK_AGAIN: Duration = Duration::from_millis(50);
 
 /// The notebook's references, and which one is showing.
 #[derive(Default)]
@@ -42,6 +50,405 @@ pub(crate) struct ReferencesUi {
     pub(crate) shown: Option<String>,
     /// Where the click that opened it was.
     shown_at: Pos2,
+    /// The search Ctrl-Shift-C opens.
+    cite_search: Option<CiteSearch>,
+    /// The new reference or edit window.
+    form: Option<FormWindow>,
+    /// The References… window.
+    window: Option<ListWindow>,
+    /// How many documents cite each key, once counted.
+    counts: Option<BTreeMap<String, usize>>,
+    /// The count under way, on a background thread.
+    counting: Option<Receiver<BTreeMap<String, Vec<PathBuf>>>>,
+    /// Whether the list has changed since the count was started.
+    recount: bool,
+    /// The rename under way, on a background thread.
+    renaming: Option<Renaming>,
+}
+
+/// The search over references: what's typed, and the row chosen.
+struct CiteSearch {
+    query: String,
+    selected: usize,
+    focus: bool,
+}
+
+/// The form in its window.
+struct FormWindow {
+    form: ReferenceForm,
+    /// Why the last save didn't work.
+    failed: Option<String>,
+    /// Set for the frame a field should take the keyboard on.
+    focus: bool,
+}
+
+/// What the References… window is asking and has to say.
+#[derive(Default)]
+struct ListWindow {
+    confirming: Option<Confirming>,
+    /// How the last delete or rename went.
+    said: Vec<String>,
+}
+
+/// A confirmation row, under the key it's about.
+enum Confirming {
+    Delete {
+        key: String,
+    },
+    Rename {
+        key: String,
+        new: String,
+        focus: bool,
+    },
+}
+
+/// A rename a background thread is doing, leaving the open document for when it's done.
+struct Renaming {
+    coming: Receiver<Result<Renamed, String>>,
+    /// The notebook it's in, which is the one to put anything back in.
+    notebook: Notebook,
+    old: String,
+    new: String,
+    /// What to put back if the open document can't follow, since `rename` will have removed it.
+    reference: Reference,
+}
+
+/// What pressing something in the References… window asks for.
+enum ListAction {
+    Close,
+    Edit(String),
+    AskToDelete(String),
+    AskToRename(String),
+    Cancel,
+    Delete(String),
+    Rename(String, String),
+}
+
+/// What Cite opens, going by the caret.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CiteStart {
+    NeedsNotebook,
+    New { key: String },
+    Edit { key: String },
+    Search,
+}
+
+/// What Cite opens for a caret at `offset` in `text`.
+pub(crate) fn cite_start(
+    text: &str,
+    offset: usize,
+    references: &References,
+    in_notebook: bool,
+) -> CiteStart {
+    if !in_notebook {
+        return CiteStart::NeedsNotebook;
+    }
+    let Some(range) = citation_at(text, offset) else {
+        return CiteStart::Search;
+    };
+    let key = key_of(text, range).to_string();
+    if references.contains(&key) {
+        CiteStart::Edit { key }
+    } else {
+        CiteStart::New { key }
+    }
+}
+
+/// The keys whose key, authors or title hold `query`, ignoring case, in `sorted()` order.
+pub(crate) fn search<'a>(references: &'a References, query: &str) -> Vec<&'a str> {
+    let query = query.trim().to_lowercase();
+    let holds = |text: &str| text.to_lowercase().contains(&query);
+    references
+        .sorted()
+        .into_iter()
+        .filter(|(key, reference)| {
+            holds(key)
+                || holds(&reference.title)
+                || reference.authors.iter().any(|name| holds(name))
+        })
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Where citing `key` puts it, for a caret at `offset`: nowhere if the caret is on it already, and
+/// after a different key the caret is on rather than in the middle of it.
+fn where_to_cite(text: &str, offset: usize, key: &str) -> Option<usize> {
+    match citation_at(text, offset) {
+        Some(range) if key_of(text, range) == key => None,
+        Some((_, end)) => Some(end),
+        None => Some(offset),
+    }
+}
+
+/// A count of documents, in words.
+fn documents(count: usize) -> String {
+    match count {
+        1 => "1 document".to_string(),
+        _ => format!("{count} documents"),
+    }
+}
+
+/// What a confirmation row says of how many documents cite a key.
+fn cited_by(count: usize) -> String {
+    match count {
+        0 => "No document cites it.".to_string(),
+        1 => "1 document cites it.".to_string(),
+        _ => format!("{count} documents cite it."),
+    }
+}
+
+/// What the References… window says of a rename, naming documents from `root`.
+fn rename_outcome(old: &str, new: &str, renamed: &Renamed, root: &Path) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Renamed {old} to {new} in {}.",
+        documents(renamed.rewritten.len())
+    )];
+    if renamed.old_kept {
+        lines.push(format!(
+            "{old} was kept, so that [{old}] still resolves. Renaming it again once this is fixed \
+             finishes it."
+        ));
+    }
+    for (path, why) in &renamed.failed {
+        let shown = path.strip_prefix(root).unwrap_or(path);
+        lines.push(format!("{}: {why}", shown.display()));
+    }
+    lines
+}
+
+/// The form's two tabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Tab {
+    #[default]
+    Structured,
+    Freeform,
+}
+
+/// What the new reference and edit windows hold while they're up. `reference` keeps everything
+/// typed, so that switching kinds and tabs loses nothing, and `built` takes what will be saved.
+pub(crate) struct ReferenceForm {
+    pub(crate) tab: Tab,
+    pub(crate) key: String,
+    pub(crate) reference: Reference,
+    /// The names as typed, comma-separated.
+    pub(crate) authors_text: String,
+    pub(crate) editors_text: String,
+    /// Whether the key is the person's, and not to be suggested over.
+    pub(crate) key_edited: bool,
+    /// The key this is editing, if it isn't a new one.
+    editing: Option<String>,
+}
+
+impl ReferenceForm {
+    /// A form for a new reference, with `key` if there's one already.
+    pub(crate) fn new(key: Option<String>) -> ReferenceForm {
+        ReferenceForm {
+            tab: Tab::default(),
+            key_edited: key.is_some(),
+            key: key.unwrap_or_default(),
+            reference: Reference::default(),
+            authors_text: String::new(),
+            editors_text: String::new(),
+            editing: None,
+        }
+    }
+
+    /// A form for changing `reference`. Its key stays: renaming is in the References… window, as
+    /// it rewrites documents.
+    pub(crate) fn editing(key: &str, reference: &Reference) -> ReferenceForm {
+        let freeform = reference.kind == Kind::Freeform;
+        ReferenceForm {
+            tab: if freeform {
+                Tab::Freeform
+            } else {
+                Tab::Structured
+            },
+            key: key.to_string(),
+            reference: Reference {
+                // The kind the Structured tab starts on, should the person go there.
+                kind: if freeform {
+                    Kind::default()
+                } else {
+                    reference.kind
+                },
+                ..reference.clone()
+            },
+            authors_text: reference.authors.join(", "),
+            editors_text: reference.editors.join(", "),
+            key_edited: true,
+            editing: Some(key.to_string()),
+        }
+    }
+
+    fn is_new(&self) -> bool {
+        self.editing.is_none()
+    }
+
+    /// The reference to save: only the fields its kind has, and freeform text exactly as typed.
+    pub(crate) fn built(&self) -> Reference {
+        let kind = match self.tab {
+            Tab::Freeform => Kind::Freeform,
+            Tab::Structured => self.reference.kind,
+        };
+        let mut typed = self.reference.clone();
+        let mut built = Reference {
+            kind,
+            ..Reference::default()
+        };
+        for name in kind.fields() {
+            match *name {
+                "authors" => built.authors = names(&self.authors_text),
+                "editors" => built.editors = names(&self.editors_text),
+                "text" => built.text.clone_from(&typed.text),
+                name => {
+                    if let (Some(to), Some(from)) =
+                        (text_field(&mut built, name), text_field(&mut typed, name))
+                    {
+                        *to = from.trim().to_string();
+                    }
+                }
+            }
+        }
+        built
+    }
+
+    /// What's wrong with the key, if anything.
+    pub(crate) fn key_problem(&self, references: &References) -> Option<String> {
+        if self.key.is_empty() {
+            return Some("It needs a key.".to_string());
+        }
+        if !valid_key(&self.key) {
+            return Some("A key is letters, digits, - and _, starting with a letter.".to_string());
+        }
+        if self.editing.as_deref() == Some(&self.key) {
+            return None;
+        }
+        // Keys differing only in case can't both be saved, for the systems that ignore it.
+        references
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(&self.key))
+            .map(|key| format!("{key} is already a reference."))
+    }
+
+    /// What stops this being saved, if anything.
+    fn problem(&self, references: &References) -> Option<String> {
+        self.key_problem(references).or_else(|| {
+            let built = self.built();
+            if built.kind == Kind::Freeform && built.text.trim().is_empty() {
+                return Some("text is missing".to_string());
+            }
+            built.check().err()
+        })
+    }
+
+    pub(crate) fn can_save(&self, references: &References) -> bool {
+        self.problem(references).is_none()
+    }
+
+    /// The entry as it would read.
+    pub(crate) fn preview(&self) -> String {
+        plain(&self.built())
+    }
+
+    /// Fills in a key from the fields, unless the key is the person's.
+    pub(crate) fn suggest(&mut self, references: &References) {
+        if self.key_edited {
+            return;
+        }
+        let named = Reference {
+            authors: names(&self.authors_text),
+            ..self.reference.clone()
+        };
+        self.key = suggest_key(&named, references).unwrap_or_default();
+    }
+}
+
+/// Comma-separated names, each as spelled.
+fn names(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The field `name` of a reference, if it's one that holds a string.
+fn text_field<'a>(reference: &'a mut Reference, name: &str) -> Option<&'a mut String> {
+    Some(match name {
+        "title" => &mut reference.title,
+        "chapter" => &mut reference.chapter,
+        "published_in" => &mut reference.published_in,
+        "location" => &mut reference.location,
+        "edition" => &mut reference.edition,
+        "place" => &mut reference.place,
+        "publisher" => &mut reference.publisher,
+        "site" => &mut reference.site,
+        "volume" => &mut reference.volume,
+        "number" => &mut reference.number,
+        "pages" => &mut reference.pages,
+        "month" => &mut reference.month,
+        "year" => &mut reference.year,
+        "doi" => &mut reference.doi,
+        "url" => &mut reference.url,
+        "accessed" => &mut reference.accessed,
+        "text" => &mut reference.text,
+        _ => return None,
+    })
+}
+
+/// What the form calls the field `name`.
+fn field_label(name: &str) -> &'static str {
+    match name {
+        "authors" => "Authors",
+        "editors" => "Editors",
+        "title" => "Title",
+        "chapter" => "Chapter",
+        "published_in" => "Published in",
+        "location" => "Location",
+        "edition" => "Edition",
+        "place" => "Place",
+        "publisher" => "Publisher",
+        "site" => "Site",
+        "volume" => "Volume",
+        "number" => "Number",
+        "pages" => "Pages",
+        "month" => "Month",
+        "year" => "Year",
+        "doi" => "DOI",
+        "url" => "URL",
+        "accessed" => "Accessed",
+        _ => "",
+    }
+}
+
+/// The freeform text box, which keeps Enter for itself.
+fn freeform_text_id() -> Id {
+    Id::unique("kame-reference-text")
+}
+
+fn enter_pressed(ctx: &egui::Context) -> bool {
+    ctx.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                }
+            )
+        })
+    })
+}
+
+/// The start of an entry, for a row with little room.
+fn entry_start(reference: &Reference) -> String {
+    let entry = plain(reference);
+    match entry.char_indices().nth(SHOWN_OF_ENTRY) {
+        Some((at, _)) => format!("{}…", &entry[..at]),
+        None => entry,
+    }
 }
 
 impl ReferencesUi {
@@ -68,14 +475,73 @@ impl ReferencesUi {
         if moved {
             self.root = Some(notebook.root.clone());
             self.problems.clear();
-            self.shown = None;
+            self.close_windows();
+            self.counts = None;
+            self.counting = None;
         }
+        self.read(notebook, files)
+    }
+
+    /// Reads the list now, for a change made here that should show at once. The files may look no
+    /// different from before, if it was quick and kept their length.
+    fn reload(&mut self, notebook: &Notebook) -> Option<String> {
+        self.checked = Some(Instant::now());
+        self.read(notebook, stamp(notebook))
+    }
+
+    fn read(
+        &mut self,
+        notebook: &Notebook,
+        files: Vec<(String, SystemTime, u64)>,
+    ) -> Option<String> {
         self.stamp = files;
+        self.recount = true;
         let loaded = load(notebook);
         self.list = loaded.references;
         let news = !loaded.problems.is_empty() && loaded.problems != self.problems;
         self.problems = loaded.problems;
         news.then(|| format!("this notebook's references: {}", self.problems.join("; ")))
+    }
+
+    /// Whether any of the windows for references is up.
+    pub(crate) fn window_open(&self) -> bool {
+        self.shown.is_some()
+            || self.cite_search.is_some()
+            || self.form.is_some()
+            || self.window.is_some()
+    }
+
+    /// Closes everything, for another document or notebook.
+    pub(crate) fn close_windows(&mut self) {
+        self.shown = None;
+        self.cite_search = None;
+        self.form = None;
+        self.window = None;
+    }
+
+    /// Closes the window on top, as Escape does. The form goes back to the window it came from,
+    /// and a rename under way keeps its window up to say how it went.
+    pub(crate) fn dismiss(&mut self) {
+        self.shown = None;
+        self.cite_search = None;
+        if self.form.take().is_some() || self.renaming.is_some() {
+            return;
+        }
+        let asking = self
+            .window
+            .as_mut()
+            .is_some_and(|window| window.confirming.take().is_some());
+        if !asking {
+            self.window = None;
+        }
+    }
+
+    fn open_form(&mut self, form: ReferenceForm) {
+        self.form = Some(FormWindow {
+            form,
+            failed: None,
+            focus: true,
+        });
     }
 
     /// Opens `key`'s entry, for a click at `at`.
@@ -170,6 +636,7 @@ impl KameApp {
             return;
         };
         let at = self.refs.shown_at;
+        let mut edit = None;
         let drawn = egui::Window::new(key)
             .id(Id::unique("kame-citation"))
             .fixed_pos(at + Vec2::new(0.0, BELOW_CLICK))
@@ -179,7 +646,9 @@ impl KameApp {
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 ui.label(plain(reference));
-                ui.add_enabled(false, egui::Button::new("Edit"));
+                if ui.button("Edit").clicked() {
+                    edit = Some(ReferenceForm::editing(key, reference));
+                }
             });
         // A press at the same place is the click that opened this, in one frame on a quick tap.
         let pressed = ctx.input(|input| {
@@ -196,6 +665,655 @@ impl KameApp {
         if pressed.is_some_and(|pos| !inside(pos)) {
             self.refs.shown = None;
         }
+        if let Some(form) = edit {
+            self.refs.shown = None;
+            self.refs.open_form(form);
+        }
+    }
+
+    /// Cite: the chord, the menus and the right-click row. Does nothing over another dialog.
+    pub(crate) fn begin_cite(&mut self) {
+        if self.dialog_open() || self.close_flow.prompting {
+            return;
+        }
+        let caret = self.session.valid_caret();
+        // Text that only looks like a key, in code or a link's words, is no key to open.
+        let text = self
+            .session
+            .document()
+            .blocks
+            .iter()
+            .find(|block| block.id == caret.block_id)
+            .filter(|block| {
+                citation_at(&block.text, caret.offset)
+                    .is_none_or(|range| block_citation_ranges(block).contains(&range))
+            })
+            .map_or("", |block| block.text.as_str());
+        let in_notebook = self.nb.notebook.is_some();
+        match cite_start(text, caret.offset, &self.refs.list, in_notebook) {
+            CiteStart::NeedsNotebook => {
+                self.notice_tracker.announced();
+                self.notice = Some("Citing needs a notebook.".to_string());
+            }
+            CiteStart::New { key } => self.refs.open_form(ReferenceForm::new(Some(key))),
+            CiteStart::Edit { key } => {
+                if let Some(reference) = self.refs.list.get(&key) {
+                    let form = ReferenceForm::editing(&key, reference);
+                    self.refs.open_form(form);
+                }
+            }
+            CiteStart::Search => {
+                self.refs.cite_search = Some(CiteSearch {
+                    query: String::new(),
+                    selected: 0,
+                    focus: true,
+                });
+            }
+        }
+    }
+
+    /// Annotate > References…
+    pub(crate) fn open_references(&mut self) {
+        if self.nb.notebook.is_some() && !self.dialog_open() && !self.close_flow.prompting {
+            self.refs.window = Some(ListWindow::default());
+            self.refs.recount = true;
+        }
+    }
+
+    /// Reads the list after a change made here, so that it shows at once.
+    fn reload_references(&mut self) {
+        let Some(notebook) = self.nb.notebook.clone() else {
+            return;
+        };
+        if let Some(problem) = self.refs.reload(&notebook) {
+            self.session.last_error = Some(problem);
+        }
+    }
+
+    /// Puts `[key]` in the document, as one ordinary edit, unless the caret is on it already.
+    fn cite(&mut self, key: &str) {
+        let caret = self.session.valid_caret();
+        let text = self
+            .session
+            .document()
+            .blocks
+            .iter()
+            .find(|block| block.id == caret.block_id)
+            .map_or("", |block| block.text.as_str());
+        let Some(at) = where_to_cite(text, caret.offset, key) else {
+            return;
+        };
+        if at != caret.offset {
+            self.session.set_caret(crate::edit::Cursor {
+                block_id: caret.block_id,
+                offset: at,
+            });
+        }
+        self.session.insert(&format!("[{key}]"));
+        self.follow_caret = true;
+    }
+
+    /// Says so and returns true if a rename is running. It has left the open document to be
+    /// rewritten when it's done, which needs that document to still be the open one.
+    pub(crate) fn held_by_rename(&mut self) -> bool {
+        let held = self.refs.renaming.is_some();
+        if held {
+            self.notice_tracker.announced();
+            self.notice = Some("A reference is being renamed. Try again when it's done.".into());
+        }
+        held
+    }
+
+    /// Takes in what the background threads have finished.
+    pub(crate) fn references_tick(&mut self, ctx: &egui::Context) {
+        if let Some(coming) = &self.refs.counting {
+            match coming.try_recv() {
+                Ok(found) => {
+                    self.refs.counts = Some(
+                        found
+                            .into_iter()
+                            .map(|(key, documents)| (key, documents.len()))
+                            .collect(),
+                    );
+                    self.refs.counting = None;
+                }
+                Err(TryRecvError::Disconnected) => self.refs.counting = None,
+                Err(TryRecvError::Empty) => ctx.request_repaint_after(LOOK_AGAIN),
+            }
+        }
+        if let Some(renaming) = &self.refs.renaming {
+            match renaming.coming.try_recv() {
+                Ok(result) => self.finish_rename(result),
+                Err(TryRecvError::Disconnected) => {
+                    self.refs.renaming = None;
+                    self.say_in_references(vec!["The rename stopped unexpectedly.".to_string()]);
+                }
+                Err(TryRecvError::Empty) => ctx.request_repaint_after(LOOK_AGAIN),
+            }
+        }
+    }
+
+    fn say_in_references(&mut self, said: Vec<String>) {
+        if let Some(window) = &mut self.refs.window {
+            window.said = said;
+        }
+    }
+
+    fn start_counting(&mut self) {
+        let Some(notebook) = self.nb.notebook.clone() else {
+            return;
+        };
+        let (send, coming) = channel();
+        self.refs.counts = None;
+        // Dropping an older one leaves it nowhere to send what it finds.
+        self.refs.counting = Some(coming);
+        std::thread::spawn(move || {
+            let _ = send.send(citing(&notebook));
+        });
+    }
+
+    fn start_rename(&mut self, old: String, new: String) {
+        let (Some(notebook), Some(reference)) =
+            (self.nb.notebook.clone(), self.refs.list.get(&old).cloned())
+        else {
+            return;
+        };
+        let open = self.session.path().map(Path::to_path_buf);
+        let (send, coming) = channel();
+        self.refs.renaming = Some(Renaming {
+            coming,
+            notebook: notebook.clone(),
+            old: old.clone(),
+            new: new.clone(),
+            reference,
+        });
+        std::thread::spawn(move || {
+            let _ = send.send(rename(&notebook, &old, &new, open.as_deref()));
+        });
+    }
+
+    /// The rename has done the other documents and, if they all went well, removed the old file.
+    /// This does the open document, last because `rename` can refuse to start, and a refused
+    /// rename should have touched nothing. If this document can't follow, the old file goes back.
+    fn finish_rename(&mut self, result: Result<Renamed, String>) {
+        let Some(renaming) = self.refs.renaming.take() else {
+            return;
+        };
+        let Renaming {
+            notebook,
+            old,
+            new,
+            reference,
+            ..
+        } = renaming;
+        let mut renamed = match result {
+            Ok(renamed) => renamed,
+            Err(refused) => {
+                self.say_in_references(vec![refused]);
+                return;
+            }
+        };
+        let here = self
+            .session
+            .path()
+            .map_or_else(|| PathBuf::from("this document"), Path::to_path_buf);
+        let mut not_put_back = None;
+        match self.rename_in_open_document(&old, &new) {
+            Ok(true) => renamed.rewritten.push(here),
+            Ok(false) => {}
+            Err(why) => {
+                renamed.failed.push((here, why));
+                if !renamed.old_kept {
+                    match save(&notebook, &old, &reference) {
+                        Ok(()) => renamed.old_kept = true,
+                        Err(why) => not_put_back = Some(format!("{old} wasn't put back: {why}")),
+                    }
+                }
+            }
+        }
+        let mut said = rename_outcome(&old, &new, &renamed, &notebook.root);
+        said.extend(not_put_back);
+        self.say_in_references(said);
+        self.reload_references();
+    }
+
+    /// Renames `old` in the open document, returning whether it cited it, or why it still does.
+    fn rename_in_open_document(&mut self, old: &str, new: &str) -> Result<bool, String> {
+        let mut only_old = References::new();
+        only_old.insert(old.to_string(), Reference::default());
+        if cited(self.session.document(), &only_old, true).is_empty() {
+            return Ok(false);
+        }
+        // The rename can be in memory with nothing written, which returns no count.
+        let count = self.session.rename_citation(old, new);
+        if self.session.save_failed {
+            let why = self.session.last_error.clone();
+            return Err(why.unwrap_or_else(|| "it could not be saved".to_string()));
+        }
+        if count == 0 {
+            return Err("its citations could not be rewritten".to_string());
+        }
+        Ok(true)
+    }
+
+    /// Draws whichever of the windows for citing and looking after references are up.
+    pub(crate) fn show_reference_windows(&mut self, ctx: &egui::Context) {
+        self.show_references_list(ctx);
+        self.show_cite_search(ctx);
+        self.show_reference_form(ctx);
+    }
+
+    fn show_cite_search(&mut self, ctx: &egui::Context) {
+        let Some(mut search_list) = self.refs.cite_search.take() else {
+            return;
+        };
+        let hits: Vec<String> = search(&self.refs.list, &search_list.query)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let rows_count = hits.len() + 1;
+        let (close, confirm) = list_keys(ctx, &mut search_list.selected, rows_count);
+        let confirm = confirm && !search_list.focus;
+        let mut clicked = None;
+        let references = &self.refs.list;
+        let typed = search_list.query.trim().to_string();
+        let new_row = if typed.is_empty() {
+            "New reference…".to_string()
+        } else {
+            format!("New reference “{typed}”…")
+        };
+        list_window(ctx, "kame-cite", |ui| {
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut search_list.query)
+                    .hint_text("Cite a reference")
+                    .return_key(None)
+                    .desired_width(f32::INFINITY),
+            );
+            focus_field(&edit, &mut search_list.focus);
+            if edit.changed() {
+                search_list.selected = 0;
+            }
+            ui.separator();
+            list_rows(ui, rows_count, search_list.selected, |ui, row, selected| {
+                let (main, side) = match hits.get(row) {
+                    Some(key) => (
+                        key.as_str(),
+                        references.get(key).map(entry_start).unwrap_or_default(),
+                    ),
+                    None => (new_row.as_str(), String::new()),
+                };
+                if list_row(ui, selected, main, &side).clicked() {
+                    clicked = Some(row);
+                }
+            });
+        });
+        let chosen = clicked.or(confirm.then_some(search_list.selected));
+        match chosen {
+            Some(row) => match hits.get(row) {
+                Some(key) => self.cite(key),
+                None => {
+                    let key = valid_key(&typed).then_some(typed);
+                    self.refs.open_form(ReferenceForm::new(key));
+                }
+            },
+            None if !close => self.refs.cite_search = Some(search_list),
+            None => {}
+        }
+    }
+
+    /// The new reference and edit window.
+    fn show_reference_form(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.refs.form.take() else {
+            return;
+        };
+        let focus = std::mem::take(&mut window.focus);
+        // A chord and an Enter arriving in the same frame would otherwise save a form nobody has
+        // read, and in the text box Enter is a new line.
+        let in_text_box = ctx.memory(|memory| memory.has_focus(freeform_text_id()));
+        let mut submit = enter_pressed(ctx) && !focus && !in_text_box;
+        let mut cancel = false;
+        let is_new = window.form.is_new();
+        let title = if is_new {
+            "New reference"
+        } else {
+            "Edit reference"
+        };
+        let references = &self.refs.list;
+        let error_ink = self.palette.error_ink;
+        egui::Window::new(title)
+            .id(Id::unique("kame-reference-form"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(480.0)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                draw_form(ui, &mut window, focus, references);
+                let problem = window.form.problem(references);
+                if let Some(problem) = &problem {
+                    ui.weak(problem);
+                }
+                if let Some(failed) = &window.failed {
+                    ui.colored_label(error_ink, failed);
+                }
+                ui.horizontal(|ui| {
+                    let save_button = if is_new { "Add and cite" } else { "Save" };
+                    let button = egui::Button::new(save_button);
+                    if ui.add_enabled(problem.is_none(), button).clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            return;
+        }
+        if !submit || !window.form.can_save(&self.refs.list) {
+            self.refs.form = Some(window);
+            return;
+        }
+        let Some(notebook) = self.nb.notebook.clone() else {
+            return;
+        };
+        let key = window.form.key.clone();
+        if let Err(why) = save(&notebook, &key, &window.form.built()) {
+            window.failed = Some(why);
+            self.refs.form = Some(window);
+            return;
+        }
+        self.reload_references();
+        if is_new {
+            self.cite(&key);
+        }
+    }
+
+    /// The References… window: every reference, with what can be done to it.
+    fn show_references_list(&mut self, ctx: &egui::Context) {
+        let Some(mut window) = self.refs.window.take() else {
+            return;
+        };
+        if std::mem::take(&mut self.refs.recount) {
+            self.start_counting();
+        }
+        let renaming = self.refs.renaming.is_some();
+        let busy = renaming || self.refs.form.is_some();
+        // The form on top of this has the keyboard.
+        let enter = enter_pressed(ctx) && !busy;
+        let error_ink = self.palette.error_ink;
+        let (references, counts, problems) =
+            (&self.refs.list, &self.refs.counts, &self.refs.problems);
+        let mut action = None;
+        egui::Window::new("References")
+            .id(Id::unique("kame-references"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                for problem in problems {
+                    ui.colored_label(error_ink, problem);
+                }
+                if references.is_empty() {
+                    ui.weak("This notebook has no references yet. Ctrl-Shift-C adds one.");
+                }
+                ui.add_enabled_ui(!busy, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (key, reference) in references.sorted() {
+                                let count = counts
+                                    .as_ref()
+                                    .map(|counts| counts.get(key).copied().unwrap_or_default());
+                                draw_list_row(ui, key, reference, count, &mut action);
+                                if let Some(confirming) = &mut window.confirming {
+                                    draw_confirming(ui, key, confirming, count, enter, &mut action);
+                                }
+                                ui.separator();
+                            }
+                        });
+                });
+                if renaming {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Renaming…");
+                    });
+                }
+                for line in &window.said {
+                    ui.label(line);
+                }
+                ui.add_enabled_ui(!renaming, |ui| {
+                    if ui.button("Close").clicked() {
+                        action = Some(ListAction::Close);
+                    }
+                });
+            });
+        match action {
+            Some(ListAction::Close) => return,
+            Some(ListAction::Edit(key)) => {
+                window.confirming = None;
+                if let Some(reference) = self.refs.list.get(&key) {
+                    let form = ReferenceForm::editing(&key, reference);
+                    self.refs.open_form(form);
+                }
+            }
+            Some(ListAction::AskToDelete(key)) => {
+                window.said.clear();
+                window.confirming = Some(Confirming::Delete { key });
+            }
+            Some(ListAction::AskToRename(key)) => {
+                window.said.clear();
+                window.confirming = Some(Confirming::Rename {
+                    new: key.clone(),
+                    key,
+                    focus: true,
+                });
+            }
+            Some(ListAction::Cancel) => window.confirming = None,
+            Some(ListAction::Delete(key)) => {
+                window.confirming = None;
+                if let Some(notebook) = &self.nb.notebook {
+                    window.said = vec![match remove(notebook, &key) {
+                        Ok(()) => format!(
+                            "Deleted {key}. Documents citing it now hold plain [{key}] text."
+                        ),
+                        Err(why) => why,
+                    }];
+                }
+                self.reload_references();
+            }
+            Some(ListAction::Rename(old, new)) => {
+                window.confirming = None;
+                self.start_rename(old, new);
+            }
+            None => {}
+        }
+        self.refs.window = Some(window);
+    }
+}
+
+/// The fields of the form, following the tab and the kind.
+fn draw_form(ui: &mut egui::Ui, window: &mut FormWindow, focus: bool, references: &References) {
+    let form = &mut window.form;
+    ui.horizontal(|ui| {
+        for (tab, label) in [(Tab::Structured, "Structured"), (Tab::Freeform, "Freeform")] {
+            if ui.selectable_value(&mut form.tab, tab, label).changed() {
+                window.focus = true;
+            }
+        }
+    });
+    if form.tab == Tab::Structured {
+        ui.horizontal(|ui| {
+            for (kind, label) in [
+                (Kind::Article, "Article"),
+                (Kind::Conference, "Conference"),
+                (Kind::Book, "Book"),
+                (Kind::Web, "Web"),
+            ] {
+                ui.selectable_value(&mut form.reference.kind, kind, label);
+            }
+        });
+    }
+    ui.separator();
+    let mut changed = false;
+    egui::Grid::new("kame-reference-fields")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Key");
+            if form.is_new() {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut form.key)
+                        .id_salt("kame-reference-key")
+                        .return_key(None)
+                        .desired_width(360.0)
+                        .hint_text("suggested from the author and year"),
+                );
+                if field.changed() {
+                    form.key_edited = true;
+                }
+                if focus && form.tab == Tab::Freeform && form.key.is_empty() {
+                    field.request_focus();
+                }
+            } else {
+                ui.label(&form.key)
+                    .on_hover_text("Rename it from Annotate > References…");
+            }
+            ui.end_row();
+            if form.tab == Tab::Structured {
+                let kind = form.reference.kind;
+                for (index, name) in kind.fields().iter().enumerate() {
+                    ui.label(field_label(name));
+                    let value = match *name {
+                        "authors" => Some(&mut form.authors_text),
+                        "editors" => Some(&mut form.editors_text),
+                        name => text_field(&mut form.reference, name),
+                    };
+                    let Some(value) = value else {
+                        ui.end_row();
+                        continue;
+                    };
+                    let mut edit = egui::TextEdit::singleline(value)
+                        .id_salt(*name)
+                        .return_key(None)
+                        .desired_width(360.0);
+                    if matches!(*name, "authors" | "editors") {
+                        edit = edit.hint_text("separated by commas");
+                    }
+                    let field = ui.add(edit);
+                    if focus && index == 0 {
+                        field.request_focus();
+                    }
+                    changed |= field.changed();
+                    ui.end_row();
+                }
+            }
+        });
+    if changed {
+        form.suggest(references);
+    }
+    match form.tab {
+        Tab::Structured => {
+            ui.separator();
+            ui.weak(form.preview());
+        }
+        Tab::Freeform => {
+            let field = ui.add(
+                egui::TextEdit::multiline(&mut form.reference.text)
+                    .id(freeform_text_id())
+                    .desired_rows(6)
+                    .desired_width(440.0)
+                    .hint_text("Goes into the References section exactly as typed"),
+            );
+            if focus && !(form.is_new() && form.key.is_empty()) {
+                field.request_focus();
+            }
+        }
+    }
+}
+
+/// A reference in the References… window.
+fn draw_list_row(
+    ui: &mut egui::Ui,
+    key: &str,
+    reference: &Reference,
+    count: Option<usize>,
+    action: &mut Option<ListAction>,
+) {
+    ui.horizontal(|ui| {
+        ui.strong(key);
+        ui.weak(count.map_or_else(|| "counting…".to_string(), documents));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("Delete…").clicked() {
+                *action = Some(ListAction::AskToDelete(key.to_string()));
+            }
+            if ui.small_button("Rename…").clicked() {
+                *action = Some(ListAction::AskToRename(key.to_string()));
+            }
+            if ui.small_button("Edit").clicked() {
+                *action = Some(ListAction::Edit(key.to_string()));
+            }
+        });
+    });
+    ui.weak(plain(reference));
+}
+
+/// The confirmation row, if it's about `key`. Nothing can be confirmed until the count it has to
+/// say is known.
+fn draw_confirming(
+    ui: &mut egui::Ui,
+    key: &str,
+    confirming: &mut Confirming,
+    count: Option<usize>,
+    enter: bool,
+    action: &mut Option<ListAction>,
+) {
+    let said = count.map_or_else(
+        || "Counting the documents that cite it…".to_string(),
+        cited_by,
+    );
+    match confirming {
+        Confirming::Delete { key: asked } if asked == key => {
+            ui.label(format!("{said} They'd then hold plain [{key}] text."));
+            ui.horizontal(|ui| {
+                let delete = egui::Button::new(format!("Delete {key}"));
+                if ui.add_enabled(count.is_some(), delete).clicked() {
+                    *action = Some(ListAction::Delete(key.to_string()));
+                }
+                if ui.button("Cancel").clicked() {
+                    *action = Some(ListAction::Cancel);
+                }
+            });
+        }
+        Confirming::Rename {
+            key: asked,
+            new,
+            focus,
+        } if asked == key => {
+            ui.label(format!("{said} Each is rewritten as an ordinary edit."));
+            let ready = count.is_some() && valid_key(new) && new != key;
+            let opening = *focus;
+            ui.horizontal(|ui| {
+                ui.label("New key");
+                let field = ui.add(
+                    egui::TextEdit::singleline(new)
+                        .return_key(None)
+                        .desired_width(200.0),
+                );
+                focus_field(&field, focus);
+                let button = egui::Button::new(format!("Rename {key}"));
+                let pressed = ui.add_enabled(ready, button).clicked();
+                if pressed || (enter && ready && !opening) {
+                    *action = Some(ListAction::Rename(key.to_string(), new.clone()));
+                }
+                if ui.button("Cancel").clicked() {
+                    *action = Some(ListAction::Cancel);
+                }
+            });
+        }
+        _ => {}
     }
 }
 
@@ -204,7 +1322,6 @@ mod tests {
     use super::*;
     use crate::{test_temp_dir, Headless};
     use kame_core::model::{Anchor, Annotation, AnnotationKind, BlockKind};
-    use kame_core::references::Reference;
     use kame_core::session::Session;
 
     fn block(kind: BlockKind, text: &str) -> Block {
@@ -634,5 +1751,1080 @@ mod tests {
         let notice = page.app.export_notice("exported".to_string(), true);
 
         assert_eq!(notice, "exported; no reference for smith2020");
+    }
+
+    #[test]
+    fn cite_opens_what_the_caret_is_on() {
+        let references = known(&["knuth1981"]);
+        let start = |text: &str, offset: usize| cite_start(text, offset, &references, true);
+        let new = CiteStart::New {
+            key: "new1".to_string(),
+        };
+        let edit = CiteStart::Edit {
+            key: "knuth1981".to_string(),
+        };
+
+        assert_eq!(
+            cite_start("[knuth1981]", 3, &references, false),
+            CiteStart::NeedsNotebook
+        );
+        assert_eq!(start("see [new1] here", 6), new, "in an unknown key");
+        assert_eq!(start("see [new1] here", 10), new, "just after it");
+        assert_eq!(start("see [knuth1981] here", 6), edit, "in a known key");
+        assert_eq!(start("see [knuth1981] here", 15), edit, "just after it");
+        assert_eq!(
+            start("see [knuth1981] here", 4),
+            CiteStart::Search,
+            "before it"
+        );
+        assert_eq!(
+            start("see [knuth1981] here", 16),
+            CiteStart::Search,
+            "past it"
+        );
+        assert_eq!(start("plain words", 3), CiteStart::Search);
+        assert_eq!(
+            start("in [a b] here", 6),
+            CiteStart::Search,
+            "not a key's shape"
+        );
+        assert_eq!(start("", 0), CiteStart::Search);
+        // Offsets are bytes, so a multibyte letter before the key has to be counted as such.
+        assert_eq!(start("é [new1]", "é [new1]".len()), new);
+    }
+
+    #[test]
+    fn search_looks_through_keys_authors_and_titles() {
+        let mut references = References::new();
+        references.insert(
+            "zeta".to_string(),
+            Reference {
+                authors: vec!["D. E. Knuth".to_string()],
+                title: "Breaking paragraphs".to_string(),
+                ..Reference::default()
+            },
+        );
+        references.insert(
+            "Alpha".to_string(),
+            Reference {
+                title: "Knuth and his lines".to_string(),
+                ..Reference::default()
+            },
+        );
+        references.insert(
+            "knuth1981".to_string(),
+            Reference {
+                title: "Élan".to_string(),
+                ..Reference::default()
+            },
+        );
+
+        assert_eq!(search(&references, "KNUTH"), ["Alpha", "knuth1981", "zeta"]);
+        assert_eq!(search(&references, "breaking"), ["zeta"]);
+        assert_eq!(search(&references, "alpha"), ["Alpha"]);
+        assert_eq!(search(&references, "élan"), ["knuth1981"]);
+        assert_eq!(search(&references, "  zeta "), ["zeta"]);
+        assert_eq!(search(&references, "nothing"), Vec::<&str>::new());
+        assert_eq!(
+            search(&references, ""),
+            ["Alpha", "knuth1981", "zeta"],
+            "everything, with nothing typed"
+        );
+    }
+
+    #[test]
+    fn names_split_on_commas_and_keep_their_spelling() {
+        let mut form = ReferenceForm::new(Some("k".to_string()));
+        form.reference.kind = Kind::Book;
+        form.reference.title = "T".to_string();
+        form.authors_text = "D. E. Knuth,  M. F. Plass ,, van der Berg".to_string();
+        form.editors_text = "Ünal Çelik".to_string();
+
+        let built = form.built();
+
+        assert_eq!(
+            built.authors,
+            ["D. E. Knuth", "M. F. Plass", "van der Berg"]
+        );
+        assert_eq!(built.editors, ["Ünal Çelik"]);
+        // And back again, as an edit shows them.
+        let again = ReferenceForm::editing("k", &built);
+        assert_eq!(again.authors_text, "D. E. Knuth, M. F. Plass, van der Berg");
+        assert_eq!(again.editors_text, "Ünal Çelik");
+        assert_eq!(again.built(), built);
+    }
+
+    #[test]
+    fn a_suggested_key_follows_the_fields_until_its_edited() {
+        let references = known(&["knuth1981"]);
+        let mut form = ReferenceForm::new(None);
+        assert!(!form.key_edited);
+        assert_eq!(form.key, "");
+
+        form.authors_text = "L. Lamport".to_string();
+        form.reference.year = "1994".to_string();
+        form.suggest(&references);
+        assert_eq!(form.key, "lamport1994");
+
+        form.authors_text = "D. E. Knuth, M. F. Plass".to_string();
+        form.reference.year = "1981".to_string();
+        form.suggest(&references);
+        assert_eq!(form.key, "knuth1981a", "the plain one is taken");
+
+        // With no letter left of the name, the person types one.
+        form.authors_text = "李".to_string();
+        form.suggest(&references);
+        assert_eq!(form.key, "");
+
+        form.key = "mine".to_string();
+        form.key_edited = true;
+        form.authors_text = "L. Lamport".to_string();
+        form.suggest(&references);
+        assert_eq!(form.key, "mine");
+
+        // A key that came with the form was already chosen.
+        let mut given = ReferenceForm::new(Some("given".to_string()));
+        given.authors_text = "L. Lamport".to_string();
+        given.suggest(&references);
+        assert_eq!(given.key, "given");
+    }
+
+    #[test]
+    fn the_form_refuses_a_bad_key_a_taken_key_and_no_title() {
+        let references = known(&["knuth1981"]);
+        let mut form = ReferenceForm::new(Some("smith2020".to_string()));
+        form.reference.title = "A title".to_string();
+        assert_eq!(form.key_problem(&references), None);
+        assert!(form.can_save(&references));
+
+        for bad in ["", "1bad", "no way", "é"] {
+            form.key = bad.to_string();
+            assert!(form.key_problem(&references).is_some(), "{bad:?}");
+            assert!(!form.can_save(&references), "{bad:?}");
+        }
+        for taken in ["knuth1981", "Knuth1981"] {
+            form.key = taken.to_string();
+            let problem = form.key_problem(&references).expect("a taken key");
+            assert!(problem.contains("knuth1981"), "{problem}");
+            assert!(!form.can_save(&references), "{taken:?}");
+        }
+
+        form.key = "smith2020".to_string();
+        for missing in ["", "   "] {
+            form.reference.title = missing.to_string();
+            assert_eq!(form.key_problem(&references), None);
+            assert!(!form.can_save(&references), "{missing:?}");
+        }
+
+        // A taken key is allowed when it's the key being edited.
+        let editing = ReferenceForm::editing("knuth1981", references.get("knuth1981").unwrap());
+        assert_eq!(editing.key_problem(&references), None);
+        assert!(editing.can_save(&references));
+    }
+
+    #[test]
+    fn freeform_saves_only_a_key_and_text_and_shows_them_as_typed() {
+        let typed = "A letter,  1 May 1984.\nSecond line: \"quoted\" ";
+        let mut form = ReferenceForm::new(Some("letter".to_string()));
+        form.authors_text = "D. E. Knuth".to_string();
+        form.reference.title = "Left on the other tab".to_string();
+        form.reference.text = typed.to_string();
+        form.tab = Tab::Freeform;
+
+        assert!(form.can_save(&References::new()));
+        assert_eq!(
+            form.built(),
+            Reference {
+                kind: Kind::Freeform,
+                text: typed.to_string(),
+                ..Reference::default()
+            }
+        );
+        assert_eq!(form.preview(), typed);
+
+        // What was typed on the other tab is still there.
+        form.tab = Tab::Structured;
+        assert_eq!(form.built().title, "Left on the other tab");
+        assert_eq!(form.built().text, "");
+
+        // Text that's only spaces is no text.
+        form.tab = Tab::Freeform;
+        form.reference.text = " \n".to_string();
+        assert!(!form.can_save(&References::new()));
+
+        // A freeform reference opens on its tab, and keeps its text.
+        let saved = Reference {
+            kind: Kind::Freeform,
+            text: typed.to_string(),
+            ..Reference::default()
+        };
+        let editing = ReferenceForm::editing("letter", &saved);
+        assert_eq!(editing.tab, Tab::Freeform);
+        assert_eq!(editing.built(), saved);
+    }
+
+    #[test]
+    fn what_the_form_builds_always_passes_check() {
+        for kind in [
+            Kind::Article,
+            Kind::Conference,
+            Kind::Book,
+            Kind::Web,
+            Kind::Freeform,
+        ] {
+            for tab in [Tab::Structured, Tab::Freeform] {
+                let mut form = ReferenceForm::new(Some("k".to_string()));
+                form.tab = tab;
+                form.reference = Reference {
+                    kind,
+                    title: "T".to_string(),
+                    chapter: "1".to_string(),
+                    published_in: "J".to_string(),
+                    location: "L".to_string(),
+                    edition: "2".to_string(),
+                    place: "P".to_string(),
+                    publisher: "Q".to_string(),
+                    site: "S".to_string(),
+                    volume: "3".to_string(),
+                    number: "4".to_string(),
+                    pages: "5".to_string(),
+                    month: "May".to_string(),
+                    year: "1981".to_string(),
+                    doi: "10.1/x".to_string(),
+                    url: "https://example.com".to_string(),
+                    accessed: "1 May 2020".to_string(),
+                    text: "Words".to_string(),
+                    ..Reference::default()
+                };
+                form.authors_text = "A. Author".to_string();
+                form.editors_text = "E. Editor".to_string();
+                assert_eq!(form.built().check(), Ok(()), "{kind:?} on {tab:?}");
+                assert!(form.can_save(&References::new()), "{kind:?} on {tab:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_citation_goes_at_the_caret_unless_the_caret_is_on_it() {
+        assert_eq!(where_to_cite("plain words", 5, "k"), Some(5));
+        assert_eq!(where_to_cite("see [k] here", 6, "k"), None, "in it");
+        assert_eq!(where_to_cite("see [k] here", 7, "k"), None, "just after it");
+        assert_eq!(where_to_cite("see [k] here", 4, "k"), Some(4), "before it");
+        // A key other than the one being cited isn't broken in two.
+        assert_eq!(where_to_cite("see [other] here", 6, "k"), Some(11));
+        assert_eq!(where_to_cite("see [other] here", 11, "k"), Some(11));
+    }
+
+    #[test]
+    fn how_many_documents_cite_a_key_is_said_in_words() {
+        assert_eq!(cited_by(0), "No document cites it.");
+        assert_eq!(cited_by(1), "1 document cites it.");
+        assert_eq!(cited_by(3), "3 documents cite it.");
+    }
+
+    #[test]
+    fn a_renames_outcome_says_what_it_did_and_what_it_left() {
+        let root = std::path::Path::new("/notebook");
+        let finished = Renamed {
+            rewritten: vec![root.join("a.kame"), root.join("b.kame")],
+            failed: Vec::new(),
+            old_kept: false,
+        };
+        assert_eq!(
+            rename_outcome("old", "new", &finished, root),
+            ["Renamed old to new in 2 documents."]
+        );
+
+        let stuck = Renamed {
+            rewritten: vec![root.join("a.kame")],
+            failed: vec![(root.join("sub/b.md"), "it can't be written".to_string())],
+            old_kept: true,
+        };
+        let lines = rename_outcome("old", "new", &stuck, root);
+        assert_eq!(lines[0], "Renamed old to new in 1 document.");
+        assert!(lines[1].contains("old was kept"), "{lines:?}");
+        assert!(
+            lines.contains(&"sub/b.md: it can't be written".to_string()),
+            "{lines:?}"
+        );
+
+        let unremoved = Renamed {
+            rewritten: Vec::new(),
+            failed: Vec::new(),
+            old_kept: true,
+        };
+        let lines = rename_outcome("old", "new", &unremoved, root);
+        assert!(lines[1].contains("old was kept"), "{lines:?}");
+    }
+
+    /// A key pressed and let go with `modifiers`, as egui takes a key still down for a repeat.
+    fn key(page: &mut Headless, key: egui::Key, modifiers: egui::Modifiers) {
+        page.frame(
+            [true, false]
+                .map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                })
+                .to_vec(),
+        );
+    }
+
+    fn press_key(page: &mut Headless, pressed: egui::Key) {
+        key(page, pressed, egui::Modifiers::NONE);
+    }
+
+    /// Ctrl-Shift-C, and the frame after it for a window to be drawn and take the keyboard.
+    fn cite_chord(page: &mut Headless) {
+        let modifiers = egui::Modifiers {
+            command: true,
+            shift: true,
+            ..egui::Modifiers::NONE
+        };
+        key(page, egui::Key::C, modifiers);
+        page.frame(Vec::new());
+    }
+
+    /// Runs frames until `done`, for what a background thread is doing.
+    fn run_until(page: &mut Headless, done: impl Fn(&KameApp) -> bool) {
+        for _ in 0..2000 {
+            page.frame(Vec::new());
+            if done(&page.app) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("it never finished");
+    }
+
+    /// Opens the References… window and waits for its counts.
+    fn open_list(page: &mut Headless) {
+        page.app.open_references();
+        run_until(page, |app| app.refs.counts.is_some());
+        page.frame(Vec::new());
+    }
+
+    fn only_text(page: &Headless) -> &str {
+        &page.app.session.document().blocks[0].text
+    }
+
+    fn root_of(page: &Headless) -> PathBuf {
+        page.app.nb.notebook.as_ref().unwrap().root.clone()
+    }
+
+    fn reference_file(page: &Headless, key: &str) -> PathBuf {
+        root_of(page).join("references").join(format!("{key}.yaml"))
+    }
+
+    /// A document beside the open one, saved with `text` in it.
+    fn other_document(page: &Headless, name: &str, text: &str) -> PathBuf {
+        let path = root_of(page).join(name);
+        let mut session = Session::open(&path).unwrap();
+        session.insert(text);
+        path
+    }
+
+    fn text_on_disk(path: &Path) -> String {
+        kame_notebook::read_document(path).unwrap().0.blocks[0]
+            .text
+            .clone()
+    }
+
+    #[test]
+    fn citing_outside_a_notebook_says_it_needs_one() {
+        let folder = test_temp_dir().join(format!("outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut page = Headless::new(Session::open(&folder.join("doc.kame")).unwrap());
+        page.frame(Vec::new());
+
+        cite_chord(&mut page);
+
+        assert_eq!(page.app.notice.as_deref(), Some("Citing needs a notebook."));
+        assert!(!page.app.dialog_open());
+    }
+
+    #[test]
+    fn choosing_from_the_search_inserts_the_key_as_one_undo() {
+        let mut page = page_in_notebook("as said by ");
+        cite_chord(&mut page);
+        assert!(page.app.dialog_open());
+
+        // What's typed goes to the search, not the document.
+        type_into(&mut page, "KNUTH");
+        assert_eq!(only_text(&page), "as said by ");
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert_eq!(only_text(&page), "as said by [knuth1981]");
+        assert!(!page.app.dialog_open());
+        assert_eq!(page.app.session.caret.offset, only_text(&page).len());
+        assert!(page.app.session.undo());
+        assert_eq!(only_text(&page), "as said by ", "only the key goes");
+    }
+
+    #[test]
+    fn up_and_down_choose_a_row_of_the_search() {
+        let mut page = page_in_notebook("");
+        write_reference(&root_of(&page), "smith2020", GOOD);
+        page.app.reload_references();
+        cite_chord(&mut page);
+
+        press_key(&mut page, egui::Key::ArrowDown);
+        press_key(&mut page, egui::Key::ArrowDown);
+        press_key(&mut page, egui::Key::ArrowUp);
+        press_key(&mut page, egui::Key::Enter);
+
+        assert_eq!(only_text(&page), "[smith2020]");
+    }
+
+    #[test]
+    fn clicking_a_row_of_the_search_chooses_it() {
+        let mut page = page_in_notebook("");
+        cite_chord(&mut page);
+
+        page.press("knuth1981");
+
+        assert_eq!(only_text(&page), "[knuth1981]");
+    }
+
+    #[test]
+    fn the_searchs_last_row_is_a_new_reference_with_the_query_as_its_key() {
+        let mut page = page_in_notebook("");
+        cite_chord(&mut page);
+        type_into(&mut page, "lamport1994");
+        page.frame(Vec::new());
+        assert!(page.sees("New reference “lamport1994”…"));
+
+        press_key(&mut page, egui::Key::Enter);
+
+        let window = page.app.refs.form.as_ref().expect("the form opens");
+        assert_eq!(window.form.key, "lamport1994");
+        assert!(page.app.refs.cite_search.is_none());
+        assert_eq!(only_text(&page), "");
+    }
+
+    #[test]
+    fn a_query_that_cant_be_a_key_leaves_the_key_to_be_suggested() {
+        let mut page = page_in_notebook("");
+        cite_chord(&mut page);
+        type_into(&mut page, "two words");
+
+        press_key(&mut page, egui::Key::Enter);
+
+        let form = &page.app.refs.form.as_ref().expect("the form opens").form;
+        assert_eq!(form.key, "");
+        assert!(!form.key_edited);
+    }
+
+    #[test]
+    fn add_and_cite_saves_inserts_and_shows_at_once() {
+        let mut page = page_in_notebook("hello ");
+        cite_chord(&mut page);
+        type_into(&mut page, "nothing like it");
+        press_key(&mut page, egui::Key::Enter);
+        page.frame(Vec::new());
+
+        // The first field has the keyboard, and the key follows it.
+        type_into(&mut page, "L. Lamport");
+        {
+            let form = &mut page.app.refs.form.as_mut().unwrap().form;
+            form.reference.year = "1994".to_string();
+            form.reference.title = "How to write".to_string();
+        }
+        type_into(&mut page, ", J. Doe");
+        page.frame(Vec::new());
+        assert_eq!(page.app.refs.form.as_ref().unwrap().form.key, "lamport1994");
+        assert!(page.sees("How to write"), "the preview");
+        assert_eq!(only_text(&page), "hello ", "typing stays in the form");
+
+        page.press("Add and cite");
+
+        assert!(page.app.refs.form.is_none());
+        assert_eq!(only_text(&page), "hello [lamport1994]");
+        let saved = page
+            .app
+            .refs
+            .list
+            .get("lamport1994")
+            .expect("listed at once");
+        assert_eq!(saved.authors, ["L. Lamport", "J. Doe"]);
+        assert!(reference_file(&page, "lamport1994").exists());
+
+        assert!(page.app.session.undo());
+        assert_eq!(only_text(&page), "hello ");
+        assert!(page.app.refs.list.contains("lamport1994"), "only the text");
+    }
+
+    #[test]
+    fn a_form_with_a_problem_cant_be_saved() {
+        let mut page = page_in_notebook("");
+        cite_chord(&mut page);
+        type_into(&mut page, "nothing like it");
+        press_key(&mut page, egui::Key::Enter);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        assert!(!page.can_press("Add and cite"));
+        assert!(page.sees("It needs a key."));
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.refs.form.is_some(), "it stays up");
+    }
+
+    #[test]
+    fn saving_a_new_key_the_caret_is_on_leaves_the_text_alone() {
+        let mut page = page_in_notebook("as in [lamport1994]");
+        let history = page.app.session.history();
+        cite_chord(&mut page);
+
+        let window = page.app.refs.form.as_mut().expect("the form opens");
+        assert_eq!(window.form.key, "lamport1994");
+        window.form.reference.title = "How to write".to_string();
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.refs.form.is_none());
+        assert_eq!(only_text(&page), "as in [lamport1994]");
+        assert_eq!(page.app.session.history(), history);
+        assert!(page.app.refs.list.contains("lamport1994"));
+    }
+
+    #[test]
+    fn a_key_the_form_was_changed_to_isnt_put_inside_the_one_the_caret_is_on() {
+        let mut page = page_in_notebook("as in [lamport1994] so");
+        let block_id = page.app.session.document().blocks[0].id;
+        page.app.session.set_caret(crate::edit::Cursor {
+            block_id,
+            offset: "as in [lam".len(),
+        });
+        cite_chord(&mut page);
+
+        let window = page.app.refs.form.as_mut().expect("the form opens");
+        window.form.key = "other".to_string();
+        window.form.reference.title = "T".to_string();
+        press_key(&mut page, egui::Key::Enter);
+
+        assert_eq!(only_text(&page), "as in [lamport1994][other] so");
+    }
+
+    #[test]
+    fn a_known_key_under_the_caret_opens_for_editing() {
+        let mut page = page_in_notebook("as in [knuth1981]");
+        let history = page.app.session.history();
+        cite_chord(&mut page);
+
+        let window = page.app.refs.form.as_mut().expect("the form opens");
+        assert_eq!(
+            window.form.reference.title,
+            "Breaking paragraphs into lines"
+        );
+        window.form.reference.title = "Another title".to_string();
+        page.frame(Vec::new());
+        page.press("Save");
+
+        assert!(page.app.refs.form.is_none());
+        assert_eq!(
+            page.app.refs.list.get("knuth1981").unwrap().title,
+            "Another title"
+        );
+        let file = std::fs::read_to_string(reference_file(&page, "knuth1981")).unwrap();
+        assert!(file.contains("Another title"), "{file}");
+        assert_eq!(page.app.session.history(), history, "no edit to the text");
+    }
+
+    #[test]
+    fn text_that_only_looks_like_a_key_opens_the_search() {
+        let mut page = page_in_notebook("[knuth1981]");
+        let block_id = page.app.session.document().blocks[0].id;
+        page.app
+            .session
+            .set_block_kind(block_id, BlockKind::Code { language: None });
+        cite_chord(&mut page);
+
+        assert!(page.app.refs.cite_search.is_some());
+        assert!(page.app.refs.form.is_none());
+    }
+
+    #[test]
+    fn a_failed_save_stays_in_the_window() {
+        let mut page = page_in_notebook("[broken2020]");
+        write_reference(&root_of(&page), "broken2020", "kind: nonsense\n");
+        page.app.reload_references();
+        cite_chord(&mut page);
+
+        let window = page.app.refs.form.as_mut().expect("the form opens");
+        window.form.reference.title = "T".to_string();
+        press_key(&mut page, egui::Key::Enter);
+        page.frame(Vec::new());
+
+        let window = page.app.refs.form.as_ref().expect("still up");
+        let failed = window.failed.as_deref().expect("it says why");
+        assert!(failed.contains("damaged"), "{failed}");
+        assert!(page.sees("damaged"));
+    }
+
+    #[test]
+    fn enter_in_the_freeform_box_is_a_new_line() {
+        let mut page = page_in_notebook("[letter1984]");
+        cite_chord(&mut page);
+        page.press("Freeform");
+        page.frame(Vec::new());
+
+        type_into(&mut page, "A letter");
+        press_key(&mut page, egui::Key::Enter);
+        type_into(&mut page, "and more");
+        page.frame(Vec::new());
+
+        let window = page.app.refs.form.as_ref().expect("still up");
+        assert_eq!(window.form.reference.text, "A letter\nand more");
+
+        page.press("Add and cite");
+        let saved = page.app.refs.list.get("letter1984").unwrap();
+        assert_eq!(saved.kind, Kind::Freeform);
+        assert_eq!(saved.text, "A letter\nand more");
+    }
+
+    #[test]
+    fn typing_in_the_form_never_reaches_the_document_and_escape_cancels_it() {
+        let mut page = page_in_notebook("[lamport1994]");
+        cite_chord(&mut page);
+        assert!(page.app.refs.form.is_some());
+
+        type_into(&mut page, "typed in the form");
+        assert_eq!(only_text(&page), "[lamport1994]");
+
+        press_key(&mut page, egui::Key::Escape);
+
+        assert!(page.app.refs.form.is_none());
+        assert!(!page.app.dialog_open());
+        assert!(!reference_file(&page, "lamport1994").exists());
+        assert_eq!(only_text(&page), "[lamport1994]");
+    }
+
+    #[test]
+    fn the_chord_is_ignored_over_a_dialog() {
+        let mut page = page_in_notebook("hello");
+        page.app.toggle_jump();
+        cite_chord(&mut page);
+        assert!(page.app.refs.cite_search.is_none());
+        page.app.nb.close_lists();
+
+        cite_chord(&mut page);
+        assert!(page.app.refs.cite_search.is_some());
+        cite_chord(&mut page);
+        assert!(page.app.refs.cite_search.is_some(), "it doesn't toggle");
+        assert!(page.app.refs.form.is_none());
+    }
+
+    #[test]
+    fn the_chord_is_ignored_in_a_notes_box() {
+        let mut page = page_in_notebook("hello");
+        let id = page
+            .app
+            .session
+            .add_annotation(AnnotationKind::Footnote)
+            .unwrap();
+        page.app.set_open_note(Some(id));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        cite_chord(&mut page);
+
+        assert!(!page.app.refs.window_open());
+    }
+
+    #[test]
+    fn a_right_click_offers_citing_in_a_notebook_only() {
+        let secondary = |page: &mut Headless, pos: Pos2| {
+            page.frame(vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false] {
+                page.frame(vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }]);
+            }
+            page.frame(Vec::new());
+        };
+        let mut page = page_in_notebook("hello ");
+        let pos = near_the_start(&page);
+        secondary(&mut page, pos);
+        page.press("Cite…");
+        page.frame(Vec::new());
+        assert!(page.app.refs.cite_search.is_some());
+
+        let folder = test_temp_dir().join(format!("outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut session = Session::open(&folder.join("doc.kame")).unwrap();
+        session.insert("hello");
+        let mut outside = Headless::new(session);
+        outside.frame(Vec::new());
+        secondary(&mut outside, pos);
+        assert!(outside.sees("Footnote"), "the menu is up");
+        assert!(!outside.sees("Cite…"));
+    }
+
+    #[test]
+    fn the_entrys_edit_button_opens_the_form() {
+        let mut page = page_in_notebook("[knuth1981] says so");
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+        assert!(page.app.refs.shown.is_some());
+
+        page.press("Edit");
+
+        assert_eq!(page.app.refs.shown, None);
+        let window = page.app.refs.form.as_ref().expect("the form opens");
+        assert_eq!(window.form.key, "knuth1981");
+        assert!(!window.form.is_new());
+    }
+
+    #[test]
+    fn the_list_shows_counts_and_load_problems() {
+        let mut page = page_in_notebook("[knuth1981] and [knuth1981]");
+        let root = root_of(&page);
+        other_document(&page, "other.kame", "also [knuth1981]");
+        write_reference(&root, "smith2020", GOOD);
+        write_reference(&root, "broken2020", "kind: nonsense\n");
+        page.app.reload_references();
+        page.app.session.last_error = None;
+
+        open_list(&mut page);
+
+        assert_eq!(page.app.refs.counts.as_ref().unwrap()["knuth1981"], 2);
+        assert!(page.sees("2 documents"));
+        assert!(page.sees("0 documents"), "smith2020");
+        assert!(
+            page.sees("broken2020"),
+            "what's wrong outlasts the status row"
+        );
+    }
+
+    #[test]
+    fn a_new_file_while_the_list_is_up_is_counted_again() {
+        let mut page = page_in_notebook("[smith2020]");
+        open_list(&mut page);
+        assert!(!page
+            .app
+            .refs
+            .counts
+            .as_ref()
+            .unwrap()
+            .contains_key("smith2020"));
+
+        write_reference(&root_of(&page), "smith2020", GOOD);
+        page.app.refs.checked = None;
+        run_until(&mut page, |app| {
+            app.refs
+                .counts
+                .as_ref()
+                .is_some_and(|counts| counts.contains_key("smith2020"))
+        });
+    }
+
+    #[test]
+    fn deleting_says_how_many_cite_it_and_shows_at_once() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+
+        page.press("Delete…");
+        page.frame(Vec::new());
+        assert!(page.sees("1 document cites it."));
+        assert!(reference_file(&page, "knuth1981").exists(), "only asked");
+
+        page.press("Delete knuth1981");
+
+        assert!(!page.app.refs.list.contains("knuth1981"), "at once");
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert_eq!(only_text(&page), "[knuth1981]");
+        page.frame(Vec::new());
+        assert!(page.sees("Deleted knuth1981"));
+    }
+
+    #[test]
+    fn cancelling_a_confirmation_changes_nothing() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+
+        page.press("Delete…");
+        page.frame(Vec::new());
+        page.press("Cancel");
+        page.frame(Vec::new());
+
+        assert!(!page.can_press("Delete knuth1981"));
+        assert!(page.app.refs.list.contains("knuth1981"));
+    }
+
+    #[test]
+    fn nothing_can_be_confirmed_before_the_count_is_known() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+        page.press("Delete…");
+        page.frame(Vec::new());
+        let (_keep_it_waiting, coming) = channel();
+        page.app.refs.counts = None;
+        page.app.refs.counting = Some(coming);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        assert!(page.sees("Counting the documents that cite it…"));
+        assert!(!page.can_press("Delete knuth1981"));
+        assert!(page.sees("Delete knuth1981"));
+    }
+
+    #[test]
+    fn escape_takes_the_windows_down_one_at_a_time() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+        page.press("Edit");
+        page.frame(Vec::new());
+        assert!(page.app.refs.form.is_some());
+
+        press_key(&mut page, egui::Key::Escape);
+        assert!(page.app.refs.form.is_none());
+        assert!(page.app.refs.window.is_some());
+
+        page.press("Delete…");
+        page.frame(Vec::new());
+        press_key(&mut page, egui::Key::Escape);
+        assert!(page.app.refs.window.as_ref().unwrap().confirming.is_none());
+        assert!(page.app.refs.window.is_some());
+
+        press_key(&mut page, egui::Key::Escape);
+        assert!(page.app.refs.window.is_none());
+        assert!(!page.app.dialog_open());
+    }
+
+    /// Asks to rename the only key, typing `new` as what it's to be.
+    fn ask_to_rename(page: &mut Headless, new: &str) {
+        page.press("Rename…");
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        if let Some(Confirming::Rename { new: field, .. }) =
+            &mut page.app.refs.window.as_mut().unwrap().confirming
+        {
+            field.clear();
+        }
+        page.frame(Vec::new());
+        type_into(page, new);
+        page.frame(Vec::new());
+    }
+
+    /// Waits for a rename, and for the list to be counted again after it.
+    fn wait_for_rename(page: &mut Headless) {
+        run_until(page, |app| {
+            app.refs.renaming.is_none() && app.refs.counts.is_some()
+        });
+        page.frame(Vec::new());
+    }
+
+    /// Renames the only key to `new`, by way of its field and Enter.
+    fn rename_only_key(page: &mut Headless, new: &str) {
+        ask_to_rename(page, new);
+        press_key(page, egui::Key::Enter);
+        wait_for_rename(page);
+    }
+
+    #[test]
+    fn enter_in_the_form_doesnt_confirm_a_rename_behind_it() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        open_list(&mut page);
+        ask_to_rename(&mut page, "plass1981");
+
+        let reference = page.app.refs.list.get("knuth1981").unwrap().clone();
+        page.app
+            .refs
+            .open_form(ReferenceForm::editing("knuth1981", &reference));
+        page.frame(Vec::new());
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.refs.renaming.is_none());
+        assert!(reference_file(&page, "knuth1981").exists());
+    }
+
+    #[test]
+    fn the_rename_button_renames_as_enter_does() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        open_list(&mut page);
+        ask_to_rename(&mut page, "plass1981");
+
+        page.press("Rename knuth1981");
+        wait_for_rename(&mut page);
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+    }
+
+    #[test]
+    fn a_rename_to_nothing_new_cant_be_confirmed() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        open_list(&mut page);
+
+        ask_to_rename(&mut page, "knuth1981");
+        assert!(!page.can_press("Rename knuth1981"));
+
+        ask_to_rename(&mut page, "not a key");
+        assert!(!page.can_press("Rename knuth1981"));
+        press_key(&mut page, egui::Key::Enter);
+        assert!(page.app.refs.renaming.is_none());
+    }
+
+    #[test]
+    fn renaming_rewrites_the_open_document_and_the_others_and_shows_at_once() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        let other = other_document(&page, "other.kame", "and [knuth1981]");
+        open_list(&mut page);
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+        assert_eq!(text_on_disk(&other), "and [plass1981]");
+        assert!(page.app.refs.list.contains("plass1981"));
+        assert!(!page.app.refs.list.contains("knuth1981"));
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(page.sees("Renamed knuth1981 to plass1981 in 2 documents."));
+        // The open document's rename is one undo, in that document.
+        assert!(page.app.session.undo());
+        assert_eq!(only_text(&page), "see [knuth1981]");
+    }
+
+    #[test]
+    fn a_rename_refused_for_a_taken_key_says_why_and_touches_nothing() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        write_reference(
+            &root_of(&page),
+            "taken2000",
+            "kind: book\ntitle: Different\n",
+        );
+        page.app.reload_references();
+        open_list(&mut page);
+        let history = page.app.session.history();
+
+        page.app
+            .start_rename("knuth1981".to_string(), "taken2000".to_string());
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+        page.frame(Vec::new());
+
+        assert!(page.sees("\"taken2000\" is already a reference"));
+        assert_eq!(only_text(&page), "see [knuth1981]");
+        assert_eq!(page.app.session.history(), history);
+        assert!(reference_file(&page, "knuth1981").exists());
+    }
+
+    #[test]
+    fn a_document_that_cant_be_rewritten_keeps_the_old_key_and_is_named() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        std::fs::write(root_of(&page).join("a.md"), "Cites [knuth1981].\n").unwrap();
+        open_list(&mut page);
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+        assert!(reference_file(&page, "knuth1981").exists());
+        assert!(reference_file(&page, "plass1981").exists());
+        assert!(page.app.refs.list.contains("knuth1981"));
+        assert!(page.sees("knuth1981 was kept"));
+        assert!(page.sees("a.md: a Markdown document"));
+    }
+
+    #[test]
+    fn when_the_open_document_cant_follow_the_old_key_stays_and_a_retry_finishes() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        let other = other_document(&page, "other.kame", "and [knuth1981]");
+        let was = std::fs::read(reference_file(&page, "knuth1981")).unwrap();
+        open_list(&mut page);
+        page.app.session.save_failed = true;
+        page.app.session.last_error = Some("the disk is full".to_string());
+
+        rename_only_key(&mut page, "plass1981");
+
+        // Where the rename had removed it, as nothing else failed.
+        assert_eq!(
+            std::fs::read(reference_file(&page, "knuth1981")).unwrap(),
+            was
+        );
+        assert!(reference_file(&page, "plass1981").exists());
+        assert!(page.app.refs.list.contains("knuth1981"));
+        assert_eq!(text_on_disk(&other), "and [plass1981]");
+        assert_eq!(only_text(&page), "see [knuth1981]");
+        assert!(page.sees("knuth1981 was kept"));
+        assert!(page.sees("doc.kame: the disk is full"));
+
+        page.app.session.save_failed = false;
+        page.app
+            .start_rename("knuth1981".to_string(), "plass1981".to_string());
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(!page.app.refs.list.contains("knuth1981"));
+    }
+
+    #[test]
+    fn an_open_document_from_a_newer_version_keeps_the_old_key_too() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        open_list(&mut page);
+        page.app.session.newer = true;
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert!(reference_file(&page, "knuth1981").exists());
+        assert_eq!(only_text(&page), "see [knuth1981]");
+        assert!(page.sees("doc.kame: its citations could not be rewritten"));
+    }
+
+    #[test]
+    fn an_open_document_that_doesnt_cite_it_is_no_failure() {
+        let mut page = page_in_notebook("no citations here");
+        let other = other_document(&page, "other.kame", "and [knuth1981]");
+        open_list(&mut page);
+        page.app.session.save_failed = true;
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert_eq!(text_on_disk(&other), "and [plass1981]");
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(page.sees("in 1 document."));
+    }
+
+    #[test]
+    fn the_document_stays_open_while_a_rename_runs() {
+        let mut page = page_in_notebook("[knuth1981]");
+        let other = other_document(&page, "other.kame", "words");
+        open_list(&mut page);
+        let (send, coming) = channel();
+        page.app.refs.renaming = Some(Renaming {
+            coming,
+            notebook: page.app.nb.notebook.clone().unwrap(),
+            old: "knuth1981".to_string(),
+            new: "plass1981".to_string(),
+            reference: Reference::default(),
+        });
+        let open = page.app.session.path().unwrap().to_path_buf();
+
+        page.app.open_document(other.display().to_string());
+        assert_eq!(page.app.session.path(), Some(open.as_path()));
+        assert!(page
+            .app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("being renamed"));
+
+        // Nor does Escape take away the window that will say how it went.
+        press_key(&mut page, egui::Key::Escape);
+        assert!(page.app.refs.window.is_some());
+        page.frame(Vec::new());
+        assert!(page.sees("Renaming…"));
+
+        send.send(Err("refused".to_string())).unwrap();
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+        page.app.open_document(other.display().to_string());
+        assert_eq!(page.app.session.path(), Some(other.as_path()));
+        assert!(
+            page.app.refs.window.is_none(),
+            "another document's windows are its own"
+        );
     }
 }

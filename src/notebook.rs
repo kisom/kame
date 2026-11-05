@@ -555,6 +555,7 @@ impl KameApp {
         if let Some(problem) = self.refs.refresh(self.nb.notebook.as_ref()) {
             self.session.last_error = Some(problem);
         }
+        self.references_tick(ctx);
         self.nb.check_listing();
         if let Some(coming) = &self.nb.listing_coming {
             match coming.try_recv() {
@@ -1195,7 +1196,7 @@ fn document_menu(ui: &mut egui::Ui, entry: &Entry, title: &str) -> Option<FileOp
 }
 
 /// Escape and Enter for a list, as (close, confirm), and the arrows moving through its rows.
-fn list_keys(ctx: &egui::Context, selected: &mut usize, rows: usize) -> (bool, bool) {
+pub(crate) fn list_keys(ctx: &egui::Context, selected: &mut usize, rows: usize) -> (bool, bool) {
     ctx.input_mut(|input| {
         let up = input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
         let down = input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
@@ -1212,14 +1213,14 @@ fn list_keys(ctx: &egui::Context, selected: &mut usize, rows: usize) -> (bool, b
     })
 }
 
-fn focus_field(field: &egui::Response, focus: &mut bool) {
+pub(crate) fn focus_field(field: &egui::Response, focus: &mut bool) {
     if *focus {
         field.request_focus();
         *focus = false;
     }
 }
 
-fn list_window(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn list_window(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Window::new(id)
         .title_bar(false)
         .resizable(false)
@@ -1233,7 +1234,7 @@ fn list_window(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// A list's rows, drawing only those in view, so that a list can be as long as it needs to be.
-fn list_rows(
+pub(crate) fn list_rows(
     ui: &mut egui::Ui,
     rows: usize,
     selected: usize,
@@ -1249,7 +1250,12 @@ fn list_rows(
         });
 }
 
-fn list_row(ui: &mut egui::Ui, selected: bool, main: &str, side: &str) -> egui::Response {
+pub(crate) fn list_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    main: &str,
+    side: &str,
+) -> egui::Response {
     let response = ui
         .horizontal(|ui| {
             let main = ui.selectable_label(selected, main);

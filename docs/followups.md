@@ -68,10 +68,6 @@ keystroke in the page, a little more for a long paragraph, and nothing yet is cl
   form would save a pass, about a sixth of a keystroke on a Retina screen. Drawing only the lines that changed would save more.
 - [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs
   far from the screen would make opening independent of length.
-- [ ] **Every frame fingerprints every block, twice,** even when nothing changed. A revision number on the document would skip it.
-- [ ] **In a notebook with references, every frame looks for citations in every block,** in `page_blocks`: 0.04 ms at 2,500
-  words, and 0.4 ms of a 0.56 ms idle frame at 26,000 words. Copying the blocks that hold one costs nothing beside it. The same
-  revision number would skip it.
 
 ## Sync
 

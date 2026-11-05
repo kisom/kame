@@ -2480,6 +2480,8 @@ struct KameApp {
     /// Whether justified paragraphs can hyphenate words.
     hyphenate: bool,
     renderer: GlyphRenderer,
+    /// The blocks as the page draws them.
+    page: references::Page,
     layouts: LayoutCache,
     textures: TextureCache,
     /// Margin bodies and footnote entries, shaped in their own columns.
@@ -2646,6 +2648,7 @@ impl KameApp {
             link_menu: None,
             clipped: None,
             menu_block: None,
+            page: references::Page::default(),
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
             annotation_textures: AnnotationTextureCache::new(),
@@ -4269,9 +4272,18 @@ impl KameApp {
 
         // Shape only blocks whose content changed since the last frame; an
         // idle repaint shapes nothing, and an edit re-shapes one block.
+        // The page and the marks come of the document and the keys known, so a frame with neither
+        // changed looks at no block.
         let marks = footnote_marks(self.session.document());
-        let page = references::page_blocks(&self.session.document().blocks, &self.refs.list);
-        let layouts = self.layouts.sync_marked(&mut self.renderer, &page, &marks);
+        let revision = self.page.update(
+            self.session.revision(),
+            &self.session.document().blocks,
+            &self.refs.list,
+        );
+        let page = self.page.blocks(&self.session.document().blocks);
+        let layouts = self
+            .layouts
+            .sync_marked(&mut self.renderer, page, &marks, Some(revision));
 
         let paper: [u8; 3] = [
             self.palette.background.r(),
@@ -4281,7 +4293,7 @@ impl KameApp {
         let highlights = highlight_map(self.session.document(), &self.palette);
 
         let document = self.session.document();
-        let blocks: &[Block] = &page;
+        let blocks: &[Block] = page;
         let caret = self.session.caret;
 
         // List markers: a bullet that changes with the level, or a number.
@@ -10556,6 +10568,56 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             painted_line_start(&mut page, CHECKED_LINE),
             as_text[CHECKED_LINE]
         );
+    }
+
+    /// Where the lines of the first block start, as the page last laid it out.
+    fn painted_lines(page: &Headless) -> Vec<usize> {
+        let id = page.app.session.document().blocks[0].id;
+        let layout = page.app.layouts.get(id).expect("the page laid it out");
+        layout.lines.iter().map(|line| line.start).collect()
+    }
+
+    #[test]
+    fn the_page_follows_every_way_the_document_changes() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Short.");
+        let mut page = Headless::new(session);
+        let follows = |page: &mut Headless, what: &str| {
+            page.frame(Vec::new());
+            assert_eq!(painted_lines(page), caret_lines(page), "after {what}");
+        };
+        follows(&mut page, "opening");
+        let short = painted_lines(&page);
+
+        page.app.session.snapshot(Some("short"));
+        let id = page.app.session.snapshots().unwrap()[0].id;
+        page.app
+            .session
+            .insert(&" A sentence long enough to wrap onto more lines.".repeat(8));
+        follows(&mut page, "typing");
+        let long = painted_lines(&page);
+        assert_ne!(long, short, "the paragraph has to take more lines");
+
+        assert!(page.app.session.undo());
+        follows(&mut page, "an undo");
+        assert_eq!(painted_lines(&page), short);
+        assert!(page.app.session.redo());
+        follows(&mut page, "a redo");
+        assert_eq!(painted_lines(&page), long);
+
+        assert!(page.app.session.restore(id));
+        follows(&mut page, "a restore");
+        assert_eq!(painted_lines(&page), short);
+
+        let mut replaced = page.app.session.document().clone();
+        replaced.blocks[0].text =
+            "Another paragraph, long enough to take more than one line here. ".repeat(6);
+        assert!(page.app.session.replace_document(replaced));
+        follows(&mut page, "a replace");
+        assert!(painted_lines(&page).len() > 1);
+
+        page.app.session = Session::anonymous().unwrap();
+        follows(&mut page, "another document");
     }
 
     #[test]

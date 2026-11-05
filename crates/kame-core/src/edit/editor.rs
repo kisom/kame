@@ -24,6 +24,56 @@ use crate::model::{
     Document, Span, SpanStyle, MAX_LIST_DEPTH,
 };
 
+/// A document that can only be changed by way of a new revision.
+mod revised {
+    use std::ops::Deref;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::model::Document;
+
+    /// The next revision any document will have, so that no two are the same.
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    fn next() -> u64 {
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(super) struct Revised {
+        doc: Document,
+        revision: u64,
+    }
+
+    impl Revised {
+        pub(super) fn new(doc: Document) -> Revised {
+            Revised {
+                doc,
+                revision: next(),
+            }
+        }
+
+        pub(super) fn revision(&self) -> u64 {
+            self.revision
+        }
+
+        /// The document, to change, with a revision of its own from here on whether it changes or
+        /// not.
+        pub(super) fn get_mut(&mut self) -> &mut Document {
+            self.revision = next();
+            &mut self.doc
+        }
+    }
+
+    impl Deref for Revised {
+        type Target = Document;
+
+        fn deref(&self) -> &Document {
+            &self.doc
+        }
+    }
+}
+
+use revised::Revised;
+
 /// A caret position: the block it sits in and a **byte** offset into that
 /// block's text.
 ///
@@ -93,7 +143,7 @@ impl std::error::Error for EditError {}
 /// [`Editor::cursor`] must agree before every write — always persist the edit
 /// you just made.
 pub struct Editor {
-    doc: Document,
+    doc: Revised,
     undo: Vec<Op>,
     redo: Vec<Op>,
     /// Whether the last edit joined up with the one before it.
@@ -106,7 +156,7 @@ impl Editor {
     /// A fresh editor with empty history.
     pub fn new(doc: Document) -> Editor {
         Editor {
-            doc,
+            doc: Revised::new(doc),
             undo: Vec::new(),
             redo: Vec::new(),
             coalesced: false,
@@ -137,7 +187,7 @@ impl Editor {
         let redo: Vec<Op> = ops[cursor..].iter().rev().cloned().collect();
         let undo: Vec<Op> = ops[..cursor].to_vec();
         Editor {
-            doc,
+            doc: Revised::new(doc),
             undo,
             redo,
             coalesced: false,
@@ -148,6 +198,13 @@ impl Editor {
     /// The current document.
     pub fn document(&self) -> &Document {
         &self.doc
+    }
+
+    /// A number for the document as it stands. It's another after anything that may have changed
+    /// the document, and no two editors share one, so whatever is worked out from a document can
+    /// be kept for as long as its revision is the same.
+    pub fn revision(&self) -> u64 {
+        self.doc.revision()
     }
 
     /// How many logged ops are applied to [`Editor::document`]: the undo cursor
@@ -166,7 +223,7 @@ impl Editor {
     /// rejected by [`apply`], not silently overwritten.
     pub fn apply_edit(&mut self, op: Op) -> Op {
         let op = with_clipped(&self.doc, normalize(&self.doc, op));
-        apply(&mut self.doc, &op);
+        apply(self.doc.get_mut(), &op);
         // Never onto history a redo could still return to, since that history is going.
         let joined = if self.redo.is_empty() {
             self.undo.last().and_then(|last| coalesce(last, &op))
@@ -196,7 +253,7 @@ impl Editor {
             old: old.clone(),
             new: Box::new(new),
         };
-        apply(&mut self.doc, &joined);
+        apply(self.doc.get_mut(), &joined);
         *self.undo.last_mut().expect("it was just read") = joined.clone();
         self.coalesced = true;
         Some(joined)
@@ -232,7 +289,7 @@ impl Editor {
     /// [`Editor::take_refused`] says so.
     pub fn undo(&mut self) -> Option<Op> {
         let op = self.undo.last()?.clone();
-        if !try_apply_inverse(&mut self.doc, &op) {
+        if !try_apply_inverse(self.doc.get_mut(), &op) {
             self.refused = true;
             return None;
         }
@@ -254,7 +311,7 @@ impl Editor {
             return None;
         }
         let op = self.undo.last()?;
-        if !try_apply_inverse(&mut self.doc, op) {
+        if !try_apply_inverse(self.doc.get_mut(), op) {
             self.refused = true;
             return None;
         }
@@ -265,7 +322,7 @@ impl Editor {
     /// Puts back the edit [`Editor::forget_last_edit`] just took out. It fits, as the document is
     /// as that edit found it.
     pub fn put_back(&mut self, op: Op) {
-        if try_apply(&mut self.doc, &op) {
+        if try_apply(self.doc.get_mut(), &op) {
             self.undo.push(op);
         }
     }
@@ -277,7 +334,7 @@ impl Editor {
     /// [`Editor::undo`], which also says what happens to a step that doesn't fit.
     pub fn redo(&mut self) -> Option<Op> {
         let op = self.redo.last()?.clone();
-        if !try_apply(&mut self.doc, &op) {
+        if !try_apply(self.doc.get_mut(), &op) {
             self.refused = true;
             return None;
         }
@@ -1515,6 +1572,54 @@ mod tests {
             anchor: Anchor::range(block_id, start, end),
             body: "note".to_string(),
         }
+    }
+
+    #[test]
+    fn the_revision_changes_with_the_document_and_only_then() {
+        let doc = doc_with("one");
+        let block_id = doc.blocks[0].id;
+        let mut e = Editor::new(doc.clone());
+        let mut seen = vec![e.revision()];
+        let mut changed = |e: &Editor| {
+            assert!(!seen.contains(&e.revision()), "{} again", e.revision());
+            seen.push(e.revision());
+        };
+
+        // Another editor of the same document has a number of its own.
+        assert_ne!(Editor::new(doc.clone()).revision(), e.revision());
+        assert_ne!(
+            Editor::with_cursor(doc.clone(), Vec::new(), 0).revision(),
+            e.revision()
+        );
+
+        let before = e.revision();
+        let _ = (e.document(), e.cursor(), e.history(), e.applied_ops());
+        assert_eq!(e.revision(), before, "reading changes nothing");
+
+        e.apply_edit(Op::InsertText {
+            block_id,
+            offset: 3,
+            text: " two".into(),
+        });
+        changed(&e);
+        e.undo().unwrap();
+        changed(&e);
+        e.redo().unwrap();
+        changed(&e);
+        let taken = e.forget_last_edit().unwrap();
+        changed(&e);
+        e.put_back(taken);
+        changed(&e);
+
+        let mut other = doc_with("other");
+        e.apply_edit(Op::ReplaceDocument {
+            old: Box::new(e.document().clone()),
+            new: Box::new(other.clone()),
+        });
+        changed(&e);
+        other.blocks[0].text = "other again".into();
+        e.join_replacing(other).unwrap();
+        changed(&e);
     }
 
     #[test]

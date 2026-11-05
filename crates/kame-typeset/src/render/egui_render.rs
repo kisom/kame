@@ -322,10 +322,15 @@ impl TextureCache {
 /// touched. Layouts of blocks that left the document are dropped.
 pub struct LayoutCache {
     entries: HashMap<BlockId, CachedLayout>,
+    /// How many blocks it has fingerprinted.
+    #[cfg(test)]
+    fingerprints: u64,
 }
 
 struct CachedLayout {
     fingerprint: u64,
+    /// The revision the layout was last found current at.
+    current_at: Option<u64>,
     layout: BlockLayout,
 }
 
@@ -339,6 +344,8 @@ impl LayoutCache {
     pub fn new() -> LayoutCache {
         LayoutCache {
             entries: HashMap::new(),
+            #[cfg(test)]
+            fingerprints: 0,
         }
     }
 
@@ -350,39 +357,52 @@ impl LayoutCache {
 
     #[cfg(test)]
     pub fn sync(&mut self, renderer: &mut GlyphRenderer, blocks: &[Block]) -> Vec<&BlockLayout> {
-        self.sync_marked(renderer, blocks, &HashMap::new())
+        self.sync_marked(renderer, blocks, &HashMap::new(), None)
     }
 
     /// Returns one layout per block, in document order, shaping only blocks
     /// whose fingerprint changed since the last call. `marks` holds each block's
     /// footnote offsets, which a block needs room for.
+    ///
+    /// `revision` is a number the caller changes whenever `blocks` or `marks` may have, and a
+    /// block already found current at it isn't fingerprinted again. With `None`, every block is.
     pub fn sync_marked(
         &mut self,
         renderer: &mut GlyphRenderer,
         blocks: &[Block],
         marks: &HashMap<BlockId, Vec<usize>>,
+        revision: Option<u64>,
     ) -> Vec<&BlockLayout> {
         let mut live = HashSet::with_capacity(blocks.len());
         for block in blocks {
             live.insert(block.id);
+            if let Some(cached) = self.entries.get(&block.id) {
+                if revision.is_some() && cached.current_at == revision {
+                    continue;
+                }
+            }
+            #[cfg(test)]
+            {
+                self.fingerprints += 1;
+            }
             let block_marks = marks.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
             let as_ranges: Vec<_> = block_marks
                 .iter()
                 .map(|mark| (*mark, *mark, [0; 3]))
                 .collect();
             let fingerprint = block_fingerprint(block, &as_ranges);
-            let up_to_date = self
-                .entries
-                .get(&block.id)
-                .is_some_and(|cached| cached.fingerprint == fingerprint);
-            if up_to_date {
-                continue;
+            if let Some(cached) = self.entries.get_mut(&block.id) {
+                if cached.fingerprint == fingerprint {
+                    cached.current_at = revision;
+                    continue;
+                }
             }
             let layout = renderer.layout_marked(block, block_marks);
             self.entries.insert(
                 block.id,
                 CachedLayout {
                     fingerprint,
+                    current_at: revision,
                     layout,
                 },
             );
@@ -397,6 +417,11 @@ impl LayoutCache {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The layout of `block_id` as last synced, if it has one.
+    pub fn get(&self, block_id: BlockId) -> Option<&BlockLayout> {
+        self.entries.get(&block_id).map(|cached| &cached.layout)
     }
 }
 
@@ -1591,6 +1616,45 @@ mod tests {
             1,
             "the removed block's cached layout is dropped"
         );
+    }
+
+    /// A block found current at a revision isn't looked at again until the revision changes, or
+    /// the cache is cleared.
+    #[test]
+    fn layout_cache_looks_at_nothing_again_at_the_same_revision() {
+        let mut renderer = GlyphRenderer::new(config());
+        let mut blocks = vec![paragraph("Hello"), paragraph("World")];
+        let marks = HashMap::new();
+        let mut cache = LayoutCache::new();
+
+        cache.sync_marked(&mut renderer, &blocks, &marks, Some(1));
+        assert_eq!(cache.fingerprints, 2);
+        assert_eq!(renderer.layout_calls(), 2);
+        cache.sync_marked(&mut renderer, &blocks, &marks, Some(1));
+        assert_eq!(cache.fingerprints, 2, "the same revision looks at no block");
+
+        // At the same revision the blocks are promised to be the same, so a change isn't seen.
+        blocks[0].text = "Hello, much longer line".to_string();
+        let layouts = cache.sync_marked(&mut renderer, &blocks, &marks, Some(1));
+        assert_eq!(layouts[0].lines.last().unwrap().end, "Hello".len());
+        assert_eq!(renderer.layout_calls(), 2);
+
+        let layouts = cache.sync_marked(&mut renderer, &blocks, &marks, Some(2));
+        assert_eq!(
+            layouts[0].lines.last().unwrap().end,
+            "Hello, much longer line".len()
+        );
+        assert_eq!(cache.fingerprints, 4, "a new revision looks at every block");
+        assert_eq!(renderer.layout_calls(), 3, "and shapes only what changed");
+
+        cache.sync_marked(&mut renderer, &blocks, &marks, None);
+        assert_eq!(cache.fingerprints, 6, "no revision looks at every block");
+        cache.sync_marked(&mut renderer, &blocks, &marks, None);
+        assert_eq!(cache.fingerprints, 8, "every time");
+
+        cache.clear();
+        cache.sync_marked(&mut renderer, &blocks, &marks, Some(2));
+        assert_eq!(renderer.layout_calls(), 5, "a cleared cache shapes again");
     }
 
     /// A paragraph and a measure where a line ends in a drawn hyphen, and that line's index.

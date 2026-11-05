@@ -524,6 +524,11 @@ impl Session {
         self.editor.document()
     }
 
+    /// The document's [`Editor::revision`], which is another whenever it may have changed.
+    pub fn revision(&self) -> u64 {
+        self.editor.revision()
+    }
+
     /// The `.kame` file this session is persisted to, or `None` for an
     /// anonymous (unsaved) document.
     pub fn path(&self) -> Option<&Path> {

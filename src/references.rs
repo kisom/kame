@@ -767,6 +767,47 @@ pub(crate) fn page_blocks<'a>(blocks: &'a [Block], references: &References) -> C
     Cow::Owned(cited.into_iter().map(Cow::into_owned).collect())
 }
 
+/// The page's blocks, [`page_blocks`] of the document, kept from frame to frame for as long as the
+/// document and the keys known are the same.
+#[derive(Default)]
+pub(crate) struct Page {
+    /// The document's revision and the keys known when the page was worked out.
+    from: Option<(u64, Vec<String>)>,
+    /// A number that's another whenever the page may have changed.
+    revision: u64,
+    /// The page, if it is a copy, and otherwise it's the document's own blocks.
+    copy: Option<Vec<Block>>,
+}
+
+impl Page {
+    /// Works the page out again, if `blocks`, at `document` revision, or the keys known are
+    /// other than they were. Returns the page's revision.
+    pub(crate) fn update(
+        &mut self,
+        document: u64,
+        blocks: &[Block],
+        references: &References,
+    ) -> u64 {
+        let same = self.from.as_ref().is_some_and(|(revision, keys)| {
+            *revision == document && keys.iter().map(String::as_str).eq(references.keys())
+        });
+        if !same {
+            self.copy = match page_blocks(blocks, references) {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(copy) => Some(copy),
+            };
+            self.from = Some((document, references.keys().map(str::to_string).collect()));
+            self.revision += 1;
+        }
+        self.revision
+    }
+
+    /// The page, for `blocks`, the document it was last updated with.
+    pub(crate) fn blocks<'a>(&'a self, blocks: &'a [Block]) -> &'a [Block] {
+        self.copy.as_deref().unwrap_or(blocks)
+    }
+}
+
 /// How the note about a key with no reference starts and ends, with the key between.
 const NOTE_STARTS: &str = "No reference called ";
 const NOTE_ENDS: &str = ". Ctrl-Shift-C adds it.";
@@ -1882,6 +1923,34 @@ mod tests {
         assert_eq!(page[1], blocks[1]);
         assert_eq!(page[0].text, blocks[0].text);
         assert!(blocks[0].spans.is_empty(), "the document is left alone");
+    }
+
+    #[test]
+    fn the_page_is_worked_out_again_only_for_another_document_or_other_keys() {
+        let blocks = vec![paragraph("as [knuth1981] says")];
+        let mut page = Page::default();
+
+        let first = page.update(1, &blocks, &known(&["knuth1981"]));
+        assert_eq!(page.blocks(&blocks)[0].spans.len(), 1);
+        assert_eq!(page.update(1, &blocks, &known(&["knuth1981"])), first);
+
+        // The same revision is the same document, so other blocks are never looked at.
+        let plain = vec![paragraph("as knuth1981 says")];
+        assert_eq!(page.update(1, &plain, &known(&["knuth1981"])), first);
+        assert_eq!(page.blocks(&plain)[0].spans.len(), 1);
+
+        let another = page.update(2, &plain, &known(&["knuth1981"]));
+        assert_ne!(another, first);
+        assert!(page.blocks(&plain)[0].spans.is_empty());
+
+        let second = page.update(3, &blocks, &known(&["knuth1981"]));
+        assert_ne!(second, another);
+        let none = page.update(3, &blocks, &References::new());
+        assert_ne!(none, second, "a key going is another page");
+        assert!(page.blocks(&blocks)[0].spans.is_empty());
+        let other = page.update(3, &blocks, &known(&["other"]));
+        assert_ne!(other, none, "so is another key");
+        assert_eq!(page.update(3, &blocks, &known(&["other"])), other);
     }
 
     /// A notebook folder with an empty `references/` in it.

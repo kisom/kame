@@ -429,15 +429,42 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ),
     ("Backspace / Delete", "delete a character, or the selection"),
     ("Ctrl-Z / Ctrl-Shift-Z", "undo / redo"),
+    ("Ctrl-Y", "redo"),
+    ("Ctrl-C / Ctrl-X / Ctrl-V", "copy / cut / paste"),
+    ("Arrows", "move the caret · add Shift to select"),
     (
-        "Ctrl-Left / Right",
+        "Ctrl-Left / Right, Alt-Left / Right",
         "move by word · add Shift to select words",
+    ),
+    (
+        "Home / End",
+        "start / end of the line · add Shift to select",
+    ),
+    (
+        "Page Up / Page Down",
+        "a window up / down · add Shift to select",
     ),
     ("Ctrl-A", "select the block; again, the whole document"),
     (
         "Enter",
         "split a block; on an empty list item, end the list",
     ),
+    (
+        "Shift-Enter",
+        "a line without leaving a code or prose block",
+    ),
+    ("Tab / Shift-Tab", "move a list item in / out"),
+    ("Alt-Backspace", "delete the word before the caret"),
+    ("Esc then Backspace", "delete the word before the caret"),
+    (
+        "Esc then <  Esc then >",
+        "the very start / end of the document",
+    ),
+    (
+        "Escape",
+        "close the find bar, a dialog or the note that's open",
+    ),
+    ("Ctrl-Enter", "close the note that's open"),
     (
         "Ctrl-N",
         "a new document, asking first if there is unsaved work",
@@ -475,10 +502,14 @@ const HELP_ROWS: &[(&str, &str)] = &[
         "```",
         "code block: three backticks and a language if wanted, then Enter",
     ),
+    ("---", "horizontal rule, typed on its own line, then Enter"),
     ("*x*  **x**", "italic / bold emphasis, typed around a word"),
     ("[text](url)", "a hyperlink, typed around the anchor text"),
+    ("[[target]]", "a link to another document, typed"),
     ("Ctrl-K", "add or edit a link on the selection"),
     ("Ctrl +  Ctrl -", "larger / smaller type"),
+    ("Ctrl-0", "type back to its usual size"),
+    ("Alt-F/A/V/S/H", "open a menu, on Linux"),
     ("Ctrl-Shift-D", "dark mode"),
     ("F11", "fullscreen"),
     (
@@ -10254,7 +10285,8 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }]);
-        for _ in 0..3 {
+        // A scrolling window grows to fit its rows over several frames.
+        for _ in 0..12 {
             page.frame(Vec::new());
         }
         page
@@ -10282,6 +10314,36 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
                     "{words:?} is outside the window"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_help_lists_every_command_the_keyboard_page_does() {
+        let page = help_page();
+        for keys in [
+            "Ctrl-C",
+            "Ctrl-Y",
+            "Shift-Enter",
+            "Ctrl-0",
+            "Home",
+            "Page Up",
+            "Alt-Backspace",
+            "Esc then Backspace",
+            "Esc then <",
+            "---",
+            "Arrows",
+            "Alt-Left",
+            "Tab",
+            "Ctrl-Enter",
+            "Escape",
+            "[[target]]",
+            "Alt-F",
+        ] {
+            assert!(
+                HELP_ROWS.iter().any(|(row, _)| row.contains(keys)),
+                "no row for {keys}"
+            );
+            assert!(page.sees(keys), "{keys} is not drawn");
         }
     }
 

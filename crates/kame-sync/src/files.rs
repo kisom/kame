@@ -7,7 +7,9 @@ use kame_core::edit::Op;
 use kame_core::model::Document;
 use kame_core::storage::Db;
 
+use crate::logs::log_folder;
 use crate::merge::{merge, Merged, Side};
+use crate::revlog::Store;
 use kame_core::session::Session;
 use std::path::PathBuf;
 
@@ -143,6 +145,42 @@ fn same_document(path: &Path, id: uuid::Uuid) -> bool {
     Db::open_read_only(path)
         .and_then(|db| db.load_document())
         .is_ok_and(|doc| doc.id == id)
+}
+
+/// Which of `files` hold the document at `path`, by id. If that document's id can't be read, or a
+/// file can't be, it's none of them or not that one, since these are for taking along with it or
+/// removing with it, and a file taken by mistake may be another document's only copy.
+pub fn copies_of(path: &Path, mut files: Vec<PathBuf>) -> Vec<PathBuf> {
+    if files.is_empty() {
+        return files;
+    }
+    let Some(id) = document_id(path) else {
+        return Vec::new();
+    };
+    files.retain(|file| same_document(file, id));
+    files
+}
+
+/// The id of the document at a path. One this machine hasn't opened yet has only its logs, whose
+/// head says. A database that's there and can't be read says nothing, and its logs aren't asked,
+/// since they may be another document's.
+fn document_id(path: &Path) -> Option<uuid::Uuid> {
+    match path.symlink_metadata() {
+        Ok(_) => Db::open_read_only(path)
+            .and_then(|db| db.load_document())
+            .ok()
+            .map(|doc| doc.id),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let store = Store::load(&log_folder(path)).ok()?;
+            let heads = store.heads();
+            let id = store.document(heads.first()?).id;
+            heads
+                .iter()
+                .all(|head| store.document(head).id == id)
+                .then_some(id)
+        }
+        Err(_) => None,
+    }
 }
 
 /// What to call a copy in a note: when it dates from, if its name says.

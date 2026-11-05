@@ -107,19 +107,19 @@ fn deleting_leaves_nothing_named_for_the_document() {
     let x = root.join("X.kame");
     document(&x, "X.");
     for name in [
-        "X.kame-wal",
-        "X.kame-shm",
-        "X.sync-conflict-1.kame.merged",
+        "X.sync-conflict-1.kame",
         ".X.retired.kame",
         ".X.retired-2.kame",
     ] {
+        std::fs::copy(&x, root.join(name)).unwrap();
+    }
+    for name in ["X.kame-wal", "X.kame-shm", "X.sync-conflict-1.kame.merged"] {
         std::fs::write(root.join(name), "").unwrap();
     }
-    std::fs::copy(&x, root.join("X.sync-conflict-1.kame")).unwrap();
     std::fs::create_dir_all(root.join(".X.kame.sync")).unwrap();
     std::fs::write(root.join(".X.kame.sync/titan.log"), "").unwrap();
     document(&root.join("XY.kame"), "XY.");
-    std::fs::write(root.join(".XY.retired.kame"), "").unwrap();
+    std::fs::copy(root.join("XY.kame"), root.join(".XY.retired.kame")).unwrap();
     delete_document(&x).unwrap();
     let mut left: Vec<String> = std::fs::read_dir(&root)
         .unwrap()
@@ -427,20 +427,20 @@ fn a_rename_carries_files_and_history() {
         session.set_metadata(metadata);
         (session.history(), session.snapshots().unwrap())
     };
-    std::fs::copy(&x, root.join("X.sync-conflict-1.kame")).unwrap();
     for name in [
-        "X.kame-wal",
-        "X.kame-shm",
-        "X.sync-conflict-1.kame.merged",
+        "X.sync-conflict-1.kame",
         ".X.retired.kame",
         ".X.retired-2.kame",
     ] {
+        std::fs::copy(&x, root.join(name)).unwrap();
+    }
+    for name in ["X.kame-wal", "X.kame-shm", "X.sync-conflict-1.kame.merged"] {
         std::fs::write(root.join(name), "").unwrap();
     }
     std::fs::create_dir_all(root.join(".X.kame.sync")).unwrap();
     std::fs::write(root.join(".X.kame.sync/titan.log"), "").unwrap();
     document(&root.join("XY.kame"), "XY.");
-    std::fs::write(root.join(".XY.retired.kame"), "").unwrap();
+    std::fs::copy(root.join("XY.kame"), root.join(".XY.retired.kame")).unwrap();
 
     let report = make_move(&nb, &x, &y);
     assert!(report.left.is_empty());
@@ -637,6 +637,105 @@ fn deleting_a_stale_copy_with_no_logs_at_its_path_left_none() {
     assert!(!a.exists());
 }
 
+/// A file `.X.retired.kame` holding a different document, as a path reuse leaves one.
+fn another_documents_retired_copy(root: &Path, name: &str) -> Vec<u8> {
+    let made = root.join("made-elsewhere");
+    document(&made, "Words that never synced.");
+    let retired = root.join(name);
+    std::fs::rename(&made, &retired).unwrap();
+    std::fs::read(&retired).unwrap()
+}
+
+#[test]
+fn deleting_leaves_a_retired_copy_of_another_document() {
+    let (root, _nb) = logged_notebook("delete-retired-other");
+    let x = root.join("X.kame");
+    let words = another_documents_retired_copy(&root, ".X.retired.kame");
+    document(&x, "A new, unrelated document.");
+    sync(&x);
+    std::fs::copy(&x, root.join(".X.retired-2.kame")).unwrap();
+    std::fs::write(root.join(".X.retired-3.kame"), "can't be read").unwrap();
+
+    delete_document(&x).unwrap();
+
+    assert_eq!(std::fs::read(root.join(".X.retired.kame")).unwrap(), words);
+    assert!(!root.join(".X.retired-2.kame").exists(), "its own goes");
+    assert_eq!(
+        std::fs::read(root.join(".X.retired-3.kame")).unwrap(),
+        b"can't be read"
+    );
+}
+
+#[test]
+fn a_move_leaves_a_retired_copy_of_another_document_under_its_name() {
+    let (root, nb) = logged_notebook("move-retired-other");
+    let (x, y) = (root.join("X.kame"), root.join("Y.kame"));
+    let words = another_documents_retired_copy(&root, ".X.retired.kame");
+    document(&x, "A new, unrelated document.");
+    sync(&x);
+    std::fs::copy(&x, root.join(".X.retired-2.kame")).unwrap();
+    std::fs::write(root.join(".X.retired-3.kame"), "can't be read").unwrap();
+
+    make_move(&nb, &x, &y);
+
+    assert_eq!(std::fs::read(root.join(".X.retired.kame")).unwrap(), words);
+    assert!(!root.join(".Y.retired.kame").exists());
+    assert!(root.join(".Y.retired-2.kame").is_file(), "its own follows");
+    assert!(!root.join(".X.retired-2.kame").exists());
+    assert_eq!(
+        std::fs::read(root.join(".X.retired-3.kame")).unwrap(),
+        b"can't be read"
+    );
+}
+
+#[test]
+fn a_document_with_only_logs_is_known_by_the_id_in_them() {
+    let (root, _nb) = logged_notebook("delete-retired-logs-only");
+    let x = root.join("X.kame");
+    let words = another_documents_retired_copy(&root, ".X.retired.kame");
+    document(&x, "The words.");
+    sync(&x);
+    std::fs::rename(&x, root.join(".X.retired-2.kame")).unwrap();
+
+    delete_document(&x).unwrap();
+
+    assert_eq!(std::fs::read(root.join(".X.retired.kame")).unwrap(), words);
+    assert!(!root.join(".X.retired-2.kame").exists(), "its own goes");
+    assert!(!log_folder(&x).exists());
+}
+
+#[test]
+fn logs_with_no_head_to_read_leave_every_retired_copy() {
+    let (root, _nb) = logged_notebook("delete-retired-no-head");
+    let x = root.join("X.kame");
+    document(&x, "The words.");
+    sync(&x);
+    std::fs::rename(&x, root.join(".X.retired.kame")).unwrap();
+    let folder = log_folder(&x);
+    for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+        std::fs::write(entry.path(), "").unwrap();
+    }
+
+    delete_document(&x).unwrap();
+
+    assert!(root.join(".X.retired.kame").is_file());
+    assert!(!folder.exists());
+}
+
+#[test]
+fn a_database_that_cannot_be_read_leaves_every_retired_copy() {
+    let (root, _nb) = logged_notebook("delete-retired-unreadable");
+    let x = root.join("X.kame");
+    document(&x, "The words.");
+    std::fs::copy(&x, root.join(".X.retired.kame")).unwrap();
+    std::fs::write(&x, "not a database").unwrap();
+
+    delete_document(&x).unwrap();
+
+    assert!(!x.exists());
+    assert!(root.join(".X.retired.kame").is_file());
+}
+
 #[test]
 fn deleting_a_document_in_step_with_its_logs_removes_them() {
     let (root, _nb) = logged_notebook("delete-in-step");
@@ -804,7 +903,7 @@ fn a_rename_in_case_only_works_where_the_disk_sees_one_file() {
     let linker = root.join("linker.kame");
     document(&linker, "");
     link(&linker, "one", document_link("a.kame"));
-    std::fs::write(root.join(".a.retired.kame"), "kept").unwrap();
+    std::fs::copy(&a, root.join(".a.retired.kame")).unwrap();
     let upper = root.join("A.kame");
     let report = make_move(&nb, &a, &upper);
     assert!(report.left.is_empty());
@@ -1272,7 +1371,8 @@ fn a_retired_copy_in_the_way_is_kept_and_the_new_one_gets_a_number() {
     let (root, nb) = plain_notebook("move-retired-taken");
     let a = root.join("a.kame");
     document(&a, "A.");
-    std::fs::write(root.join(".a.retired.kame"), "from a").unwrap();
+    std::fs::copy(&a, root.join(".a.retired.kame")).unwrap();
+    let from_a = std::fs::read(root.join(".a.retired.kame")).unwrap();
     std::fs::write(root.join(".b.retired.kame"), "from b").unwrap();
     make_move(&nb, &a, &root.join("b.kame"));
     assert_eq!(
@@ -1281,7 +1381,7 @@ fn a_retired_copy_in_the_way_is_kept_and_the_new_one_gets_a_number() {
     );
     assert_eq!(
         std::fs::read(root.join(".b.retired-2.kame")).unwrap(),
-        b"from a"
+        from_a
     );
     assert!(!root.join(".a.retired.kame").exists());
 }

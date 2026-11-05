@@ -82,7 +82,8 @@ pub fn check_new_path(
 
 /// The files kept for a document beside it: conflicting copies from a sync tool, each with the
 /// copy a merge left of it, and databases retired from it. Names are matched whole, so a document
-/// `XY` isn't taken for `X`.
+/// `XY` isn't taken for `X`. A retired copy is also matched by id, as a conflicting copy is, since
+/// a path can be reused, and `.X.retired.kame` may be the only copy of the old `X`'s words.
 pub fn belonging_files(path: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for copy in kame_sync::files::conflict_copies(path) {
@@ -122,7 +123,7 @@ pub fn belonging_files(path: &Path) -> Vec<PathBuf> {
         })
         .collect();
     retired.sort();
-    found.extend(retired);
+    found.extend(kame_sync::files::copies_of(path, retired));
     found
 }
 
@@ -141,7 +142,7 @@ pub(crate) fn sqlite_files(path: &Path) -> [PathBuf; 2] {
 }
 
 /// Deletes a document, and with it what belongs to it: what SQLite keeps beside the file, its
-/// conflicting and retired copies, and its logs. A file that can't be removed is an error before
+/// conflicting and retired copies, by id, and its logs. A file that can't be removed is an error before
 /// the logs are touched, so that a document left in place keeps them. A stranded database has no
 /// logs of its own: what's at its log folder, if anything, is another document's, and stays, as
 /// removing it would remove that document on every machine. This returns whether it left logs

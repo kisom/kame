@@ -343,10 +343,14 @@ revision logs, and fixes its own relative links and images if it changed folders
 name. `.md` and `.markdown` documents are imported rather than edited, so links in them are left as they are. Those, and any other document
 that couldn't be changed, are named in a report when it's done.
 
-Delete asks once, and it's permanent. It takes the document, its logs, and any conflict or retired copies named for it. Links to it stay,
-and following one offers to create it again. If it was open, you land on the contents page, or a new document if it was the contents page.
-Deleting a stale copy, one left behind when its document was moved or deleted on another machine, leaves any logs at its path, since those
-belong to whatever document is there now.
+Delete asks once, and it's permanent. It takes the document, its logs, and any conflict or retired copies of it. A retired copy is told by
+the document's id, as a conflict copy is, so a `.X.retired.kame` holding some other document, left when the path was reused, stays, whether
+you delete `X` or move it. Links to it stay, and following one offers to create it again. If it was open, you land on the contents page, or a
+new document if it was the contents page.
+
+Deleting a stale copy, one left behind when its document was moved or deleted on another machine, leaves any logs at its path, since those may
+belong to whatever document is there now, and the notice says so. The row stays in the browser for those logs. Deleting it again removes
+them, on every machine.
 
 In a folder with revision logs, each of these reaches the other machines through the logs. A machine's own database doesn't travel, so on
 another machine the stale one is dealt with once kame has seen it stranded for 10 minutes: it's renamed to join its document if that moved.

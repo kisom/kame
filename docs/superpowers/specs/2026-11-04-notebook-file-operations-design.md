@@ -70,9 +70,19 @@ Folders it names are created. Folders left empty stay, since the browser doesn't
 
 ### Deleting
 
-Removed: `X.kame`, its `-wal` and `-shm`, `.X.kame.sync/`, and any conflict copies and merged or retired copies named for
-it, which are hidden from the browser and would otherwise be left with nothing to belong to. A `.md` document is just the
-file.
+Removed: `X.kame`, its `-wal` and `-shm`, `.X.kame.sync/`, and any conflict copies and merged or retired copies of it, which
+are hidden from the browser and would otherwise be left with nothing to belong to. A `.md` document is just the file.
+
+A retired copy is told by its document's id as well as its name, as a conflict copy is, since a path can be reused. If the old
+`X` was retired to `.X.retired.kame` holding words that never synced, and a new, unrelated `X` was made, deleting the new one
+mustn't take the old one's only copy. A retired copy of another document, or one that can't be read, stays. A document with
+only its logs has its id from their head, and if that can't be read, retired copies are left alone.
+
+A stranded database has no logs of its own, so whatever is at its log folder stays, as it may be another document's. Those
+logs keep its row in the browser, where they list as a document with only its logs, so `delete_document` returns whether it
+left logs, and the app says so: "deleted the stale copy of *title*; the logs at that path may be another document's, and were
+left". Without that a person reads the row as the delete not having taken, and deletes again, which with no database to say
+otherwise removes the logs, on every machine.
 
 If it's the open document, the app first syncs and leaves it: it goes to the notebook's contents page (`Notebook::index`)
 if that isn't the one being deleted, and otherwise to a new anonymous document. The window's other memory of the path goes
@@ -88,7 +98,8 @@ The root `Notebook.kame` can be deleted like any other document. Home then says 
    and one whose logs have such a link is opened and synced first, then planned from the result. Links arriving later from
    a machine that hadn't heard of the move can't be helped, and `follow` treats them as any stale link.
 3. **Move the files.** `X.kame`, `-wal`, `-shm` and `.X.kame.sync/` move together, with conflict copies and merged or
-   retired copies renamed to follow. If the document is open, the app syncs it, leaves it, moves it, and opens it again at
+   retired copies of it, told as a delete tells them, renamed to follow. A retired copy of another document stays behind under
+   its old name. If the document is open, the app syncs it, leaves it, moves it, and opens it again at
    the new path with its caret and scroll, so that no SQLite connection is open across the rename. A failure here leaves
    the rest undone and says so.
 4. **Rewrite the links** in each document in the plan. A failure in one doesn't stop the others.

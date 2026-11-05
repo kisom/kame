@@ -6,8 +6,8 @@
 //! [`ImportReport`] so the author can see what changed.
 
 use crate::model::{
-    is_script_url, Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind, Document,
-    Metadata, MAX_LIST_DEPTH,
+    is_script_url, link_style, Anchor, Annotation, AnnotationKind, Block, BlockId, BlockKind,
+    Document, Metadata, MAX_LIST_DEPTH,
 };
 use crate::model::{Span, SpanStyle};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -428,8 +428,12 @@ impl<'a> Builder<'a> {
                 if is_script_url(&dest_url) {
                     self.report.script_links += 1;
                 }
-                self.open_style(SpanStyle::Link {
-                    url: dest_url.to_string(),
+                // A link to a heading is one to a heading here, as typing it makes.
+                let url = dest_url.to_string();
+                self.open_style(if url.starts_with('#') {
+                    link_style(url)
+                } else {
+                    SpanStyle::Link { url }
                 });
             }
             Tag::Image { dest_url, .. } => {
@@ -786,6 +790,31 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn a_link_to_a_heading_is_a_document_link() {
+        let doc = import("See [the intro](<#The Intro>) and [here](#Plain).\n").document;
+        let block = &doc.blocks[0];
+        assert_eq!(block.text, "See the intro and here.");
+        let styles: Vec<&SpanStyle> = block.spans.iter().map(|span| &span.style).collect();
+        assert_eq!(
+            styles,
+            [
+                &SpanStyle::DocumentLink {
+                    target: "#The Intro".to_string()
+                },
+                &SpanStyle::DocumentLink {
+                    target: "#Plain".to_string()
+                },
+            ]
+        );
+        // Nothing about another page's heading, or a bare `#`, changes.
+        let doc = import("[a](https://e.com/#x) [b](#)\n").document;
+        assert!(doc.blocks[0]
+            .spans
+            .iter()
+            .all(|span| matches!(span.style, SpanStyle::Link { .. })));
     }
 
     #[test]

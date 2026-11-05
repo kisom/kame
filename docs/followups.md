@@ -79,8 +79,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 
 - [ ] **Tables (deferred).** Simplified on import because the model has no equivalent.
   Tables are wanted but too complex for now, and a code block is the stopgap.
-- [ ] **A link to a heading stays an ordinary link.** `[x](<#Heading>)` imports as a web link, so
-  clicking it goes to the browser, where typing it would make a document link.
 
 ## Export
 

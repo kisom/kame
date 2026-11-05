@@ -770,6 +770,26 @@ fn opening_stranded_writes_nothing() {
 }
 
 #[test]
+fn opening_stranded_with_another_documents_logs_writes_nothing() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    drop(session);
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let other = another_document(&talos, "different.kame");
+    std::fs::rename(log_folder(&other), &folder).unwrap();
+    let before = Store::load(&folder).unwrap().revision_count();
+
+    let mut session = talos.session();
+    talos.append(&mut session, 0, " Old words.");
+    let outcome = talos.sync(&mut session, 3);
+
+    assert!(outcome.stranded);
+    assert_eq!(Store::load(&folder).unwrap().revision_count(), before);
+}
+
+#[test]
 fn logs_replaced_while_open_stop_all_writing() {
     let (talos, _) = two_machines();
     let mut session = talos.session();

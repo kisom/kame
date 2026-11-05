@@ -174,8 +174,15 @@ impl Logged {
         }
         // The store keeps revisions after their files go, so ask the disk, and only when something
         // could have changed. This is before any refresh or write, which could recreate a folder.
+        // A first sync also asks if the logs as read when this opened don't hold the revision,
+        // since it may have been opened on another document's logs, where there's no news to see.
+        let not_held = self.synced.is_none()
+            && self
+                .last
+                .as_ref()
+                .is_some_and(|last| !self.store.contains(last));
         if self.last.is_some()
-            && (!self.replica.folder.exists() || self.has_news())
+            && (!self.replica.folder.exists() || self.has_news() || not_held)
             && is_stranded(self.last.as_deref(), &self.replica.folder)
         {
             return Ok(Outcome {

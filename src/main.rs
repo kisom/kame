@@ -862,7 +862,9 @@ struct OpenPrompt {
 
 /// A native file dialog starting in `directory`, if there is one.
 fn file_dialog(title: &str, directory: Option<&Path>) -> rfd::FileDialog {
-    assert!(!cfg!(test), "a test asked for the file browser: {title}");
+    if cfg!(test) {
+        panic!("a test asked for the file browser: {title}");
+    }
     let dialog = rfd::FileDialog::new().set_title(title);
     match directory {
         Some(directory) => dialog.set_directory(directory),

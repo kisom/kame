@@ -2213,6 +2213,9 @@ impl Session {
     /// and selection stay as they are. So is a marginal the file wouldn't let go, with the failed
     /// write reported. Returns whether it went.
     pub fn discard_unwritten_marginal(&mut self, id: AnnotationId) -> bool {
+        // Asked first: a file replaced behind this refuses as a failed write does, with memory
+        // and the log left agreeing.
+        self.check_file();
         let unwritten = match self.editor.applied_ops().last() {
             Some(Op::AddAnnotation { annotation }) => {
                 annotation.id == id
@@ -2226,7 +2229,7 @@ impl Session {
             }
             _ => false,
         };
-        if !unwritten || self.save_failed {
+        if !unwritten || self.save_failed || self.replaced || self.newer {
             return false;
         }
         let (caret, selection) = (self.caret, self.selection);
@@ -2242,24 +2245,23 @@ impl Session {
             self.report_refused("undo");
             return false;
         };
-        self.check_file();
-        if !self.replaced && !self.newer {
-            let forgotten = self
-                .db
-                .forget_last_edit(self.editor.document(), self.editor.cursor());
-            match forgotten {
-                Ok(()) => self.clear_save_error(),
-                Err(err) => {
-                    // The file still has the add, so memory goes back to having it too: the log
-                    // and the redo stack have to agree, for what's typed next to join the right
-                    // step. Closing the marginal again can try again.
-                    self.editor.put_back(op);
-                    self.mark_save_failed(err);
-                    return false;
-                }
+        let forgotten = self
+            .db
+            .forget_last_edit(self.editor.document(), self.editor.cursor());
+        match forgotten {
+            Ok(()) => {
+                self.clear_save_error();
+                true
+            }
+            Err(err) => {
+                // The file still has the add, so memory goes back to having it too: the log and
+                // the redo stack have to agree, for what's typed next to join the right step.
+                // Closing the marginal again can try again.
+                self.editor.put_back(op);
+                self.mark_save_failed(err);
+                false
             }
         }
-        true
     }
 
     /// Replaces a note's body and persists it as one undoable edit. A body the note already has
@@ -8172,6 +8174,32 @@ mod tests {
         assert!(session.replaced && session.save_failed);
         assert!(session.last_error.as_deref().unwrap().contains("a.kame"));
         assert!(!session.check_file(), "already noticed");
+    }
+
+    #[test]
+    fn a_discard_finding_the_file_replaced_keeps_memory_as_the_log_has_it() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("a");
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        another_copy(&dir.join("b.kame"), "theirs");
+        std::fs::rename(dir.join("b.kame"), &path).unwrap();
+
+        assert!(!session.discard_unwritten_marginal(id));
+        assert_eq!(session.document().annotations.len(), 1);
+        assert_eq!(session.history(), (2, 0));
+
+        let saved = dir.join("saved.kame");
+        session.save_as(&saved).unwrap();
+        session.insert("b");
+        assert_agrees_with_its_file(&session);
+        assert_eq!(session.document().blocks[0].text, "ab");
+        drop(session);
+
+        let mut reopened = Session::open(&saved).unwrap();
+        assert!(!reopened.redo());
+        assert_eq!(reopened.document().blocks[0].text, "ab");
     }
 
     #[test]

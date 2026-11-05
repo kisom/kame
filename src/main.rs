@@ -6532,7 +6532,8 @@ impl KameApp {
                     from.as_deref(),
                     notebook.as_ref().map(|nb| nb.root.as_path()),
                 );
-                self.session.rehome_links(from.as_deref());
+                self.session
+                    .rehome_links(from.as_deref(), kame_sync::logs::names_logs_only);
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
                     self.finish_close(ctx);
@@ -9447,6 +9448,32 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         page.app.follow_document_link(&target);
         assert_eq!(page.app.session.path(), Some(picked.as_path()));
         assert!(!root.join("three/two").exists());
+    }
+
+    #[test]
+    fn a_link_to_a_document_there_only_as_logs_still_leads_there_after_save_as() {
+        let root = kame_test_dir::folder("app-logs-link-save-as")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two/.d.kame.sync")).unwrap();
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        let mut session = open(&root.join("one/a.kame"));
+        session.insert("see d");
+        let block_id = session.valid_caret().block_id;
+        assert!(session.set_link(block_id, 4, 5, "../two/d".to_string()));
+        let mut page = Headless::new(session);
+
+        let ctx = page.ctx.clone();
+        page.app
+            .save_to(&ctx, &root.join("three/deep/a.kame"), false);
+
+        assert_eq!(
+            page.app.session.document().blocks[0].spans[0].style,
+            SpanStyle::Link {
+                url: "../../two/d".to_string()
+            }
+        );
     }
 
     #[test]

@@ -1776,14 +1776,15 @@ impl Session {
     /// it. A web link or `#Heading` depends on nothing of the kind and stays, and a document that
     /// had no file has no way to say where one led. A link to anything at all is only taken for a
     /// path if what it names was there, as what looks like a path may be an address someone
-    /// wrote, while a link to a document always names one, or one to come.
-    pub fn rehome_links(&mut self, from: Option<&Path>) {
+    /// wrote, while a link to a document always names one, or one to come. What's on disk is
+    /// there, and so is anything `there` says a link, written in the document at `from`, names.
+    pub fn rehome_links(&mut self, from: Option<&Path>, there: impl Fn(&str, &Path) -> bool) {
         let (Some(from), Some(to)) = (from, self.path.clone()) else {
             return;
         };
         let selection = self.selection;
         let rewritten = self.rewrite_links_by_kind(|link, to_document| {
-            (to_document || names_something(link, from))
+            (to_document || names_something(link, from) || there(link, from))
                 .then(|| own_target_after_save_as(link, from, &to, to_document))
         });
         match rewritten {
@@ -3961,7 +3962,7 @@ mod tests {
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         let to = root.join("three/deep/a.kame");
         session.save_as(&to).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         let expected = [
             "../../two/d.kame",
             "../../two/d.kame#Part",
@@ -3991,10 +3992,10 @@ mod tests {
         let before = link_targets(&session);
         let history = session.history();
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(link_targets(&session), before);
         assert_eq!(session.history(), history);
-        session.rehome_links(None);
+        session.rehome_links(None, |_, _| false);
         assert_eq!(link_targets(&session), before);
         assert_eq!(session.history(), history);
         std::fs::remove_dir_all(&root).unwrap();
@@ -4019,7 +4020,7 @@ mod tests {
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         session.save_as(&root.join("three/deep/a.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4044,7 +4045,7 @@ mod tests {
         std::fs::remove_file(&from).unwrap();
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         session.save_as(&root.join("three/deep/a.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4062,7 +4063,7 @@ mod tests {
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         std::fs::remove_file(&from).unwrap();
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(
             link_targets(&session)[..7],
             [
@@ -4084,7 +4085,7 @@ mod tests {
         let from = root.join("one/a.kame");
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4118,7 +4119,7 @@ mod tests {
         }];
         session.replace_document(document);
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(link_targets(&session), ["b.kame#Part"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -4130,7 +4131,7 @@ mod tests {
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         let (before, history) = (link_targets(&session), session.history());
         session.save_as(&from).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(link_targets(&session), before);
         assert_eq!(session.history(), history);
         std::fs::remove_dir_all(&root).unwrap();
@@ -4170,7 +4171,7 @@ mod tests {
         );
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         session.save_as(&root.join("three/deep/a.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4208,7 +4209,7 @@ mod tests {
         assert!(selection.is_some());
         std::fs::create_dir_all(root.join("three")).unwrap();
         session.save_as(&root.join("three/a.kame")).unwrap();
-        session.rehome_links(Some(&from));
+        session.rehome_links(Some(&from), |_, _| false);
         assert_eq!(session.selection, selection);
         std::fs::remove_dir_all(&root).unwrap();
     }

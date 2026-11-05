@@ -15,8 +15,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **A footnote or note added right after punctuation** has no word to anchor to, so it sits at one point and its mark moves along as you keep typing there.
 - [ ] **Save As's rewrite of links and images is an invisible undo step, and it ends the redo tail.** Undoing it changes nothing on the
   screen, and leaves a link that's wrong from the new folder until it's redone, and anything waiting for a redo can't come back once it's run.
-- [ ] **On Save As, a `Link` to a document that's there only as logs stays as written.** Only what's on disk counts as what it names, and core can't
-  see logs, so the link stops leading to the document from another folder. A `DocumentLink` isn't affected.
 
 - [ ] **Save As tells a saved document what exists on this machine (accepted for now).** A relative `Link` is rewritten only if what it names is there, and
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its

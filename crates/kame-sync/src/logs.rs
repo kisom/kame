@@ -4,7 +4,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use kame_core::edit::{try_apply_inverse, Cursor};
-use kame_core::links::{find_document, resolve_open_path};
+use kame_core::links::{find_document, resolve_open_path, split_document_target};
 use kame_core::model::{Document, Metadata};
 use kame_core::session::Session;
 use kame_core::storage::Db;
@@ -533,16 +533,32 @@ pub fn find_or_build(path: &str, base: &Path) -> Result<Option<PathBuf>> {
     if let Some(found) = find_document(path, base) {
         return Ok(Some(found));
     }
-    let mut named = resolve_open_path(path, base);
+    let named = database_named(path, base);
+    Ok(build_from_logs(&named)?.then_some(named))
+}
+
+/// Whether a link, written in the document at `base`, names a document that has logs and no file,
+/// which [`find_or_build`] would build.
+pub fn names_logs_only(target: &str, base: &Path) -> bool {
+    let (path, _) = split_document_target(target);
+    !path.is_empty()
+        && find_document(path, base).is_none()
+        && log_folder(&database_named(path, base)).is_dir()
+}
+
+/// The database a link's path names, relative to the document at `base`, with `.kame` added if
+/// it was left off.
+fn database_named(path: &str, base: &Path) -> PathBuf {
+    let named = resolve_open_path(path, base);
     if named
         .extension()
-        .is_none_or(|extension| extension != "kame")
+        .is_some_and(|extension| extension == "kame")
     {
-        let mut with_extension = named.into_os_string();
-        with_extension.push(".kame");
-        named = PathBuf::from(with_extension);
+        return named;
     }
-    Ok(build_from_logs(&named)?.then_some(named))
+    let mut with_extension = named.into_os_string();
+    with_extension.push(".kame");
+    PathBuf::from(with_extension)
 }
 
 /// Builds the database of a document that has logs and no file yet, as on a fresh machine,
@@ -586,6 +602,22 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_names_a_document_there_only_as_logs() {
+        let root = kame_test_dir::folder("logs-only-link");
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two/.d.kame.sync")).unwrap();
+        std::fs::write(root.join("two/e.kame"), "").unwrap();
+        std::fs::create_dir_all(root.join("two/.e.kame.sync")).unwrap();
+        let base = root.join("one/a.kame");
+        for link in ["../two/d", "../two/d.kame", "../two/d.kame#Part"] {
+            assert!(names_logs_only(link, &base), "{link}");
+        }
+        for link in ["../two/e", "../two/f", "#Part", ""] {
+            assert!(!names_logs_only(link, &base), "{link}");
+        }
+    }
 
     #[test]
     fn retired_and_temporary_names_are_told_whole() {

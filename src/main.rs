@@ -6319,6 +6319,9 @@ impl KameApp {
 
     /// Saves the document at `path`, and says its images and links again from there.
     fn save_to(&mut self, ctx: &egui::Context, path: &Path, close_after: bool) {
+        // An open note closes first, as closing one can change the document, and it can't once
+        // this has logged a step after it.
+        self.set_open_note(None);
         let from = self.session.path().map(Path::to_path_buf);
         match self.session.save_as(path) {
             Ok(()) => {
@@ -9213,6 +9216,36 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         page.app.follow_document_link(&target);
         assert_eq!(page.app.session.path(), Some(picked.as_path()));
         assert!(!root.join("three/two").exists());
+    }
+
+    #[test]
+    fn saving_as_takes_away_an_unwritten_marginal_even_when_a_link_changes() {
+        let root = kame_test_dir::folder("app-marginal-save-as")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        let mut session = open(&root.join("one/a.kame"));
+        session.insert("word");
+        session
+            .link_to_document("../two/d.kame".to_string(), "d")
+            .unwrap();
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+
+        let to = root.join("three/deep/a.kame");
+        page.app.save_to(&ctx, &to, false);
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path(), Some(to.as_path()));
+        assert!(page.app.session.document().annotations.is_empty());
+        assert_eq!(page.app.open_note, None);
+        drop(page);
+        assert!(open(&to).document().annotations.is_empty());
     }
 
     #[test]

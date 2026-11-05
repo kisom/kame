@@ -135,7 +135,7 @@ Ctrl-Shift-E exports Markdown and Ctrl-Shift-B exports a standalone HTML page. E
 - A link to a kame document exports as its words, since it can't lead anywhere outside kame.
 - An image exports with its whole path, so the page only shows it while the picture stays where it is on this machine.
 
-Opening a `.md` file imports it as a new document and leaves the file alone. The status row says what it had to simplify. Tables and raw HTML become plain text, and image descriptions are dropped. Front matter fills in the properties.
+Opening a `.md` file imports it as a new document and leaves the file alone. The status row says what it had to simplify. Tables and raw HTML become plain text, and image descriptions are dropped. Front matter fills in the properties. A relative link leads from the Markdown file's folder, and still leads there once the document is saved, wherever that is.
 
 ## Notebooks
 

@@ -6524,7 +6524,12 @@ impl KameApp {
                 self.set_open_note(None);
             }
         }
-        let from = self.session.path().map(Path::to_path_buf);
+        // An import's links lead from its Markdown file until it has a file of its own.
+        let from = self
+            .session
+            .path()
+            .or(self.session.source_path.as_deref())
+            .map(Path::to_path_buf);
         match self.session.save_as(path) {
             Ok(()) => {
                 let notebook = kame_notebook::Notebook::find(path).ok().flatten();
@@ -9473,6 +9478,46 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             SpanStyle::Link {
                 url: "../../two/d".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn an_imported_link_still_leads_there_after_the_first_save_elsewhere() {
+        let root = kame_test_dir::folder("app-import-link-save")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        std::fs::write(root.join("two/d.md"), "D").unwrap();
+        let source = root.join("one/notes.md");
+        std::fs::write(
+            &source,
+            "See [d](../two/d.md) and [far](https://e.com/x).\n",
+        )
+        .unwrap();
+        let (session, _) = Session::import(&source).unwrap();
+        let mut page = Headless::new(session);
+
+        let ctx = page.ctx.clone();
+        page.app
+            .save_to(&ctx, &root.join("three/deep/notes.kame"), false);
+
+        let urls: Vec<_> = page.app.session.document().blocks[0]
+            .spans
+            .iter()
+            .map(|span| span.style.clone())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                SpanStyle::Link {
+                    url: "../../two/d.md".to_string()
+                },
+                SpanStyle::Link {
+                    url: "https://e.com/x".to_string()
+                },
+            ]
         );
     }
 

@@ -252,7 +252,9 @@ HTML exactly, and to Markdown as a block quote with hard line breaks, which keep
 lines but not extra spacing.
 
 A link to a kame document publishes as its text, since it can't lead anywhere outside
-kame.
+kame. A link to a heading in the same document stays a link in Markdown, as
+`[words](<#The Intro>)`, so that importing it again gives the same link. In HTML, where
+headings have no ids, it is its text.
 
 HTML shows the author under the first heading, and passages highlighted with no note on them. A
 note with words leaves no trace, neither the words nor the highlight. Markdown has no highlight, so those passages are plain text there. HTML

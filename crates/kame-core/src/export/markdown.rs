@@ -340,9 +340,11 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
         .spans
         .iter()
         // A script link publishes as its text, as does a link to a kame document, which
-        // can't lead anywhere outside kame.
+        // can't lead anywhere outside kame. A link to a heading stays in this document.
         .filter(|span| !matches!(&span.style, SpanStyle::Link { url } if is_script_url(url)))
-        .filter(|span| !matches!(span.style, SpanStyle::DocumentLink { .. }))
+        .filter(|span| {
+            !matches!(&span.style, SpanStyle::DocumentLink { target } if !target.starts_with('#'))
+        })
         .filter_map(|span| {
             let start = snap_up(text, span.start);
             let end = snap_down(text, span.end);
@@ -386,7 +388,11 @@ fn render_block_text(block: &Block, footnotes: &[(usize, usize)]) -> String {
         // emphasis nests under it in `style_order()`.
         let mut wanted: Vec<SpanStyle> = Vec::new();
         if let Some((_, _, style)) = spans.iter().find(|(s, e, style)| {
-            matches!(style, SpanStyle::Link { .. }) && *s <= start && *e >= end
+            matches!(
+                style,
+                SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
+            ) && *s <= start
+                && *e >= end
         }) {
             wanted.push(style.clone());
         }
@@ -555,9 +561,8 @@ fn open_delimiter(style: &SpanStyle) -> String {
     match style {
         SpanStyle::Bold => "**".to_string(),
         SpanStyle::Italic => "*".to_string(),
-        SpanStyle::Link { .. } => "[".to_string(),
+        SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. } => "[".to_string(),
         SpanStyle::Code => unreachable!("a code span's delimiter depends on its text"),
-        SpanStyle::DocumentLink { .. } => unreachable!("document links are dropped"),
     }
 }
 
@@ -567,9 +572,33 @@ fn close_delimiter(style: &SpanStyle) -> String {
         SpanStyle::Bold => "**".to_string(),
         SpanStyle::Italic => "*".to_string(),
         SpanStyle::Link { url } => format!("]({})", link_destination(url)),
+        SpanStyle::DocumentLink { target } => format!("](<{}>)", heading_destination(target)),
         SpanStyle::Code => unreachable!("a code span's delimiter depends on its text"),
-        SpanStyle::DocumentLink { .. } => unreachable!("document links are dropped"),
     }
+}
+
+/// A link to a heading as what goes between a Markdown destination's angle brackets, which keep
+/// the spaces a heading has. A renderer decodes character references and backslash escapes here,
+/// and a line break can't be in one at all.
+fn heading_destination(target: &str) -> String {
+    let mut out = String::with_capacity(target.len());
+    for c in target.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '\\' | '<' | '>' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => {
+                let mut bytes = [0; 4];
+                for byte in c.encode_utf8(&mut bytes).bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A URL as a Markdown link destination, meaning the same URL once read back. A
@@ -1561,6 +1590,87 @@ mod tests {
         }];
         doc.blocks = vec![linked];
         assert_eq!(to_markdown(&doc), "See the intro now.\n");
+    }
+
+    /// A paragraph with a link to `target` on the words `words`.
+    fn with_heading_link(before: &str, words: &str, target: &str) -> Document {
+        let mut doc = Document::new("t");
+        let mut linked = paragraph(&format!("{before}{words}"));
+        linked.spans = vec![Span {
+            start: before.len(),
+            end: before.len() + words.len(),
+            style: SpanStyle::DocumentLink {
+                target: target.to_string(),
+            },
+        }];
+        doc.blocks = vec![linked];
+        doc
+    }
+
+    #[test]
+    fn a_link_to_a_heading_exports_as_a_link() {
+        assert_eq!(
+            to_markdown(&with_heading_link("See ", "the intro", "#The Intro")),
+            "See [the intro](<#The Intro>)\n"
+        );
+        assert_eq!(
+            to_markdown(&with_heading_link("", "x", "#Plain")),
+            "[x](<#Plain>)\n"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_heading_keeps_its_emphasis_inside() {
+        let mut doc = with_heading_link("", "the intro", "#The Intro");
+        doc.blocks[0].spans.push(Span {
+            start: 4,
+            end: 9,
+            style: SpanStyle::Bold,
+        });
+        assert_eq!(to_markdown(&doc), "[the **intro**](<#The Intro>)\n");
+    }
+
+    #[test]
+    fn a_link_to_a_heading_reads_back_as_itself() {
+        for target in [
+            "#The Intro",
+            "#Plain",
+            "#Q&A: <now> \\ (then)",
+            "#été à Paris",
+            "#a&amp;b",
+        ] {
+            let doc = with_heading_link("See ", "this", target);
+            let exported = to_markdown(&doc);
+            let back =
+                crate::import::markdown::from_markdown(&exported, std::path::Path::new(""), "t")
+                    .document;
+            assert_eq!(
+                back.blocks[0].spans[0].style,
+                SpanStyle::DocumentLink {
+                    target: target.to_string()
+                },
+                "{exported}"
+            );
+            assert_eq!(back.blocks[0].text, "See this");
+            assert_eq!(to_markdown(&back), exported);
+        }
+    }
+
+    #[test]
+    fn a_link_to_a_heading_in_another_document_still_publishes_as_its_text() {
+        assert_eq!(
+            to_markdown(&with_heading_link("See ", "this", "other.kame#The Intro")),
+            "See this\n"
+        );
+    }
+
+    #[test]
+    fn an_image_linked_to_a_heading_reads_back_as_itself() {
+        let source = "[![](a.png)](<#The Intro>)\n";
+        let doc =
+            crate::import::markdown::from_markdown(source, std::path::Path::new("/"), "t").document;
+        let exported = to_markdown(&doc);
+        assert_eq!(exported, "[![](/a.png)](#The%20Intro)\n");
     }
 
     fn with_code(text: &str, ranges: &[(usize, usize)]) -> Document {

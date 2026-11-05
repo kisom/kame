@@ -177,7 +177,7 @@ A document's "linked from" list is every other document holding a `DocumentLink`
 
 ### 4.3 Other links, and what to write
 
-The rules above cover document links. In the app, inside a notebook, a `Link` span or image link holding a relative URL follows the same rules. Any other URL goes to the system's opener, unless it's a script URL or starts with `-`. A `Link` span holding `#x` also goes to the opener and doesn't jump.
+The rules above cover document links. In the app, inside a notebook, a `Link` span or image link holding a relative URL follows the same rules. A `Link` span or image link holding `#x` goes to that heading, in or out of a notebook. Any other URL goes to the system's opener, unless it's a script URL or starts with `-`.
 
 **New links should be relative.** The desktop's link dialog writes `~/…` or a whole path, and those rot on any machine where the notebook lives somewhere else. Typing `[[path]]` keeps what was typed.
 

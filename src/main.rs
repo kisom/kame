@@ -2129,6 +2129,12 @@ fn may_open(url: &str) -> bool {
     !url.is_empty() && !url.starts_with('-') && !is_script_url(url)
 }
 
+/// Whether following `url` stays in kame rather than going to the browser. A heading is in this
+/// document, and in a notebook so is anything relative.
+fn leads_within_kame(url: &str, in_notebook: bool) -> bool {
+    (url.starts_with('#') && url.len() > 1) || (in_notebook && notebook::is_relative_link(url))
+}
+
 /// Opens `url` in the system browser, best-effort: a link that cannot launch is
 /// never worth an error dialog in the editor.
 fn open_in_browser(url: &str) {
@@ -5057,7 +5063,7 @@ impl KameApp {
                             cited_key(&url).filter(|key| self.refs.list.contains(key))
                         {
                             self.refs.show(key, pos);
-                        } else if self.nb.notebook.is_some() && notebook::is_relative_link(&url) {
+                        } else if leads_within_kame(&url, self.nb.notebook.is_some()) {
                             followed_link = Some(url);
                         } else {
                             open_in_browser(&url);
@@ -5250,8 +5256,7 @@ impl KameApp {
         });
         if let Some(menu) = link_menu.filter(|_| open_link) {
             let document = menu.link.as_ref().is_some_and(|link| link.document);
-            let in_notebook = self.nb.notebook.is_some() && notebook::is_relative_link(&menu.url);
-            if document || in_notebook {
+            if document || leads_within_kame(&menu.url, self.nb.notebook.is_some()) {
                 self.follow_document_link(&menu.url);
             } else {
                 open_in_browser(&menu.url);
@@ -7888,6 +7893,16 @@ mod tests {
         let dir = test_temp_dir().join(format!("kame-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_link_to_a_heading_leads_there_rather_than_to_the_browser() {
+        assert!(leads_within_kame("#The Intro", false));
+        assert!(leads_within_kame("#The Intro", true));
+        assert!(leads_within_kame("a/b.md", true));
+        assert!(!leads_within_kame("a/b.md", false));
+        assert!(!leads_within_kame("https://e.com/#x", true));
+        assert!(!leads_within_kame("#", true));
     }
 
     #[test]

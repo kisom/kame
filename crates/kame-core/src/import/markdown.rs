@@ -442,13 +442,15 @@ impl<'a> Builder<'a> {
                 if self.footnote.is_none() {
                     self.flush();
                     let path = self.resolve_image(&dest_url);
-                    // The innermost link around it, unless that runs script.
+                    // The innermost link around it, unless that runs script. A document link
+                    // here can only be to a heading, as that's all an import makes.
                     let link = self
                         .open_styles
                         .iter()
                         .rev()
                         .find_map(|(style, _)| match style {
                             SpanStyle::Link { url } if !is_script_url(url) => Some(url.clone()),
+                            SpanStyle::DocumentLink { target } => Some(target.clone()),
                             _ => None,
                         });
                     self.blocks.push(new_block(
@@ -815,6 +817,17 @@ mod tests {
             .spans
             .iter()
             .all(|span| matches!(span.style, SpanStyle::Link { .. })));
+    }
+
+    #[test]
+    fn an_image_linked_to_a_heading_keeps_its_link() {
+        let doc = import("[![](a.png)](<#The Intro>)\n").document;
+        match &doc.blocks[0].kind {
+            BlockKind::Image { link, .. } => {
+                assert_eq!(link.as_deref(), Some("#The Intro"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

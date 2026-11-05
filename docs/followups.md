@@ -6,10 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **Before the next field on `Metadata` or `Annotation`, stop it invalidating every log.** `Revision::id()` hashes the
-  re-serialized struct, so adding a field makes every line of every log fail its check, and they drop out of every merge. Checking the
-  digest against the line's raw `revision` bytes would validate every line ever written. It needs its own task, since it brings old
-  revisions back into merges. `skip_serializing_if` on new fields is the cheap stopgap. This is the most pressing item here.
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
 - [ ] **A snapshot taken before a Save As to another folder still says its links and images from the old one.** Save As says them

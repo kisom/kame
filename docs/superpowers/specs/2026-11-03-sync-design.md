@@ -106,6 +106,14 @@ digests, with the text only of blocks not seen before. Ids are digests of conten
 cut off in transit fails to parse and is ignored until the rest arrives. A revision whose parents or
 blocks have not arrived yet waits.
 
+**What a revision is written as can't change.** A reader takes a line's id again from the revision as it
+parses it and writes it back, and a block's digest the same way, so any change to those bytes makes
+every line already written fail its check. A field added to a revision, its metadata, an annotation or a
+block is therefore left out when it's at its default, with `skip_serializing_if` on exactly that
+default. Old lines then read back to the same bytes, and lines with the field at its default are the
+same as before. The golden tests at the end of `crates/kame-sync/src/revlog.rs` pin the bytes for a
+revision and blocks with every field present, and at their defaults.
+
 **Convergence needs no coordination.** When a folder holds several heads, each machine merges them
 in sorted order, against their latest shared ancestor. A merge's id depends only on its parents and
 result, so machines merging separately write the same revision, the duplicates collapse on reading,

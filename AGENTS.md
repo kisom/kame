@@ -33,6 +33,7 @@ DISPLAY=:99 VK_ICD_FILENAMES=/run/current-system/sw/share/vulkan/icd.d/lvp_icd.x
 - **Undo history is linear**: a new edit after undo truncates the redo tail. Snapshots are the no-loss net and are restored as an explicit user action (not an op).
 - **Crash-safe persistence**: op + head + cursor + redo-tail truncation land in ONE transaction (`Db::record_edit`); snapshot restore is atomic (`Db::restore_state`).
 - **Deterministic export**: `to_markdown`/`to_html` must be byte-identical across runs and round-trips — footnote/note numbering derives from reading order, never storage order or UUIDs.
+- **Revision bytes never change**: a revision's id and a block's digest are taken over the JSON this build writes for them again, so a change to that JSON makes every line already in every log fail its check. A field added to `Revision`, `Metadata`, `Annotation`, `Block` or anything they hold is left out when it's at its serde default (`#[serde(default, skip_serializing_if = ...)]`, skipped exactly at that default). The golden tests at the end of `crates/kame-sync/src/revlog.rs` pin today's bytes, and must pass unchanged.
 
 ## Typography
 

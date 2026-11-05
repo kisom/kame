@@ -1249,4 +1249,233 @@ mod tests {
             started.elapsed()
         );
     }
+
+    /// Every kind of block, with every field it has present, for the golden tests below.
+    fn every_block() -> Vec<Block> {
+        use kame_core::model::{BlockKind, ImageAlign, Span, SpanStyle};
+        let block = |at: u128, kind: BlockKind, text: &str, spans: Vec<Span>| Block {
+            id: Uuid::from_u128(at),
+            kind,
+            text: text.to_string(),
+            spans,
+        };
+        let span = |start: usize, end: usize, style: SpanStyle| Span { start, end, style };
+        vec![
+            block(
+                10,
+                BlockKind::Paragraph,
+                "Bold, italic, code, a link and a document link.",
+                vec![
+                    span(0, 4, SpanStyle::Bold),
+                    span(6, 12, SpanStyle::Italic),
+                    span(14, 18, SpanStyle::Code),
+                    span(
+                        22,
+                        26,
+                        SpanStyle::Link {
+                            url: "https://example.com".to_string(),
+                        },
+                    ),
+                    span(
+                        33,
+                        46,
+                        SpanStyle::DocumentLink {
+                            target: "other.kame#Heading".to_string(),
+                        },
+                    ),
+                ],
+            ),
+            block(
+                11,
+                BlockKind::Heading {
+                    level: 2,
+                    centered: false,
+                },
+                "Heading",
+                Vec::new(),
+            ),
+            block(
+                12,
+                BlockKind::ListItem {
+                    ordered: true,
+                    depth: 2,
+                },
+                "Item",
+                Vec::new(),
+            ),
+            block(13, BlockKind::BlockQuote, "Quoted", Vec::new()),
+            block(
+                14,
+                BlockKind::Image {
+                    path: "images/a.png".to_string(),
+                    link: Some("https://example.com/a".to_string()),
+                    align: ImageAlign::Center,
+                },
+                "",
+                Vec::new(),
+            ),
+            block(15, BlockKind::Rule, "", Vec::new()),
+            block(
+                16,
+                BlockKind::Code {
+                    language: Some("rust".to_string()),
+                },
+                "fn main() {}",
+                Vec::new(),
+            ),
+            block(17, BlockKind::Prose, "A verse\n  indented", Vec::new()),
+        ]
+    }
+
+    /// A revision with every field of itself, its `Metadata` and its `Annotation`s present.
+    fn full_revision() -> Revision {
+        use kame_core::model::{AcceptedMark, Anchor, AnnotationKind};
+        let annotation = |at: u128, kind: AnnotationKind, anchor: Anchor, body: &str| Annotation {
+            id: Uuid::from_u128(at),
+            kind,
+            anchor,
+            body: body.to_string(),
+        };
+        let blocks = every_block();
+        Revision {
+            parents: vec!["0a".repeat(16), "0b".repeat(16)],
+            device: "talos".to_string(),
+            when: 1_762_300_000,
+            document: Uuid::from_u128(1),
+            title: "Every field".to_string(),
+            order: blocks.iter().map(block_digest).collect(),
+            annotations: vec![
+                annotation(
+                    20,
+                    AnnotationKind::Marginal,
+                    Anchor::block(blocks[0].id),
+                    "Beside.",
+                ),
+                annotation(
+                    21,
+                    AnnotationKind::Note,
+                    Anchor::range(blocks[0].id, 0, 4),
+                    "Mine.",
+                ),
+                annotation(
+                    22,
+                    AnnotationKind::Footnote,
+                    Anchor::range(blocks[1].id, 7, 7),
+                    "Below [knuth1981].",
+                ),
+            ],
+            metadata: Metadata {
+                title: "A title".to_string(),
+                author: "An author".to_string(),
+                created: "2026-11-05".to_string(),
+                published: "2026-11-06".to_string(),
+                tags: vec!["one".to_string(), "two".to_string()],
+                words: vec!["kame".to_string()],
+                accepted: vec![AcceptedMark {
+                    rule: "Spelling".to_string(),
+                    text: "wrod".to_string(),
+                }],
+                publish: true,
+            },
+        }
+    }
+
+    // These pin the exact bytes a revision and its blocks are written as. A revision's id is the
+    // digest of those bytes as this build writes them again, so a change to them makes every line
+    // already in every log fail its check and drop out of merges. A field added to `Revision`,
+    // `Metadata`, `Annotation`, `Block` or anything in them must be left out of what's written
+    // when it's at its serde default (`#[serde(default, skip_serializing_if = ...)]`), and these
+    // tests must pass unchanged with it at that default. Never update the bytes here to make them
+    // pass.
+
+    #[test]
+    fn a_revision_with_every_field_is_written_as_it_always_has_been() {
+        let revision = full_revision();
+        assert_eq!(
+            serde_json::to_string(&revision).unwrap(),
+            r#"{"parents":["0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"],"device":"talos","when":1762300000,"document":"00000000-0000-0000-0000-000000000001","title":"Every field","order":["e8852fbb1c2a6f39b5a6164923ebb936","dfffb92dc5b204d91fcde20544ea726a","3c30da59fe1ebbe486aeb39cfd4d9910","53f3091672e140107bf04d181e90d1ee","66a3722379c82476ddd129fffd615357","96fa2c13cf8fb6a632a191eac408af17","a6dfb1d135722a40103bd7b9b0a12976","6174246e19d33f99b06819e6dac11f6e"],"annotations":[{"id":"00000000-0000-0000-0000-000000000014","kind":"Marginal","anchor":"00000000-0000-0000-0000-00000000000a","body":"Beside."},{"id":"00000000-0000-0000-0000-000000000015","kind":"Note","anchor":{"block_id":"00000000-0000-0000-0000-00000000000a","start":0,"end":4},"body":"Mine."},{"id":"00000000-0000-0000-0000-000000000016","kind":"Footnote","anchor":{"block_id":"00000000-0000-0000-0000-00000000000b","start":7,"end":7},"body":"Below [knuth1981]."}],"metadata":{"title":"A title","author":"An author","created":"2026-11-05","published":"2026-11-06","tags":["one","two"],"words":["kame"],"accepted":[{"rule":"Spelling","text":"wrod"}],"publish":true}}"#
+        );
+        assert_eq!(revision.id(), "243dd97157b2078fba39a2bcebb38352");
+    }
+
+    #[test]
+    fn a_revision_at_its_defaults_is_written_as_it_always_has_been() {
+        let revision = revision(Vec::new(), 0);
+        assert_eq!(
+            serde_json::to_string(&revision).unwrap(),
+            r#"{"parents":[],"device":"test","when":0,"document":"00000000-0000-0000-0000-000000000001","title":"","order":[],"annotations":[],"metadata":{"title":"","author":"","created":"","published":"","tags":[],"words":[],"accepted":[],"publish":false}}"#
+        );
+        assert_eq!(revision.id(), "bd1377f7c5c5e729901f60487028077d");
+    }
+
+    #[test]
+    fn every_kind_of_block_is_written_as_it_always_has_been() {
+        let written: Vec<String> = every_block()
+            .iter()
+            .map(|block| serde_json::to_string(block).unwrap())
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                r#"{"id":"00000000-0000-0000-0000-00000000000a","kind":"Paragraph","text":"Bold, italic, code, a link and a document link.","spans":[{"start":0,"end":4,"style":"Bold"},{"start":6,"end":12,"style":"Italic"},{"start":14,"end":18,"style":"Code"},{"start":22,"end":26,"style":{"Link":{"url":"https://example.com"}}},{"start":33,"end":46,"style":{"DocumentLink":{"target":"other.kame#Heading"}}}]}"#,
+                r#"{"id":"00000000-0000-0000-0000-00000000000b","kind":{"Heading":{"level":2}},"text":"Heading","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-00000000000c","kind":{"ListItem":{"ordered":true,"depth":2}},"text":"Item","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-00000000000d","kind":"BlockQuote","text":"Quoted","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-00000000000e","kind":{"Image":{"path":"images/a.png","link":"https://example.com/a","align":"Center"}},"text":"","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-00000000000f","kind":"Rule","text":"","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-000000000010","kind":{"Code":{"language":"rust"}},"text":"fn main() {}","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-000000000011","kind":"Prose","text":"A verse\n  indented","spans":[]}"#,
+            ]
+        );
+        let digests: Vec<String> = every_block().iter().map(block_digest).collect();
+        assert_eq!(
+            digests,
+            vec![
+                "e8852fbb1c2a6f39b5a6164923ebb936",
+                "dfffb92dc5b204d91fcde20544ea726a",
+                "3c30da59fe1ebbe486aeb39cfd4d9910",
+                "53f3091672e140107bf04d181e90d1ee",
+                "66a3722379c82476ddd129fffd615357",
+                "96fa2c13cf8fb6a632a191eac408af17",
+                "a6dfb1d135722a40103bd7b9b0a12976",
+                "6174246e19d33f99b06819e6dac11f6e"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_block_at_its_defaults_is_written_as_it_always_has_been() {
+        use kame_core::model::{BlockKind, ImageAlign};
+        let written: Vec<String> = [
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: None,
+                align: ImageAlign::Left,
+            },
+            BlockKind::Code { language: None },
+        ]
+        .into_iter()
+        .map(|kind| {
+            serde_json::to_string(&Block {
+                id: Uuid::from_u128(30),
+                kind,
+                text: String::new(),
+                spans: Vec::new(),
+            })
+            .unwrap()
+        })
+        .collect();
+        assert_eq!(
+            written,
+            vec![
+                r#"{"id":"00000000-0000-0000-0000-00000000001e","kind":{"ListItem":{"ordered":false}},"text":"","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-00000000001e","kind":{"Image":{"path":"a.png"}},"text":"","spans":[]}"#,
+                r#"{"id":"00000000-0000-0000-0000-00000000001e","kind":{"Code":{}},"text":"","spans":[]}"#,
+            ]
+        );
+    }
 }

@@ -278,6 +278,7 @@ pub fn plan_site(
             body => safe(body),
             url => safe(url.clone()),
             draft => source.draft,
+            title_centered => source.title_centered,
         };
         let page = render(&env, "document.html", values, problems);
         plan.add(page_path(&url), Output::Bytes(page), problems);
@@ -625,6 +626,48 @@ mod tests {
             plan.files.get(Path::new("k/a/a.png")),
             Some(Output::Copy(_))
         ));
+    }
+
+    fn page_opening_with(site: &Site, heading: &str, centered: bool) -> String {
+        std::fs::create_dir_all(site.dir.join("docs")).unwrap();
+        let path = site.dir.join("docs/a.kame");
+        let mut doc = Document::new("D");
+        doc.blocks = vec![crate::testing::block(
+            kame_core::model::BlockKind::Heading { level: 1, centered },
+            heading,
+        )];
+        write_kame(&path, &doc, Some(&metadata("A Title", "2026-01-01", &[])));
+        site.config(&[("a", &path)], &[]);
+        text(&site.plan(), "k/a/index.html")
+    }
+
+    #[test]
+    fn a_centered_title_is_centered_though_the_page_prints_it() {
+        let page = page_opening_with(&Site::new("plancentertitle"), "A Title", true);
+        assert!(
+            page.contains("<h1 class=\"centered\">A Title</h1>"),
+            "{page}"
+        );
+        assert!(page.contains("<p class=\"meta centered\">"), "{page}");
+        assert!(page.contains("p.meta.centered"), "{page}");
+    }
+
+    #[test]
+    fn a_centered_heading_that_isnt_the_title_leaves_the_title_alone() {
+        let page = page_opening_with(&Site::new("plancenterother"), "Another", true);
+        assert!(page.contains("<h1>A Title</h1>"), "{page}");
+        assert!(page.contains("<p class=\"meta\">"), "{page}");
+        assert!(
+            page.contains("<h1 class=\"centered\">Another</h1>"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_title_that_isnt_centered_stays_as_it_was() {
+        let page = page_opening_with(&Site::new("planplaintitle"), "A Title", false);
+        assert!(page.contains("<h1>A Title</h1>"), "{page}");
+        assert!(page.contains("<p class=\"meta\">"), "{page}");
     }
 
     #[test]

@@ -85,7 +85,7 @@ fn markdown_with(doc: &Document, references: &References) -> String {
         }
         let mut continuation = None;
         let prefix = match block.kind {
-            BlockKind::Heading { level } => {
+            BlockKind::Heading { level, .. } => {
                 format!("{} ", "#".repeat(level.clamp(1, 6) as usize))
             }
             BlockKind::ListItem { .. } => {
@@ -746,7 +746,13 @@ mod tests {
         let note_id = note_block.id;
         document(
             vec![
-                block(BlockKind::Heading { level: 2 }, "Section"),
+                block(
+                    BlockKind::Heading {
+                        level: 2,
+                        centered: false,
+                    },
+                    "Section",
+                ),
                 styled,
                 bullet,
                 ordered,
@@ -763,7 +769,13 @@ mod tests {
     fn headings_and_paragraphs_export() {
         let doc_with_heading_and_para = document(
             vec![
-                block(BlockKind::Heading { level: 1 }, "Title"),
+                block(
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false,
+                    },
+                    "Title",
+                ),
                 paragraph("Body text"),
             ],
             Vec::new(),
@@ -999,12 +1011,24 @@ mod tests {
     #[test]
     fn heading_levels_are_clamped_to_six() {
         let doc = document(
-            vec![block(BlockKind::Heading { level: 0 }, "Low")],
+            vec![block(
+                BlockKind::Heading {
+                    level: 0,
+                    centered: false,
+                },
+                "Low",
+            )],
             Vec::new(),
         );
         assert_eq!(to_markdown(&doc), "# Low\n");
         let doc = document(
-            vec![block(BlockKind::Heading { level: 9 }, "High")],
+            vec![block(
+                BlockKind::Heading {
+                    level: 9,
+                    centered: false,
+                },
+                "High",
+            )],
             Vec::new(),
         );
         assert_eq!(to_markdown(&doc), "###### High\n");
@@ -1196,7 +1220,10 @@ mod tests {
     #[test]
     fn a_line_break_in_a_heading_is_a_space() {
         let mut doc = Document::new("t");
-        doc.blocks[0].kind = BlockKind::Heading { level: 2 };
+        doc.blocks[0].kind = BlockKind::Heading {
+            level: 2,
+            centered: false,
+        };
         doc.blocks[0].text = "first\nsecond".to_string();
         assert_eq!(to_markdown(&doc), "## first second\n");
     }
@@ -1263,7 +1290,13 @@ mod tests {
     fn a_first_heading_repeating_the_title_is_not_published_twice() {
         let mut doc = Document::new("t");
         doc.blocks = vec![
-            block(BlockKind::Heading { level: 1 }, "On Burnout"),
+            block(
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+                "On Burnout",
+            ),
             paragraph("Body."),
         ];
         let out = to_markdown_with(&doc, &metadata(), &References::new());
@@ -1275,7 +1308,13 @@ mod tests {
     fn a_different_first_heading_stays() {
         let mut doc = Document::new("t");
         doc.blocks = vec![
-            block(BlockKind::Heading { level: 1 }, "Introduction"),
+            block(
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+                "Introduction",
+            ),
             paragraph("Body."),
         ];
         assert!(to_markdown_with(&doc, &metadata(), &References::new()).contains("# Introduction"));
@@ -1284,7 +1323,13 @@ mod tests {
     #[test]
     fn a_title_heading_with_a_footnote_keeps_the_footnote() {
         let mut doc = Document::new("t");
-        let heading = block(BlockKind::Heading { level: 1 }, "On Burnout");
+        let heading = block(
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
+            "On Burnout",
+        );
         doc.annotations = vec![annotation(
             AnnotationKind::Footnote,
             heading.id,
@@ -1402,6 +1447,19 @@ mod tests {
     }
 
     #[test]
+    fn markdown_has_no_form_for_a_centered_heading() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Heading {
+                level: 2,
+                centered: true,
+            },
+            "Words",
+        )];
+        assert_eq!(to_markdown(&doc), "## Words\n");
+    }
+
+    #[test]
     fn markdown_has_no_form_for_an_images_alignment() {
         let mut doc = Document::new("t");
         doc.blocks = vec![block(
@@ -1434,7 +1492,13 @@ mod tests {
     #[test]
     fn a_note_on_the_title_heading_does_not_print_the_title_twice() {
         let mut doc = Document::new("t");
-        let heading = block(BlockKind::Heading { level: 1 }, "On Burnout");
+        let heading = block(
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
+            "On Burnout",
+        );
         doc.annotations = vec![annotation(
             AnnotationKind::Note,
             heading.id,
@@ -1461,7 +1525,13 @@ mod tests {
     #[test]
     fn a_marginal_on_the_title_heading_does_not_print_the_title_twice() {
         let mut doc = Document::new("t");
-        let heading = block(BlockKind::Heading { level: 1 }, "On Burnout");
+        let heading = block(
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
+            "On Burnout",
+        );
         doc.annotations = vec![annotation(
             AnnotationKind::Marginal,
             heading.id,
@@ -1790,7 +1860,13 @@ mod tests {
     fn a_first_heading_repeating_the_title_can_be_left_out() {
         let mut doc = Document::new("t");
         doc.blocks = vec![
-            block(BlockKind::Heading { level: 1 }, "The Title"),
+            block(
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+                "The Title",
+            ),
             paragraph("Words."),
         ];
         let without = crate::export::without_repeated_title(&doc, "The Title");
@@ -1804,7 +1880,10 @@ mod tests {
         let mut doc = Document::new("t");
         doc.blocks = vec![
             block(
-                BlockKind::Heading { level: 1 },
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
                 " On The Commanding Heights ",
             ),
             paragraph("Words."),
@@ -1818,7 +1897,13 @@ mod tests {
     #[test]
     fn a_repeated_title_stays_if_a_footnote_is_anchored_in_it() {
         let mut doc = Document::new("t");
-        let heading = block(BlockKind::Heading { level: 1 }, "The Title");
+        let heading = block(
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
+            "The Title",
+        );
         let id = heading.id;
         doc.blocks = vec![heading];
         doc.annotations.push(Annotation {
@@ -2012,7 +2097,13 @@ mod tests {
     fn the_section_follows_a_repeated_title_being_dropped() {
         let mut doc = Document::new("t");
         doc.blocks = vec![
-            block(BlockKind::Heading { level: 1 }, "[knuth1981]"),
+            block(
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+                "[knuth1981]",
+            ),
             paragraph("Body."),
         ];
         let metadata = Metadata {

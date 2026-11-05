@@ -24,6 +24,9 @@ pub enum BlockKind {
     Paragraph,
     Heading {
         level: u8,
+        /// Set in the middle of the line. Absent when it isn't, as in files from before it.
+        #[serde(default, skip_serializing_if = "is_false")]
+        centered: bool,
     },
     ListItem {
         ordered: bool,
@@ -79,6 +82,10 @@ pub enum SpanStyle {
     DocumentLink {
         target: String,
     },
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 fn is_zero(depth: &u8) -> bool {
@@ -457,6 +464,22 @@ mod tests {
     }
 
     #[test]
+    fn a_heading_says_its_centered_only_when_it_is() {
+        let heading = |centered| BlockKind::Heading { level: 2, centered };
+        let plain = serde_json::to_string(&heading(false)).unwrap();
+        assert_eq!(plain, r#"{"Heading":{"level":2}}"#);
+        assert_eq!(
+            serde_json::from_str::<BlockKind>(&plain).unwrap(),
+            heading(false)
+        );
+        let centered = serde_json::to_string(&heading(true)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BlockKind>(&centered).unwrap(),
+            heading(true)
+        );
+    }
+
+    #[test]
     fn an_image_says_its_alignment_only_when_it_isnt_the_left() {
         let image = |align| BlockKind::Image {
             path: "a.png".to_string(),
@@ -486,7 +509,10 @@ mod tests {
             blocks: vec![
                 Block {
                     id: Uuid::new_v4(),
-                    kind: BlockKind::Heading { level: 1 },
+                    kind: BlockKind::Heading {
+                        level: 1,
+                        centered: false,
+                    },
                     text: "Title".to_string(),
                     spans: vec![Span {
                         start: 0,

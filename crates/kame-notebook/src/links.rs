@@ -199,7 +199,10 @@ pub fn create_document(path: &Path, heading: Option<&str>) -> std::io::Result<Ma
         .unwrap_or_default();
     let mut doc = Document::new(&title);
     if let Some(heading) = heading {
-        doc.blocks[0].kind = BlockKind::Heading { level: 1 };
+        doc.blocks[0].kind = BlockKind::Heading {
+            level: 1,
+            centered: false,
+        };
         doc.blocks[0].text = heading.to_string();
     }
     let mut db = Db::open(path).map_err(std::io::Error::other)?;

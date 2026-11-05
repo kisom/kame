@@ -1020,12 +1020,24 @@ pub fn command_for_event(event: &Event) -> Option<Command> {
 fn block_kind_for_key(key: Key) -> Option<BlockKind> {
     match key {
         Key::Num0 => Some(BlockKind::Paragraph),
-        Key::Num1 => Some(BlockKind::Heading { level: 1 }),
-        Key::Num2 => Some(BlockKind::Heading { level: 2 }),
-        Key::Num3 => Some(BlockKind::Heading { level: 3 }),
+        Key::Num1 => Some(BlockKind::Heading {
+            level: 1,
+            centered: false,
+        }),
+        Key::Num2 => Some(BlockKind::Heading {
+            level: 2,
+            centered: false,
+        }),
+        Key::Num3 => Some(BlockKind::Heading {
+            level: 3,
+            centered: false,
+        }),
         // Shift+1 is `!` on most layouts, and `Key::from_name("!")` names it,
         // so egui-winit hands us this instead of the digit.
-        Key::Exclamationmark => Some(BlockKind::Heading { level: 1 }),
+        Key::Exclamationmark => Some(BlockKind::Heading {
+            level: 1,
+            centered: false,
+        }),
         _ => None,
     }
 }
@@ -1121,7 +1133,10 @@ mod tests {
     fn heading(text: &str) -> Block {
         Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::Heading { level: 1 },
+            kind: BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
             text: text.to_string(),
             spans: Vec::new(),
         }
@@ -2126,15 +2141,24 @@ visual form, and thus with an independent existence.";
         };
         assert_eq!(
             command_for_key(Key::Num1, ctrl_shift),
-            Some(Command::SetBlockKind(BlockKind::Heading { level: 1 }))
+            Some(Command::SetBlockKind(BlockKind::Heading {
+                level: 1,
+                centered: false
+            }))
         );
         assert_eq!(
             command_for_key(Key::Num2, ctrl_shift),
-            Some(Command::SetBlockKind(BlockKind::Heading { level: 2 }))
+            Some(Command::SetBlockKind(BlockKind::Heading {
+                level: 2,
+                centered: false
+            }))
         );
         assert_eq!(
             command_for_key(Key::Num3, ctrl_shift),
-            Some(Command::SetBlockKind(BlockKind::Heading { level: 3 }))
+            Some(Command::SetBlockKind(BlockKind::Heading {
+                level: 3,
+                centered: false
+            }))
         );
         assert_eq!(
             command_for_key(Key::Num0, ctrl_shift),
@@ -2179,9 +2203,30 @@ visual form, and thus with an independent existence.";
         // `Num1` — the case a hand-built `Modifiers` cannot catch.
         assert_eq!(Key::from_name("!"), Some(Key::Exclamationmark));
         for (symbol, physical, kind) in [
-            ("!", Key::Num1, BlockKind::Heading { level: 1 }),
-            ("@", Key::Num2, BlockKind::Heading { level: 2 }),
-            ("#", Key::Num3, BlockKind::Heading { level: 3 }),
+            (
+                "!",
+                Key::Num1,
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+            ),
+            (
+                "@",
+                Key::Num2,
+                BlockKind::Heading {
+                    level: 2,
+                    centered: false,
+                },
+            ),
+            (
+                "#",
+                Key::Num3,
+                BlockKind::Heading {
+                    level: 3,
+                    centered: false,
+                },
+            ),
             (")", Key::Num0, BlockKind::Paragraph),
         ] {
             assert_eq!(
@@ -2199,7 +2244,10 @@ visual form, and thus with an independent existence.";
         assert_eq!(Key::from_name(")"), None);
         assert_eq!(
             command_for_event(&shifted_digit_event("?", Key::Num1)),
-            Some(Command::SetBlockKind(BlockKind::Heading { level: 1 })),
+            Some(Command::SetBlockKind(BlockKind::Heading {
+                level: 1,
+                centered: false
+            })),
             "a layout whose Shift+1 is '?' still makes an H1 via the digit"
         );
 

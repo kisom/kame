@@ -1173,7 +1173,10 @@ mod tests {
     fn set_block_kind_invert_restores_the_previous_kind() {
         let mut d = doc("text");
         let id = d.blocks[0].id;
-        d.blocks[0].kind = BlockKind::Heading { level: 3 };
+        d.blocks[0].kind = BlockKind::Heading {
+            level: 3,
+            centered: false,
+        };
 
         let op = Op::set_block_kind(&d, id, BlockKind::Paragraph);
         let undone = invert(&op);
@@ -1182,7 +1185,10 @@ mod tests {
             Op::SetBlockKind {
                 block_id: id,
                 old_kind: BlockKind::Paragraph,
-                kind: BlockKind::Heading { level: 3 },
+                kind: BlockKind::Heading {
+                    level: 3,
+                    centered: false
+                },
             }
         );
         assert_eq!(invert(&undone), op, "invert must be involutive");
@@ -1893,7 +1899,10 @@ mod tests {
         let mut d = doc("first");
         let added = Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::Heading { level: 2 },
+            kind: BlockKind::Heading {
+                level: 2,
+                centered: false,
+            },
             text: "added".to_string(),
             spans: Vec::new(),
         };
@@ -1916,7 +1925,10 @@ mod tests {
     fn set_block_kind_undo_restores_heading_level() {
         let mut d = doc("text");
         let id = d.blocks[0].id;
-        d.blocks[0].kind = BlockKind::Heading { level: 3 };
+        d.blocks[0].kind = BlockKind::Heading {
+            level: 3,
+            centered: false,
+        };
 
         let op = Op::set_block_kind(
             &d,
@@ -1936,7 +1948,13 @@ mod tests {
         );
 
         apply_inverse(&mut d, &op);
-        assert_eq!(d.blocks[0].kind, BlockKind::Heading { level: 3 });
+        assert_eq!(
+            d.blocks[0].kind,
+            BlockKind::Heading {
+                level: 3,
+                centered: false
+            }
+        );
         assert_eq!(d.blocks[0].text, "text");
     }
 
@@ -2015,7 +2033,10 @@ mod tests {
         let block_id = Uuid::new_v4();
         let block = Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::Heading { level: 3 },
+            kind: BlockKind::Heading {
+                level: 3,
+                centered: false,
+            },
             text: "b".into(),
             spans: Vec::new(),
         };
@@ -2046,7 +2067,10 @@ mod tests {
             },
             Op::SetBlockKind {
                 block_id,
-                old_kind: BlockKind::Heading { level: 3 },
+                old_kind: BlockKind::Heading {
+                    level: 3,
+                    centered: false,
+                },
                 kind: BlockKind::ListItem {
                     ordered: false,
                     depth: 0,

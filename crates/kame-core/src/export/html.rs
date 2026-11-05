@@ -133,6 +133,10 @@ p.byline {
   color: var(--muted);
   text-align: left;
 }
+h1.centered, h2.centered, h3.centered, h4.centered, h5.centered, h6.centered,
+p.byline.centered, p.meta.centered {
+  text-align: center;
+}
 em {
   font-style: italic;
 }
@@ -494,13 +498,18 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
         };
         let after = render_apparatus(apparatus, publish.references);
         match block.kind {
-            BlockKind::Heading { level } => {
+            BlockKind::Heading { level, centered } => {
                 close_list(&mut body, &mut open_list);
                 let level = level.clamp(1, 6);
                 body.push_str(&after);
-                body.push_str(&format!("<h{level}>{inner}</h{level}>\n"));
+                let class = if centered { " class=\"centered\"" } else { "" };
+                body.push_str(&format!("<h{level}{class}>{inner}</h{level}>\n"));
                 if let (Some(byline), 0) = (&byline, index) {
-                    body.push_str(byline);
+                    if centered {
+                        body.push_str(&byline.replacen("byline", "byline centered", 1));
+                    } else {
+                        body.push_str(byline);
+                    }
                 }
             }
             BlockKind::Paragraph => {
@@ -1188,7 +1197,13 @@ mod tests {
         );
         document(
             vec![
-                block(BlockKind::Heading { level: 1 }, "A Title"),
+                block(
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false,
+                    },
+                    "A Title",
+                ),
                 styled,
                 annotated,
                 bullet,
@@ -1420,11 +1435,23 @@ mod tests {
     #[test]
     fn heading_levels_are_clamped() {
         let low = to_html(&document(
-            vec![block(BlockKind::Heading { level: 0 }, "Low")],
+            vec![block(
+                BlockKind::Heading {
+                    level: 0,
+                    centered: false,
+                },
+                "Low",
+            )],
             Vec::new(),
         ));
         let high = to_html(&document(
-            vec![block(BlockKind::Heading { level: 9 }, "High")],
+            vec![block(
+                BlockKind::Heading {
+                    level: 9,
+                    centered: false,
+                },
+                "High",
+            )],
             Vec::new(),
         ));
         assert!(low.contains("<h1>Low</h1>"));
@@ -1555,7 +1582,10 @@ mod tests {
     #[test]
     fn a_line_break_in_a_heading_is_a_space() {
         let mut doc = Document::new("t");
-        doc.blocks[0].kind = BlockKind::Heading { level: 2 };
+        doc.blocks[0].kind = BlockKind::Heading {
+            level: 2,
+            centered: false,
+        };
         doc.blocks[0].text = "first\nsecond".to_string();
         assert!(
             to_html(&doc).contains("<h2>first second</h2>"),
@@ -1731,7 +1761,10 @@ mod tests {
     fn a_marginal_comes_before_its_block_of_every_kind() {
         for kind in [
             BlockKind::Paragraph,
-            BlockKind::Heading { level: 2 },
+            BlockKind::Heading {
+                level: 2,
+                centered: false,
+            },
             BlockKind::BlockQuote,
             BlockKind::ListItem {
                 ordered: false,
@@ -1795,6 +1828,37 @@ mod tests {
         );
         assert!(STYLE.contains("img.image-center"));
         assert!(STYLE.contains("img.image-right"));
+    }
+
+    fn headed(centered: bool) -> Document {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(BlockKind::Heading { level: 1, centered }, "Title"),
+            block(BlockKind::Paragraph, "Words."),
+        ];
+        doc
+    }
+
+    #[test]
+    fn a_centered_heading_says_so_and_takes_its_byline_along() {
+        let html = render_body(&headed(true), &Publish::plain(), Some("K. Isom"));
+        assert!(
+            html.contains(
+                "<h1 class=\"centered\">Title</h1>\n<p class=\"byline centered\">K. Isom</p>"
+            ),
+            "{html}"
+        );
+        assert!(STYLE.contains("h1.centered"));
+        assert!(STYLE.contains("p.byline.centered"));
+    }
+
+    #[test]
+    fn a_heading_that_isnt_centered_exports_as_it_always_has() {
+        let html = render_body(&headed(false), &Publish::plain(), Some("K. Isom"));
+        assert!(
+            html.contains("<h1>Title</h1>\n<p class=\"byline\">K. Isom</p>"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -2267,7 +2331,13 @@ mod tests {
     fn the_author_shows_under_a_first_heading() {
         let mut doc = Document::new("t");
         doc.blocks = vec![
-            block(BlockKind::Heading { level: 1 }, "Title"),
+            block(
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+                "Title",
+            ),
             paragraph("Words."),
         ];
         let html = to_html_with(&doc, &authored("K. Isom"), &References::new());
@@ -2292,8 +2362,20 @@ mod tests {
     fn the_author_shows_once_and_is_escaped() {
         let mut doc = Document::new("t");
         doc.blocks = vec![
-            block(BlockKind::Heading { level: 1 }, "One"),
-            block(BlockKind::Heading { level: 2 }, "Two"),
+            block(
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+                "One",
+            ),
+            block(
+                BlockKind::Heading {
+                    level: 2,
+                    centered: false,
+                },
+                "Two",
+            ),
         ];
         let html = to_html_with(&doc, &authored("A & <B>"), &References::new());
         assert_eq!(html.matches("class=\"byline\"").count(), 1);
@@ -2312,7 +2394,13 @@ mod tests {
     #[test]
     fn a_body_has_no_byline_since_a_theme_prints_its_own() {
         let mut doc = Document::new("t");
-        doc.blocks = vec![block(BlockKind::Heading { level: 1 }, "Title")];
+        doc.blocks = vec![block(
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
+            "Title",
+        )];
         assert!(!html_body(&doc, &Publish::plain()).contains("byline"));
     }
 

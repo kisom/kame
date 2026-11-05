@@ -275,7 +275,7 @@ pub fn narrow_headings(query: &str, document: &Document) -> Vec<Heading> {
         .iter()
         .enumerate()
         .filter_map(|(at, block)| {
-            let BlockKind::Heading { level } = block.kind else {
+            let BlockKind::Heading { level, .. } = block.kind else {
                 return None;
             };
             if block.text.trim().is_empty() {

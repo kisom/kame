@@ -103,7 +103,16 @@ pub fn from_markdown(source: &str, base_dir: &Path, fallback_title: &str) -> Imp
             matches!(first.kind, BlockKind::Heading { .. }) && first.text == *title
         });
         if !repeated {
-            blocks.insert(0, new_block(BlockKind::Heading { level: 1 }, title.clone()));
+            blocks.insert(
+                0,
+                new_block(
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false,
+                    },
+                    title.clone(),
+                ),
+            );
         }
     }
 
@@ -584,7 +593,10 @@ impl<'a> Builder<'a> {
                 language: language.clone(),
             }
         } else if let Some(level) = self.heading {
-            BlockKind::Heading { level }
+            BlockKind::Heading {
+                level,
+                centered: false,
+            }
         } else if let Some(ordered) = self.lists.last() {
             BlockKind::ListItem {
                 ordered: *ordered,
@@ -736,9 +748,21 @@ mod tests {
         assert_eq!(
             outline(&doc),
             vec![
-                (BlockKind::Heading { level: 1 }, "One".to_string()),
+                (
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false
+                    },
+                    "One".to_string()
+                ),
                 paragraph("Body text."),
-                (BlockKind::Heading { level: 2 }, "Two".to_string()),
+                (
+                    BlockKind::Heading {
+                        level: 2,
+                        centered: false
+                    },
+                    "Two".to_string()
+                ),
                 (BlockKind::BlockQuote, "Quoted.".to_string()),
                 (
                     BlockKind::ListItem {
@@ -789,8 +813,20 @@ mod tests {
         assert_eq!(
             outline(&doc),
             vec![
-                (BlockKind::Heading { level: 1 }, "Title".to_string()),
-                (BlockKind::Heading { level: 2 }, "Section".to_string()),
+                (
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false
+                    },
+                    "Title".to_string()
+                ),
+                (
+                    BlockKind::Heading {
+                        level: 2,
+                        centered: false
+                    },
+                    "Section".to_string()
+                ),
             ]
         );
     }
@@ -1083,7 +1119,13 @@ mod tests {
         assert_eq!(
             outline(&imported.document),
             vec![
-                (BlockKind::Heading { level: 1 }, "On Burnout".to_string()),
+                (
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false
+                    },
+                    "On Burnout".to_string()
+                ),
                 paragraph("Body."),
             ]
         );
@@ -1097,7 +1139,13 @@ mod tests {
         assert_eq!(
             outline(&imported.document),
             vec![
-                (BlockKind::Heading { level: 1 }, "On Burnout".to_string()),
+                (
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false
+                    },
+                    "On Burnout".to_string()
+                ),
                 paragraph("Body."),
             ]
         );
@@ -1109,7 +1157,13 @@ mod tests {
         assert_eq!(
             outline(&doc),
             vec![
-                (BlockKind::Heading { level: 1 }, "Same".to_string()),
+                (
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false
+                    },
+                    "Same".to_string()
+                ),
                 paragraph("Body."),
             ]
         );

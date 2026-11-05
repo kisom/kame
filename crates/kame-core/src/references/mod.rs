@@ -648,7 +648,14 @@ mod tests {
             );
         }
         assert_eq!(block_citation_ranges(&paragraph("x [a]")), vec![(2, 5)]);
-        let heading = block(BlockKind::Heading { level: 2 }, "[a]", Vec::new());
+        let heading = block(
+            BlockKind::Heading {
+                level: 2,
+                centered: false,
+            },
+            "[a]",
+            Vec::new(),
+        );
         assert_eq!(block_citation_ranges(&heading), vec![(0, 3)]);
     }
 

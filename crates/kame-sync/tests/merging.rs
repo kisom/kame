@@ -467,7 +467,13 @@ fn random_edits(
             }
             8 => {
                 let block_id = session.document().blocks[which].id;
-                session.set_block_kind(block_id, BlockKind::Heading { level: 2 });
+                session.set_block_kind(
+                    block_id,
+                    BlockKind::Heading {
+                        level: 2,
+                        centered: false,
+                    },
+                );
             }
             _ => {
                 let text = &session.document().blocks[which].text;

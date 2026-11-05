@@ -77,7 +77,7 @@ File > Document Properties holds the title, author, dates and tags. A document w
 
 Formatting applies as you type, and undoes as one step.
 
-- `# `, `## ` or `### ` at the start of a line makes a heading. Ctrl-Shift-1, -2 and -3 do the same, and Ctrl-Shift-0 returns to body text.
+- `# `, `## ` or `### ` at the start of a line makes a heading. Ctrl-Shift-1, -2 and -3 do the same, and Ctrl-Shift-0 returns to body text. Right-click a heading and choose Centered to set it in the middle of the line, which Markdown exports leave out.
 - `- ` or `1. ` at the start of a line starts a list. Tab moves an item in a level and Shift-Tab moves it out. Enter on an empty item comes out of the list.
 - `*word*` is italic, `**word**` is bold, and a pair of backticks around a word makes it inline code.
 - `> ` at the start of a line is a block quote.

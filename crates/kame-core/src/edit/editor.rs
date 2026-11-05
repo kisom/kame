@@ -1313,7 +1313,13 @@ fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
     }
     for (marker, level) in [("### ", 3), ("## ", 2), ("# ", 1)] {
         if text.starts_with(marker) {
-            return Some((BlockKind::Heading { level }, marker.len()));
+            return Some((
+                BlockKind::Heading {
+                    level,
+                    centered: false,
+                },
+                marker.len(),
+            ));
         }
     }
     if text.starts_with("- ") || text.starts_with("* ") {
@@ -1773,7 +1779,10 @@ mod tests {
     fn undo_of_set_block_kind_restores_the_heading_level() {
         let mut doc = doc_with("title");
         let id = doc.blocks[0].id;
-        doc.blocks[0].kind = BlockKind::Heading { level: 2 };
+        doc.blocks[0].kind = BlockKind::Heading {
+            level: 2,
+            centered: false,
+        };
 
         let mut e = Editor::new(doc);
         let change = Op::set_block_kind(e.document(), id, BlockKind::Paragraph);
@@ -1781,7 +1790,13 @@ mod tests {
         assert_eq!(e.document().blocks[0].kind, BlockKind::Paragraph);
 
         e.undo().expect("kind change to be undoable");
-        assert_eq!(e.document().blocks[0].kind, BlockKind::Heading { level: 2 });
+        assert_eq!(
+            e.document().blocks[0].kind,
+            BlockKind::Heading {
+                level: 2,
+                centered: false
+            }
+        );
     }
 
     /// History survives a close/reopen: undo after reloading the head document,
@@ -2199,15 +2214,33 @@ mod tests {
         let paragraph = BlockKind::Paragraph;
         assert_eq!(
             markdown_prefix("## Hi", &paragraph),
-            Some((BlockKind::Heading { level: 2 }, 3))
+            Some((
+                BlockKind::Heading {
+                    level: 2,
+                    centered: false
+                },
+                3
+            ))
         );
         assert_eq!(
             markdown_prefix("# Hi", &paragraph),
-            Some((BlockKind::Heading { level: 1 }, 2))
+            Some((
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false
+                },
+                2
+            ))
         );
         assert_eq!(
             markdown_prefix("### Hi", &paragraph),
-            Some((BlockKind::Heading { level: 3 }, 4))
+            Some((
+                BlockKind::Heading {
+                    level: 3,
+                    centered: false
+                },
+                4
+            ))
         );
         assert_eq!(
             markdown_prefix("- Hi", &paragraph),
@@ -2236,7 +2269,13 @@ mod tests {
         // No trailing space, or a block that already has a kind: nothing.
         assert_eq!(markdown_prefix("##Hi", &paragraph), None);
         assert_eq!(
-            markdown_prefix("## Hi", &BlockKind::Heading { level: 1 }),
+            markdown_prefix(
+                "## Hi",
+                &BlockKind::Heading {
+                    level: 1,
+                    centered: false
+                }
+            ),
             None
         );
     }
@@ -2249,7 +2288,13 @@ mod tests {
 
         e.apply_markdown_prefix(id).expect("a prefix to apply");
         let block = &e.document().blocks[0];
-        assert_eq!(block.kind, BlockKind::Heading { level: 2 });
+        assert_eq!(
+            block.kind,
+            BlockKind::Heading {
+                level: 2,
+                centered: false
+            }
+        );
         assert_eq!(block.text, "Section");
 
         e.undo().expect("the conversion is one undo step");
@@ -2615,17 +2660,32 @@ mod tests {
         let mut e = Editor::new(doc);
 
         let op = e
-            .set_block_kind(id, BlockKind::Heading { level: 2 })
+            .set_block_kind(
+                id,
+                BlockKind::Heading {
+                    level: 2,
+                    centered: false,
+                },
+            )
             .expect("set the kind");
         assert_eq!(
             op,
             Op::SetBlockKind {
                 block_id: id,
                 old_kind: BlockKind::Paragraph,
-                kind: BlockKind::Heading { level: 2 },
+                kind: BlockKind::Heading {
+                    level: 2,
+                    centered: false
+                },
             }
         );
-        assert_eq!(e.document().blocks[0].kind, BlockKind::Heading { level: 2 });
+        assert_eq!(
+            e.document().blocks[0].kind,
+            BlockKind::Heading {
+                level: 2,
+                centered: false
+            }
+        );
 
         e.undo().expect("kind change to be undoable");
         assert_eq!(e.document().blocks[0].kind, BlockKind::Paragraph);

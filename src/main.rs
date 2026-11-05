@@ -1637,7 +1637,7 @@ fn menu_entry(
 /// so they don't take a block out of the row it belongs to.
 fn is_block_style(current: &BlockKind, style: &BlockKind) -> bool {
     match (current, style) {
-        (BlockKind::Heading { level: a }, BlockKind::Heading { level: b }) => a == b,
+        (BlockKind::Heading { level: a, .. }, BlockKind::Heading { level: b, .. }) => a == b,
         (BlockKind::ListItem { ordered: a, .. }, BlockKind::ListItem { ordered: b, .. }) => a == b,
         _ => std::mem::discriminant(current) == std::mem::discriminant(style),
     }
@@ -2269,7 +2269,7 @@ fn gap_after(block: &BlockKind, next: &BlockKind) -> f32 {
     };
     let ratio = match (block, next) {
         (BlockKind::Heading { .. }, _) => 0.4,
-        (_, BlockKind::Heading { level }) => match level {
+        (_, BlockKind::Heading { level, .. }) => match level {
             0 | 1 => 2.6,
             2 => 2.2,
             _ => 1.7,
@@ -2293,7 +2293,7 @@ fn block_height(
         return image_size(&image_file(path, document), config.body_width).y;
     }
     let minimum = match block.kind {
-        crate::model::BlockKind::Heading { level } => heading_size_for(config, level) * 1.4,
+        crate::model::BlockKind::Heading { level, .. } => heading_size_for(config, level) * 1.4,
         _ => config.body_line_height,
     };
     layout.height.max(minimum)
@@ -2470,9 +2470,9 @@ struct KameApp {
     /// What was last copied here, with its formatting. It's kept here and not in the session, so
     /// that it can be pasted in another document.
     clipped: Option<Clipped>,
-    /// The image the page's menu was opened on. The menu's other rows change the caret's block,
-    /// but a right-click doesn't move the caret.
-    image_menu: Option<BlockId>,
+    /// The block the page's menu was opened on, for its rows about that block in particular. The
+    /// others change the caret's block, and a right-click doesn't move the caret.
+    menu_block: Option<BlockId>,
     /// Whether justified paragraphs can hyphenate words.
     hyphenate: bool,
     renderer: GlyphRenderer,
@@ -2640,7 +2640,7 @@ impl KameApp {
             mark_menu: None,
             link_menu: None,
             clipped: None,
-            image_menu: None,
+            menu_block: None,
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
             annotation_textures: AnnotationTextureCache::new(),
@@ -5102,7 +5102,7 @@ impl KameApp {
         // --- a mark's menu -----------------------------------------------------
         if response.secondary_clicked() {
             self.mark_menu = None;
-            self.image_menu = None;
+            self.menu_block = None;
             self.link_menu = None;
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some(cursor) =
@@ -5125,11 +5125,7 @@ impl KameApp {
                     if references_up {
                         self.link_menu = None;
                     }
-                    self.image_menu = blocks
-                        .iter()
-                        .find(|block| block.id == cursor.block_id)
-                        .filter(|block| matches!(block.kind, BlockKind::Image { .. }))
-                        .map(|block| block.id);
+                    self.menu_block = Some(cursor.block_id);
                     let exceptions = Exceptions {
                         words: &self.my_words,
                         document_words: &self.session.metadata.words,
@@ -5378,14 +5374,22 @@ impl KameApp {
                 }
                 ui.separator();
             }
-            let image = self.image_menu.and_then(|id| {
+            let under_menu = self.menu_block.and_then(|id| {
                 let index = self.session.block_index(id)?;
-                match self.session.document().blocks[index].kind {
-                    BlockKind::Image { align, .. } => Some((id, align)),
-                    _ => None,
-                }
+                Some((id, self.session.document().blocks[index].kind.clone()))
             });
-            if let Some((id, current)) = image {
+            if let Some((id, BlockKind::Heading { centered, .. })) = under_menu {
+                let mut row = egui::Button::new("Centered");
+                if centered {
+                    row = row.right_text("\u{2714}");
+                }
+                if ui.add(row).clicked() {
+                    self.session.set_heading_centered(id, !centered);
+                    ui.close();
+                }
+                ui.separator();
+            }
+            if let Some((id, BlockKind::Image { align: current, .. })) = under_menu {
                 ui.menu_button("Align", |ui| {
                     for (label, align) in [
                         ("Left", ImageAlign::Left),
@@ -5412,9 +5416,27 @@ impl KameApp {
                 .map(|index| self.session.document().blocks[index].kind.clone());
             for (label, kind) in [
                 ("Body", BlockKind::Paragraph),
-                ("Heading 1", BlockKind::Heading { level: 1 }),
-                ("Heading 2", BlockKind::Heading { level: 2 }),
-                ("Heading 3", BlockKind::Heading { level: 3 }),
+                (
+                    "Heading 1",
+                    BlockKind::Heading {
+                        level: 1,
+                        centered: false,
+                    },
+                ),
+                (
+                    "Heading 2",
+                    BlockKind::Heading {
+                        level: 2,
+                        centered: false,
+                    },
+                ),
+                (
+                    "Heading 3",
+                    BlockKind::Heading {
+                        level: 3,
+                        centered: false,
+                    },
+                ),
                 (
                     "Bulleted list",
                     BlockKind::ListItem {
@@ -7897,7 +7919,10 @@ mod tests {
         let mut height = |level| {
             let block = Block {
                 id: uuid::Uuid::new_v4(),
-                kind: BlockKind::Heading { level },
+                kind: BlockKind::Heading {
+                    level,
+                    centered: false,
+                },
                 text: String::new(),
                 spans: Vec::new(),
             };
@@ -7953,7 +7978,10 @@ mod tests {
     }
 
     fn heading_kind(level: u8) -> BlockKind {
-        BlockKind::Heading { level }
+        BlockKind::Heading {
+            level,
+            centered: false,
+        }
     }
 
     #[test]

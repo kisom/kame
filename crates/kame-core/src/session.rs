@@ -1690,6 +1690,29 @@ impl Session {
         }
     }
 
+    /// Centers a heading, or stops, as one undoable edit. Anything else does nothing.
+    pub fn set_heading_centered(&mut self, block_id: BlockId, centered: bool) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        let Some(index) = self.block_index(block_id) else {
+            return false;
+        };
+        let BlockKind::Heading {
+            level,
+            centered: current,
+        } = self.document().blocks[index].kind
+        else {
+            return false;
+        };
+        if current == centered {
+            return false;
+        }
+        let kind = BlockKind::Heading { level, centered };
+        let result = self.editor.set_block_kind(block_id, kind);
+        self.commit(result)
+    }
+
     /// Moves an image across its line. Anything else, or no change, does nothing.
     pub fn set_image_align(&mut self, block_id: BlockId, align: ImageAlign) -> bool {
         let Some(index) = self.block_index(block_id) else {
@@ -1950,16 +1973,17 @@ impl Session {
         if self.save_failed {
             return false;
         }
-        // Changing what kind of list an item is in leaves it at its level.
-        let existing =
-            self.block_index(block_id)
-                .and_then(|index| match self.document().blocks[index].kind {
-                    BlockKind::ListItem { depth, .. } => Some(depth),
-                    _ => None,
-                });
+        // Changing what kind of list an item is in leaves it at its level, and a heading's level
+        // leaves it centered.
+        let existing = self
+            .block_index(block_id)
+            .map(|index| self.document().blocks[index].kind.clone());
         let kind = match (kind, existing) {
-            (BlockKind::ListItem { ordered, .. }, Some(depth)) => {
+            (BlockKind::ListItem { ordered, .. }, Some(BlockKind::ListItem { depth, .. })) => {
                 BlockKind::ListItem { ordered, depth }
+            }
+            (BlockKind::Heading { level, .. }, Some(BlockKind::Heading { centered, .. })) => {
+                BlockKind::Heading { level, centered }
             }
             (kind, _) => kind,
         };
@@ -3763,6 +3787,61 @@ mod tests {
             .collect()
     }
 
+    fn heading_kind(session: &Session, id: BlockId) -> BlockKind {
+        let index = session.block_index(id).unwrap();
+        session.document().blocks[index].kind.clone()
+    }
+
+    #[test]
+    fn centering_a_heading_is_one_step_and_a_second_toggle_undoes_it() {
+        let (root, _plate) = plate_folder("center");
+        let path = root.join("essay.kame");
+        let mut session = open(&path);
+        let id = session.valid_caret().block_id;
+        let heading = |level, centered| BlockKind::Heading { level, centered };
+        session.set_block_kind(id, heading(2, false));
+        assert!(session.set_heading_centered(id, true));
+        assert_eq!(heading_kind(&session, id), heading(2, true));
+        assert!(session.undo());
+        assert_eq!(heading_kind(&session, id), heading(2, false));
+        assert!(session.set_heading_centered(id, true));
+        assert!(!session.set_heading_centered(id, true), "no change");
+        assert!(session.set_heading_centered(id, false));
+        assert_eq!(heading_kind(&session, id), heading(2, false));
+        assert!(session.set_heading_centered(id, true));
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(heading_kind(&reopened, id), heading(2, true));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_centered_heading_stays_centered_at_another_level_but_not_as_body_text() {
+        let (root, _plate) = plate_folder("centerlevel");
+        let mut session = open(&root.join("essay.kame"));
+        let id = session.valid_caret().block_id;
+        let heading = |level, centered| BlockKind::Heading { level, centered };
+        session.set_block_kind(id, heading(1, false));
+        session.set_heading_centered(id, true);
+        session.set_block_kind(id, heading(3, false));
+        assert_eq!(heading_kind(&session, id), heading(3, true));
+        session.set_block_kind(id, BlockKind::Paragraph);
+        assert_eq!(heading_kind(&session, id), BlockKind::Paragraph);
+        assert!(session.undo());
+        assert_eq!(heading_kind(&session, id), heading(3, true));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_a_heading_can_be_centered() {
+        let (root, _plate) = plate_folder("centerbody");
+        let mut session = open(&root.join("essay.kame"));
+        let id = session.valid_caret().block_id;
+        assert!(!session.set_heading_centered(id, true));
+        assert_eq!(heading_kind(&session, id), BlockKind::Paragraph);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     fn image_align(session: &Session) -> Vec<ImageAlign> {
         session
             .document()
@@ -4921,10 +5000,19 @@ mod tests {
         let block_id = first_block_id(&session);
         assert_eq!(session.document().blocks[0].kind, BlockKind::Paragraph);
 
-        assert!(session.set_block_kind(block_id, BlockKind::Heading { level: 1 }));
+        assert!(session.set_block_kind(
+            block_id,
+            BlockKind::Heading {
+                level: 1,
+                centered: false
+            }
+        ));
         assert_eq!(
             session.document().blocks[0].kind,
-            BlockKind::Heading { level: 1 }
+            BlockKind::Heading {
+                level: 1,
+                centered: false
+            }
         );
         assert_eq!(session.history(), (2, 0), "the change is one undoable op");
 
@@ -4938,7 +5026,10 @@ mod tests {
         let reopened = open(&path);
         assert_eq!(
             reopened.document().blocks[0].kind,
-            BlockKind::Heading { level: 1 }
+            BlockKind::Heading {
+                level: 1,
+                centered: false
+            }
         );
     }
 

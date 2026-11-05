@@ -219,7 +219,7 @@ pub fn layout_block_marked_with_align(
             config.body_line_height,
             Style::Normal,
         ),
-        BlockKind::Heading { level } => {
+        BlockKind::Heading { level, .. } => {
             let size = heading_size_for(config, level);
             (
                 HEADING_FAMILY,
@@ -943,9 +943,10 @@ pub fn layout_block_marked(
 ) -> BlockLayout {
     // Prose paragraphs justify to the measure; headings, lists and quotes stay
     // left-aligned so a ragged right edge reads naturally in narrow or indented
-    // columns.
+    // columns, unless a heading asks for the middle.
     let align = match block.kind {
         BlockKind::Paragraph => Align::Justified,
+        BlockKind::Heading { centered: true, .. } => Align::Center,
         _ => Align::Left,
     };
     layout_block_marked_with_align(font_system, block, config, align, marks)
@@ -1117,6 +1118,76 @@ remarkably counterintuitive properties under circumstances nobody anticipated be
         let block = paragraph("a b");
         let layout = layout_block_with_align(fs, &block, config, Align::Left);
         layout.runs[0].glyphs[1].w
+    }
+
+    fn heading_layout(text: &str, centered: bool, width: f32) -> BlockLayout {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let config = LayoutConfig {
+            body_width: width,
+            ..config()
+        };
+        let block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Heading { level: 1, centered },
+            text: text.to_string(),
+            spans: Vec::new(),
+        };
+        layout_block(&mut fs, &block, &config)
+    }
+
+    /// How far a line's words sit from the column's left and right edges.
+    fn margins(run: &LayoutRun, width: f32) -> (f32, f32) {
+        let first = run.glyphs.first().unwrap();
+        let last = run.glyphs.last().unwrap();
+        (first.x, width - (last.x + last.w))
+    }
+
+    #[test]
+    fn a_centered_heading_sits_in_the_middle_of_the_column() {
+        let layout = heading_layout("Words", true, 600.0);
+        let (left, right) = margins(&layout.runs[0], 600.0);
+        assert!(left > 100.0, "{left}");
+        assert!((left - right).abs() < 1.0, "{left} and {right}");
+    }
+
+    #[test]
+    fn every_line_of_a_long_centered_heading_is_in_the_middle() {
+        let layout = heading_layout(
+            "A heading that runs well past the width of a narrow column of text",
+            true,
+            200.0,
+        );
+        assert!(layout.runs.len() > 1);
+        for run in &layout.runs {
+            let words: Vec<_> = run
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.w > 0.0)
+                .cloned()
+                .collect();
+            let text_end = words
+                .iter()
+                .rev()
+                .find(|glyph| glyph.start != glyph.end)
+                .unwrap();
+            let left = run.glyphs[0].x;
+            let right = 200.0 - (text_end.x + text_end.w);
+            assert!((left - right).abs() < 12.0, "{left} and {right}");
+        }
+    }
+
+    #[test]
+    fn a_heading_that_isnt_centered_stays_at_the_left() {
+        let layout = heading_layout("Words", false, 600.0);
+        assert!(layout.runs[0].glyphs[0].x < 1.0);
+    }
+
+    #[test]
+    fn a_centered_heading_ending_in_a_period_is_still_near_the_middle() {
+        let layout = heading_layout("Words.", true, 600.0);
+        let (left, right) = margins(&layout.runs[0], 600.0);
+        assert!((left - right).abs() < 4.0, "{left} and {right}");
     }
 
     #[test]
@@ -1657,7 +1728,10 @@ around at this measure.\n\nAnd one after a blank line."
 
         let block = Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::Heading { level: 1 },
+            kind: BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
             text: "On the Shape of Letters".to_string(),
             spans: Vec::new(),
         };
@@ -1814,7 +1888,10 @@ around at this measure.\n\nAnd one after a blank line."
         load_fonts(&mut fs);
         let block = Block {
             id: Uuid::new_v4(),
-            kind: BlockKind::Heading { level: 1 },
+            kind: BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
             text: "On the Shape of Letters".to_string(),
             spans: Vec::new(),
         };
@@ -1987,7 +2064,10 @@ around at this measure.\n\nAnd one after a blank line."
         for level in 1..=6 {
             let block = Block {
                 id: Uuid::new_v4(),
-                kind: BlockKind::Heading { level },
+                kind: BlockKind::Heading {
+                    level,
+                    centered: false,
+                },
                 text: "Heading".to_string(),
                 spans: Vec::new(),
             };
@@ -2027,7 +2107,10 @@ around at this measure.\n\nAnd one after a blank line."
         for level in 1..=3 {
             let block = Block {
                 id: Uuid::new_v4(),
-                kind: BlockKind::Heading { level },
+                kind: BlockKind::Heading {
+                    level,
+                    centered: false,
+                },
                 text: "Heading".to_string(),
                 spans: Vec::new(),
             };
@@ -2226,7 +2309,10 @@ dance, on a page, of pen, eye, and hand, and whose, sapwood is, the rest.";
     #[test]
     fn a_quote_starting_a_heading_or_a_list_item_hangs_too() {
         for kind in [
-            BlockKind::Heading { level: 2 },
+            BlockKind::Heading {
+                level: 2,
+                centered: false,
+            },
             BlockKind::ListItem {
                 ordered: false,
                 depth: 0,

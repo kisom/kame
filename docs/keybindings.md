@@ -109,6 +109,10 @@ three are on the Annotate menu and the right-click menu. A note needs no words, 
 Each opens for writing as it's added, with any starting words selected so that typing replaces them. Ctrl-Enter, Close or Escape closes it, and Remove takes it
 out, along with its highlight. Emptying a marginal removes it too, and so does closing one that nothing was written in, which leaves nothing to undo or redo.
 
+## Centered headings
+
+Right-click a heading for Centered, which sets it in the middle of the line, on the page and in HTML, as one undoable edit, and a second click turns it off. Changing the heading's level keeps it, and turning it into body text drops it. If the document's title is centered, its byline is too, and on a site so are the title the page prints and the line under it. Markdown has no form for this, so it exports and imports headings at the left.
+
 ## Images
 
 Insert image… on the right-click menu asks for a file, starting in the notebook's `images/` if it has one, or the document's folder, and shows it at its own size, or at the body's width if it's wider. An image from outside the notebook is copied to `images/path/to/document/`, and a different picture with the same name becomes `name-2.jpg`. Nothing in `images/` is public until a published document shows it, and then it publishes at `/static/images/`.

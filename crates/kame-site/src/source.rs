@@ -29,6 +29,8 @@ pub struct Source {
     pub page: Option<String>,
     /// Image paths that are already where they publish, with nothing to copy beside the page.
     pub placed_images: Vec<String>,
+    /// The document opens with its title as a centered heading, which the page prints in its place.
+    pub title_centered: bool,
 }
 
 impl Source {
@@ -164,6 +166,7 @@ pub fn from_parts(
         });
     }
 
+    let title_centered = kame_core::export::title_is_centered(&doc, &title);
     let doc = kame_core::export::without_repeated_title(&doc, &title).into_owned();
     Some(Source {
         slug: slug.clone(),
@@ -176,6 +179,7 @@ pub fn from_parts(
         doc,
         page: None,
         placed_images: Vec::new(),
+        title_centered,
     })
 }
 
@@ -318,7 +322,13 @@ mod tests {
         let path = dir.join("a.kame");
         let mut document = Document::new("A");
         document.blocks = vec![
-            block(BlockKind::Heading { level: 1 }, "The Title"),
+            block(
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false,
+                },
+                "The Title",
+            ),
             paragraph("Words."),
         ];
         write_kame(

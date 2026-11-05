@@ -889,7 +889,10 @@ fn outline(headings: &[(u8, &str)]) -> kame_core::model::Document {
         .iter()
         .map(|(level, text)| kame_core::model::Block {
             id: uuid::Uuid::new_v4(),
-            kind: kame_core::model::BlockKind::Heading { level: *level },
+            kind: kame_core::model::BlockKind::Heading {
+                level: *level,
+                centered: false,
+            },
             text: text.to_string(),
             spans: Vec::new(),
         })

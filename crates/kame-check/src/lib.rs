@@ -370,7 +370,10 @@ mod tests {
         let wrong = "An indispensible tool.";
         for kind in [
             BlockKind::Paragraph,
-            BlockKind::Heading { level: 1 },
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
             BlockKind::ListItem {
                 depth: 0,
                 ordered: false,

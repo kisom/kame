@@ -1869,7 +1869,10 @@ mod tests {
     fn heading_block(level: u8, text: &str) -> Block {
         Block {
             id: uuid::Uuid::new_v4(),
-            kind: BlockKind::Heading { level },
+            kind: BlockKind::Heading {
+                level,
+                centered: false,
+            },
             text: text.to_string(),
             spans: Vec::new(),
         }

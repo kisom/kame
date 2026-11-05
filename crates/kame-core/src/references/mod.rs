@@ -9,6 +9,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{AnnotationKind, Block, BlockKind, Document, Span, SpanStyle};
 
+mod ieee;
+
+pub use ieee::{entry, plain, Run, RunStyle};
+
 /// The longest a key can be, in bytes.
 const MAX_KEY: usize = 64;
 

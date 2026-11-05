@@ -1663,3 +1663,80 @@ fn a_side_file_left_at_a_retired_name_is_not_taken_for_a_moving_copys() {
         "Never synced. A."
     );
 }
+
+/// A database a crash left in the name a clean-up moves one through, as it's then treated as
+/// retired, so it's the document's as a retired copy is.
+#[test]
+fn deleting_takes_a_copy_left_in_a_moving_name_and_leaves_a_neighbours() {
+    let root = folder("delete-moving");
+    let x = root.join("X.kame");
+    document(&x, "X.");
+    copy_with_words_in_its_wal(&x, &root.join(".X.moving-1.kame"), "Never synced. ");
+    let elsewhere = folder("delete-moving-other").join("other.kame");
+    document(&elsewhere, "Another document.");
+    copy_with_words_in_its_wal(&elsewhere, &root.join(".X.moving-2.kame"), "Its own. ");
+    let xy = root.join("XY.kame");
+    document(&xy, "XY.");
+    copy_with_words_in_its_wal(&xy, &root.join(".XY.moving-1.kame"), "Neighbour's. ");
+    for name in [".X.moving-.kame", ".X.moving-a.kame", ".X.movingly.kame"] {
+        std::fs::copy(&x, root.join(name)).unwrap();
+    }
+
+    delete_document(&x).unwrap();
+
+    let mut left: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            ".X.moving-.kame",
+            ".X.moving-2.kame",
+            ".X.moving-2.kame-wal",
+            ".X.moving-a.kame",
+            ".X.movingly.kame",
+            ".XY.moving-1.kame",
+            ".XY.moving-1.kame-wal",
+            "XY.kame"
+        ]
+    );
+    assert_eq!(
+        words_in(&root.join(".X.moving-2.kame")),
+        "Its own. Another document."
+    );
+    assert_eq!(
+        words_in(&root.join(".XY.moving-1.kame")),
+        "Neighbour's. XY."
+    );
+}
+
+#[test]
+fn a_copy_left_in_a_moving_name_moves_with_its_document() {
+    let (root, nb) = plain_notebook("move-moving");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    copy_with_words_in_its_wal(&a, &root.join(".a.moving-1.kame"), "Never synced. ");
+    let elsewhere = folder("move-moving-other").join("other.kame");
+    document(&elsewhere, "Another document.");
+    copy_with_words_in_its_wal(&elsewhere, &root.join(".b.moving-1.kame"), "Its own. ");
+    let ab = root.join("ab.kame");
+    document(&ab, "AB.");
+    copy_with_words_in_its_wal(&ab, &root.join(".ab.moving-1.kame"), "Neighbour's. ");
+
+    make_move(&nb, &a, &root.join("b.kame"));
+
+    assert_eq!(
+        words_in(&root.join(".b.moving-1.kame")),
+        "Its own. Another document."
+    );
+    assert_eq!(words_in(&root.join(".b.moving-2.kame")), "Never synced. A.");
+    assert!(root.join(".b.moving-2.kame-wal").is_file());
+    assert!(!root.join(".a.moving-1.kame").exists());
+    assert!(!root.join(".a.moving-1.kame-wal").exists());
+    assert_eq!(
+        words_in(&root.join(".ab.moving-1.kame")),
+        "Neighbour's. AB."
+    );
+}

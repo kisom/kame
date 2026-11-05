@@ -83,9 +83,11 @@ pub fn check_new_path(
 }
 
 /// The files kept for a document beside it: conflicting copies from a sync tool, each with the
-/// copy a merge left of it, and databases retired from it. Names are matched whole, so a document
-/// `XY` isn't taken for `X`. A retired copy is also matched by id, as a conflicting copy is, since
-/// a path can be reused, and `.X.retired.kame` may be the only copy of the old `X`'s words.
+/// copy a merge left of it, and databases retired from it, or left by a crash in the name a
+/// clean-up moves one through, `.X.moving-1.kame`, which is then treated as retired. Names are
+/// matched whole, so a document `XY` isn't taken for `X`. A retired copy is also matched by id, as
+/// a conflicting copy is, since a path can be reused, and `.X.retired.kame` may be the only copy of
+/// the old `X`'s words.
 pub fn belonging_files(path: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for copy in kame_sync::files::conflict_copies(path) {
@@ -100,7 +102,8 @@ pub fn belonging_files(path: &Path) -> Vec<PathBuf> {
     let (Some(stem), Some(folder)) = (path.file_stem(), path.parent()) else {
         return found;
     };
-    let before = format!(".{}.retired", stem.to_string_lossy());
+    let before = format!(".{}.", stem.to_string_lossy());
+    let is_number = |text: &str| !text.is_empty() && text.chars().all(|c| c.is_ascii_digit());
     let Ok(entries) = std::fs::read_dir(folder) else {
         return found;
     };
@@ -118,10 +121,9 @@ pub fn belonging_files(path: &Path) -> Vec<PathBuf> {
             else {
                 return false;
             };
-            rest.is_empty()
-                || rest
-                    .strip_prefix('-')
-                    .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            rest == "retired"
+                || rest.strip_prefix("retired-").is_some_and(is_number)
+                || rest.strip_prefix("moving-").is_some_and(is_number)
         })
         .collect();
     retired.sort();
@@ -556,8 +558,9 @@ fn belonging_file_after(file: &Path, from: &Path, to: &Path) -> PathBuf {
 
 /// A retired database going to `.X.retired.kame`, or a numbered one, takes the next number if
 /// that's taken, or if what SQLite keeps beside a database is there, since it's never put over
-/// another, nor beside a `-wal` that would be read as its own. Any other path is as it was.
-fn free_retired_name(new: PathBuf, old: &Path) -> PathBuf {
+/// another, nor beside a `-wal` that would be read as its own. So does one going to
+/// `.X.moving-1.kame`. Any other path is as it was.
+fn free_set_aside_name(new: PathBuf, old: &Path) -> PathBuf {
     let name = new
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -567,14 +570,26 @@ fn free_retired_name(new: PathBuf, old: &Path) -> PathBuf {
             .iter()
             .all(|(old, new)| new.symlink_metadata().is_err() || same_file(new, old))
     };
-    let Some((before, _)) = name.rsplit_once(".retired") else {
+    // By what's after the stem's last `.`, as a stem can have `.moving-` or `.retired` in it.
+    let Some((before, last)) = name
+        .strip_suffix(".kame")
+        .filter(|_| name.starts_with('.'))
+        .and_then(|inner| inner.rsplit_once('.'))
+    else {
         return new;
     };
-    if !name.starts_with('.') || !name.ends_with(".kame") || is_free(&new) {
+    let (set_aside, first) = if last == "retired" || last.starts_with("retired-") {
+        ("retired", 2)
+    } else if last.starts_with("moving-") {
+        ("moving", 1)
+    } else {
+        return new;
+    };
+    if is_free(&new) {
         return new;
     }
-    (2..)
-        .map(|number| new.with_file_name(format!("{before}.retired-{number}.kame")))
+    (first..)
+        .map(|number| new.with_file_name(format!("{before}.{set_aside}-{number}.kame")))
         .find(|path| is_free(path))
         .unwrap_or(new)
 }
@@ -597,7 +612,7 @@ fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String>
         }
     }
     let settled = |(old, new): &(PathBuf, PathBuf)| {
-        let new = free_retired_name(new.clone(), old);
+        let new = free_set_aside_name(new.clone(), old);
         with_side_files(old, &new)
     };
     let everything: Vec<(PathBuf, PathBuf)> = moves

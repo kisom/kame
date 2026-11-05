@@ -209,10 +209,14 @@ fn rewrite_links(
                 block.kind = BlockKind::Paragraph;
             }
         }
-        // An image's link goes the same way as any other.
+        // An image's link goes the same way as any other, and one to a heading goes as its words do.
         if let BlockKind::Image { link, .. } = &mut block.kind {
             if let Some(url) = link.clone().filter(|url| !is_web_link(url)) {
-                *link = published_link(notebook, published, &url, &from, &slug, problems);
+                *link = if url.starts_with('#') {
+                    None
+                } else {
+                    published_link(notebook, published, &url, &from, &slug, problems)
+                };
             }
         }
     }
@@ -1317,6 +1321,28 @@ mod tests {
             "{page_text}"
         );
         assert!(!page_text.contains("private-plans"), "{page_text}");
+    }
+
+    #[test]
+    fn an_image_linked_to_a_heading_publishes_as_a_heading_link_does() {
+        let nb = made("nbimageheading", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("images/plate.png", "a plate");
+        let mut doc = image("images/plate.png");
+        for block in &mut doc.blocks {
+            if let BlockKind::Image { link, .. } = &mut block.kind {
+                *link = Some("#The Intro".to_string());
+            }
+        }
+        nb.document("essay.kame", true, &doc);
+        let (plan, problems) = nb.plan();
+        let page_text = page(&plan, "essay/index.html");
+        assert!(
+            page_text.contains("/static/images/plate.png"),
+            "{page_text}"
+        );
+        assert!(!page_text.contains("The Intro"), "{page_text}");
+        assert!(problems.warnings.is_empty(), "{:?}", problems.warnings);
     }
 
     #[test]

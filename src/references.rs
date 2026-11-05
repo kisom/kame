@@ -4877,6 +4877,41 @@ mod tests {
     }
 
     #[test]
+    fn of_several_documents_the_os_asks_for_at_once_the_first_opens() {
+        let mut page = page_in_notebook("");
+        let first = other_document(&page, "first.kame", "one");
+        let second = other_document(&page, "second.kame", "two");
+        let ctx = page.ctx.clone();
+
+        page.app.handle_os_requests(
+            &ctx,
+            crate::external::Requests {
+                open: vec![first.clone(), second],
+                quit: false,
+            },
+        );
+
+        assert_eq!(page.app.session.path(), Some(first.as_path()));
+    }
+
+    #[test]
+    fn the_os_asking_to_quit_closes_the_window_as_its_own_button_does() {
+        let mut page = page_in_notebook("");
+        let ctx = page.ctx.clone();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            page.app.handle_os_requests(
+                ui.ctx(),
+                crate::external::Requests {
+                    open: Vec::new(),
+                    quit: true,
+                },
+            );
+        });
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&egui::ViewportCommand::Close));
+    }
+
+    #[test]
     fn a_document_the_os_asks_for_opens_at_once_with_no_form() {
         let mut page = page_in_notebook("");
         let other = other_document(&page, "other.kame", "elsewhere");

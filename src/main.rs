@@ -6177,6 +6177,20 @@ impl KameApp {
         self.held_open = Some(path);
     }
 
+    /// Does what the OS has asked for since the last frame, and opens what was waiting for a dialog
+    /// that has now closed. The OS asking to quit goes through the same close request as the
+    /// window's own button, and so through the unsaved-document prompt.
+    fn handle_os_requests(&mut self, ctx: &egui::Context, requests: external::Requests) {
+        if requests.quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // kame shows one document, so of several files opened at once the first wins.
+        if let Some(path) = requests.open.into_iter().next() {
+            self.request_open(path);
+        }
+        self.open_held();
+    }
+
     /// Opens what the OS asked for, if it was waiting and the dialog that held it has closed.
     fn open_held(&mut self) {
         if !self.dialog_open() {
@@ -6865,17 +6879,7 @@ impl eframe::App for KameApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // The OS asking to quit goes through the same close request as the window's
-        // own button, and so through the unsaved-document prompt.
-        let requests = external::take();
-        if requests.quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-        // kame shows one document, so of several files opened at once the first wins.
-        if let Some(path) = requests.open.into_iter().next() {
-            self.request_open(path);
-        }
-        self.open_held();
+        self.handle_os_requests(ctx, external::take());
         // Here because eframe skips `ui` while the window is hidden, and before it so that a key
         // pressed on coming back lands in text that's up to date.
         self.tick_logs(ctx);
@@ -7042,7 +7046,7 @@ impl Headless {
             ..Default::default()
         };
         let app = &mut self.app;
-        app.open_held();
+        app.handle_os_requests(&self.ctx, external::Requests::default());
         app.notebook_tick(&self.ctx);
         let mut output = self.ctx.run_ui(input, |ui| {
             app.handle_input(ui.ctx());

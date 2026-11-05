@@ -212,7 +212,7 @@ whenever it is opened.
 ## Links between documents
 
 File > Link to Document…, or the right-click menu, asks for a file and links to it, as
-`~/path/to/essay.kame` when it is under your home folder. With text selected, the selected
+`~/path/to/essay.kame` when it is under your home folder. In a notebook, a document inside it is linked by the way from this document's folder, such as `../notes/essay.kame`, which still holds when the notebook moves. With text selected, the selected
 words become the link. With the caret in a link, the link points at the new file instead.
 Otherwise the document's title goes in at the caret as the link's text.
 

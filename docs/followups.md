@@ -49,8 +49,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 - [ ] **A rename shadowing a link.** A link `b` that led to `b.md`, or offered to create `b.kame`, opens the moved
   document after something is renamed to `b.kame`.
 - [ ] **A command palette.**
-- [ ] **File > Link to Document… in a notebook.** It writes `~/...` for anything under the home folder,
-  which breaks when the notebook moves. It could keep the way from the document, as images now do.
 
 ## References
 

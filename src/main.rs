@@ -13,7 +13,9 @@ mod notebook;
 mod publish;
 mod references;
 
-use kame_core::links::{image_file, resolve_open_path, split_document_target, stored_image_path};
+use kame_core::links::{
+    image_file, resolve_open_path, split_document_target, stored_image_path, way_within_notebook,
+};
 use kame_core::references::{cited_key, with_citation_spans};
 use kame_core::session::{is_markdown_path, Clipped, LinkUnder, Session};
 use kame_core::{edit, model, storage};
@@ -2073,8 +2075,21 @@ fn document_link_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
     })
 }
 
-/// The target for a link to the file at `path`, written from `~` when it is under home.
-fn document_link_target(path: &Path, home: Option<&Path>) -> String {
+/// The target for a link to the file at `path` from the document at `document`. Within the
+/// notebook at `root` it is the way from the document's folder, which holds when the notebook
+/// moves. Anywhere else it is written from `~` when under home, and whole otherwise.
+fn document_link_target(
+    path: &Path,
+    home: Option<&Path>,
+    document: Option<&Path>,
+    root: Option<&Path>,
+) -> String {
+    if let Some(way) = document
+        .zip(root)
+        .and_then(|(document, root)| way_within_notebook(path, document, root))
+    {
+        return way;
+    }
     match home.and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
@@ -5914,7 +5929,14 @@ impl KameApp {
             return;
         };
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let target = document_link_target(&path, home.as_deref());
+        let document = self.session.path().map(Path::to_path_buf);
+        let root = self
+            .nb
+            .notebook
+            .as_ref()
+            .map(|notebook| notebook.root.clone());
+        let target =
+            document_link_target(&path, home.as_deref(), document.as_deref(), root.as_deref());
         let title = document_title(&path);
         if let Err(refusal) = self.session.link_to_document(target, &title) {
             self.notice = Some(refusal.to_string());
@@ -8932,20 +8954,63 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     fn a_picked_document_under_home_links_from_tilde() {
         let home = Path::new("/home/kyle");
         assert_eq!(
-            document_link_target(Path::new("/home/kyle/notes/a.kame"), Some(home)),
+            document_link_target(Path::new("/home/kyle/notes/a.kame"), Some(home), None, None),
             "~/notes/a.kame"
         );
         assert_eq!(
-            document_link_target(Path::new("/srv/notes/a.kame"), Some(home)),
+            document_link_target(Path::new("/srv/notes/a.kame"), Some(home), None, None),
             "/srv/notes/a.kame"
         );
         assert_eq!(
-            document_link_target(Path::new("/home/kylie/a.kame"), Some(home)),
+            document_link_target(Path::new("/home/kylie/a.kame"), Some(home), None, None),
             "/home/kylie/a.kame"
         );
         assert_eq!(
-            document_link_target(Path::new("/srv/a.kame"), None),
+            document_link_target(Path::new("/srv/a.kame"), None, None, None),
             "/srv/a.kame"
+        );
+    }
+
+    #[test]
+    fn a_picked_document_in_the_notebook_links_by_the_way_from_the_document() {
+        let root = kame_test_dir::folder("app-link-within")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("one/deep")).unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        let from = root.join("one/a.kame");
+        for file in ["one/b.kame", "one/deep/c.kame", "two/d.kame"] {
+            std::fs::write(root.join(file), "").unwrap();
+        }
+        // The home folder holds the notebook, and still isn't what the link goes by.
+        let home = root.parent().unwrap();
+        let target = |file: &str| {
+            document_link_target(&root.join(file), Some(home), Some(&from), Some(&root))
+        };
+        assert_eq!(target("one/b.kame"), "b.kame");
+        assert_eq!(target("one/deep/c.kame"), "deep/c.kame");
+        assert_eq!(target("two/d.kame"), "../two/d.kame");
+
+        // Outside the notebook, or with no notebook or no file, it goes by home as it did.
+        let outside = kame_test_dir::folder("app-link-outside")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(outside.join("e.kame"), "").unwrap();
+        let by_home = |document: Option<&Path>, root: Option<&Path>| {
+            document_link_target(&outside.join("e.kame"), Some(home), document, root)
+        };
+        assert_eq!(
+            by_home(Some(&from), Some(&root)),
+            document_link_target(&outside.join("e.kame"), Some(home), None, None)
+        );
+        let inside = root.join("two/d.kame");
+        assert_eq!(
+            document_link_target(&inside, Some(home), Some(&from), None),
+            document_link_target(&inside, Some(home), None, None)
+        );
+        assert_eq!(
+            document_link_target(&inside, Some(home), None, Some(&root)),
+            document_link_target(&inside, Some(home), None, None)
         );
     }
 

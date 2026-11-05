@@ -40,16 +40,20 @@ pub fn image_file(stored: &str, document: Option<&Path>) -> PathBuf {
 /// the notebook at `root` it's the way there from the document's folder, which still holds on
 /// another machine or once the notebook has moved. Anywhere else it's `file` itself.
 pub fn stored_image_path(file: &Path, document: &Path, root: Option<&Path>) -> String {
-    let relative = (|| {
-        let root = root?.canonicalize().ok()?;
-        let folder = document.parent()?.canonicalize().ok()?;
-        let file = file.canonicalize().ok()?;
-        if !folder.starts_with(&root) || !file.starts_with(&root) {
-            return None;
-        }
-        Some(path_between(&folder, &file))
-    })();
-    relative.unwrap_or_else(|| file.display().to_string())
+    root.and_then(|root| way_within_notebook(file, document, root))
+        .unwrap_or_else(|| file.display().to_string())
+}
+
+/// The way from the folder of `document` to `file`, if both are inside the notebook at `root`
+/// and exist. It still holds on another machine or once the notebook has moved.
+pub fn way_within_notebook(file: &Path, document: &Path, root: &Path) -> Option<String> {
+    let root = root.canonicalize().ok()?;
+    let folder = document.parent()?.canonicalize().ok()?;
+    let file = file.canonicalize().ok()?;
+    if !folder.starts_with(&root) || !file.starts_with(&root) {
+        return None;
+    }
+    Some(path_between(&folder, &file))
 }
 
 /// The way from `folder` to `file`, both of them whole paths with nothing like `..` in them.

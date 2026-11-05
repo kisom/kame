@@ -84,7 +84,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **A name holding a semicolon,** possible only by hand in its file, splits on Save from the form.
 - [ ] **With no file open, a rename can lose the old key** if the unsaved copy can't follow. It needs a failed write to the temporary database, and the reference survives under the new key.
 - [ ] **A new single name such as `King, Jr.`** splits on commas unless it's typed with a `;`.
-- [ ] **Test gaps:** paste leaving no note, `chmod` as root.
 
 ## Sync
 

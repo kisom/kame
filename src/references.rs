@@ -2104,6 +2104,22 @@ mod tests {
         assert_eq!(page.app.notice, None);
     }
 
+    #[test]
+    fn pasting_a_closed_unknown_key_leaves_no_note() {
+        let mut page = page_in_notebook("");
+
+        page.frame(vec![egui::Event::Paste(
+            "as in [kleppmann2019]".to_string(),
+        )]);
+        page.frame(Vec::new());
+
+        assert_eq!(
+            page.app.session.document().blocks[0].text,
+            "as in [kleppmann2019]"
+        );
+        assert_eq!(page.app.notice, None);
+    }
+
     /// `[lamport1994]` typed so that its note is up, and the form for it open with a title.
     fn noted_key_with_its_form() -> Headless {
         let mut page = page_in_notebook("");
@@ -3438,6 +3454,22 @@ mod tests {
         assert!(!page.sees("was kept"));
     }
 
+    /// Whether a folder with no write permission turns away a new file. It doesn't for root, which
+    /// a test that needs a refusal has to skip.
+    #[cfg(unix)]
+    fn read_only_folder_refuses_files(folder: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = folder.join("probe");
+        let refused = std::fs::File::create(&probe).is_err();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_file(&probe);
+        if !refused {
+            eprintln!("skipped: this user can write to a read-only folder");
+        }
+        refused
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_old_file_that_cant_be_removed_at_the_end_is_named_and_a_retry_finishes() {
@@ -3449,6 +3481,9 @@ mod tests {
         let send = rename_held_open(&mut page);
         let done = rename(&notebook, "knuth1981", "plass1981", Some(&open));
         let folder = root_of(&page).join("references");
+        if !read_only_folder_refuses_files(&folder) {
+            return;
+        }
 
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
         send.send(done).unwrap();

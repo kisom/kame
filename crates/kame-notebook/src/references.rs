@@ -1077,6 +1077,13 @@ mod tests {
         write_document(&doc, "[old]", &[]);
         let references = folder(&notebook);
         std::fs::set_permissions(&references, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root can write where nobody else can, and then there is no refusal to test.
+        let refused = std::fs::File::create(references.join("probe")).is_err();
+        if !refused {
+            std::fs::set_permissions(&references, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipped: this user can write to a read-only folder");
+            return;
+        }
         let result = rename(&notebook, "old", "fresh", None);
         std::fs::set_permissions(&references, std::fs::Permissions::from_mode(0o755)).unwrap();
         let renamed = result.unwrap();

@@ -229,6 +229,14 @@ pub fn own_target_after_save_as(target: &str, from: &Path, to: &Path) -> String 
     }
 }
 
+/// Whether a link, written in the document at `document`, names something that's there: a file or
+/// folder, or a document with its extension left off. It says nothing of a link with no path.
+pub fn names_something(target: &str, document: &Path) -> bool {
+    let (path, _) = split_document_target(target);
+    !path.is_empty()
+        && (resolve_open_path(path, document).exists() || find_document(path, document).is_some())
+}
+
 /// Whether a link's path, written in the document at `document`, leads to that document. `www.`
 /// starts a web address, as it does in a document's text.
 fn names_document(path: &str, document: &Path) -> bool {

@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
-use crate::links::{image_file, own_target_after_save_as, retargeted, stored_image_path};
+use crate::links::{
+    image_file, names_something, own_target_after_save_as, retargeted, stored_image_path,
+};
 use crate::model::{
     bare_link_ranges, Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document,
     ImageAlign, Metadata, Span, SpanStyle,
@@ -960,6 +962,15 @@ impl Session {
         &mut self,
         mut rewrite: impl FnMut(&str) -> Option<String>,
     ) -> Result<usize, String> {
+        self.rewrite_links_by_kind(|link, _| rewrite(link))
+    }
+
+    /// [`Session::rewrite_links`], telling `rewrite` whether each is a link to a document, as a
+    /// `DocumentLink` is, rather than a link to anything at all.
+    fn rewrite_links_by_kind(
+        &mut self,
+        mut rewrite: impl FnMut(&str, bool) -> Option<String>,
+    ) -> Result<usize, String> {
         if self.newer {
             return Err("this document has changes from a newer version of kame".into());
         }
@@ -968,7 +979,7 @@ impl Session {
         }
         let mut document = self.editor.document().clone();
         let mut changed = 0;
-        let mut apply = |link: &mut String| match rewrite(link) {
+        let mut apply = |link: &mut String, to_document: bool| match rewrite(link, to_document) {
             Some(new) if new != *link => {
                 *link = new;
                 changed += 1;
@@ -978,8 +989,8 @@ impl Session {
         for block in &mut document.blocks {
             for span in &mut block.spans {
                 match &mut span.style {
-                    SpanStyle::Link { url } => apply(url),
-                    SpanStyle::DocumentLink { target } => apply(target),
+                    SpanStyle::Link { url } => apply(url, false),
+                    SpanStyle::DocumentLink { target } => apply(target, true),
                     _ => {}
                 }
             }
@@ -987,7 +998,7 @@ impl Session {
                 link: Some(link), ..
             } = &mut block.kind
             {
-                apply(link);
+                apply(link, false);
             }
         }
         if changed > 0 && !self.replace_document(document) {
@@ -1740,13 +1751,18 @@ impl Session {
     /// After a save as, says each relative link again for where the document is now, having been
     /// at `from` until then, as one undo step. A link to the document itself goes on leading to
     /// it. A web link or `#Heading` depends on nothing of the kind and stays, and a document that
-    /// had no file has no way to say where one led.
+    /// had no file has no way to say where one led. A link to anything at all is only taken for a
+    /// path if what it names was there, as what looks like a path may be an address someone
+    /// wrote, while a link to a document always names one, or one to come.
     pub fn rehome_links(&mut self, from: Option<&Path>) {
         let (Some(from), Some(to)) = (from, self.path.clone()) else {
             return;
         };
         let selection = self.selection;
-        let rewritten = self.rewrite_links(|link| Some(own_target_after_save_as(link, from, &to)));
+        let rewritten = self.rewrite_links_by_kind(|link, to_document| {
+            (to_document || names_something(link, from))
+                .then(|| own_target_after_save_as(link, from, &to))
+        });
         match rewritten {
             Ok(_) => self.selection = selection,
             Err(err) => self.last_error = Some(err),
@@ -3839,6 +3855,9 @@ mod tests {
             ("mailto:a@example.com", false),
             ("www.example.com/x", false),
         ];
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        std::fs::write(root.join("two/d.kame"), "").unwrap();
+        std::fs::write(root.join("notes.md"), "").unwrap();
         let mut session = document_with_links(root, &targets);
         session.insert_image("https://example.com/plate.png".to_string());
         let image = session.valid_caret().block_id;
@@ -3991,6 +4010,60 @@ mod tests {
         session.rehome_links(Some(&from));
         assert_eq!(link_targets(&session), before);
         assert_eq!(session.history(), history);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_as_leaves_a_link_alone_unless_it_names_something_there_was() {
+        let root = scratch_dir("rehomenothing").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        std::fs::write(root.join("two/there.pdf"), "").unwrap();
+        std::fs::write(root.join("two/d.kame"), "").unwrap();
+        let from = root.join("one/a.kame");
+        let mut session = document_with_links(
+            &root,
+            &[
+                ("example.com/x", false),
+                ("me@example.com", false),
+                ("localhost/x", false),
+                ("?q=1", false),
+                ("../two/gone.pdf", false),
+                ("../two/there.pdf", false),
+                ("../two/d", false),
+                ("../two/", false),
+                ("../two/d.kame#Part", false),
+                ("../two/gone.kame", true),
+            ],
+        );
+        session.insert_image("https://example.com/plate.png".to_string());
+        let image = session.valid_caret().block_id;
+        session.set_block_kind(
+            image,
+            BlockKind::Image {
+                path: "https://example.com/plate.png".to_string(),
+                link: Some("example.com/y".to_string()),
+                align: ImageAlign::default(),
+            },
+        );
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        session.save_as(&root.join("three/deep/a.kame")).unwrap();
+        session.rehome_links(Some(&from));
+        assert_eq!(
+            link_targets(&session),
+            [
+                "example.com/x",
+                "me@example.com",
+                "localhost/x",
+                "?q=1",
+                "../two/gone.pdf",
+                "../../two/there.pdf",
+                "../../two/d",
+                "../../two/",
+                "../../two/d.kame#Part",
+                "../../two/gone.kame",
+                "example.com/y",
+            ]
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

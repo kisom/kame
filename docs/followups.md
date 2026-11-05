@@ -80,7 +80,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **`page_blocks` clones the blocks every frame** when one holds a citation. It hasn't been measured.
 - [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
 - [ ] **`cite` says it couldn't** when the key went in and only the write failed (`src/references.rs`).
-- [ ] **A selection wholly inside a key** comes out of a rename as an empty selection.
 - [ ] **A zero-width anchor inside a key** widens when the key is renamed.
 - [ ] **Typing straight after an inserted key** joins its undo step.
 - [ ] **The browser panel and File > Open** close a form and lose what's typed in it.

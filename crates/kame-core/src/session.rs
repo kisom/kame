@@ -2250,15 +2250,35 @@ impl Session {
                 offset_after_rename(cursor.offset, keys, new.len(), true)
             }),
         };
-        let (caret, selection) = (moved(self.caret), self.selection);
+        let selection = self.selection.map(|selection| {
+            let mut after = Selection {
+                start: moved(selection.start),
+                end: moved(selection.end),
+            };
+            // Both ends went to the end of the one key they were in, so it covers that key, as
+            // a span inside one comes to, with the moving end still the moving end.
+            if after.start == after.end && selection.start != selection.end {
+                let key_start = Cursor {
+                    block_id: after.end.block_id,
+                    offset: after.end.offset - new.len(),
+                };
+                if selection.start.offset < selection.end.offset {
+                    after.start = key_start;
+                } else {
+                    after.end = key_start;
+                }
+            }
+            after
+        });
+        let caret = match (self.selection, selection) {
+            (Some(before), Some(after)) if before.end == self.caret => after.end,
+            _ => moved(self.caret),
+        };
         if !self.replace_document(document) {
             return 0;
         }
         self.caret = caret;
-        self.selection = selection.map(|selection| Selection {
-            start: moved(selection.start),
-            end: moved(selection.end),
-        });
+        self.selection = selection;
         self.valid_caret();
         changed
     }
@@ -7910,6 +7930,120 @@ mod tests {
         assert!(selection.is_some());
         assert_eq!(session.rename_citation("other", "fresh"), 0);
         assert_eq!((session.caret, session.selection), (caret, selection));
+    }
+
+    /// `text` in one paragraph, with a selection from `start` to `end`.
+    fn selecting(text: &str, start: usize, end: usize) -> Session {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(text);
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: start,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: end,
+        });
+        session
+    }
+
+    #[test]
+    fn a_selection_wholly_inside_a_key_covers_the_renamed_key() {
+        let text = "é [smith2020] now";
+        let key = text.find("smith2020").unwrap();
+        let (inside, later, end) = (key + 1, key + 4, key + "smith2020".len());
+        let new_end = key + "li19".len();
+        // Dragged forward and back, with one end inside or both, and with the moving end
+        // where the caret is.
+        for (from, to, caret) in [
+            (inside, later, new_end),
+            (later, inside, key),
+            (inside, end, new_end),
+            (end, inside, key),
+        ] {
+            let mut session = selecting(text, from, to);
+            let before = session.document().clone();
+            assert_eq!(session.rename_citation("smith2020", "li19"), 1);
+            let (start_of, end_of) = session.ordered_selection().unwrap();
+            assert_eq!((start_of.offset, end_of.offset), (key, new_end), "{from}");
+            assert_eq!(session.caret.offset, caret, "{from}");
+            assert_eq!(session.selection.unwrap().end, session.caret, "{from}");
+            assert!(session.undo());
+            assert_eq!(session.document(), &before);
+        }
+    }
+
+    #[test]
+    fn a_selection_outside_a_key_or_around_one_moves_with_the_text() {
+        let text = "é [a] and [a] end";
+        let key = |n: usize| text.match_indices("[a]").nth(n).unwrap().0 + 1;
+        let new = "é [longer] and [longer] end";
+        let new_key = |n: usize| new.match_indices("[longer]").nth(n).unwrap().0 + 1;
+        let tail = text.len() - 1;
+        for (from, to, want_from, want_to) in [
+            // Before the keys, and after them.
+            (0, key(0) - 1, 0, new_key(0) - 1),
+            (tail - 2, tail, new.len() - 3, new.len() - 1),
+            // Around one, exactly on it, and between two.
+            (0, key(0) + 2, 0, new_key(0) + "longer]".len()),
+            (key(0), key(0) + 1, new_key(0), new_key(0) + 6),
+            (key(0) + 2, key(1) - 1, new_key(0) + 7, new_key(1) - 1),
+            // From the middle of the document to the far end, either way round.
+            (key(1), tail, new_key(1), new.len() - 1),
+            (tail, key(1), new.len() - 1, new_key(1)),
+        ] {
+            let mut session = selecting(text, from, to);
+            assert_eq!(session.rename_citation("a", "longer"), 2);
+            assert_eq!(session.document().blocks[0].text, new);
+            let selection = session.selection.unwrap();
+            assert_eq!(
+                (selection.start.offset, selection.end.offset),
+                (want_from, want_to),
+                "{from}..{to}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selection_with_its_ends_in_two_keys_keeps_each_at_its_key_s_end() {
+        // One letter into each key, which only a key of more than one letter has.
+        let text = "[ab] and [ab] end";
+        let key = |n: usize| text.match_indices("[ab]").nth(n).unwrap().0 + 1;
+        let new = "[xyz] and [xyz] end";
+        let new_key = |n: usize| new.match_indices("[xyz]").nth(n).unwrap().0 + 1;
+        let mut session = selecting(text, key(0) + 1, key(1) + 1);
+        assert_eq!(session.rename_citation("ab", "xyz"), 2);
+        let selection = session.selection.unwrap();
+        assert_eq!(
+            (selection.start.offset, selection.end.offset),
+            (new_key(0) + 3, new_key(1) + 3)
+        );
+    }
+
+    #[test]
+    fn a_selection_inside_keys_in_two_blocks_keeps_each_at_its_key_s_end() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("[ab]");
+        assert!(session.split());
+        session.insert("[ab]");
+        let first = session.document().blocks[0].id;
+        let second = session.document().blocks[1].id;
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 2,
+        });
+        session.select_to(Cursor {
+            block_id: second,
+            offset: 2,
+        });
+        assert_eq!(session.rename_citation("ab", "xyz"), 2);
+        let selection = session.selection.unwrap();
+        assert_eq!(
+            (selection.start.block_id, selection.start.offset),
+            (first, 4)
+        );
+        assert_eq!((selection.end.block_id, selection.end.offset), (second, 4));
     }
 
     #[test]

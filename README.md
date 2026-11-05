@@ -30,6 +30,7 @@ itself is a structured, first-class file, never a pile of markup.
   body text, and `- ` or `1. ` at the start of a line for a list.
 - **Code and prose blocks** — text kept exactly as typed, line breaks and spacing
   included.
+- **Images** — shown on the page, and kept with a notebook wherever it moves.
 - **Links between documents** — `[[essay]]` or File > Link to Document, and
   clicking one opens it.
 - **Notebooks** — a folder of documents with a jump list, a search and a browser,
@@ -83,7 +84,7 @@ app to others needs a Developer ID certificate and `notarytool` notarization.
 ## Using
 
 ```sh
-kame                    # an anonymous document; the first save asks for a file
+kame                    # the last document, or an empty one; its first save asks for a file
 kame <document.kame>    # open (or create) a document
 kame <notes.md>         # import Markdown as a new, unsaved document
 kame <folder>           # open a notebook

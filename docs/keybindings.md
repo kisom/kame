@@ -107,7 +107,7 @@ out, along with its highlight. Emptying a marginal removes it too.
 
 ## Images
 
-Insert image… on the right-click menu asks for a file, starting in `images/`, and shows it at its own size, or at the body's width if it's wider. An image from outside the notebook is copied to `images/path/to/document/`, and a different picture with the same name becomes `name-2.jpg`. Nothing in `images/` is public until a published document shows it, and then it publishes at `/static/images/`.
+Insert image… on the right-click menu asks for a file, starting in the notebook's `images/` if it has one, or the document's folder, and shows it at its own size, or at the body's width if it's wider. An image from outside the notebook is copied to `images/path/to/document/`, and a different picture with the same name becomes `name-2.jpg`. Nothing in `images/` is public until a published document shows it, and then it publishes at `/static/images/`.
 
 The document keeps the way to the image from its own folder, so it still shows on another machine and after the notebook moves. A document with no file yet, or outside a notebook, keeps the image's whole path. Saving a document somewhere else says its images' paths again from there, and an export uses whole paths, since it can land anywhere. A document whose images already have whole paths keeps them until it's saved somewhere else.
 

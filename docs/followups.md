@@ -2,6 +2,14 @@
 
 Open work, most pressing first. Delete items as they land.
 
+## Site
+
+- [ ] **A missing image publishes its local path.** A published page's `src` gets the path on this
+  machine, such as `/home/you/notes/images/gone.png`, though the build does warn that it's missing. It
+  should publish as nothing, or as its words.
+- [ ] **The theme's About link leads nowhere** until the notebook has a published `about.kame` or
+  `about.md`. It's hard-coded in `theme/templates/base.html`.
+
 ## Annotations
 
 - [ ] **A key for adding a marginal.** Notes and footnotes have one, and a marginal is only on the
@@ -30,6 +38,8 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 - [ ] **The Move command,** with the clean-up of databases a move leaves behind. Moving a document in
   a folder with revision logs leaves a stale copy on the other machine for now.
 - [ ] **A command palette.**
+- [ ] **File > Link to Document… in a notebook.** It writes `~/...` for anything under the home folder,
+  which breaks when the notebook moves. It could keep the way from the document, as images now do.
 
 ## Sync
 
@@ -46,6 +56,8 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 
 - [ ] **Tables (deferred).** Simplified on import because the model has no equivalent.
   Tables are wanted but too complex for now, and a code block is the stopgap.
+- [ ] **A link to a heading stays an ordinary link.** `[x](<#Heading>)` imports as a web link, so
+  clicking it goes to the browser, where typing it would make a document link.
 
 ## Export
 

@@ -48,7 +48,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `storage/` — SQLite `Db` (WAL, `PRAGMA user_version` migrations, snapshots)
 - `edit/` — `Op` log + `Editor` (undo/redo, commands)
 - `export/` — `to_markdown`, `to_html` (deterministic), and `html_body` with `Publish` hooks for a tool that knows where links and images end up
-- `links.rs` — where a link between documents leads
+- `links.rs` — where a link between documents leads, and how a document keeps an image's path
 - `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
 - `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk
 - `text.rs` — moving through text by character and word
@@ -63,7 +63,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies, and `logs` and `revlog` for revision logs in folders that turn them on. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
-`crates/kame-notebook` — a notebook: a folder with a `notebook.yaml`, on `kame-core` and `kame-sync`. It finds one, lists what's in it, searches it, and works out where links lead and when one can create a document. Nothing derived is stored. The app's side of it is `src/notebook.rs`, and `kame-site` builds one as a site in `notebook.rs`. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
+`crates/kame-notebook` — a notebook: a folder with a `notebook.yaml`, on `kame-core` and `kame-sync`. It finds one, lists what's in it, searches it, works out where links lead and when one can create a document, and copies images in from outside. Nothing derived is stored. The app's side of it is `src/notebook.rs`, and `kame-site` builds one as a site in `notebook.rs`. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
 `crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
 

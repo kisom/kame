@@ -10,6 +10,8 @@ mod external;
 #[cfg(target_os = "macos")]
 mod macos;
 mod notebook;
+#[cfg(test)]
+mod perf;
 mod publish;
 mod references;
 

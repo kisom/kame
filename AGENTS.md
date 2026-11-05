@@ -80,6 +80,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 
+`src/perf.rs` — how long the page takes over a real document: typing, deleting, scrolling and opening, at its size and ten times over. Ignored by default; its comment says how to run it.
+
 The layering is one-way: core knows nothing of typeset or the app. Keep logic out of the app where it can go in a library. Keybindings, and how everything is used, are documented in `docs/keybindings.md`. Open work is in `docs/followups.md`.
 
 ## Conventions

@@ -252,7 +252,14 @@ fn book(reference: &Reference, b: &mut Builder) {
         }
     }
     let editors_follow = !editors_lead && !reference.editors.is_empty();
-    let edition = (!reference.edition.is_empty()).then(|| format!("{} ed.", reference.edition));
+    // Someone may have typed the abbreviation with the edition.
+    let edition = (!reference.edition.is_empty()).then(|| {
+        if reference.edition.to_lowercase().ends_with("ed.") {
+            reference.edition.clone()
+        } else {
+            format!("{} ed.", reference.edition)
+        }
+    });
     // The title closes with a period inside its italics when nothing else comes before the
     // place and publisher.
     if edition.is_none() && !editors_follow {
@@ -481,6 +488,27 @@ mod tests {
         );
         book.pages = s("5");
         assert!(plain(&book).ends_with("2020, p. 5."), "{}", plain(&book));
+    }
+
+    #[test]
+    fn an_edition_typed_with_its_abbreviation_isnt_abbreviated_twice() {
+        let mut book = Reference {
+            kind: Kind::Book,
+            title: s("Title of Book"),
+            place: s("City"),
+            publisher: s("Publisher"),
+            ..Reference::default()
+        };
+        for typed in ["2nd ed.", "2nd Ed.", "2ND ED."] {
+            book.edition = s(typed);
+            assert_eq!(
+                plain(&book),
+                format!("Title of Book, {typed} City: Publisher."),
+                "{typed}"
+            );
+        }
+        book.edition = s("2nd");
+        assert_eq!(plain(&book), "Title of Book, 2nd ed. City: Publisher.");
     }
 
     #[test]

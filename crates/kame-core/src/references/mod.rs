@@ -465,16 +465,16 @@ pub fn cited<'a>(
         .collect()
 }
 
-/// Whether `key` has the shape `suggest_key` gives: lowercase letters, a four digit year and
-/// perhaps a letter, as `knuth1981` or `knuth1981a`.
+/// Whether `key` has the shape `suggest_key` gives, in either case: letters, a four digit year and
+/// perhaps a letter, as `knuth1981`, `Smith2020` or `knuth1981a`.
 pub fn looks_like_suggested_key(key: &str) -> bool {
-    let rest = key.trim_start_matches(|c: char| c.is_ascii_lowercase());
+    let rest = key.trim_start_matches(|c: char| c.is_ascii_alphabetic());
     let year = rest.get(..4).unwrap_or("");
     let after = &rest[year.len()..];
     rest.len() < key.len()
         && year.len() == 4
         && year.bytes().all(|b| b.is_ascii_digit())
-        && (after.is_empty() || (after.len() == 1 && after.as_bytes()[0].is_ascii_lowercase()))
+        && (after.is_empty() || (after.len() == 1 && after.as_bytes()[0].is_ascii_alphabetic()))
 }
 
 /// Keys cited in `doc` that have no reference and look like a suggested key, so that a
@@ -735,18 +735,25 @@ mod tests {
 
     #[test]
     fn only_keys_that_look_suggested_are_unresolved() {
-        let first = paragraph("[smith2020] [smith2020a] [sic] [known2000] [smith2020]");
+        let first = paragraph("[smith2020] [smith2020a] [Jones2019] [sic] [known2000] [smith2020]");
         let doc = document(vec![first], Vec::new());
         let references = known(&["known2000"]);
         assert_eq!(
             unresolved(&doc, &references, false),
-            ["smith2020", "smith2020a"]
+            ["Jones2019", "smith2020", "smith2020a"]
         );
     }
 
     #[test]
     fn a_suggested_key_is_letters_a_year_and_perhaps_a_letter() {
-        for yes in ["knuth1981", "knuth1981a", "a1999"] {
+        for yes in [
+            "knuth1981",
+            "knuth1981a",
+            "a1999",
+            "Knuth1981",
+            "SMITH2020",
+            "Smith2020A",
+        ] {
             assert!(looks_like_suggested_key(yes), "{yes}");
         }
         for no in [
@@ -756,7 +763,7 @@ mod tests {
             "knuth81",
             "knuth19811",
             "knuth1981ab",
-            "Knuth1981",
+            "Knuth1981AB",
             "k-1981",
             "",
         ] {

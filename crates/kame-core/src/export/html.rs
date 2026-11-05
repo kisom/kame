@@ -991,11 +991,17 @@ fn render_inline(
                 target.push(tag.clone());
             }
         }
-        let keep = open
+        let mut keep = open
             .iter()
             .zip(target.iter())
             .take_while(|(open_tag, target_tag)| open_tag == target_tag)
             .count();
+        // A marker is a link itself, and one link can't hold another, so a link going on past
+        // a marker is closed around it and opened again.
+        if footnotes.iter().any(|(offset, _)| *offset == start) {
+            let is_link = |tag: &InlineTag| matches!(tag, InlineTag::Link { .. });
+            keep = open[..keep].iter().position(is_link).unwrap_or(keep);
+        }
         while open.len() > keep {
             let tag = open.pop().expect("the stack is longer than its prefix");
             out.push_str(tag.close());
@@ -2531,6 +2537,114 @@ mod tests {
                  <a href=\"#ref-knuth1981\">1981]</a> x</p>"
             ),
             "{html}"
+        );
+    }
+
+    /// How deep the anchors in `html` go at their deepest.
+    fn deepest_anchor(html: &str) -> usize {
+        let (mut depth, mut deepest) = (0usize, 0);
+        for (at, _) in html.match_indices('<') {
+            if html[at..].starts_with("<a ") {
+                depth += 1;
+                deepest = deepest.max(depth);
+            } else if html[at..].starts_with("</a>") {
+                depth -= 1;
+            }
+        }
+        deepest
+    }
+
+    const MARKER: &str = "<sup class=\"footnote-ref\" id=\"fnref1\"><a href=\"#fn1\">1</a></sup>";
+
+    #[test]
+    fn a_footnote_on_a_citation_closes_the_link_around_its_marker() {
+        let block = paragraph("[knuth1981] x");
+        let id = block.id;
+        // On the key's word, as Ctrl-Shift-F makes it with the caret in the key.
+        let doc = document(
+            vec![block],
+            vec![annotation(AnnotationKind::Footnote, id, 1, 10, "A note.")],
+        );
+        let html = page(&doc, &knuth());
+        assert_eq!(deepest_anchor(&html), 1, "{html}");
+        assert!(
+            html.contains(&format!(
+                "<p><a href=\"#ref-knuth1981\">[knuth1981</a>{MARKER}\
+                 <a href=\"#ref-knuth1981\">]</a> x</p>"
+            )),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_footnote_inside_a_stored_link_closes_it_and_keeps_what_was_around_it() {
+        let url = "https://example.com";
+        let mut block = paragraph("read this");
+        block.spans = vec![
+            Span {
+                start: 0,
+                end: 9,
+                style: SpanStyle::Link {
+                    url: url.to_string(),
+                },
+            },
+            Span {
+                start: 0,
+                end: 9,
+                style: SpanStyle::Bold,
+            },
+        ];
+        let id = block.id;
+        let doc = document(
+            vec![block],
+            vec![annotation(AnnotationKind::Footnote, id, 0, 4, "A note.")],
+        );
+        let html = html_body(&doc, &Publish::plain());
+        assert_eq!(deepest_anchor(&html), 1, "{html}");
+        assert!(
+            html.contains(&format!(
+                "<p><strong><a href=\"{url}\">read</a>{MARKER}<a href=\"{url}\"> this</a></strong></p>"
+            )),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_footnote_at_either_edge_of_a_link_leaves_it_whole() {
+        let url = "https://example.com";
+        let link = |start: usize, end: usize| {
+            let mut block = paragraph("see this now");
+            block.spans = vec![Span {
+                start: 4,
+                end: 8,
+                style: SpanStyle::Link {
+                    url: url.to_string(),
+                },
+            }];
+            let id = block.id;
+            html_body(
+                &document(
+                    vec![block],
+                    vec![annotation(
+                        AnnotationKind::Footnote,
+                        id,
+                        start,
+                        end,
+                        "A note.",
+                    )],
+                ),
+                &Publish::plain(),
+            )
+        };
+        assert!(
+            link(0, 4).contains(&format!("see {MARKER}<a href=\"{url}\">this</a> now")),
+            "{}",
+            link(0, 4)
+        );
+        assert!(
+            link(4, 8).contains(&format!("see <a href=\"{url}\">this</a>{MARKER} now")),
+            "{}",
+            link(4, 8)
         );
     }
 

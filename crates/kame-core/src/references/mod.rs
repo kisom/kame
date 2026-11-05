@@ -496,12 +496,18 @@ pub fn citation_at(text: &str, offset: usize) -> Option<(usize, usize)> {
 /// there is room left for a suffix within `MAX_KEY`.
 const MAX_YEAR_DIGITS: usize = 8;
 
+/// What can follow a name after a comma and still be part of it, as in `M. L. King, Jr.`.
+pub const NAME_SUFFIXES: [&str; 7] = ["Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV"];
+
 /// A key for `reference` from its first author's last name and its year, with `a`, `b` and so
 /// on added if that's taken. Characters a key can't hold are dropped. `None` if no letter is
 /// left of the name.
 pub fn suggest_key(reference: &Reference, references: &References) -> Option<String> {
     let author = reference.authors.first()?;
     let surname = match author.split_once(',') {
+        Some((before, after)) if NAME_SUFFIXES.contains(&after.trim()) => {
+            before.split_whitespace().next_back().unwrap_or("")
+        }
         Some((before, _)) => before,
         None => author.split_whitespace().next_back().unwrap_or(""),
     };
@@ -834,6 +840,22 @@ mod tests {
         );
         assert_eq!(suggest_key(&author("王", "2020"), &none), None);
         assert_eq!(suggest_key(&Reference::default(), &none), None);
+    }
+
+    #[test]
+    fn a_suffix_after_a_comma_is_passed_over_for_the_surname() {
+        let none = References::new();
+        for name in ["M. L. King, Jr.", "M. L. King, Sr", "M. L. King, III"] {
+            assert_eq!(
+                suggest_key(&author(name, "1963"), &none).as_deref(),
+                Some("king1963"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            suggest_key(&author("King, M. L.", "1963"), &none).as_deref(),
+            Some("king1963")
+        );
     }
 
     #[test]

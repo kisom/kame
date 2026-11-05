@@ -17,7 +17,7 @@ use kame_core::export::markdown_unresolved;
 use kame_core::model::{Block, Document};
 use kame_core::references::{
     block_citation_ranges, citation_at, cited, entry, key_of, plain, suggest_key, unresolved,
-    valid_key, with_citation_spans, Kind, Reference, References, RunStyle,
+    valid_key, with_citation_spans, Kind, Reference, References, RunStyle, NAME_SUFFIXES,
 };
 use kame_notebook::references::{citing, load, remove, rename, save, stamp, Loaded, Open, Renamed};
 use kame_notebook::Notebook;
@@ -462,9 +462,6 @@ impl ReferenceForm {
         self.key = suggest_key(&named, references).unwrap_or_default();
     }
 }
-
-/// What can follow a name after a comma and still be part of it.
-const NAME_SUFFIXES: [&str; 7] = ["Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV"];
 
 /// Names, each as spelled: split on semicolons if there are any, so that a name can hold a comma,
 /// and otherwise on commas, keeping a suffix such as `Jr.` with the name before it.

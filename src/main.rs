@@ -3774,8 +3774,7 @@ impl KameApp {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "not saved to a file yet".to_string());
         let not_saved = self.session.is_anonymous() && self.session.has_content();
-        let error = self.session.last_error.clone();
-        let notice = self.notice.clone();
+        let message = self.status_message();
         // Applied after the panel closes: some of these block on a native dialog
         // or replace the session the panel is reading.
         let mut action: Option<MenuAction> = None;
@@ -3986,15 +3985,14 @@ impl KameApp {
                         ui.label(egui::RichText::new("not saved yet").small().weak());
                     }
                     // In this row, cut to fit, so a message never changes the height of
-                    // the chrome and moves the page. An error goes first and can be
-                    // selected, to copy a path or reason out of a desktop launch.
-                    let message = error
-                        .as_ref()
-                        .map(|error| (error, self.palette.error_ink, true))
-                        .or(notice
-                            .as_ref()
-                            .map(|notice| (notice, self.palette.notice_ink, false)));
-                    if let Some((text, ink, selectable)) = message {
+                    // the chrome and moves the page. An error can be selected, to copy a path or
+                    // reason out of a desktop launch.
+                    if let Some((text, wrong)) = &message {
+                        let (ink, selectable) = if *wrong {
+                            (self.palette.error_ink, true)
+                        } else {
+                            (self.palette.notice_ink, false)
+                        };
                         let room = ui.available_width() * STATUS_MESSAGE_SHARE;
                         ui.allocate_ui(Vec2::new(room, ui.available_height()), |ui| {
                             ui.add(
@@ -4015,6 +4013,16 @@ impl KameApp {
         if let Some(action) = action {
             self.run_menu_action(ui.ctx(), action);
         }
+    }
+
+    /// What the status row says, and whether it says something is wrong. An error goes first,
+    /// then a notice, and then what's wrong with the notebook's references, which is said for as
+    /// long as it's so.
+    fn status_message(&self) -> Option<(String, bool)> {
+        let error = self.session.last_error.clone().map(|error| (error, true));
+        let notice = || self.notice.clone().map(|notice| (notice, false));
+        let references = || self.refs.problem_line().map(|problem| (problem, true));
+        error.or_else(notice).or_else(references)
     }
 
     /// Carries out a menu choice through the same path its shortcut uses.

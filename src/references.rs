@@ -42,7 +42,7 @@ const NOT_A_KEY: &str = "A key is letters, digits, - and _, starting with a lett
 pub(crate) struct ReferencesUi {
     /// What the notebook on screen holds. Nothing outside one.
     pub(crate) list: References,
-    /// What was wrong with the files left out of the list.
+    /// What is wrong with the files left out of the list, as of the last time they were read.
     problems: Vec<String>,
     /// The files the list was read from, as they were.
     stamp: Vec<(String, SystemTime, u64)>,
@@ -580,9 +580,8 @@ fn entry_start(reference: &Reference) -> String {
 }
 
 impl ReferencesUi {
-    /// Keeps the list up with `notebook` and its files. Says what's wrong with them when that
-    /// changes, as there's no use saying it every time they are looked at.
-    pub(crate) fn refresh(&mut self, notebook: Option<&Notebook>) -> Option<String> {
+    /// Keeps the list up with `notebook` and its files, and with what's wrong with them.
+    pub(crate) fn refresh(&mut self, notebook: Option<&Notebook>) {
         let Some(notebook) = notebook else {
             // A rename goes on, and its window stays until it has been read to say how it went.
             let renaming = self.renaming.take();
@@ -595,24 +594,23 @@ impl ReferencesUi {
                 window,
                 ..ReferencesUi::default()
             };
-            return None;
+            return;
         };
         let moved = self.root.as_ref() != Some(&notebook.root);
         let due = self
             .checked
             .is_none_or(|checked| checked.elapsed() >= CHECK_EVERY);
         if !moved && !due {
-            return None;
+            return;
         }
         self.checked = Some(Instant::now());
         // Taken before reading, so that a file changing in between is read again next time.
         let files = stamp(notebook);
         if !moved && files == self.stamp {
-            return None;
+            return;
         }
         if moved {
             self.root = Some(notebook.root.clone());
-            self.problems.clear();
             self.close_windows();
             self.counts = None;
             self.counting = None;
@@ -622,23 +620,23 @@ impl ReferencesUi {
 
     /// Reads the list now, for a change made here that should show at once. The files may look no
     /// different from before, if it was quick and kept their length.
-    fn reload(&mut self, notebook: &Notebook) -> Option<String> {
+    fn reload(&mut self, notebook: &Notebook) {
         self.checked = Some(Instant::now());
-        self.read(notebook, stamp(notebook))
+        self.read(notebook, stamp(notebook));
     }
 
-    fn read(
-        &mut self,
-        notebook: &Notebook,
-        files: Vec<(String, SystemTime, u64)>,
-    ) -> Option<String> {
+    fn read(&mut self, notebook: &Notebook, files: Vec<(String, SystemTime, u64)>) {
         self.stamp = files;
         self.recount = true;
         let loaded = load(notebook);
         self.list = loaded.references;
-        let news = !loaded.problems.is_empty() && loaded.problems != self.problems;
         self.problems = loaded.problems;
-        news.then(|| format!("this notebook's references: {}", self.problems.join("; ")))
+    }
+
+    /// What the status row says is wrong with the files now, if anything is.
+    pub(crate) fn problem_line(&self) -> Option<String> {
+        (!self.problems.is_empty())
+            .then(|| format!("this notebook's references: {}", self.problems.join("; ")))
     }
 
     /// Whether any of the windows for references is up.
@@ -958,9 +956,7 @@ impl KameApp {
         let Some(notebook) = self.nb.notebook.clone() else {
             return;
         };
-        if let Some(problem) = self.refs.reload(&notebook) {
-            self.session.last_error = Some(problem);
-        }
+        self.refs.reload(&notebook);
     }
 
     /// Puts `[key]` in the document, as one ordinary edit, unless the caret is on it already. A
@@ -1868,12 +1864,12 @@ mod tests {
         let second = Notebook::open(&second).unwrap();
 
         let mut refs = ReferencesUi::default();
-        assert_eq!(refs.refresh(Some(&first)), None);
+        refs.refresh(Some(&first));
         assert!(refs.list.contains("knuth1981"));
 
         write_reference(&first.root, "smith2020", GOOD);
         refs.checked = None;
-        assert_eq!(refs.refresh(Some(&first)), None);
+        refs.refresh(Some(&first));
         assert!(refs.list.contains("smith2020"), "a new file is seen");
 
         std::fs::remove_file(first.root.join("references/smith2020.yaml")).unwrap();
@@ -1896,23 +1892,35 @@ mod tests {
     }
 
     #[test]
-    fn a_damaged_file_is_reported_once_and_the_others_still_load() {
+    fn a_damaged_file_is_reported_while_it_lasts_and_the_others_still_load() {
         let root = notebook_folder("list-damaged");
         write_reference(&root, "knuth1981", GOOD);
         write_reference(&root, "broken2020", "title: [not closed\n");
         let notebook = Notebook::open(&root).unwrap();
 
         let mut refs = ReferencesUi::default();
-        let problem = refs
-            .refresh(Some(&notebook))
-            .expect("the damage is reported");
+        refs.refresh(Some(&notebook));
+        let problem = refs.problem_line().expect("the damage is reported");
         assert!(problem.contains("broken2020"), "{problem}");
         assert!(refs.list.contains("knuth1981"));
 
         write_reference(&root, "smith2020", GOOD);
         refs.checked = None;
-        assert_eq!(refs.refresh(Some(&notebook)), None, "already said");
+        refs.refresh(Some(&notebook));
+        assert_eq!(refs.problem_line(), Some(problem), "still so");
         assert!(refs.list.contains("smith2020"));
+
+        std::fs::remove_file(root.join("references/broken2020.yaml")).unwrap();
+        refs.checked = None;
+        refs.refresh(Some(&notebook));
+        assert_eq!(refs.problem_line(), None);
+
+        refs.refresh(None);
+        assert_eq!(
+            refs.problem_line(),
+            None,
+            "outside a notebook there's nothing to say"
+        );
     }
 
     /// A page in a notebook holding `knuth1981`, with `text` as its only block.
@@ -3219,17 +3227,50 @@ mod tests {
         write_reference(&root, "smith2020", GOOD);
         write_reference(&root, "broken2020", "kind: nonsense\n");
         page.app.reload_references();
-        page.app.session.last_error = None;
 
         open_list(&mut page);
 
         assert_eq!(page.app.refs.counts.as_ref().unwrap()["knuth1981"], 2);
         assert!(page.sees("2 documents"));
         assert!(page.sees("0 documents"), "smith2020");
-        assert!(
-            page.sees("broken2020"),
-            "what's wrong outlasts the status row"
+        assert!(page.sees("broken2020"), "the window says what's wrong too");
+    }
+
+    /// Has the files looked at again on the next frame, as a second's wait would.
+    fn look_again(page: &mut Headless) {
+        page.app.refs.checked = None;
+        page.frame(Vec::new());
+    }
+
+    #[test]
+    fn the_status_says_whats_wrong_with_a_file_for_as_long_as_it_is() {
+        let mut page = page_in_notebook("words");
+        let root = root_of(&page);
+        write_reference(&root, "broken2020", "kind: nonsense\n");
+        look_again(&mut page);
+        let (said, wrong) = page.app.status_message().expect("something is wrong");
+        assert!(said.contains("references/broken2020.yaml"), "{said}");
+        assert!(wrong);
+
+        // Another error goes first while it's there, and what's wrong is still said after.
+        page.app.session.last_error = Some("could not export".to_string());
+        page.frame(Vec::new());
+        assert_eq!(
+            page.app.status_message(),
+            Some(("could not export".to_string(), true))
         );
+        page.app.session.last_error = None;
+        page.frame(Vec::new());
+        assert_eq!(page.app.status_message(), Some((said, true)));
+
+        write_reference(&root, "broken2020", GOOD);
+        look_again(&mut page);
+        assert_eq!(
+            page.app.status_message(),
+            None,
+            "fixed, it's no longer said"
+        );
+        assert!(page.app.refs.list.contains("broken2020"));
     }
 
     #[test]

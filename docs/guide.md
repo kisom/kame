@@ -195,7 +195,7 @@ Outside a notebook it says "Citing needs a notebook."
 - Delete… says how many documents cite the reference first. Those documents then hold plain `[key]` text.
 - Rename… rewrites `[old]` to `[new]` in each citing document, in prose, footnotes and marginals but not notes, as an ordinary edit there with its own undo step. The window then lists what it did. A document that can't be rewritten, or can't be read to see whether it cites the key, is named with the reason, and the old key is kept, so `[old]` still resolves. A Markdown document is one of those, and if it's imported and open it stays as its file is. Run the rename again once the problem is fixed to finish it.
 
-Reference files are written straight to disk and aren't undo steps.
+Reference files are written straight to disk and aren't undo steps. A file kame can't use, such as one with a field it doesn't know, is left alone and named in the References… window, and the status row says what's wrong with it for as long as it's so, once anything passing has gone.
 
 **Exporting.** HTML, Markdown and a notebook's site end with a `## References` section, after the footnotes. It lists only what that output cites, sorted by key ignoring case, one entry to a paragraph in IEEE format. In HTML and on a site, each citation links to its entry. In Markdown the citations stay as text. A document citing nothing gets no section and exports as it always did. A section you wrote yourself isn't looked for, so you'd get two. Markdown leaves out marginals, so a source cited only in a marginal appears in HTML and not in Markdown.
 

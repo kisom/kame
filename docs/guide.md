@@ -94,7 +94,7 @@ To link to another document, type `[[essay]]`, `[[notes/essay#The Intro]]` or `[
 
 ## The margin: notes, marginals and footnotes
 
-These are the reason for kame's name. Each attaches to the selection, or to the word under the caret, and stays with those words as the text changes around them. They differ mostly in who gets to read them.
+These are the reason for kame's name. Each attaches to the selection, or to the word under the caret, and stays with those words as the text changes around them. Straight after punctuation, the word is the one before it, so a footnote added at the end of a sentence keeps its number after the full stop as you type on. They differ mostly in who gets to read them.
 
 - A **note** (Ctrl-Shift-N) highlights a passage and holds a comment for you alone. The note's words never publish, in any format, and neither does its highlight. Leave a note without words and it's purely a highlight, which does show in HTML.
 - A **marginal** (Ctrl-Shift-M) sits in the margin beside its paragraph. It publishes in HTML, and is left out of Markdown, which has nowhere to put it.

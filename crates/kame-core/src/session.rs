@@ -18,7 +18,9 @@ use crate::references::{
     block_citation_ranges, citation_ranges, key_of, rewrite_citation, valid_key, References,
 };
 use crate::storage::{self, Db, DbError, SnapshotMeta};
-use crate::text::{next_boundary, next_word, prev_boundary, prev_word, widen_to_words, word_at};
+use crate::text::{
+    next_boundary, next_word, prev_boundary, prev_word, widen_to_words, word_at, word_for_note,
+};
 
 /// The document, its durable history, and the caret — everything that exists
 /// without a window.
@@ -2514,7 +2516,8 @@ impl Session {
 
     /// The anchor for a new annotation of `kind`: marginalia anchor to a whole
     /// block, notes and footnotes to the selection (clamped to its first block,
-    /// since an anchor lives in one block) or the word under the caret.
+    /// since an anchor lives in one block) or the word under the caret, which
+    /// straight after punctuation is the word before it with its punctuation.
     pub fn annotation_anchor(&self, kind: AnnotationKind) -> Option<Anchor> {
         let document = self.editor.document();
         let block_id = if let Some((start, _)) = self.ordered_selection() {
@@ -2554,7 +2557,7 @@ impl Session {
             .blocks
             .iter()
             .find(|block| block.id == caret.block_id)?;
-        let (start, end) = word_at(&block.text, caret.offset);
+        let (start, end) = word_for_note(&block.text, caret.offset);
         Some(Anchor::range(block.id, start, end))
     }
 
@@ -3696,6 +3699,70 @@ mod tests {
             " two,",
             "punctuation and space stay as chosen"
         );
+    }
+
+    /// The anchor a note of `kind` added with the caret at `offset` in `text` takes.
+    fn note_at_caret(text: &str, offset: usize, kind: AnnotationKind) -> (usize, usize) {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(text);
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor { block_id, offset });
+        session
+            .annotation_anchor(kind)
+            .unwrap()
+            .byte_range()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_footnote_straight_after_punctuation_takes_the_word_before_it() {
+        let text = "The fox slept. Then it woke";
+        let after = text.find(". Then").unwrap() + 1;
+        for kind in [AnnotationKind::Footnote, AnnotationKind::Note] {
+            let (start, end) = note_at_caret(text, after, kind);
+            assert_eq!(&text[start..end], "slept.", "{kind:?}");
+        }
+        let text = "It said (so).";
+        let (start, end) = note_at_caret(text, text.len(), AnnotationKind::Footnote);
+        assert_eq!(&text[start..end], "so).", "all the punctuation");
+        let text = "Le café…";
+        let (start, end) = note_at_caret(text, text.len(), AnnotationKind::Footnote);
+        assert_eq!(&text[start..end], "café…");
+    }
+
+    #[test]
+    fn a_footnote_after_a_space_or_punctuation_alone_stays_at_its_point() {
+        let text = "The fox slept. ";
+        let end = text.len();
+        assert_eq!(
+            note_at_caret(text, end, AnnotationKind::Footnote),
+            (end, end)
+        );
+        assert_eq!(note_at_caret("...", 3, AnnotationKind::Footnote), (3, 3));
+        assert_eq!(note_at_caret("", 0, AnnotationKind::Footnote), (0, 0));
+    }
+
+    #[test]
+    fn a_footnote_added_after_punctuation_keeps_its_mark_there_as_typing_goes_on() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("The fox slept.");
+        let block_id = session.document().blocks[0].id;
+        let id = session.add_annotation(AnnotationKind::Footnote).unwrap();
+
+        session.set_caret(Cursor {
+            block_id,
+            offset: "The fox slept.".len(),
+        });
+        session.insert(" Then it woke.");
+
+        let annotation = session
+            .document()
+            .annotations
+            .iter()
+            .find(|annotation| annotation.id == id)
+            .unwrap();
+        let (start, end) = annotation.anchor.byte_range().unwrap();
+        assert_eq!(&session.document().blocks[0].text[start..end], "slept.");
     }
 
     #[test]

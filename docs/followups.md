@@ -12,7 +12,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   revisions back into merges. `skip_serializing_if` on new fields is the cheap stopgap. This is the most pressing item here.
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
-- [ ] **A footnote or note added right after punctuation** has no word to anchor to, so it sits at one point and its mark moves along as you keep typing there.
 - [ ] **A snapshot taken before a Save As to another folder still says its links and images from the old one.** Save As says them
   again through the history, but leaves snapshots as they were taken, so restoring one brings back paths that lead from where the
   document was.

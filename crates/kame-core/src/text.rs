@@ -121,6 +121,35 @@ pub fn word_at(text: &str, offset: usize) -> (usize, usize) {
     }
 }
 
+/// What a note or footnote added with the caret at `offset` covers: [`word_at`], unless that
+/// finds no word and the caret is straight after punctuation that follows one. Then it's that
+/// word and its punctuation, so that a footnote's mark stays after the punctuation, and what's
+/// typed next goes after the note rather than carrying it along.
+pub fn word_for_note(text: &str, offset: usize) -> (usize, usize) {
+    let (start, end) = word_at(text, offset);
+    if start < end {
+        return (start, end);
+    }
+    let punctuation = text[..start]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| !c.is_whitespace() && !is_word_char(*c))
+        .last()
+        .map(|(index, _)| index);
+    let word = punctuation.and_then(|punctuation| {
+        text[..punctuation]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word_char(*c))
+            .last()
+            .map(|(index, _)| index)
+    });
+    match word {
+        Some(word) => (word, start),
+        None => (start, start),
+    }
+}
+
 /// A word character for cursor movement and selection: alphanumeric plus the
 /// apostrophe forms, so "don't" moves as one word.
 fn is_word_char(c: char) -> bool {

@@ -103,7 +103,8 @@ position on the keyboard.
 ## Notes, marginals and footnotes
 
 Ctrl-Shift-N adds a note and Ctrl-Shift-F a footnote, at the selection or the word under the
-caret. Ctrl-Shift-M adds a marginal, which belongs to a whole block, and turns Hide margin off if it was on. All
+caret. Straight after punctuation that follows a word, they take that word and the punctuation, so a
+footnote's number stays after the punctuation and what's typed next goes after it. Ctrl-Shift-M adds a marginal, which belongs to a whole block, and turns Hide margin off if it was on. All
 three are on the Annotate menu and the right-click menu. A note needs no words, in which case it's just a highlight.
 
 Each opens for writing as it's added, with any starting words selected so that typing replaces them. Ctrl-Enter, Close or Escape closes it, and Remove takes it

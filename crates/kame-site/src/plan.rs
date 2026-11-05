@@ -589,6 +589,7 @@ mod tests {
             kame_core::model::BlockKind::Image {
                 path: "a.png".to_string(),
                 link: None,
+                align: Default::default(),
             },
             "",
         )];
@@ -600,6 +601,28 @@ mod tests {
             plan.files.get(Path::new("k/a/a.png")),
             Some(Output::Copy(_))
         ));
+    }
+
+    #[test]
+    fn an_aligned_image_is_aligned_on_the_site() {
+        let site = Site::new("planalign");
+        std::fs::create_dir_all(site.dir.join("docs")).unwrap();
+        std::fs::write(site.dir.join("docs/a.png"), "x").unwrap();
+        let path = site.dir.join("docs/a.kame");
+        let mut doc = Document::new("D");
+        doc.blocks = vec![crate::testing::block(
+            kame_core::model::BlockKind::Image {
+                path: "a.png".to_string(),
+                link: None,
+                align: kame_core::model::ImageAlign::Center,
+            },
+            "",
+        )];
+        write_kame(&path, &doc, Some(&metadata("A", "2026-01-01", &[])));
+        site.config(&[("a", &path)], &[]);
+        let page = text(&site.plan(), "k/a/index.html");
+        assert!(page.contains("class=\"image image-center\""), "{page}");
+        assert!(page.contains("img.image-center"), "{page}");
     }
 
     #[test]

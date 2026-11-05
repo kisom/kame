@@ -447,8 +447,14 @@ impl<'a> Builder<'a> {
                             SpanStyle::Link { url } if !is_script_url(url) => Some(url.clone()),
                             _ => None,
                         });
-                    self.blocks
-                        .push(new_block(BlockKind::Image { path, link }, String::new()));
+                    self.blocks.push(new_block(
+                        BlockKind::Image {
+                            path,
+                            link,
+                            align: Default::default(),
+                        },
+                        String::new(),
+                    ));
                     self.image_depth += 1;
                 }
             }
@@ -809,6 +815,7 @@ mod tests {
             BlockKind::Image {
                 path: PathBuf::from("/notes/pics/a.png").display().to_string(),
                 link: None,
+                align: Default::default(),
             }
         );
         assert_eq!(doc.blocks[0].text, "");
@@ -824,6 +831,7 @@ mod tests {
                 BlockKind::Image {
                     path: path.to_string(),
                     link: None,
+                    align: Default::default(),
                 }
             );
         }
@@ -841,6 +849,7 @@ mod tests {
                     BlockKind::Image {
                         path: "a.png".to_string(),
                         link: None,
+                        align: Default::default(),
                     },
                     String::new(),
                 ),
@@ -1422,6 +1431,7 @@ mod tests {
                 BlockKind::Image {
                     path: "small.jpg".to_string(),
                     link: Some("large.jpg".to_string()),
+                    align: Default::default(),
                 },
                 String::new(),
             )]
@@ -1436,6 +1446,7 @@ mod tests {
             BlockKind::Image {
                 path: "a.png".to_string(),
                 link: None,
+                align: Default::default(),
             }
         );
     }
@@ -1448,6 +1459,7 @@ mod tests {
             BlockKind::Image {
                 path: "a.png".to_string(),
                 link: Some("b.html".to_string()),
+                align: Default::default(),
             }
         );
         assert_eq!(doc.blocks[1].text, "words");
@@ -1475,6 +1487,7 @@ mod tests {
             BlockKind::Image {
                 path: "a.png".to_string(),
                 link: None,
+                align: Default::default(),
             }
         );
     }

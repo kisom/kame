@@ -85,7 +85,7 @@ Formatting applies as you type, and undoes as one step.
 - `| ` at the start of a line starts a prose block, for poetry or anything else whose line breaks and spacing should stand exactly as typed. It leaves the same way as a code block.
 - `[words](https://example.com)` is a link. So is Ctrl-K on a selection, where an empty address removes the link.
 
-The right-click menu changes the kind of the block under the caret, adds annotations, and has Insert image…, which asks for a file and shows the picture at its own size, or at the body's width if it's wider. "Where to put papers and images" below says where the file ends up.
+The right-click menu changes the kind of the block under the caret, adds annotations, and has Insert image…, which asks for a file and shows the picture at its own size, or at the body's width if it's wider. Right-click a picture for Align, to put it at the left, center or right of its line. It's on a line of its own, whichever you choose, and Markdown exports leave the alignment out. "Where to put papers and images" below says where the file ends up.
 
 To link to another document, type `[[essay]]`, `[[notes/essay#The Intro]]` or `[[notes/essay#The Intro|the intro]]`, where the words after `|` are what shows. Paths start from the folder of the document holding the link. File > Link to Document… picks the file for you, but under your home folder it writes the path as `~/...`, which breaks if the notebook moves or reaches a machine with a different home folder. In a notebook, typing the link is safer. Clicking a document link opens it, and Ctrl-[ takes you back, as many links as you went.
 

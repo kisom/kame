@@ -33,7 +33,8 @@ use crate::layout::{
 };
 use crate::model::{
     bare_link_ranges, is_script_url, list_labels, list_positions, AcceptedMark, Anchor, Annotation,
-    AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata, SpanStyle,
+    AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, ImageAlign, Metadata,
+    SpanStyle,
 };
 use crate::render::egui_render::{
     adjacent_line, caret_line, caret_x, command_for_event, install_fonts, offset_at, range_rects,
@@ -2031,6 +2032,15 @@ const MISSING_IMAGE_HEIGHT: f32 = 72.0;
 /// keeping its shape. A file that can't be read (or reports a zero dimension) takes the whole
 /// column at a short placeholder's height, which says what is missing without leaving a blank
 /// stretch of page.
+/// Where an image `width` wide starts, in a column starting at `left` and `column` wide.
+fn image_left(left: f32, column: f32, width: f32, align: ImageAlign) -> f32 {
+    match align {
+        ImageAlign::Left => left,
+        ImageAlign::Center => left + (column - width) / 2.0,
+        ImageAlign::Right => left + column - width,
+    }
+}
+
 fn image_size(path: &Path, width: f32) -> Vec2 {
     match image::image_dimensions(path) {
         Ok((w, h)) if w > 0 && h > 0 => {
@@ -2175,6 +2185,9 @@ struct KameApp {
     marks: Marks,
     /// The mark the page's right-click menu is about, while it's open.
     mark_menu: Option<(BlockId, Finding)>,
+    /// The image the page's menu was opened on. The menu's other rows change the caret's block,
+    /// but a right-click doesn't move the caret.
+    image_menu: Option<BlockId>,
     /// Whether justified paragraphs can hyphenate words.
     hyphenate: bool,
     renderer: GlyphRenderer,
@@ -2326,6 +2339,7 @@ impl KameApp {
             last_log_tick: std::time::Instant::now(),
             marks: Marks::default(),
             mark_menu: None,
+            image_menu: None,
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
             annotation_textures: AnnotationTextureCache::new(),
@@ -4071,12 +4085,13 @@ impl KameApp {
                 );
                 continue;
             }
-            if let BlockKind::Image { path, .. } = &block.kind {
+            if let BlockKind::Image { path, align, .. } = &block.kind {
                 // At its own size if it fits the measure, and scaled to it if not. Its
                 // height is already baked into `tops`.
                 let file = image_file(path, self.session.path());
                 let size = image_size(&file, config.body_width);
-                let rect = Rect::from_min_size(Pos2::new(body_left, tops[index]), size);
+                let left = image_left(body_left, config.body_width, size.x, *align);
+                let rect = Rect::from_min_size(Pos2::new(left, tops[index]), size);
                 if let Some(texture) = self.image_textures.get(path) {
                     painter.image(texture.id(), rect, uv, Color32::WHITE);
                 } else {
@@ -4571,10 +4586,16 @@ impl KameApp {
         // --- a mark's menu -----------------------------------------------------
         if response.secondary_clicked() {
             self.mark_menu = None;
+            self.image_menu = None;
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
                 {
+                    self.image_menu = blocks
+                        .iter()
+                        .find(|block| block.id == cursor.block_id)
+                        .filter(|block| matches!(block.kind, BlockKind::Image { .. }))
+                        .map(|block| block.id);
                     let exceptions = Exceptions {
                         words: &self.my_words,
                         document_words: &self.session.metadata.words,
@@ -4795,6 +4816,32 @@ impl KameApp {
                         ui.close();
                     }
                 }
+                ui.separator();
+            }
+            let image = self.image_menu.and_then(|id| {
+                let index = self.session.block_index(id)?;
+                match self.session.document().blocks[index].kind {
+                    BlockKind::Image { align, .. } => Some((id, align)),
+                    _ => None,
+                }
+            });
+            if let Some((id, current)) = image {
+                ui.menu_button("Align", |ui| {
+                    for (label, align) in [
+                        ("Left", ImageAlign::Left),
+                        ("Center", ImageAlign::Center),
+                        ("Right", ImageAlign::Right),
+                    ] {
+                        let mut row = egui::Button::new(label);
+                        if align == current {
+                            row = row.right_text("\u{2714}");
+                        }
+                        if ui.add(row).clicked() {
+                            self.session.set_image_align(id, align);
+                            ui.close();
+                        }
+                    }
+                });
                 ui.separator();
             }
             // The caret's block, since that is the one these rows change.
@@ -6978,6 +7025,7 @@ mod tests {
             kind: BlockKind::Image {
                 path: "images/tall.png".to_string(),
                 link: None,
+                align: Default::default(),
             },
             text: String::new(),
             spans: Vec::new(),
@@ -7149,6 +7197,7 @@ mod tests {
             kind: BlockKind::Image {
                 path: "a.png".to_string(),
                 link: Some("large.png".to_string()),
+                align: Default::default(),
             },
             text: String::new(),
             spans: Vec::new(),
@@ -7416,6 +7465,17 @@ mod tests {
             resolve_open_path("~/essays/new.kame", base),
             PathBuf::from(home).join("essays/new.kame")
         );
+    }
+
+    #[test]
+    fn an_image_sits_where_its_alignment_says_across_the_column() {
+        assert_eq!(image_left(100.0, 600.0, 200.0, ImageAlign::Left), 100.0);
+        assert_eq!(image_left(100.0, 600.0, 200.0, ImageAlign::Center), 300.0);
+        assert_eq!(image_left(100.0, 600.0, 200.0, ImageAlign::Right), 500.0);
+        // As wide as the column, it has nowhere to go.
+        for align in [ImageAlign::Left, ImageAlign::Center, ImageAlign::Right] {
+            assert_eq!(image_left(100.0, 600.0, 600.0, align), 100.0);
+        }
     }
 
     #[test]

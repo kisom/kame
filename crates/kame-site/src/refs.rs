@@ -235,6 +235,7 @@ mod tests {
                     BlockKind::Image {
                         path: path.to_string(),
                         link: None,
+                        align: Default::default(),
                     },
                     "",
                 )

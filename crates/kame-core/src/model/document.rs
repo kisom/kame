@@ -4,6 +4,21 @@ use uuid::Uuid;
 pub type BlockId = Uuid;
 pub type AnnotationId = Uuid;
 
+/// Where an image sits across its line. Text never runs beside it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl ImageAlign {
+    fn is_left(&self) -> bool {
+        *self == ImageAlign::Left
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockKind {
     Paragraph,
@@ -18,13 +33,16 @@ pub enum BlockKind {
     },
     /// An indented, italicized quotation.
     BlockQuote,
-    /// An image, sized to the body width. `path` is where the file lives on
-    /// disk; the block's `text` is empty (the image has no prose).
+    /// An image, on a line of its own. `path` is where the file lives on disk;
+    /// the block's `text` is empty (the image has no prose).
     Image {
         path: String,
         /// Where the image links to, if anywhere. Absent in files from before it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
+        /// Where it sits across the line. Absent when it's the left, as in files from before it.
+        #[serde(default, skip_serializing_if = "ImageAlign::is_left")]
+        align: ImageAlign,
     },
     /// A horizontal rule. Its `text` is empty.
     Rule,
@@ -417,6 +435,28 @@ mod tests {
         assert_eq!(d.blocks.len(), 1);
         assert_eq!(d.blocks[0].kind, BlockKind::Paragraph);
         assert_eq!(d.blocks[0].text, "");
+    }
+
+    #[test]
+    fn an_image_says_its_alignment_only_when_it_isnt_the_left() {
+        let image = |align| BlockKind::Image {
+            path: "a.png".to_string(),
+            link: None,
+            align,
+        };
+        let left = serde_json::to_string(&image(ImageAlign::Left)).unwrap();
+        assert_eq!(left, r#"{"Image":{"path":"a.png"}}"#);
+        assert_eq!(
+            serde_json::from_str::<BlockKind>(&left).unwrap(),
+            image(ImageAlign::Left)
+        );
+        for align in [ImageAlign::Center, ImageAlign::Right] {
+            let said = serde_json::to_string(&image(align)).unwrap();
+            assert_eq!(
+                serde_json::from_str::<BlockKind>(&said).unwrap(),
+                image(align)
+            );
+        }
     }
 
     #[test]

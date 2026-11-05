@@ -916,6 +916,7 @@ mod tests {
         block.kind = BlockKind::Image {
             path: path.to_string(),
             link: None,
+            align: Default::default(),
         };
         doc.blocks = vec![paragraph("Words."), block];
         doc

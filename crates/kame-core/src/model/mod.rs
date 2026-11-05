@@ -11,5 +11,5 @@ pub use anchor::shift_anchors;
 pub use document::{
     bare_link_ranges, is_script_url, link_ranges, link_style, list_labels, list_positions,
     AcceptedMark, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
-    Document, ListPosition, Metadata, Span, SpanStyle, MAX_LIST_DEPTH,
+    Document, ImageAlign, ListPosition, Metadata, Span, SpanStyle, MAX_LIST_DEPTH,
 };

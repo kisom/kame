@@ -8,7 +8,8 @@ use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::links::{image_file, stored_image_path};
 use crate::model::{
-    Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document, Metadata, SpanStyle,
+    Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document, ImageAlign, Metadata,
+    SpanStyle,
 };
 use crate::storage::{self, Db, DbError, SnapshotMeta};
 use crate::text::{next_boundary, next_word, prev_boundary, prev_word, widen_to_words, word_at};
@@ -1504,6 +1505,25 @@ impl Session {
         }
     }
 
+    /// Moves an image across its line. Anything else, or no change, does nothing.
+    pub fn set_image_align(&mut self, block_id: BlockId, align: ImageAlign) -> bool {
+        let Some(index) = self.block_index(block_id) else {
+            return false;
+        };
+        let BlockKind::Image {
+            path,
+            link,
+            align: current,
+        } = self.document().blocks[index].kind.clone()
+        else {
+            return false;
+        };
+        if current == align {
+            return false;
+        }
+        self.set_block_kind(block_id, BlockKind::Image { path, link, align })
+    }
+
     /// After a save as, says each image's path again for where the document is now, having been
     /// at `from` until then. `root` is the notebook it's in now, if any. An image that can't be
     /// found keeps what it has, since there's nothing to say about it.
@@ -1511,16 +1531,18 @@ impl Session {
         let Some(document) = self.path.clone() else {
             return;
         };
-        let images: Vec<(BlockId, String, Option<String>)> = self
+        let images: Vec<(BlockId, String, Option<String>, ImageAlign)> = self
             .document()
             .blocks
             .iter()
             .filter_map(|block| match &block.kind {
-                BlockKind::Image { path, link } => Some((block.id, path.clone(), link.clone())),
+                BlockKind::Image { path, link, align } => {
+                    Some((block.id, path.clone(), link.clone(), *align))
+                }
                 _ => None,
             })
             .collect();
-        for (id, stored, link) in images {
+        for (id, stored, link, align) in images {
             let file = if Path::new(&stored).is_absolute() {
                 PathBuf::from(&stored)
             } else {
@@ -1534,7 +1556,7 @@ impl Session {
             }
             let path = stored_image_path(&file, &document, root);
             if path != stored {
-                let kind = BlockKind::Image { path, link };
+                let kind = BlockKind::Image { path, link, align };
                 let result = self.editor.set_block_kind(id, kind);
                 self.commit(result);
             }
@@ -2720,6 +2742,65 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn image_align(session: &Session) -> Vec<ImageAlign> {
+        session
+            .document()
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                BlockKind::Image { align, .. } => Some(*align),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn aligning_an_image_keeps_it_and_undoes_as_one_step() {
+        let (root, _plate) = plate_folder("align");
+        let path = root.join("essay.kame");
+        let mut session = open(&path);
+        session.insert_image("static/plate.png".to_string());
+        let image = session.valid_caret().block_id;
+        assert!(session.set_image_align(image, ImageAlign::Center));
+        assert_eq!(image_align(&session), [ImageAlign::Center]);
+        assert_eq!(image_paths(&session), ["static/plate.png"]);
+        assert!(session.undo());
+        assert_eq!(image_align(&session), [ImageAlign::Left]);
+        assert!(session.set_image_align(image, ImageAlign::Right));
+        drop(session);
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(image_align(&reopened), [ImageAlign::Right]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn aligning_to_where_it_is_or_anything_else_changes_nothing() {
+        let (root, _plate) = plate_folder("alignnone");
+        let mut session = open(&root.join("essay.kame"));
+        let paragraph = session.valid_caret().block_id;
+        assert!(!session.set_image_align(paragraph, ImageAlign::Center));
+        session.insert_image("static/plate.png".to_string());
+        let image = session.valid_caret().block_id;
+        assert!(!session.set_image_align(image, ImageAlign::Left));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_as_keeps_an_images_alignment() {
+        let (root, _plate) = plate_folder("rehomealign");
+        let first = root.join("essay.kame");
+        let second = root.join("maritain/essay.kame");
+        let mut session = open(&first);
+        session.insert_image("static/plate.png".to_string());
+        let image = session.valid_caret().block_id;
+        session.set_image_align(image, ImageAlign::Center);
+        session.save_as(&second).unwrap();
+        session.rehome_images(Some(&first), Some(&root));
+        assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        assert_eq!(image_align(&session), [ImageAlign::Center]);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -16,7 +16,8 @@
 
 use crate::model::bare_link_ranges;
 use crate::model::{
-    is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, SpanStyle,
+    is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, ImageAlign,
+    SpanStyle,
 };
 use std::collections::HashMap;
 
@@ -82,6 +83,13 @@ img.image {
   height: auto;
   display: block;
   margin: 1.2em 0;
+}
+img.image-center {
+  margin-left: auto;
+  margin-right: auto;
+}
+img.image-right {
+  margin-left: auto;
 }
 h1, h2, h3, h4, h5, h6 {
   font-family: "Crimson Pro", "EB Garamond", Georgia, serif;
@@ -374,10 +382,15 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
         }
         // An image is a block with no text: emit it as an `<img>` before the
         // empty-text skip drops it.
-        if let BlockKind::Image { path, link } = &block.kind {
+        if let BlockKind::Image { path, link, align } = &block.kind {
             close_list(&mut body, &mut open_list);
+            let class = match align {
+                ImageAlign::Left => "image",
+                ImageAlign::Center => "image image-center",
+                ImageAlign::Right => "image image-right",
+            };
             let image = format!(
-                "<img class=\"image\" src=\"{}\" alt=\"\">",
+                "<img class=\"{class}\" src=\"{}\" alt=\"\">",
                 escape_attribute(&(publish.image)(path))
             );
             match link.as_deref().filter(|url| !is_script_url(url)) {
@@ -1146,6 +1159,7 @@ mod tests {
                 BlockKind::Image {
                     path: "/img/a.png".into(),
                     link: None,
+                    align: Default::default(),
                 },
                 "",
             )],
@@ -1488,6 +1502,7 @@ mod tests {
             BlockKind::Image {
                 path: r#"a" onerror="z.png"#.to_string(),
                 link: None,
+                align: Default::default(),
             },
             "",
         );
@@ -1611,9 +1626,50 @@ mod tests {
             BlockKind::Image {
                 path: "a.png".to_string(),
                 link: link.map(str::to_string),
+                align: Default::default(),
             },
             "",
         )
+    }
+
+    fn aligned(align: ImageAlign, link: Option<&str>) -> String {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: link.map(str::to_string),
+                align,
+            },
+            "",
+        )];
+        to_html(&doc)
+    }
+
+    #[test]
+    fn an_aligned_image_says_so_and_the_page_knows_what_that_means() {
+        let center = aligned(ImageAlign::Center, None);
+        assert!(
+            center.contains(r#"<img class="image image-center" src="a.png" alt="">"#),
+            "{center}"
+        );
+        let right = aligned(ImageAlign::Right, Some("b.png"));
+        assert!(
+            right.contains(
+                r#"<a href="b.png"><img class="image image-right" src="a.png" alt=""></a>"#
+            ),
+            "{right}"
+        );
+        assert!(STYLE.contains("img.image-center"));
+        assert!(STYLE.contains("img.image-right"));
+    }
+
+    #[test]
+    fn a_left_image_exports_as_it_always_has() {
+        let html = aligned(ImageAlign::Left, None);
+        assert!(
+            html.contains(r#"<img class="image" src="a.png" alt="">"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -1909,6 +1965,7 @@ mod tests {
             BlockKind::Image {
                 path: "/home/me/a.png".to_string(),
                 link: None,
+                align: Default::default(),
             },
             "",
         )];

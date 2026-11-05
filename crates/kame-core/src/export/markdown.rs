@@ -52,7 +52,7 @@ pub fn to_markdown(doc: &Document) -> String {
     for (index, block) in doc.blocks.iter().enumerate() {
         // An image is a block with no text: emit it as a Markdown image before
         // the empty-text skip drops it.
-        if let BlockKind::Image { path, link } = &block.kind {
+        if let BlockKind::Image { path, link, .. } = &block.kind {
             let image = format!("![]({})", link_destination(path));
             parts.push(match link.as_deref().filter(|url| !is_script_url(url)) {
                 Some(url) => format!("[{image}]({})", link_destination(url)),
@@ -675,6 +675,7 @@ mod tests {
                     BlockKind::Image {
                         path: "/img/a.png".into(),
                         link: None,
+                        align: Default::default(),
                     },
                     "",
                 ),
@@ -1270,10 +1271,25 @@ mod tests {
             BlockKind::Image {
                 path: "my pic.png".to_string(),
                 link: None,
+                align: Default::default(),
             },
             "",
         )];
         assert_eq!(to_markdown(&doc), "![](my%20pic.png)\n");
+    }
+
+    #[test]
+    fn markdown_has_no_form_for_an_images_alignment() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![block(
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: None,
+                align: crate::model::ImageAlign::Center,
+            },
+            "",
+        )];
+        assert_eq!(to_markdown(&doc), "![](a.png)\n");
     }
 
     #[test]
@@ -1376,6 +1392,7 @@ mod tests {
             BlockKind::Image {
                 path: "a.png".to_string(),
                 link: Some("javascript:alert(1)".to_string()),
+                align: Default::default(),
             },
             "",
         )];

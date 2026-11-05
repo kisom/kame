@@ -288,6 +288,7 @@ mod tests {
                 BlockKind::Image {
                     path: "a.png".to_string(),
                     link: None,
+                    align: Default::default(),
                 },
                 "",
             ),

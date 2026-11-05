@@ -377,8 +377,8 @@ impl ReferenceForm {
         };
         for name in kind.fields() {
             match *name {
-                "authors" => built.authors = names(&self.authors_text),
-                "editors" => built.editors = names(&self.editors_text),
+                "authors" => built.authors = names_from(&self.authors_text, &typed.authors),
+                "editors" => built.editors = names_from(&self.editors_text, &typed.editors),
                 "text" => built.text.clone_from(&typed.text),
                 name => {
                     if let (Some(to), Some(from)) =
@@ -462,6 +462,16 @@ fn names(text: &str) -> Vec<String> {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// The names in a box that was filled with `names_text(had)`: `had` as it was if the box is
+/// unchanged, so that a name the box can't separate, holding a semicolon, isn't split by a save
+/// that never touched it, and otherwise `names` of what's in the box.
+fn names_from(text: &str, had: &[String]) -> Vec<String> {
+    if text == names_text(had) {
+        return had.to_vec();
+    }
+    names(text)
 }
 
 /// `names` as the form shows them, so that `names` reads them back the same. One name holding a
@@ -2395,6 +2405,27 @@ mod tests {
         let form = ReferenceForm::editing("k", &plain_names);
         assert_eq!(form.authors_text, "D. E. Knuth, M. F. Plass");
         assert_eq!(form.built(), plain_names);
+    }
+
+    #[test]
+    fn a_name_holding_a_semicolon_is_kept_unless_its_box_is_changed() {
+        let saved = Reference {
+            kind: Kind::Book,
+            title: "T".to_string(),
+            authors: vec!["Doe; J.".to_string()],
+            editors: vec!["A. Editor; Jr.".to_string(), "B. Other".to_string()],
+            ..Reference::default()
+        };
+        let mut form = ReferenceForm::editing("k", &saved);
+        assert_eq!(form.built(), saved);
+
+        form.reference.title = "Retitled".to_string();
+        assert_eq!(form.built().authors, saved.authors);
+        assert_eq!(form.built().editors, saved.editors);
+
+        // Typed in the box, the semicolon separates, as it does in any name typed there.
+        form.authors_text = "Doe; J. Roe".to_string();
+        assert_eq!(form.built().authors, ["Doe", "J. Roe"]);
     }
 
     #[test]

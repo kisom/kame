@@ -11,6 +11,7 @@ use crate::model::{
     is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, Metadata,
     SpanStyle,
 };
+use crate::references::{self, Reference, References, Run, RunStyle};
 use std::collections::HashMap;
 
 /// Render `doc` as Markdown.
@@ -29,12 +30,19 @@ use std::collections::HashMap;
 /// - footnotes get `[^n]` inline at the end of their anchored range and a
 ///   `[^n]: body` line after the body, numbered in document order,
 /// - marginalia do not publish, for want of a Markdown form,
-/// - notes do not publish.
+/// - notes do not publish,
+/// - citations are kept as the text they are, and [`to_markdown_with`] lists the sources cited.
 ///
 /// The output depends only on the document contents: footnote numbering follows
 /// block order rather than the order annotations happen to be stored in, so
 /// exporting the same document twice (or after a serde round trip) is stable.
 pub fn to_markdown(doc: &Document) -> String {
+    markdown_with(doc, &References::new())
+}
+
+/// [`to_markdown`], ending in a `## References` section for the sources `doc` cites, if any.
+/// Marginals aren't exported, so one that cites a source doesn't list it.
+fn markdown_with(doc: &Document, references: &References) -> String {
     let footnotes = numbered_footnotes(doc);
     let mut by_block: HashMap<BlockId, Vec<(usize, usize)>> = HashMap::new();
     for (number, annotation) in &footnotes {
@@ -140,6 +148,50 @@ pub fn to_markdown(doc: &Document) -> String {
         out.push_str(&lines.join("\n"));
         out.push('\n');
     }
+    let cited = references::cited(doc, references, false);
+    if !cited.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let entries: Vec<String> = cited
+            .iter()
+            .map(|(key, reference)| {
+                let mut entry = String::new();
+                push_escaped(&mut entry, &format!("[{key}]"));
+                entry.push(' ');
+                entry.push_str(&reference_markdown(reference));
+                entry
+            })
+            .collect();
+        out.push_str(&format!("## References\n\n{}\n", entries.join("\n\n")));
+    }
+    out
+}
+
+/// One entry's text: titles in italics, a web address as an autolink unless it would run a
+/// script or can't be written as one. A line break becomes a space, to stay one paragraph.
+fn reference_markdown(reference: &Reference) -> String {
+    let mut out = String::new();
+    for Run { text, style } in references::entry(reference) {
+        let text = text.replace(['\r', '\n'], " ");
+        match style {
+            RunStyle::Plain => push_escaped(&mut out, &text),
+            RunStyle::Italic => {
+                out.push('*');
+                push_escaped(&mut out, &text);
+                out.push('*');
+            }
+            RunStyle::Url
+                if !is_script_url(&text)
+                    && !text.contains(|c: char| {
+                        c.is_whitespace() || c.is_control() || c == '<' || c == '>'
+                    }) =>
+            {
+                out.push_str(&format!("<{text}>"));
+            }
+            RunStyle::Url => push_escaped(&mut out, &text),
+        }
+    }
     out
 }
 
@@ -148,8 +200,9 @@ pub fn to_markdown(doc: &Document) -> String {
 ///
 /// A first heading repeating the title is dropped, since a blog renders the title
 /// itself, unless a footnote is anchored in it. The date is the published date,
-/// or the created date for a document not yet published.
-pub fn to_markdown_with(doc: &Document, metadata: &Metadata) -> String {
+/// or the created date for a document not yet published. A source cited by the document that
+/// `references` holds is listed after the footnotes.
+pub fn to_markdown_with(doc: &Document, metadata: &Metadata, references: &References) -> String {
     let date = if metadata.published.is_empty() {
         &metadata.created
     } else {
@@ -167,7 +220,10 @@ pub fn to_markdown_with(doc: &Document, metadata: &Metadata) -> String {
     .map(|(key, value)| format!("{key}: {}\n", header_value(value)))
     .collect();
 
-    let body = to_markdown(&super::without_repeated_title(doc, &metadata.title));
+    let body = markdown_with(
+        &super::without_repeated_title(doc, &metadata.title),
+        references,
+    );
 
     match (header.is_empty(), body.is_empty()) {
         (true, _) => body,
@@ -1104,7 +1160,7 @@ mod tests {
         let mut doc = Document::new("t");
         doc.blocks = vec![paragraph("Body.")];
         assert_eq!(
-            to_markdown_with(&doc, &metadata()),
+            to_markdown_with(&doc, &metadata(), &References::new()),
             "Title: On Burnout\nDate: 2019-01-02\nAuthor: K. Isom\nTags: life, work\n\nBody.\n"
         );
     }
@@ -1117,7 +1173,7 @@ mod tests {
             published: String::new(),
             ..metadata()
         };
-        assert!(to_markdown_with(&doc, &meta).contains("Date: 2019-01-01\n"));
+        assert!(to_markdown_with(&doc, &meta, &References::new()).contains("Date: 2019-01-01\n"));
     }
 
     #[test]
@@ -1128,9 +1184,12 @@ mod tests {
             title: "T".to_string(),
             ..Default::default()
         };
-        assert_eq!(to_markdown_with(&doc, &title_only), "Title: T\n\nBody.\n");
         assert_eq!(
-            to_markdown_with(&doc, &crate::model::Metadata::default()),
+            to_markdown_with(&doc, &title_only, &References::new()),
+            "Title: T\n\nBody.\n"
+        );
+        assert_eq!(
+            to_markdown_with(&doc, &crate::model::Metadata::default(), &References::new()),
             "Body.\n"
         );
     }
@@ -1143,7 +1202,7 @@ mod tests {
             block(BlockKind::Heading { level: 1 }, "On Burnout"),
             paragraph("Body."),
         ];
-        let out = to_markdown_with(&doc, &metadata());
+        let out = to_markdown_with(&doc, &metadata(), &References::new());
         assert!(!out.contains("# On Burnout"), "{out}");
         assert!(out.contains("Title: On Burnout"), "{out}");
     }
@@ -1155,7 +1214,7 @@ mod tests {
             block(BlockKind::Heading { level: 1 }, "Introduction"),
             paragraph("Body."),
         ];
-        assert!(to_markdown_with(&doc, &metadata()).contains("# Introduction"));
+        assert!(to_markdown_with(&doc, &metadata(), &References::new()).contains("# Introduction"));
     }
 
     #[test]
@@ -1170,7 +1229,7 @@ mod tests {
             "A note.",
         )];
         doc.blocks = vec![heading, paragraph("Body.")];
-        assert!(to_markdown_with(&doc, &metadata()).contains("[^1]: A note."));
+        assert!(to_markdown_with(&doc, &metadata(), &References::new()).contains("[^1]: A note."));
     }
 
     #[test]
@@ -1184,7 +1243,7 @@ mod tests {
                 title: format!("T{separator}Author: forged"),
                 ..Default::default()
             };
-            let out = to_markdown_with(&doc, &meta);
+            let out = to_markdown_with(&doc, &meta, &References::new());
             let header = out.split("\n\n").next().unwrap();
             assert_eq!(
                 header.lines().count(),
@@ -1209,7 +1268,7 @@ mod tests {
             tags: vec!["a\nTitle: forged".to_string()],
             ..Default::default()
         };
-        let out = to_markdown_with(&doc, &meta);
+        let out = to_markdown_with(&doc, &meta, &References::new());
         assert_eq!(
             out.split("\n\n").next().unwrap().lines().count(),
             1,
@@ -1320,7 +1379,7 @@ mod tests {
             "private",
         )];
         doc.blocks = vec![heading, paragraph("Body.")];
-        assert!(!to_markdown_with(&doc, &metadata()).contains("# On Burnout"));
+        assert!(!to_markdown_with(&doc, &metadata(), &References::new()).contains("# On Burnout"));
     }
 
     #[test]
@@ -1347,7 +1406,7 @@ mod tests {
             "side",
         )];
         doc.blocks = vec![heading, paragraph("Body.")];
-        assert!(!to_markdown_with(&doc, &metadata()).contains("# On Burnout"));
+        assert!(!to_markdown_with(&doc, &metadata(), &References::new()).contains("# On Burnout"));
     }
 
     #[test]
@@ -1645,5 +1704,214 @@ mod tests {
             body: "SECRET NOTE".to_string(),
         });
         assert_eq!(to_markdown(&doc), "See this bit now.\n");
+    }
+
+    fn article() -> Reference {
+        Reference {
+            kind: crate::references::Kind::Article,
+            authors: vec!["D. E. Knuth".to_string(), "M. F. Plass".to_string()],
+            title: "Breaking paragraphs into lines".to_string(),
+            published_in: "Softw.: Pract. Exper.".to_string(),
+            volume: "11".to_string(),
+            number: "11".to_string(),
+            pages: "1119\u{2013}1184".to_string(),
+            month: "Nov.".to_string(),
+            year: "1981".to_string(),
+            ..Reference::default()
+        }
+    }
+
+    fn knuth() -> References {
+        let mut references = References::new();
+        references.insert("knuth1981".to_string(), article());
+        references
+    }
+
+    fn with_reference(reference: Reference) -> References {
+        let mut references = References::new();
+        references.insert("src".to_string(), reference);
+        references
+    }
+
+    fn md_of(text: &str, references: &References) -> String {
+        to_markdown_with(
+            &document(vec![paragraph(text)], Vec::new()),
+            &Metadata::default(),
+            references,
+        )
+    }
+
+    #[test]
+    fn a_document_citing_nothing_exports_as_it_always_did() {
+        let mut doc = rich_document();
+        doc.blocks
+            .push(paragraph("A stray [knuth1981a] and [sic]."));
+        let expected = to_markdown(&doc);
+        assert_eq!(
+            to_markdown_with(&doc, &Metadata::default(), &knuth()),
+            expected
+        );
+        assert!(!expected.contains("## References"));
+    }
+
+    #[test]
+    fn markdown_keeps_a_citation_as_text_and_lists_it_after_the_footnotes() {
+        let block = paragraph("Broken [knuth1981].");
+        let id = block.id;
+        let doc = document(vec![block], vec![footnote(id, 19, 19, "A footnote.")]);
+        let md = to_markdown_with(&doc, &Metadata::default(), &knuth());
+        assert!(md.contains("Broken \\[knuth1981\\]."), "{md}");
+        assert!(
+            md.contains(
+                "\n## References\n\n\\[knuth1981\\] D. E. Knuth and M. F. Plass, \
+                 \u{201c}Breaking paragraphs into lines,\u{201d} *Softw.: Pract. Exper.*, \
+                 vol. 11, no. 11, pp. 1119\u{2013}1184, Nov. 1981.\n"
+            ),
+            "{md}"
+        );
+        assert!(md.find("[^1]: A footnote.").unwrap() < md.find("## References").unwrap());
+        assert!(md.ends_with("Nov. 1981.\n"), "{md}");
+    }
+
+    #[test]
+    fn each_entry_is_a_paragraph_in_key_order() {
+        let mut references = knuth();
+        references.insert("Alpha".to_string(), article());
+        let md = md_of("[knuth1981] [Alpha]", &references);
+        let (_, section) = md.split_once("## References\n\n").expect("a section");
+        let entries: Vec<&str> = section.trim_end().split("\n\n").collect();
+        assert_eq!(entries.len(), 2, "{md}");
+        assert!(entries[0].starts_with("\\[Alpha\\] "), "{md}");
+        assert!(entries[1].starts_with("\\[knuth1981\\] "), "{md}");
+        assert_eq!(md, md_of("[knuth1981] [Alpha]", &references));
+    }
+
+    #[test]
+    fn a_key_cited_only_in_a_footnote_is_listed() {
+        let block = paragraph("Text.");
+        let id = block.id;
+        let doc = document(vec![block], vec![footnote(id, 5, 5, "See [knuth1981].")]);
+        let md = to_markdown_with(&doc, &Metadata::default(), &knuth());
+        assert!(md.contains("[^1]: See \\[knuth1981\\]."), "{md}");
+        assert!(
+            md.contains("## References\n\n\\[knuth1981\\] D. E. Knuth"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn a_key_cited_only_in_a_marginal_is_not_listed() {
+        let block = paragraph("Text.");
+        let id = block.id;
+        let doc = document(
+            vec![block],
+            vec![annotation(
+                AnnotationKind::Marginal,
+                id,
+                0,
+                5,
+                "Per [knuth1981].",
+            )],
+        );
+        let md = to_markdown_with(&doc, &Metadata::default(), &knuth());
+        assert!(!md.contains("References"), "{md}");
+    }
+
+    #[test]
+    fn a_citation_in_a_note_in_code_or_in_a_links_words_is_not_listed() {
+        let code = block(BlockKind::Code { language: None }, "see [knuth1981]");
+        let mut inline = paragraph("see [knuth1981] here");
+        inline.spans = vec![Span {
+            start: 4,
+            end: 15,
+            style: SpanStyle::Code,
+        }];
+        let mut linked = paragraph("see [knuth1981] here");
+        linked.spans = vec![Span {
+            start: 0,
+            end: 15,
+            style: SpanStyle::Link {
+                url: "https://example.com/".to_string(),
+            },
+        }];
+        let noted = paragraph("Plain.");
+        let id = noted.id;
+        let doc = document(
+            vec![code, inline, linked, noted],
+            vec![annotation(
+                AnnotationKind::Note,
+                id,
+                0,
+                5,
+                "Check [knuth1981].",
+            )],
+        );
+        let md = to_markdown_with(&doc, &Metadata::default(), &knuth());
+        assert!(!md.contains("References"), "{md}");
+    }
+
+    #[test]
+    fn an_unknown_key_stays_as_typed_with_no_section() {
+        let md = md_of("Lost [smith2020].", &knuth());
+        assert_eq!(md, "Lost \\[smith2020\\].\n");
+    }
+
+    #[test]
+    fn the_section_follows_a_repeated_title_being_dropped() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![
+            block(BlockKind::Heading { level: 1 }, "[knuth1981]"),
+            paragraph("Body."),
+        ];
+        let metadata = Metadata {
+            title: "[knuth1981]".to_string(),
+            ..Metadata::default()
+        };
+        let md = to_markdown_with(&doc, &metadata, &knuth());
+        assert!(
+            !md.contains("## References"),
+            "the dropped heading cites nothing: {md}"
+        );
+    }
+
+    #[test]
+    fn a_script_url_is_escaped_text_and_a_web_one_is_an_autolink() {
+        let web = |url: &str| Reference {
+            kind: crate::references::Kind::Web,
+            title: "Page".to_string(),
+            url: url.to_string(),
+            ..Reference::default()
+        };
+        let md = md_of("See [src].", &with_reference(web("javascript:alert(1)")));
+        assert!(md.contains("javascript:alert(1)"), "{md}");
+        assert!(!md.contains("<javascript"), "{md}");
+
+        let md = md_of("See [src].", &with_reference(web("https://a.b/c_d")));
+        assert!(md.contains("<https://a.b/c_d>"), "{md}");
+    }
+
+    #[test]
+    fn reference_text_is_escaped() {
+        let hostile = Reference {
+            kind: crate::references::Kind::Book,
+            title: "<script>alert(1)</script>".to_string(),
+            ..Reference::default()
+        };
+        let md = md_of("See [src].", &with_reference(hostile));
+        assert!(md.contains("*\\<script\\>alert(1)\\</script\\>.*"), "{md}");
+    }
+
+    #[test]
+    fn a_freeform_reference_stays_one_paragraph_and_escapes_markup() {
+        let freeform = Reference {
+            kind: crate::references::Kind::Freeform,
+            text: "Smith *et al.*\n\nsecond line".to_string(),
+            ..Reference::default()
+        };
+        let md = md_of("See [src].", &with_reference(freeform));
+        assert!(
+            md.ends_with("## References\n\n\\[src\\] Smith \\*et al.\\*  second line\n"),
+            "{md}"
+        );
     }
 }

@@ -2575,7 +2575,7 @@ impl KameApp {
                 };
                 self.notice = self
                     .session
-                    .export_markdown_to(&path)
+                    .export_markdown_to(&path, &kame_core::references::References::new())
                     .map(|path| format!("exported Markdown to {}", path.display()));
             }
             FileCommand::ExportHtml => {
@@ -2586,7 +2586,7 @@ impl KameApp {
                 };
                 self.notice = self
                     .session
-                    .export_html_to(&path)
+                    .export_html_to(&path, &kame_core::references::References::new())
                     .map(|path| format!("exported HTML to {}", path.display()));
             }
             FileCommand::SnapshotNow => {
@@ -8047,8 +8047,11 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         session.insert("A paragraph.");
         session.split();
         session.insert("Another one.");
-        let expected =
-            kame_core::export::to_markdown_with(session.document(), &session.published_metadata());
+        let expected = kame_core::export::to_markdown_with(
+            session.document(),
+            &session.published_metadata(),
+            &kame_core::references::References::new(),
+        );
         assert!(expected.contains("A paragraph."));
         assert!(expected.contains("Another one."));
 

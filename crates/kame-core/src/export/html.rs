@@ -19,6 +19,9 @@ use crate::model::{
     is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, ImageAlign,
     SpanStyle,
 };
+use crate::references::{
+    self, citation_ranges, citation_url, key_of, Reference, References, Run, RunStyle,
+};
 use std::collections::HashMap;
 
 /// The embedded stylesheet.
@@ -263,6 +266,28 @@ a.footnote-backref {
 }
 "#;
 
+/// The rules for a References section, kept apart from [`STYLE`] so a document citing nothing
+/// exports the same bytes as ever. A page adds it only when it lists references.
+pub const REFERENCES_STYLE: &str = r#"
+section.references {
+  margin: 3rem 0 0;
+  padding: 1.2rem 0 0;
+  border-top: 1px solid var(--rule);
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+section.references h2 {
+  margin: 0 0 0.8em;
+  font-size: 1.1em;
+}
+section.references p {
+  margin: 0.5em 0;
+  padding-left: 1.4rem;
+  text-indent: -1.4rem;
+  text-align: left;
+}
+"#;
+
 /// The apparatus anchored to one block, already in reading order.
 #[derive(Default, Clone)]
 struct BlockApparatus {
@@ -292,7 +317,7 @@ struct BlockApparatus {
 /// - text is escaped (`&`, `<`, `>`); the output carries no document or
 ///   annotation ids, so it is stable across runs and serde round trips.
 pub fn to_html(doc: &Document) -> String {
-    to_html_with(doc, &crate::model::Metadata::default())
+    to_html_with(doc, &crate::model::Metadata::default(), &References::new())
 }
 
 /// How a document's outside references publish, for a tool that knows where everything
@@ -302,21 +327,41 @@ pub struct Publish<'a> {
     pub document_link: &'a dyn Fn(&str) -> Option<String>,
     /// The URL for an image's path.
     pub image: &'a dyn Fn(&str) -> String,
+    /// The references a citation can name. A document citing any of them ends with a
+    /// References section.
+    pub references: &'a References,
 }
+
+static NO_REFERENCES: References = References::new();
 
 impl Publish<'_> {
     pub fn plain() -> Publish<'static> {
         Publish {
             document_link: &|_| None,
             image: &|path| path.to_string(),
+            references: &NO_REFERENCES,
         }
     }
 }
 
 /// [`to_html`] for publishing: `metadata` fills the page's head. An empty title
-/// falls back to the document's own, and an empty date to the created date.
-pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String {
-    let body = render_body(doc, &Publish::plain(), Some(metadata.author.trim()));
+/// falls back to the document's own, and an empty date to the created date. A citation of one
+/// of `references` links to its entry in a References section at the very end.
+pub fn to_html_with(
+    doc: &Document,
+    metadata: &crate::model::Metadata,
+    references: &References,
+) -> String {
+    let publish = Publish {
+        references,
+        ..Publish::plain()
+    };
+    let body = render_body(doc, &publish, Some(metadata.author.trim()));
+    let references_style = if references::cited(doc, references, true).is_empty() {
+        ""
+    } else {
+        REFERENCES_STYLE
+    };
     let title = if metadata.title.is_empty() {
         escape(&doc.title)
     } else {
@@ -345,7 +390,7 @@ pub fn to_html_with(doc: &Document, metadata: &crate::model::Metadata) -> String
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         {metas}<title>{title}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n\
+         {metas}<title>{title}</title>\n<style>{STYLE}{references_style}</style>\n</head>\n<body>\n\
          <main class=\"document\">\n{body}</main>\n</body>\n</html>\n"
     )
 }
@@ -426,7 +471,7 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
             kind if kind.is_verbatim() => inner.to_string(),
             _ => inner.replace('\n', "<br>\n"),
         };
-        let after = render_apparatus(apparatus);
+        let after = render_apparatus(apparatus, publish.references);
         match block.kind {
             BlockKind::Heading { level } => {
                 close_list(&mut body, &mut open_list);
@@ -493,14 +538,14 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
     // Margin notes whose anchor block no longer exists: the anchor is gone, the
     // authored text is not.
     for marginal in &collected.unanchored_marginalia {
-        body.push_str(&marginalia_aside(marginal));
+        body.push_str(&marginalia_aside(marginal, publish.references));
     }
 
     if !collected.footnotes.is_empty() {
         body.push_str("<ol class=\"footnotes\">\n");
         for footnote in &collected.footnotes {
             let number = footnote.number;
-            let text = escape(&footnote.body);
+            let text = escape_with_citations(&footnote.body, publish.references);
             if footnote.anchored {
                 body.push_str(&format!(
                     "<li id=\"fn{number}\">{text} <a class=\"footnote-backref\" \
@@ -513,7 +558,43 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
         }
         body.push_str("</ol>\n");
     }
+    body.push_str(&references_section(doc, publish.references));
     body
+}
+
+/// The References section: every source `doc` cites, sorted by key, or nothing if it cites none.
+fn references_section(doc: &Document, references: &References) -> String {
+    let cited = references::cited(doc, references, true);
+    if cited.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<section class=\"references\">\n<h2>References</h2>\n");
+    for (key, reference) in cited {
+        out.push_str(&format!(
+            "<p id=\"ref-{key}\">[{key}] {}</p>\n",
+            reference_html(reference)
+        ));
+    }
+    out.push_str("</section>\n");
+    out
+}
+
+/// One entry's text: titles in italics, a web address as a link unless it would run a script.
+/// A freeform reference is its text, with its line breaks as spaces.
+fn reference_html(reference: &Reference) -> String {
+    references::entry(reference)
+        .iter()
+        .map(|Run { text, style }| match style {
+            RunStyle::Plain => escape(&text.replace(['\r', '\n'], " ")),
+            RunStyle::Italic => format!("<em>{}</em>", escape(text)),
+            RunStyle::Url if is_script_url(text) => escape(text),
+            RunStyle::Url => format!(
+                "<a href=\"{}\">{}</a>",
+                escape_attribute(text),
+                escape(text)
+            ),
+        })
+        .collect()
 }
 
 /// Close a list still open from the previous block, if any.
@@ -696,21 +777,42 @@ fn collect_apparatus(doc: &Document) -> Collected {
 
 /// Render the apparatus that follows a block: marginalia asides. Footnotes are
 /// collected at the foot of the document instead.
-fn render_apparatus(apparatus: &BlockApparatus) -> String {
+fn render_apparatus(apparatus: &BlockApparatus, references: &References) -> String {
     apparatus
         .marginalia
         .iter()
-        .map(|body| marginalia_aside(body))
+        .map(|body| marginalia_aside(body, references))
         .collect()
 }
 
 /// The margin note's body. The `<aside>` is where a marginal is read, whether
 /// it kept its block or lost it.
-fn marginalia_aside(body: &str) -> String {
+fn marginalia_aside(body: &str, references: &References) -> String {
     format!(
         "<aside class=\"marginalia\"><p>{}</p></aside>\n",
-        escape(body).replace('\n', "<br>\n")
+        escape_with_citations(body, references).replace('\n', "<br>\n")
     )
+}
+
+/// `text` escaped, with each citation of a known reference linked to its entry.
+fn escape_with_citations(text: &str, references: &References) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    for range in citation_ranges(text) {
+        let key = key_of(text, range);
+        if !references.contains(key) {
+            continue;
+        }
+        out.push_str(&escape(&text[done..range.0]));
+        out.push_str(&format!(
+            "<a href=\"{}\">{}</a>",
+            escape_attribute(&citation_url(key)),
+            escape(&text[range.0..range.1])
+        ));
+        done = range.1;
+    }
+    out.push_str(&escape(&text[done..]));
+    out
 }
 
 /// One open inline element, compared by identity when deciding what to close.
@@ -782,6 +884,9 @@ fn render_inline(
     highlights: &[(usize, usize)],
     publish: &Publish,
 ) -> String {
+    // A citation of a known reference is a link over its text.
+    let block = references::with_citation_spans(block, publish.references);
+    let block = &*block;
     let text = block.text.as_str();
 
     let spans: Vec<(usize, usize, SpanStyle)> = block
@@ -1444,7 +1549,7 @@ mod tests {
             tags: vec!["life".to_string(), "work".to_string()],
             ..crate::model::Metadata::default()
         };
-        let html = to_html_with(&doc, &meta);
+        let html = to_html_with(&doc, &meta, &References::new());
         assert!(html.contains("<title>On &lt;Burnout&gt;</title>"), "{html}");
         assert!(
             html.contains(r#"<meta name="author" content="K. Isom">"#),
@@ -1465,7 +1570,7 @@ mod tests {
     fn empty_metadata_writes_no_meta_tags() {
         let mut doc = Document::new("stored");
         doc.blocks = vec![block(BlockKind::Paragraph, "Body.")];
-        let html = to_html_with(&doc, &crate::model::Metadata::default());
+        let html = to_html_with(&doc, &crate::model::Metadata::default(), &References::new());
         assert!(!html.contains(r#"name="author""#), "{html}");
         assert!(!html.contains(r#"name="keywords""#), "{html}");
         assert!(!html.contains(r#"name="date""#), "{html}");
@@ -1481,7 +1586,7 @@ mod tests {
             tags: vec!["it's".to_string()],
             ..Default::default()
         };
-        let html = to_html_with(&doc, &meta);
+        let html = to_html_with(&doc, &meta, &References::new());
         assert!(
             html.contains(r#"content="K&quot; onload=&quot;x""#),
             "{html}"
@@ -1941,6 +2046,7 @@ mod tests {
         let publish = Publish {
             document_link: &|target| (target == "a.kame#Intro").then(|| "/k/a/".to_string()),
             image: &|path| path.to_string(),
+            references: &References::new(),
         };
         assert_eq!(
             html_body(&linking_to("a.kame#Intro"), &publish),
@@ -1953,6 +2059,7 @@ mod tests {
         let publish = Publish {
             document_link: &|_| None,
             image: &|path| path.to_string(),
+            references: &References::new(),
         };
         assert_eq!(
             html_body(&linking_to("gone.kame"), &publish),
@@ -1974,6 +2081,7 @@ mod tests {
         let publish = Publish {
             document_link: &|_| None,
             image: &|path| format!("/k/s/{}\"", path.rsplit('/').next().unwrap()),
+            references: &References::new(),
         };
         assert!(
             html_body(&doc, &publish).contains("src=\"/k/s/a.png&quot;\""),
@@ -2043,7 +2151,7 @@ mod tests {
             block(BlockKind::Heading { level: 1 }, "Title"),
             paragraph("Words."),
         ];
-        let html = to_html_with(&doc, &authored("K. Isom"));
+        let html = to_html_with(&doc, &authored("K. Isom"), &References::new());
         assert!(
             html.contains("<h1>Title</h1>\n<p class=\"byline\">K. Isom</p>\n<p>Words.</p>"),
             "{html}"
@@ -2054,7 +2162,7 @@ mod tests {
     fn the_author_leads_a_document_with_no_first_heading() {
         let mut doc = Document::new("t");
         doc.blocks = vec![paragraph("Words.")];
-        let html = to_html_with(&doc, &authored("K. Isom"));
+        let html = to_html_with(&doc, &authored("K. Isom"), &References::new());
         assert!(
             html.contains("<p class=\"byline\">K. Isom</p>\n<p>Words.</p>"),
             "{html}"
@@ -2068,7 +2176,7 @@ mod tests {
             block(BlockKind::Heading { level: 1 }, "One"),
             block(BlockKind::Heading { level: 2 }, "Two"),
         ];
-        let html = to_html_with(&doc, &authored("A & <B>"));
+        let html = to_html_with(&doc, &authored("A & <B>"), &References::new());
         assert_eq!(html.matches("class=\"byline\"").count(), 1);
         assert!(html.contains(">A &amp; &lt;B&gt;<"), "{html}");
     }
@@ -2077,7 +2185,9 @@ mod tests {
     fn no_author_means_no_byline() {
         let mut doc = Document::new("t");
         doc.blocks = vec![paragraph("Words.")];
-        assert!(!to_html_with(&doc, &authored("")).contains("<p class=\"byline\""));
+        assert!(
+            !to_html_with(&doc, &authored(""), &References::new()).contains("<p class=\"byline\"")
+        );
     }
 
     #[test]
@@ -2217,5 +2327,291 @@ mod tests {
     #[test]
     fn body_type_is_twenty_pixels_at_a_browsers_default_size() {
         assert!(rule_for("body", STYLE).contains("font-size: 1.25em;"));
+    }
+
+    fn article() -> Reference {
+        Reference {
+            kind: crate::references::Kind::Article,
+            authors: vec!["D. E. Knuth".to_string(), "M. F. Plass".to_string()],
+            title: "Breaking paragraphs into lines".to_string(),
+            published_in: "Softw.: Pract. Exper.".to_string(),
+            volume: "11".to_string(),
+            number: "11".to_string(),
+            pages: "1119\u{2013}1184".to_string(),
+            month: "Nov.".to_string(),
+            year: "1981".to_string(),
+            ..Reference::default()
+        }
+    }
+
+    fn knuth() -> References {
+        let mut references = References::new();
+        references.insert("knuth1981".to_string(), article());
+        references
+    }
+
+    fn with_reference(reference: Reference) -> References {
+        let mut references = References::new();
+        references.insert("src".to_string(), reference);
+        references
+    }
+
+    fn page(doc: &Document, references: &References) -> String {
+        to_html_with(doc, &crate::model::Metadata::default(), references)
+    }
+
+    fn page_of(text: &str, references: &References) -> String {
+        page(&document(vec![paragraph(text)], Vec::new()), references)
+    }
+
+    const KNUTH_LINK: &str = "<a href=\"#ref-knuth1981\">[knuth1981]</a>";
+
+    #[test]
+    fn a_document_citing_nothing_exports_as_it_always_did() {
+        let mut doc = rich_document();
+        doc.blocks
+            .push(paragraph("A stray [knuth1981a] and [sic]."));
+        let expected = to_html(&doc);
+        assert_eq!(page(&doc, &knuth()), expected);
+        assert!(!expected.contains("class=\"references\""));
+        assert!(!expected.contains("section.references"));
+    }
+
+    #[test]
+    fn a_citation_links_to_its_entry_at_the_very_end() {
+        let block = paragraph("Broken [knuth1981].");
+        let id = block.id;
+        let doc = document(
+            vec![block],
+            vec![annotation(
+                AnnotationKind::Footnote,
+                id,
+                19,
+                19,
+                "A footnote.",
+            )],
+        );
+        let html = page(&doc, &knuth());
+        assert!(html.contains(&format!("Broken {KNUTH_LINK}.")), "{html}");
+        assert!(html.contains(
+            "<section class=\"references\">\n<h2>References</h2>\n\
+             <p id=\"ref-knuth1981\">[knuth1981] D. E. Knuth and M. F. Plass, \
+             \u{201c}Breaking paragraphs into lines,\u{201d} <em>Softw.: Pract. Exper.</em>"
+        ));
+        let footnotes = html.find("class=\"footnotes\"").expect("a footnote list");
+        let references = html
+            .find("class=\"references\"")
+            .expect("a references section");
+        assert!(footnotes < references);
+        assert!(
+            html.ends_with("</section>\n</main>\n</body>\n</html>\n"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn the_stylesheet_for_references_comes_only_with_the_section() {
+        let cited = page_of("See [knuth1981].", &knuth());
+        assert!(cited.contains(REFERENCES_STYLE));
+        assert!(cited.contains("section.references {"));
+        assert!(!page_of("See nothing.", &knuth()).contains("section.references"));
+    }
+
+    #[test]
+    fn a_key_cited_only_in_a_footnote_is_listed_and_linked() {
+        let block = paragraph("Text.");
+        let id = block.id;
+        let doc = document(
+            vec![block],
+            vec![annotation(
+                AnnotationKind::Footnote,
+                id,
+                0,
+                5,
+                "See [knuth1981] & <more>.",
+            )],
+        );
+        let html = page(&doc, &knuth());
+        assert!(
+            html.contains(&format!("See {KNUTH_LINK} &amp; &lt;more&gt;.")),
+            "{html}"
+        );
+        assert!(html.contains("<p id=\"ref-knuth1981\">"));
+    }
+
+    #[test]
+    fn a_key_cited_only_in_a_marginal_is_listed_and_linked() {
+        let block = paragraph("Text.");
+        let id = block.id;
+        let doc = document(
+            vec![block],
+            vec![annotation(
+                AnnotationKind::Marginal,
+                id,
+                0,
+                5,
+                "Per [knuth1981]\nand more.",
+            )],
+        );
+        let html = page(&doc, &knuth());
+        assert!(
+            html.contains(&format!("<p>Per {KNUTH_LINK}<br>\nand more.</p>")),
+            "{html}"
+        );
+        assert!(html.contains("<p id=\"ref-knuth1981\">"));
+    }
+
+    #[test]
+    fn a_citation_in_a_note_in_code_or_in_a_links_words_is_not_listed() {
+        let mut code = block(BlockKind::Code { language: None }, "see [knuth1981]");
+        code.spans = Vec::new();
+        let mut inline = paragraph("see [knuth1981] here");
+        inline.spans = vec![Span {
+            start: 4,
+            end: 15,
+            style: SpanStyle::Code,
+        }];
+        let mut linked = paragraph("see [knuth1981] here");
+        linked.spans = vec![Span {
+            start: 0,
+            end: 15,
+            style: SpanStyle::Link {
+                url: "https://example.com/".to_string(),
+            },
+        }];
+        let noted = paragraph("Plain.");
+        let id = noted.id;
+        let doc = document(
+            vec![code, inline, linked, noted],
+            vec![annotation(
+                AnnotationKind::Note,
+                id,
+                0,
+                5,
+                "Check [knuth1981].",
+            )],
+        );
+        let html = page(&doc, &knuth());
+        assert!(!html.contains("class=\"references\""), "{html}");
+        assert!(!html.contains("#ref-knuth1981"), "{html}");
+    }
+
+    #[test]
+    fn an_unknown_key_stays_as_typed_with_no_section() {
+        let html = page_of("Lost [smith2020].", &knuth());
+        assert!(html.contains("<p>Lost [smith2020].</p>"), "{html}");
+        assert!(!html.contains("class=\"references\""));
+        assert!(!html.contains("<a href=\"#ref-"));
+    }
+
+    #[test]
+    fn a_citation_nests_validly_with_bold_and_with_a_highlight() {
+        let mut bold = paragraph("A [knuth1981] b");
+        bold.spans = vec![Span {
+            start: 0,
+            end: 15,
+            style: SpanStyle::Bold,
+        }];
+        let html = page(&document(vec![bold], Vec::new()), &knuth());
+        assert!(
+            html.contains(&format!("<p><strong>A {KNUTH_LINK} b</strong></p>")),
+            "{html}"
+        );
+
+        let marked = paragraph("[knuth1981] x");
+        let id = marked.id;
+        let doc = document(
+            vec![marked],
+            vec![annotation(AnnotationKind::Note, id, 0, 6, "")],
+        );
+        let html = page(&doc, &knuth());
+        assert!(
+            html.contains(
+                "<p><mark><a href=\"#ref-knuth1981\">[knuth</a></mark>\
+                 <a href=\"#ref-knuth1981\">1981]</a> x</p>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn citing_exports_the_same_bytes_every_time() {
+        let doc = document(
+            vec![paragraph("[knuth1981] and [zeta] and [Alpha]")],
+            Vec::new(),
+        );
+        let mut references = knuth();
+        references.insert("zeta".to_string(), article());
+        references.insert("Alpha".to_string(), article());
+        let html = page(&doc, &references);
+        assert_eq!(html, page(&doc, &references));
+        let alpha = html.find("id=\"ref-Alpha\"").unwrap();
+        let knuth_at = html.find("id=\"ref-knuth1981\"").unwrap();
+        let zeta = html.find("id=\"ref-zeta\"").unwrap();
+        assert!(alpha < knuth_at && knuth_at < zeta, "sorted by key: {html}");
+    }
+
+    #[test]
+    fn reference_text_is_escaped() {
+        let hostile = Reference {
+            kind: crate::references::Kind::Web,
+            title: "<script>alert(1)</script>".to_string(),
+            ..Reference::default()
+        };
+        let html = page_of("See [src].", &with_reference(hostile));
+        assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_script_url_in_a_reference_is_plain_text_and_a_web_one_is_a_link() {
+        let web = |url: &str| Reference {
+            kind: crate::references::Kind::Web,
+            title: "Page".to_string(),
+            url: url.to_string(),
+            ..Reference::default()
+        };
+        let html = page_of("See [src].", &with_reference(web("javascript:alert(1)")));
+        assert!(html.contains("javascript:alert(1)"), "{html}");
+        assert!(!html.contains("href=\"javascript"), "{html}");
+
+        let html = page_of("See [src].", &with_reference(web("https://a.b/c_d")));
+        assert!(
+            html.contains("<a href=\"https://a.b/c_d\">https://a.b/c_d</a>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_freeform_reference_is_one_escaped_paragraph() {
+        let freeform = Reference {
+            kind: crate::references::Kind::Freeform,
+            text: "Smith & Jones,\nfurther <text>.".to_string(),
+            ..Reference::default()
+        };
+        let html = page_of("See [src].", &with_reference(freeform));
+        assert!(
+            html.contains("<p id=\"ref-src\">[src] Smith &amp; Jones, further &lt;text&gt;.</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_body_holds_the_section_for_a_tool_that_supplies_its_own_page() {
+        let doc = document(vec![paragraph("See [knuth1981].")], Vec::new());
+        let references = knuth();
+        let body = html_body(
+            &doc,
+            &Publish {
+                references: &references,
+                ..Publish::plain()
+            },
+        );
+        assert!(body.contains(KNUTH_LINK), "{body}");
+        assert!(body.ends_with("</p>\n</section>\n"), "{body}");
+        assert!(!body.contains("<style>"));
     }
 }

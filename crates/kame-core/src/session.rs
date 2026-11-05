@@ -11,6 +11,7 @@ use crate::model::{
     bare_link_ranges, Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document,
     ImageAlign, Metadata, Span, SpanStyle,
 };
+use crate::references::References;
 use crate::storage::{self, Db, DbError, SnapshotMeta};
 use crate::text::{next_boundary, next_word, prev_boundary, prev_word, widen_to_words, word_at};
 
@@ -562,26 +563,32 @@ impl Session {
     /// keep writing and take the export again.
     pub fn export_markdown(&mut self) -> Option<PathBuf> {
         let path = self.export_suggestion("md");
-        self.export_markdown_to(&path)
+        self.export_markdown_to(&path, &References::new())
     }
 
     /// Writes the document as Markdown to `path` and returns the path written.
-    pub fn export_markdown_to(&mut self, path: &Path) -> Option<PathBuf> {
-        let markdown =
-            crate::export::to_markdown_with(&self.exported_document(), &self.published_metadata());
+    pub fn export_markdown_to(&mut self, path: &Path, references: &References) -> Option<PathBuf> {
+        let markdown = crate::export::to_markdown_with(
+            &self.exported_document(),
+            &self.published_metadata(),
+            references,
+        );
         self.write_export(path, &markdown)
     }
 
     pub fn export_html(&mut self) -> Option<PathBuf> {
         let path = self.export_suggestion("html");
-        self.export_html_to(&path)
+        self.export_html_to(&path, &References::new())
     }
 
     /// Writes the document as a standalone HTML page to `path` and returns the
     /// path written.
-    pub fn export_html_to(&mut self, path: &Path) -> Option<PathBuf> {
-        let html =
-            crate::export::to_html_with(&self.exported_document(), &self.published_metadata());
+    pub fn export_html_to(&mut self, path: &Path, references: &References) -> Option<PathBuf> {
+        let html = crate::export::to_html_with(
+            &self.exported_document(),
+            &self.published_metadata(),
+            references,
+        );
         self.write_export(path, &html)
     }
 
@@ -3251,11 +3258,17 @@ mod tests {
         let mut session = open(&dir.join("essay.kame"));
         session.insert("Words");
         let target = dir.join("elsewhere.md");
-        assert_eq!(session.export_markdown_to(&target), Some(target.clone()));
+        assert_eq!(
+            session.export_markdown_to(&target, &References::new()),
+            Some(target.clone())
+        );
         assert!(std::fs::read_to_string(&target).unwrap().contains("Words"));
         assert!(!dir.join("essay.md").exists());
         let html = dir.join("page.html");
-        assert_eq!(session.export_html_to(&html), Some(html.clone()));
+        assert_eq!(
+            session.export_html_to(&html, &References::new()),
+            Some(html.clone())
+        );
         assert!(std::fs::read_to_string(&html).unwrap().contains("Words"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3417,7 +3430,9 @@ mod tests {
         let mut session = open(&document);
         session.insert_image("../static/plate.png".to_string());
         let target = root.with_extension("md");
-        session.export_markdown_to(&target).unwrap();
+        session
+            .export_markdown_to(&target, &References::new())
+            .unwrap();
         let written = std::fs::read_to_string(&target).unwrap();
         assert!(written.contains(&plate.display().to_string()), "{written}");
         assert_eq!(image_paths(&session), ["../static/plate.png"]);
@@ -4570,8 +4585,11 @@ mod tests {
         let path = temp_db_path();
         let mut session = open(&path);
         session.insert("A paragraph.");
-        let expected =
-            crate::export::to_html_with(session.document(), &session.published_metadata());
+        let expected = crate::export::to_html_with(
+            session.document(),
+            &session.published_metadata(),
+            &References::new(),
+        );
 
         let written = session.export_html().expect("an html export");
         assert_eq!(written, path.with_extension("html"));
@@ -4579,6 +4597,42 @@ mod tests {
         assert_eq!(contents, expected, "the file is exactly to_html's output");
         assert!(contents.starts_with("<!DOCTYPE html>"), "{contents:.40}");
         assert!(contents.contains("<p>A paragraph.</p>"), "{contents}");
+    }
+
+    #[test]
+    fn exporting_with_references_writes_the_section() {
+        let mut references = References::new();
+        references.insert(
+            "knuth1981".to_string(),
+            crate::references::Reference {
+                kind: crate::references::Kind::Freeform,
+                text: "D. E. Knuth, a paper.".to_string(),
+                ..Default::default()
+            },
+        );
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("Broken [knuth1981].");
+
+        let html = path.with_extension("cited.html");
+        assert_eq!(
+            session.export_html_to(&html, &references),
+            Some(html.clone())
+        );
+        let contents = std::fs::read_to_string(&html).expect("read the export");
+        assert!(contents.contains("<h2>References</h2>"), "{contents}");
+        assert!(
+            contents.contains("<p id=\"ref-knuth1981\">[knuth1981] D. E. Knuth, a paper.</p>"),
+            "{contents}"
+        );
+
+        let markdown = path.with_extension("cited.md");
+        session.export_markdown_to(&markdown, &references).unwrap();
+        let contents = std::fs::read_to_string(&markdown).expect("read the export");
+        assert!(
+            contents.contains("## References\n\n\\[knuth1981\\] D. E. Knuth, a paper.\n"),
+            "{contents}"
+        );
     }
 
     #[test]

@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use kame_core::export::{html_body, Publish, STYLE};
+use kame_core::export::{html_body, Publish, REFERENCES_STYLE, STYLE};
+use kame_core::references::References;
 use minijinja::{context, Environment, Value};
 
 use crate::config::Config;
@@ -230,7 +231,7 @@ pub fn plan_site(
         author => config.author.clone(),
         about => about_url(&sources, &pages).map(safe),
     };
-    let kame_css = safe(STYLE);
+    let kame_css = safe(format!("{STYLE}{REFERENCES_STYLE}"));
     let index = SiteIndex::new(&sources);
     let published: Vec<&Source> = sources.iter().filter(|source| !source.draft).collect();
     let listed: Vec<Value> = published
@@ -251,6 +252,7 @@ pub fn plan_site(
             &Publish {
                 document_link: &document_link,
                 image: &image,
+                references: &References::new(),
             },
         );
         let url = source.url();

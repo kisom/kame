@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use kame_core::export::{html_body, Publish};
+use kame_core::references::References;
 
 use crate::config::Config;
 use crate::refs::{Images, SiteIndex};
@@ -63,6 +64,7 @@ pub fn render(config: &Config, sources: &[Source], index: &SiteIndex, site_dir: 
             &Publish {
                 document_link: &document_link,
                 image: &image,
+                references: &References::new(),
             },
         );
         let url = format!("{site}{doc_url}");

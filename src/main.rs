@@ -6152,14 +6152,20 @@ impl KameApp {
             // they can still discard or cancel explicitly.
             return;
         };
+        self.save_to(ctx, &path, close_after);
+    }
+
+    /// Saves the document at `path`, and says its images and links again from there.
+    fn save_to(&mut self, ctx: &egui::Context, path: &Path, close_after: bool) {
         let from = self.session.path().map(Path::to_path_buf);
-        match self.session.save_as(&path) {
+        match self.session.save_as(path) {
             Ok(()) => {
-                let notebook = kame_notebook::Notebook::find(&path).ok().flatten();
+                let notebook = kame_notebook::Notebook::find(path).ok().flatten();
                 self.session.rehome_images(
                     from.as_deref(),
                     notebook.as_ref().map(|nb| nb.root.as_path()),
                 );
+                self.session.rehome_links(from.as_deref());
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
                     self.finish_close(ctx);
@@ -8969,6 +8975,49 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             document_link_target(Path::new("/srv/a.kame"), None, None, None),
             "/srv/a.kame"
         );
+    }
+
+    #[test]
+    fn a_link_to_a_document_still_leads_there_after_save_as() {
+        let root = kame_test_dir::folder("app-link-save-as")
+            .canonicalize()
+            .unwrap();
+        kame_notebook::init(&root).unwrap();
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        let picked = root.join("two/d.kame");
+        drop(open(&picked));
+        let mut session = open(&root.join("one/a.kame"));
+        session.insert("word");
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page.app
+            .session
+            .link_to_document("../two/d.kame".to_string(), "d")
+            .unwrap();
+
+        let ctx = page.ctx.clone();
+        page.app
+            .save_to(&ctx, &root.join("three/deep/a.kame"), false);
+        page.frame(Vec::new());
+
+        let target = page
+            .app
+            .session
+            .document()
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .find_map(|span| match &span.style {
+                SpanStyle::DocumentLink { target } => Some(target.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(target, "../../two/d.kame");
+        page.app.follow_document_link(&target);
+        assert_eq!(page.app.session.path(), Some(picked.as_path()));
+        assert!(!root.join("three/two").exists());
     }
 
     #[test]

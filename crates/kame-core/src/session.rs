@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
-use crate::links::{image_file, retargeted, stored_image_path};
+use crate::links::{image_file, own_target_after_move, retargeted, stored_image_path};
 use crate::model::{
     bare_link_ranges, Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document,
     ImageAlign, Metadata, Span, SpanStyle,
@@ -1734,6 +1734,21 @@ impl Session {
                 let result = self.editor.set_block_kind(id, kind);
                 self.commit(result);
             }
+        }
+    }
+
+    /// After a save as, says each relative link again for where the document is now, having been
+    /// at `from` until then, as one undo step. A web link or `#Heading` depends on nothing of the
+    /// kind and stays, and a document that had no file has no way to say where one led.
+    pub fn rehome_links(&mut self, from: Option<&Path>) {
+        let (Some(from), Some(to)) = (from, self.path.clone()) else {
+            return;
+        };
+        let selection = self.selection;
+        let rewritten = self.rewrite_links(|link| Some(own_target_after_move(link, from, &to)));
+        match rewritten {
+            Ok(_) => self.selection = selection,
+            Err(err) => self.last_error = Some(err),
         }
     }
 
@@ -3521,6 +3536,146 @@ mod tests {
         drop(session);
         let reopened = Session::open(&path).unwrap();
         assert_eq!(image_align(&reopened), [ImageAlign::Right]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Every link target in the document, in reading order, an image's link after its block's spans.
+    fn link_targets(session: &Session) -> Vec<String> {
+        let mut targets = Vec::new();
+        for block in &session.document().blocks {
+            for span in &block.spans {
+                match &span.style {
+                    SpanStyle::Link { url } => targets.push(url.clone()),
+                    SpanStyle::DocumentLink { target } => targets.push(target.clone()),
+                    _ => {}
+                }
+            }
+            if let BlockKind::Image {
+                link: Some(link), ..
+            } = &block.kind
+            {
+                targets.push(link.clone());
+            }
+        }
+        targets
+    }
+
+    /// A document at `root/one/a.kame` holding one of each kind of link: the two that depend on
+    /// where it is first, as `Link` and `DocumentLink` and an image's link, and then the rest.
+    fn document_with_each_link(root: &Path) -> Session {
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        let mut session = open(&root.join("one/a.kame"));
+        let targets: [(&str, bool); 8] = [
+            ("../two/d.kame", true),
+            ("../two/d.kame#Part", true),
+            ("../notes.md", false),
+            ("#Heading", true),
+            ("#Heading", false),
+            ("https://example.com/a#b", false),
+            ("mailto:a@example.com", false),
+            ("www.example.com/x", false),
+        ];
+        let mut document = session.document().clone();
+        let block = &mut document.blocks[0];
+        block.text = "x".repeat(targets.len());
+        block.spans = targets
+            .iter()
+            .enumerate()
+            .map(|(at, (target, is_document))| Span {
+                start: at,
+                end: at + 1,
+                style: if *is_document {
+                    SpanStyle::DocumentLink {
+                        target: target.to_string(),
+                    }
+                } else {
+                    SpanStyle::Link {
+                        url: target.to_string(),
+                    }
+                },
+            })
+            .collect();
+        session.replace_document(document);
+        session.insert_image("https://example.com/plate.png".to_string());
+        let image = session.valid_caret().block_id;
+        session.set_block_kind(
+            image,
+            BlockKind::Image {
+                path: "https://example.com/plate.png".to_string(),
+                link: Some("../two/d.kame".to_string()),
+                align: ImageAlign::default(),
+            },
+        );
+        session
+    }
+
+    #[test]
+    fn saving_as_says_a_relative_link_from_the_new_folder() {
+        let root = scratch_dir("rehomelinks").canonicalize().unwrap();
+        let from = root.join("one/a.kame");
+        let mut session = document_with_each_link(&root);
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        let to = root.join("three/deep/a.kame");
+        session.save_as(&to).unwrap();
+        session.rehome_links(Some(&from));
+        let expected = [
+            "../../two/d.kame",
+            "../../two/d.kame#Part",
+            "../../notes.md",
+            "#Heading",
+            "#Heading",
+            "https://example.com/a#b",
+            "mailto:a@example.com",
+            "www.example.com/x",
+            "../../two/d.kame",
+        ];
+        assert_eq!(link_targets(&session), expected);
+        // It reached the disk, and is one step that goes back to what it was.
+        drop(session);
+        let mut reopened = Session::open(&to).unwrap();
+        assert_eq!(link_targets(&reopened), expected);
+        assert!(reopened.undo());
+        assert_eq!(link_targets(&reopened)[0], "../two/d.kame");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_as_within_a_folder_or_with_no_file_before_changes_no_link() {
+        let root = scratch_dir("rehomelinkssame").canonicalize().unwrap();
+        let from = root.join("one/a.kame");
+        let mut session = document_with_each_link(&root);
+        let before = link_targets(&session);
+        let history = session.history();
+        session.save_as(&root.join("one/b.kame")).unwrap();
+        session.rehome_links(Some(&from));
+        assert_eq!(link_targets(&session), before);
+        assert_eq!(session.history(), history);
+        session.rehome_links(None);
+        assert_eq!(link_targets(&session), before);
+        assert_eq!(session.history(), history);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_as_keeps_the_selection_when_links_change() {
+        let root = scratch_dir("rehomelinkssel").canonicalize().unwrap();
+        let from = root.join("one/a.kame");
+        let mut session = document_with_each_link(&root);
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 1,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: 3,
+        });
+        let selection = session.selection;
+        assert!(selection.is_some());
+        std::fs::create_dir_all(root.join("three")).unwrap();
+        session.save_as(&root.join("three/a.kame")).unwrap();
+        session.rehome_links(Some(&from));
+        assert_eq!(session.selection, selection);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

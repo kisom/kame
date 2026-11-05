@@ -90,9 +90,10 @@ fn tidied(path: &Path) -> PathBuf {
 }
 
 /// `target`, a link copied from the document at `from`, as it has to be written to lead to the
-/// same place from the document at `to`. Only a relative one depends on where it is. `#Heading`
-/// means the document it's in, so elsewhere it names `from`. If either document has no file, or
-/// no folder that can be found, there's no way to say, and it stays as it is.
+/// same place from the document at `to`. Only a relative one depends on where it is, and
+/// `www.` starts a web address, as it does in a document's text. `#Heading` means the document
+/// it's in, so elsewhere it names `from`. If either document has no file, or no folder that can
+/// be found, there's no way to say, and it stays as it is.
 pub fn retargeted(target: &str, from: &Path, to: &Path) -> String {
     let (path, _) = split_document_target(target);
     let has_scheme = path.split_once(':').is_some_and(|(before, _)| {
@@ -104,7 +105,7 @@ pub fn retargeted(target: &str, from: &Path, to: &Path) -> String {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });
-    if has_scheme || path.starts_with('/') || path.starts_with('~') {
+    if has_scheme || path.starts_with('/') || path.starts_with('~') || path.starts_with("www.") {
         return target.to_string();
     }
     let real_folder = |document: &Path| document.parent()?.canonicalize().ok();

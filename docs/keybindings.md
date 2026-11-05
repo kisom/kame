@@ -170,7 +170,8 @@ without making the document read-only.
 Open and Save As use the system's file browser. File > Open Path takes a typed path
 instead, with `~` expanded and relative paths resolved beside the current document.
 Save As carries the history, snapshots and properties to the new file and continues
-there, leaving the old file as it was. Saving over an existing file replaces it
+there, leaving the old file as it was. Images and relative links are said again from
+the new folder, so they lead where they did. Saving over an existing file replaces it
 whole.
 
 A snapshot is a complete copy of the document stored in the `.kame` file,

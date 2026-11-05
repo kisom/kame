@@ -227,8 +227,8 @@ conflict logs exist to avoid, and it could disagree with the folder. The documen
   ends in `.kame` so that the `**.kame` line in `.stignore` keeps it on this machine, which `X.kame.retired` wouldn't.
 
 A database that has never synced has simply not written logs yet, and is left alone. This is built: the app looks for such databases
-when a notebook is found, when its listing changes and every minute while one is waiting, and acts on one only after it has looked
-stranded for 10 minutes, so that a sync in progress finishes first. It reads on a thread and renames on the main thread. What it did is
+when a notebook is found, when its listing changes, every minute while one is still waiting and otherwise every 10 minutes, and acts on
+one only after it has looked stranded for 10 minutes, so that a sync in progress finishes first. It reads on a thread and renames on the main thread. What it did is
 said in a notice. The reasons are in the file operations design. A list can still be added later if this falls short.
 
 **Deleting.** A document in a folder with logs is deleted by removing both `X.kame` and `.X.kame.sync/`. Removing only the database

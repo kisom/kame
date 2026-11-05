@@ -51,8 +51,9 @@ search don't.
 
 **Rename and Move** open one dialog, with one text field holding the document's path from the notebook's root, such as
 `maritain/materialism.kame`. They differ only in what's selected when it opens: Rename selects the file's name without its
-extension, and Move selects the folders. Enter or the button confirms, and Escape cancels. A refusal shows in the dialog
-and leaves it open.
+extension, and Move selects the folders. A document at the root has no folders to select, so what's typed goes in front of its name,
+and without a `/` that's a rename, and the Move dialog says to type a folder and `/` before the name. Enter or the button
+confirms, and Escape cancels. A refusal shows in the dialog and leaves it open.
 
 A new path is refused if:
 
@@ -165,8 +166,8 @@ The two places that write a sync state (`Logged::write_and_merge` and `build_fro
 logs at that path, so a database in its right place always passes. The state is saved only once the log it names has been
 flushed to disk, as a power cut between the two would otherwise leave a healthy database naming a revision its logs lack, which
 would look stranded. For this to be reliable, `Session::save_as` must clear
-the sync state in the copy, since a copy saved today carries one from somewhere else. Nothing depends on it: `is_usable`
-already discards it there.
+the sync state in the copy, since a copy would otherwise carry one from somewhere else, and be taken for a stale copy of the
+original. A copy made before that change still does (see the limits below).
 
 **What's done with a stranded database,** by a new `kame_notebook` function, for everything but the open document. Its
 *new home* is the one log folder elsewhere in the notebook containing its recorded revision.
@@ -230,6 +231,15 @@ is dealt with by the pass after it's left. Its edits are then in the database th
 
 - A machine that wrote logs offline and reconnects after a delete can leave a partial log folder at the old path, and the
   document may come back from it. Nothing here tries to tell that apart.
+- The same goes for a move. If B edits X offline, A renames X to Y and B reconnects, B's `.X.kame.sync/B.log` survives the sync
+  tool's delete and reaches A as a logs-only X with no usable head. B's X isn't stranded, since its own partial log holds its
+  revision, so B's edits never reach Y, and X can come back on A as an empty document. It's divergence and not loss: the words
+  are in B's database and B's log.
+- A copy made before `save_as` cleared the state, and not opened since, still carries the original's revision. It says "moved
+  or deleted on another machine", and the pass finds that revision in the original's logs with a healthy original there, and
+  retires it with `opened_there`. On disk it can't be told from a real stale copy. Nothing is lost, since its words are in
+  `.Z.retired.kame`, and `docs/keybindings.md` says how to get it back: open that and use Save As, which gives the copy logs of
+  its own. Renaming the file isn't enough, as it would still carry the revision and be retired again.
 - Deliberately deleting a document's `.sync` folder while keeping the marker now retires its database. The docs only ever
   told people to remove both.
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a

@@ -42,6 +42,20 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 
 - [ ] **A clean-up pass stops without a word** on any log it can't read or one from a newer kame, since either
   could hold the revision being looked for. The user is told nothing, and stranded databases stay until it's fixed.
+- [ ] **An old copy retired by mistake.** A copy made before `save_as` cleared the sync state, and not opened since, carries
+  the original's revision and is retired as stale. Nothing is lost, and `docs/keybindings.md` says how to get it back, but it
+  can't be told apart on disk.
+- [ ] **A partial log folder after a move.** If a machine edits X offline while another renames X to Y, its surviving
+  `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
+  X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.
+- [ ] **A stranded document open on another document's logs reads them on every sync check,** since logs replaced while it's
+  open always look like news to it.
+- [ ] **News for a healthy open document reads its logs on the main thread,** in `is_stranded`. It's only when there's news,
+  and fine for small logs.
+- [ ] **`.X.moving-N.kame` doesn't go with its document.** A temporary name left by a crash isn't in `belonging_files`, so a
+  delete or move leaves it.
+- [ ] **A retired copy's `-wal` stays behind.** `belonging_files` doesn't list what SQLite keeps beside a retired copy, so if a
+  crash left one, a delete leaves it, and a move leaves the words in it under the old name.
 - [ ] **A rename shadowing a link.** A link `b` that led to `b.md`, or offered to create `b.kame`, opens the moved
   document after something is renamed to `b.kame`.
 - [ ] **A command palette.**

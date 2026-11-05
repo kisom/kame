@@ -335,8 +335,9 @@ opened.
 Right-click a document in the browser for Rename…, Move… and Delete…. Folders and other files have no menu.
 
 Rename and Move open one dialog holding the document's path from the notebook's root. Rename selects its name and Move selects its folders,
-so you can type over either. Enter confirms, and Escape cancels. Folders it names are created. If something is already at the new path, or
-it isn't a place a document can be, the dialog says why and stays open. Nothing is ever overwritten: delete the other file first.
+so you can type over either. A document at the root has no folders to select, so what you type goes in front of its name, and Move says to
+type a folder and `/` before the name. Enter confirms, and Escape cancels. Folders it names are created. If something is already at the new
+path, or it isn't a place a document can be, the dialog says why and stays open. Nothing is ever overwritten: delete the other file first.
 
 A rename or move rewrites the links to the document in every other document, including closed ones and any with links only in their
 revision logs, and fixes its own relative links and images if it changed folders. A title that was only the file's name follows the new
@@ -357,6 +358,11 @@ another machine the stale one is dealt with once kame has seen it stranded for 1
 If the document was deleted, or has already been opened there, the old database is retired. It's only ever renamed, to `.X.retired.kame`
 beside where it was (`.X.retired-2.kame` if that's taken), and a notice says where and whether it holds words that never synced. Those files
 start with a dot, so the browser doesn't show them. `ls -a` finds them, and File > Open Path opens one.
+
+A copy made by an older kame's Save As and not opened since still carries the original's sync state, so it can't be told from a stale copy. It
+says "moved or deleted on another machine" and gets retired. Nothing is lost, as its words are in `.Z.retired.kame`. To get it back, open that
+with File > Open Path and use Save As, which gives the copy logs of its own. Renaming the retired file isn't enough: it would still remember
+the original's revision, and be retired again.
 
 ### The site tool
 

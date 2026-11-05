@@ -680,7 +680,10 @@ fn only_what_may_be_acted_on_is_touched() {
     remove_logs(&b);
 
     assert!(reconcile(&nb, &[], None).is_empty());
-    assert_eq!(find_stranded(&nb, &mut Healthy::default()), [a.clone(), b.clone()]);
+    assert_eq!(
+        find_stranded(&nb, &mut Healthy::default()),
+        [a.clone(), b.clone()]
+    );
     assert_eq!(reconcile(&nb, just(&b), None).len(), 1);
     assert!(a.is_file());
     assert!(!b.exists());
@@ -1449,6 +1452,46 @@ fn a_retirement_goes_ahead_if_the_database_was_only_opened_after_it_was_decided(
     ));
 }
 
+/// A copy made before Save As cleared the state still names the original's revision, so it can't be
+/// told from a stale copy, and is retired. Renaming the retired file doesn't bring it back, as it
+/// still names that revision. Save As does, as it clears that.
+#[test]
+fn an_old_copy_retired_by_mistake_comes_back_by_save_as_and_not_by_a_rename() {
+    let (root, nb) = logged_notebook("stranded-old-copy");
+    let (a, z) = (root.join("a.kame"), root.join("z.kame"));
+    synced(&a, "Words.");
+    std::fs::copy(&a, &z).unwrap();
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&z));
+    let retired = root.join(".z.retired.kame");
+    assert_eq!(
+        reconcile(&nb, just(&z), None),
+        [Done::Retired {
+            from: z.clone(),
+            to: retired.clone(),
+            opened_there: true,
+            unsynced: false,
+        }]
+    );
+
+    let renamed = root.join("renamed.kame");
+    std::fs::rename(&retired, &renamed).unwrap();
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&renamed));
+    std::fs::rename(&renamed, &retired).unwrap();
+
+    let saved = root.join("saved.kame");
+    let mut session = Session::open(&retired).unwrap();
+    session.save_as(&saved).unwrap();
+    session.insert(" More.");
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert!(log_folder(&saved).is_dir());
+    drop(session);
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(text_of(&a).contains("Words."));
+    assert!(!words_in_logs(&log_folder(&a)).contains("More."));
+    assert!(words_in_logs(&log_folder(&saved)).contains("More."));
+}
+
 /// A document's one log.
 fn only_log(path: &Path) -> PathBuf {
     let logs: Vec<PathBuf> = std::fs::read_dir(log_folder(path))
@@ -1504,8 +1547,7 @@ fn a_log_of_another_size_is_read_again() {
     spoil_at_the_same_size(&a);
     let log = only_log(&a);
     let mut grown = std::fs::read(&log).unwrap();
-    grown.extend_from_slice(b"
-");
+    grown.extend_from_slice(b"\n");
     std::fs::write(&log, grown).unwrap();
 
     assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
@@ -1594,8 +1636,7 @@ fn logs_from_a_newer_kame_are_not_remembered_as_healthy() {
     let mut healthy = Healthy::default();
     assert!(find_stranded(&nb, &mut healthy).is_empty(), "can't be told");
 
-    let blank = "
-".repeat(std::fs::metadata(&newer).unwrap().len() as usize);
+    let blank = "\n".repeat(std::fs::metadata(&newer).unwrap().len() as usize);
     std::fs::write(&newer, blank).unwrap();
     let revision = Session::open(&a).unwrap().sync_state().unwrap();
     let spoiled = std::fs::read_to_string(&log)

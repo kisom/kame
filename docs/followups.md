@@ -40,8 +40,10 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
-- [ ] **The Move command,** with the clean-up of databases a move leaves behind. Moving a document in
-  a folder with revision logs leaves a stale copy on the other machine for now.
+- [ ] **A clean-up pass stops without a word** on any log it can't read or one from a newer kame, since either
+  could hold the revision being looked for. The user is told nothing, and stranded databases stay until it's fixed.
+- [ ] **A rename shadowing a link.** A link `b` that led to `b.md`, or offered to create `b.kame`, opens the moved
+  document after something is renamed to `b.kame`.
 - [ ] **A command palette.**
 - [ ] **File > Link to Document… in a notebook.** It writes `~/...` for anything under the home folder,
   which breaks when the notebook moves. It could keep the way from the document, as images now do.

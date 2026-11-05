@@ -162,9 +162,9 @@ empty. It comes from a background read of the notebook when a document opens, so
 
 **Moving a document.** Placement is fixed for now. kame offers no way to move a document, and one moved by hand keeps
 its new place while links to the old one go stale. In a folder with logs, section 10 says what a moved document leaves behind. Following such a link would make a new, empty document at the old
-path, which is removed again if left unwritten. A later revision adds a Move command through the command palette, which
-would read the notebook for every document linking to the old path, and rewrite those links as ordinary edits at the
-moment of the move.
+path, which is removed again if left unwritten. Moving and renaming read the notebook for every document
+linking to the old path, rewriting those links as ordinary edits at the moment of the move. See
+`2026-11-04-notebook-file-operations-design.md`.
 
 ## 9. Publishing
 
@@ -223,10 +223,13 @@ conflict logs exist to avoid, and it could disagree with the folder. The documen
 - A database that has synced before records its last revision, so one with no logs beside it had logs that went somewhere.
 - If logs elsewhere in the notebook hold the same document's id, it moved, and the database is renamed to join them, keeping its undo
   history and snapshots.
-- If none do, it was deleted elsewhere, and the database is renamed with `.retired` added, not deleted.
+- If none do, it was deleted elsewhere, and the database is renamed to `.X.retired.kame`, not deleted. The name starts with a `.` and
+  ends in `.kame` so that the `**.kame` line in `.stignore` keeps it on this machine, which `X.kame.retired` wouldn't.
 
-A database that has never synced has simply not written logs yet, and is left alone. This belongs with the Move command, and a list can
-still be added later if this falls short.
+A database that has never synced has simply not written logs yet, and is left alone. This is built: the app looks for such databases
+when a notebook is found, when its listing changes and every minute while one is waiting, and acts on one only after it has looked
+stranded for 10 minutes, so that a sync in progress finishes first. It reads on a thread and renames on the main thread. What it did is
+said in a notice. The reasons are in the file operations design. A list can still be added later if this falls short.
 
 **Deleting.** A document in a folder with logs is deleted by removing both `X.kame` and `.X.kame.sync/`. Removing only the database
 gets it rebuilt from its logs on the next open, as the live test showed.
@@ -280,5 +283,4 @@ beside a document, and that a build publishes nothing from outside `static/` but
 ## 13. What's left
 
 Built without an implementation plan, for trying out and seeing what shakes out. A few choices were made along the way: the browser is
-200 points wide, and the page hides if the text and its margin don't fit beside it, which on a narrow tiled window is often. The Move
-command, and what section 10 says about databases left behind by a move, aren't built.
+200 points wide, and the page hides if the text and its margin don't fit beside it, which on a narrow tiled window is often.

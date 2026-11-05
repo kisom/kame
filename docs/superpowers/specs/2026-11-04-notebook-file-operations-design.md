@@ -151,7 +151,9 @@ with it (`sync_in`, with no usable `last`), bringing deleted words into an unrel
 synced has no state and is left alone, as is anything with no `.kame-logs` above it.
 
 The two places that write a sync state (`Logged::write_and_merge` and `build_from_logs`) both write a revision from the
-logs at that path, so a database in its right place always passes. For this to be reliable, `Session::save_as` must clear
+logs at that path, so a database in its right place always passes. The state is saved only once the log it names has been
+flushed to disk, as a power cut between the two would otherwise leave a healthy database naming a revision its logs lack, which
+would look stranded. For this to be reliable, `Session::save_as` must clear
 the sync state in the copy, since a copy saved today carries one from somewhere else. Nothing depends on it: `is_usable`
 already discards it there.
 
@@ -163,11 +165,14 @@ already discards it there.
   stranded database the home of another, they move through temporary names. The revision is a better test than the
   document's id, which Save As copies share.
 - **It's retired** if its new home already has a database that isn't itself stranded, because the moved document has
-  already been opened here. Its undo history stays in the retired file, and the notice says so.
+  already been opened here. Its undo history stays in the retired file, and the notice says so (`Done::Retired`'s `opened_there`).
 - **It's left alone** if more than one log folder contains the revision, which shouldn't happen. The next pass sees it again.
 - **It was deleted** if no log folder contains the revision. It's retired too.
 
-Retired means renamed to `.X.retired.kame`, numbered if that's taken.
+Retired means renamed to `.X.retired.kame`, numbered if that's taken. The notice for a retirement says where the file is, and
+whether it holds words that never synced (`unsynced`) or is only a copy of what's in the logs. A deleted document can't be
+compared with anything, so it counts as unsynced.
+
 - **A retired database comes back** if logs containing its revision later appear at a path with no database, since a moved
   document's logs can arrive after the old ones have gone. It's renamed to join them, as above.
 
@@ -176,9 +181,17 @@ what the machine retired to every other machine. A leading `.` and a final `.kam
 ever written, and the browser and listing already skip it. Words in a retired database are kept and reachable by hand, and
 `docs/keybindings.md` says where.
 
-**When.** On a background thread when a notebook's found (`notebook_tick`, where `looked_from` changes) and when a listing
-comes back different. The cheap test (is there a log folder?) runs first, and logs are read only for a stranded database.
-Afterwards the listing refreshes, and a notice says what was retired or moved, naming them.
+**When.** When a notebook's found (`notebook_tick`, where `looked_from` changes), when a listing comes back different, and
+every minute while any database is waiting out the wait below. A pass reads on a background thread and renames on the main
+thread. Reading every log is slow, so it can't be on the main thread. But `build_from_logs` and opening a document run on the
+main thread, and a build's rename replaces whatever is at its path, so a rename from another thread landing there would be
+lost, and one in the middle of an open would move a file from under its session. So the thread only decides (`decide`), and
+the main thread does what was decided (`apply`) when the result arrives, with the open path as of then, looking at each step
+again just before taking it. That happens each time a pass finishes, even when nothing has waited long enough, since a retired
+database coming back needs no wait. Passes never overlap, since a temporary name seen by a second pass would be taken for
+something else; a due pass waits for the next tick. The cheap test (is there a log folder?) runs first, and logs are read only
+for a stranded database. Afterwards the listing refreshes, and a notice says what was done, naming the first and counting
+the others.
 
 **The wait.** Nothing is moved or retired the first time it's seen stranded. The app remembers when it first saw each one,
 in memory, and acts only if it's still stranded on a pass at least 10 minutes later. The notebook spec has a sentence
@@ -200,6 +213,8 @@ is dealt with by the pass after it's left. Its edits are then in the database th
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a
   stale document. What's on this machine is what's published (section 10).
 - A second running copy of kame with an affected document open sees "File changed on disk", as with any outside change.
+- A second running copy of kame isn't protected from the race above: its `build_from_logs` or opening can land across a rename
+  made by this one, and nothing here can tell.
 
 ## Where it goes
 

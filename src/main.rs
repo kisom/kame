@@ -2195,6 +2195,7 @@ struct KameApp {
     /// The file `logged` is for, and whether a problem with its logs has been mentioned.
     logged_path: Option<PathBuf>,
     orphan_mentioned: bool,
+    stranded_mentioned: bool,
     next_log_check: std::time::Instant,
     last_typed: std::time::Instant,
     was_focused: bool,
@@ -2356,6 +2357,7 @@ impl KameApp {
             logged: None,
             logged_path: None,
             orphan_mentioned: false,
+            stranded_mentioned: false,
             next_log_check: std::time::Instant::now(),
             last_typed: std::time::Instant::now(),
             was_focused: true,
@@ -2761,6 +2763,7 @@ impl KameApp {
         self.logged = None;
         self.logged_path = None;
         self.orphan_mentioned = false;
+        self.stranded_mentioned = false;
         self.session = session;
         self.clear_left_fresh(left_untouched);
         self.conflict_copies.clear();
@@ -5976,6 +5979,14 @@ impl KameApp {
                 .map_or(0, |since| since.as_secs() as i64);
             match logged.sync(&mut self.session, now) {
                 Ok(outcome) => {
+                    if outcome.stranded && !self.stranded_mentioned {
+                        self.stranded_mentioned = true;
+                        self.notice = Some(
+                            "this document was moved or deleted on another machine, and isn't \
+                             syncing"
+                                .to_string(),
+                        );
+                    }
                     if outcome.merged {
                         self.set_open_note(None);
                         self.notice_tracker.announced();

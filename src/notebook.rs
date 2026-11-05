@@ -2,17 +2,19 @@
 //! know about a notebook comes from `kame-notebook`, on background threads, since it reads every
 //! document. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use kame_core::model::{BlockId, Metadata};
 use kame_notebook::links::{create_document, linking_to, remove_untouched, Follow, LinkFrom, Made};
 use kame_notebook::list::{listed, listed_if_changed, narrow, rows, Kind, Listed, RowKind};
 use kame_notebook::search::{search, Hit};
+use kame_notebook::stranded::{apply, decide, find_stranded, Done, Steps};
 use kame_notebook::Notebook;
 
 use super::{same_document, BackStop, KameApp};
@@ -27,6 +29,12 @@ const LIST_HEIGHT: f32 = 380.0;
 const RECENT: usize = 20;
 /// How often a list on the screen looks for what has arrived, in seconds.
 const LIST_CHECK_SECONDS: u64 = 10;
+/// How long a database must have been stranded before it's moved or retired, so that a sync still
+/// in progress has time to finish.
+const STRANDED_WAIT: Duration = Duration::from_secs(600);
+/// How often to look again while something's waiting, since nothing else would bring a pass back
+/// ten minutes on.
+const STRANDED_RECHECK: Duration = Duration::from_secs(60);
 
 /// The jump list, open.
 pub(crate) struct JumpList {
@@ -56,6 +64,9 @@ struct Fresh {
     metadata: Metadata,
 }
 
+/// What a clean-up pass read: when each database was first seen stranded, and what to do.
+type StrandedPass = (HashMap<PathBuf, Instant>, Steps);
+
 #[derive(Default)]
 pub(crate) struct NotebookUi {
     pub(crate) notebook: Option<Notebook>,
@@ -64,6 +75,14 @@ pub(crate) struct NotebookUi {
     listing: Vec<Listed>,
     listing_coming: Option<Receiver<Vec<Listed>>>,
     listing_checked: Option<std::time::Instant>,
+    /// When each database that's looked stranded was first seen so.
+    stranded_seen: HashMap<PathBuf, Instant>,
+    stranded_checked: Option<Instant>,
+    /// Whether a pass is wanted whatever the time: a notebook just found, or a different listing.
+    stranded_due: bool,
+    /// A pass reading on a thread: the notebook it read, and what it saw and decided. The renames
+    /// are made when it arrives, on the main thread.
+    stranded_coming: Option<(Notebook, Receiver<StrandedPass>)>,
     pub(crate) jump: Option<JumpList>,
     pub(crate) search: Option<SearchList>,
     pub(crate) browser_open: bool,
@@ -142,6 +161,87 @@ impl NotebookUi {
     }
 }
 
+/// Notes when each of `found` was first seen stranded, forgetting any that no longer are, and
+/// returns those seen so for at least `STRANDED_WAIT`.
+pub(crate) fn stranded_ready(
+    seen: &mut HashMap<PathBuf, Instant>,
+    found: &[PathBuf],
+    now: Instant,
+) -> Vec<PathBuf> {
+    seen.retain(|path, _| found.contains(path));
+    for path in found {
+        seen.entry(path.clone()).or_insert(now);
+    }
+    found
+        .iter()
+        .filter(|path| now.saturating_duration_since(seen[*path]) >= STRANDED_WAIT)
+        .cloned()
+        .collect()
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// What a clean-up did, in a notice: the first thing that was done, retirements ahead of the rest
+/// since they're what a person may want to look for, and how many others there were.
+pub(crate) fn stranded_notice(done: &[Done]) -> String {
+    let first = done
+        .iter()
+        .find(|one| matches!(one, Done::Retired { .. }))
+        .or(done.first());
+    let Some(first) = first else {
+        return String::new();
+    };
+    let mut text = match first {
+        Done::Moved { from, to } => format!(
+            "{} was moved to {}, to follow its document, which was moved on another machine",
+            file_name(from),
+            to.display()
+        ),
+        Done::Returned { from, to } => format!(
+            "{} was moved back to {}, since its document's logs have arrived there",
+            file_name(from),
+            to.display()
+        ),
+        Done::Retired {
+            from,
+            to,
+            opened_there,
+            unsynced,
+        } => {
+            let mut text = format!(
+                "{} was retired to {}, since its document was moved or deleted on another \
+                 machine. ",
+                file_name(from),
+                to.display()
+            );
+            text.push_str(if *unsynced {
+                "It holds words that never synced"
+            } else {
+                "It is only a copy of what's in the logs"
+            });
+            if *opened_there {
+                text.push_str(", and its undo history is in the retired file");
+            }
+            text.push('.');
+            text
+        }
+    };
+    let others = done.len() - 1;
+    if others > 0 {
+        text.push_str(&format!(
+            " {others} other database{} {} also tidied up.",
+            if others == 1 { "" } else { "s" },
+            if others == 1 { "was" } else { "were" }
+        ));
+    }
+    text
+}
+
 /// Where the text starts, within the room right of the browser: where it would be anyway if
 /// that's clear of the browser, and just past it if not. `None` if the text and its margin don't
 /// fit beside the browser, so that the document hides for the moment. Nothing rewraps either way.
@@ -194,6 +294,7 @@ impl KameApp {
                 self.nb.recent.insert(0, path.clone());
                 self.nb.recent.truncate(RECENT);
                 self.nb.looked_from = Some(path);
+                self.nb.stranded_due = true;
                 self.start_backlinks();
             }
         }
@@ -201,6 +302,9 @@ impl KameApp {
         if let Some(coming) = &self.nb.listing_coming {
             match coming.try_recv() {
                 Ok(listing) => {
+                    if self.nb.listing != listing {
+                        self.nb.stranded_due = true;
+                    }
                     self.nb.listing = listing;
                     self.nb.listing_coming = None;
                 }
@@ -210,6 +314,7 @@ impl KameApp {
                 }
             }
         }
+        self.stranded_tick(ctx);
         if let Some((coming, _)) = &self.nb.backlinks_coming {
             match coming.try_recv() {
                 Ok(links) => {
@@ -239,6 +344,59 @@ impl KameApp {
                 }
             }
         }
+    }
+
+    /// Starts a clean-up pass of databases left behind by a move or delete on another machine when
+    /// one's due, and acts on one that has finished. A pass reads on a thread and changes nothing.
+    /// What it decided is done here, with what's open now, since opening a document and building one
+    /// from its logs happen here, and a rename in the middle of either would be lost or move a file
+    /// from under a session.
+    fn stranded_tick(&mut self, ctx: &egui::Context) {
+        if let Some((_, coming)) = &self.nb.stranded_coming {
+            match coming.try_recv() {
+                Ok((seen, steps)) => {
+                    let Some((notebook, _)) = self.nb.stranded_coming.take() else {
+                        return;
+                    };
+                    self.nb.stranded_seen = seen;
+                    let done = apply(&notebook, steps, self.session.path());
+                    if !done.is_empty() {
+                        self.nb.refresh_listing();
+                        self.nb.stranded_due = true;
+                        self.notice_tracker.announced();
+                        self.notice = Some(stranded_notice(&done));
+                    }
+                }
+                Err(TryRecvError::Disconnected) => self.nb.stranded_coming = None,
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+            }
+            return;
+        }
+        let Some(notebook) = self.nb.notebook.clone() else {
+            return;
+        };
+        let recheck = !self.nb.stranded_seen.is_empty()
+            && self
+                .nb
+                .stranded_checked
+                .is_none_or(|checked| checked.elapsed() >= STRANDED_RECHECK);
+        if !self.nb.stranded_due && !recheck {
+            return;
+        }
+        self.nb.stranded_due = false;
+        self.nb.stranded_checked = Some(Instant::now());
+        let mut seen = self.nb.stranded_seen.clone();
+        let (send, coming) = channel();
+        let reading = notebook.clone();
+        self.nb.stranded_coming = Some((notebook, coming));
+        std::thread::spawn(move || {
+            let found = find_stranded(&reading);
+            let ready = stranded_ready(&mut seen, &found, Instant::now());
+            let steps = decide(&reading, &ready);
+            let _ = send.send((seen, steps));
+        });
     }
 
     fn start_backlinks(&mut self) {
@@ -878,6 +1036,91 @@ impl KameApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stranded_database_waits_ten_minutes_from_when_it_was_first_seen() {
+        let start = Instant::now();
+        let path = PathBuf::from("/n/a.kame");
+        let mut seen = HashMap::new();
+        assert!(stranded_ready(&mut seen, std::slice::from_ref(&path), start).is_empty());
+        assert!(stranded_ready(
+            &mut seen,
+            std::slice::from_ref(&path),
+            start + Duration::from_secs(599)
+        )
+        .is_empty());
+        assert_eq!(
+            stranded_ready(
+                &mut seen,
+                std::slice::from_ref(&path),
+                start + Duration::from_secs(600)
+            ),
+            std::slice::from_ref(&path)
+        );
+    }
+
+    #[test]
+    fn a_database_that_stops_being_stranded_starts_again() {
+        let start = Instant::now();
+        let path = PathBuf::from("/n/a.kame");
+        let mut seen = HashMap::new();
+        stranded_ready(&mut seen, std::slice::from_ref(&path), start);
+        stranded_ready(&mut seen, &[], start + Duration::from_secs(300));
+        assert!(seen.is_empty());
+        assert!(stranded_ready(
+            &mut seen,
+            std::slice::from_ref(&path),
+            start + Duration::from_secs(600)
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn the_notice_for_a_retirement_says_where_it_is_and_what_it_holds() {
+        let retired = |opened_there, unsynced| {
+            stranded_notice(&[Done::Retired {
+                from: PathBuf::from("/n/a.kame"),
+                to: PathBuf::from("/n/.a.retired.kame"),
+                opened_there,
+                unsynced,
+            }])
+        };
+        let words = retired(false, true);
+        assert!(words.contains("/n/.a.retired.kame"), "{words}");
+        assert!(words.contains("words that never synced"), "{words}");
+        assert!(!words.contains("undo"), "{words}");
+        let copy = retired(true, false);
+        assert!(copy.contains("only a copy of what's in the logs"), "{copy}");
+        assert!(
+            copy.contains("undo history is in the retired file"),
+            "{copy}"
+        );
+    }
+
+    #[test]
+    fn the_notice_for_several_names_one_and_counts_the_rest() {
+        let text = stranded_notice(&[
+            Done::Moved {
+                from: PathBuf::from("/n/a.kame"),
+                to: PathBuf::from("/n/b.kame"),
+            },
+            Done::Retired {
+                from: PathBuf::from("/n/c.kame"),
+                to: PathBuf::from("/n/.c.retired.kame"),
+                opened_there: false,
+                unsynced: false,
+            },
+            Done::Returned {
+                from: PathBuf::from("/n/.d.retired.kame"),
+                to: PathBuf::from("/n/d.kame"),
+            },
+        ]);
+        assert!(text.starts_with("c.kame was retired"), "{text}");
+        assert!(
+            text.contains("2 other databases were also tidied up"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn the_text_stays_put_if_the_browser_fits_in_the_gutter() {

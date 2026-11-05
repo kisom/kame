@@ -77,6 +77,8 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 
 - [ ] **Tables (deferred).** Simplified on import because the model has no equivalent.
   Tables are wanted but too complex for now, and a code block is the stopgap.
+- [ ] **A relative link in an imported file breaks when it's first saved in another folder.** Until then it leads from the Markdown
+  file, and Save As only says links again from a document's own earlier file, which an import doesn't have.
 
 ## Export
 

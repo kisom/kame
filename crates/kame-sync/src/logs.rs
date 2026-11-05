@@ -235,6 +235,20 @@ pub struct Logged {
     here: String,
     /// What the document and its properties were at the last sync.
     synced: Option<(Document, Metadata)>,
+    /// Why the last sync wrote nothing, if that was because of what's at the log folder, with what
+    /// that rested on.
+    held_off: Option<HeldOff>,
+}
+
+/// A sync that wrote nothing because the logs have left the database, or may be another document's,
+/// and each log's name and size when it found that out, from looking at them and reading none. Asked
+/// again while they're unchanged, it's the same answer, and nothing is read for it. What the answer
+/// also depends on is the database's revision and place and its document's id, which don't change
+/// while it isn't syncing.
+#[derive(Debug, PartialEq)]
+struct HeldOff {
+    stranded: bool,
+    logs: Option<Vec<(PathBuf, u64)>>,
 }
 
 impl Logged {
@@ -260,6 +274,7 @@ impl Logged {
             path: path.to_path_buf(),
             here,
             synced: None,
+            held_off: None,
         })
     }
 
@@ -295,6 +310,15 @@ impl Logged {
         if session.save_failed || session.replaced {
             return Ok(Outcome::default());
         }
+        // Before any reading, so that logs added to meanwhile are read next time.
+        let logs = Store::log_sizes(&self.replica.folder);
+        if let Some(held_off) = self.held_off.take() {
+            if held_off.logs == logs {
+                let outcome = held_off.outcome();
+                self.held_off = Some(held_off);
+                return Ok(outcome);
+            }
+        }
         // The store keeps revisions after their files go, so ask the disk, and only when something
         // could have changed. This is before any refresh or write, which could recreate a folder.
         // A first sync also asks if the logs as read when this opened don't hold the revision,
@@ -308,10 +332,13 @@ impl Logged {
             && (!self.replica.folder.exists() || self.has_news() || not_held)
             && is_stranded(&self.path, self.last.as_deref(), self.place.as_deref())
         {
-            return Ok(Outcome {
+            let held_off = HeldOff {
                 stranded: true,
-                ..Outcome::default()
-            });
+                logs,
+            };
+            let outcome = held_off.outcome();
+            self.held_off = Some(held_off);
+            return Ok(outcome);
         }
         self.store.refresh(&self.replica.folder)?;
         let local = session.document().clone();
@@ -321,10 +348,13 @@ impl Logged {
             .as_ref()
             .is_some_and(|last| !self.store.could_hold(last) && !self.store.can_be_for(local.id))
         {
-            return Ok(Outcome {
-                others_logs: true,
-                ..Outcome::default()
-            });
+            let held_off = HeldOff {
+                stranded: false,
+                logs,
+            };
+            let outcome = held_off.outcome();
+            self.held_off = Some(held_off);
+            return Ok(outcome);
         }
         // A first sync of text that's already here builds on it. Otherwise it starts from this
         // document's history, which is shared with any machine sharing that past.
@@ -396,6 +426,16 @@ impl Logged {
         self.last = Some(synced.head);
         self.synced = Some((session.document().clone(), session.metadata.clone()));
         Ok(outcome)
+    }
+}
+
+impl HeldOff {
+    fn outcome(&self) -> Outcome {
+        Outcome {
+            stranded: self.stranded,
+            others_logs: !self.stranded,
+            ..Outcome::default()
+        }
     }
 }
 

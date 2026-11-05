@@ -15,7 +15,7 @@ use kame_sync::logs::{
     build_from_logs, device_name, display_device, find_or_build, is_stranded, log_folder,
     logging_root, orphaned_logs, place_of, Logged, MARKER,
 };
-use kame_sync::revlog::Store;
+use kame_sync::revlog::{log_reads_here, Store};
 
 /// A machine's copy of an opted-in folder, holding one document both started from.
 struct Machine {
@@ -1115,4 +1115,97 @@ fn another_documents_aged_logs_leave_a_database_at_its_place_stranded() {
     let mut session = talos.session();
     assert!(talos.sync(&mut session, 3).stranded);
     assert_eq!(std::fs::read_dir(&folder).unwrap().count(), before);
+}
+
+/// Syncs a document held off its logs again and again, as the app's checks do, and then once more
+/// after a log turns up beside it, which is read. Until then nothing is read, whatever is typed.
+fn held_off_reads_only_what_changes(
+    machine: &Machine,
+    session: &mut Session,
+    logged: &mut Logged,
+    held_off: impl Fn(&kame_sync::logs::Outcome) -> bool,
+) {
+    let folder = log_folder(&machine.path);
+    let before = Store::load(&folder).unwrap().revision_count();
+    machine.append(session, 0, " Typed.");
+    assert!(held_off(&logged.sync(session, 10).unwrap()));
+    let reads = log_reads_here();
+    for clock in 11..14 {
+        machine.append(session, 0, " More.");
+        let outcome = logged.sync(session, clock).unwrap();
+        assert!(held_off(&outcome));
+        assert_eq!(outcome.written, 0);
+    }
+    assert_eq!(log_reads_here(), reads, "nothing was read");
+
+    let log = std::fs::read_dir(&folder).unwrap().next().unwrap().unwrap();
+    std::fs::copy(log.path(), folder.join("arrived-cccc.log")).unwrap();
+    assert!(held_off(&logged.sync(session, 14).unwrap()));
+    assert!(log_reads_here() > reads, "what changed was read");
+    assert_eq!(Store::load(&folder).unwrap().revision_count(), before);
+}
+
+#[test]
+fn a_document_whose_logs_were_replaced_while_open_reads_them_only_when_they_change() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    let mut logged = talos.logged(&session);
+    logged.sync(&mut session, 1).unwrap();
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let other = another_document(&talos, "different.kame");
+    std::fs::rename(log_folder(&other), &folder).unwrap();
+
+    held_off_reads_only_what_changes(&talos, &mut session, &mut logged, |outcome| {
+        outcome.stranded
+    });
+}
+
+#[test]
+fn a_document_opened_stranded_reads_its_logs_only_when_they_change() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    drop(session);
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let other = another_document(&talos, "different.kame");
+    std::fs::rename(log_folder(&other), &folder).unwrap();
+
+    let mut session = talos.session();
+    let mut logged = talos.logged(&session);
+    held_off_reads_only_what_changes(&talos, &mut session, &mut logged, |outcome| {
+        outcome.stranded
+    });
+}
+
+#[test]
+fn a_document_on_another_documents_logs_reads_them_only_when_they_change() {
+    let (talos, _) = two_machines();
+    let (copy, _) = hand_copy_on_another_documents_logs(&talos);
+    let mut session = copy.session();
+    let mut logged = copy.logged(&session);
+    held_off_reads_only_what_changes(&copy, &mut session, &mut logged, |outcome| {
+        outcome.others_logs && !outcome.stranded
+    });
+}
+
+/// What a sync held off is remembered only while the logs are as they were.
+#[test]
+fn a_document_whose_logs_come_back_syncs_again() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    let mut logged = talos.logged(&session);
+    logged.sync(&mut session, 1).unwrap();
+    let folder = log_folder(&talos.path);
+    let away = folder.with_file_name("away");
+    std::fs::rename(&folder, &away).unwrap();
+    talos.append(&mut session, 0, " Typed while they were away.");
+    assert!(logged.sync(&mut session, 2).unwrap().stranded);
+    assert!(logged.sync(&mut session, 3).unwrap().stranded);
+
+    std::fs::rename(&away, &folder).unwrap();
+    let outcome = logged.sync(&mut session, 4).unwrap();
+    assert!(!outcome.stranded);
+    assert!(outcome.written > 0);
 }

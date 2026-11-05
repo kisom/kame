@@ -109,6 +109,17 @@ fn drops_something(raw: &[u8], line: &Line) -> bool {
         .is_ok_and(|known| kame_core::model::has_unknown_fields(&written, &known))
 }
 
+thread_local! {
+    static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has read a folder of logs, whole with [`Store::load`] or for what's
+/// new with [`Store::refresh`]. Reading is slow for long logs, so this is for telling which thread
+/// does it, and how often.
+pub fn log_reads_here() -> u64 {
+    READS.with(std::cell::Cell::get)
+}
+
 impl Store {
     #[cfg(test)]
     pub(crate) fn has_unflushed(&self) -> bool {
@@ -156,6 +167,7 @@ impl Store {
     /// revisions it found. A log that has shrunk was replaced, so it's read again from the start,
     /// which is harmless since everything is addressed by content.
     pub fn refresh(&mut self, folder: &Path) -> Result<Vec<String>> {
+        READS.with(|reads| reads.set(reads.get() + 1));
         let mut found = Vec::new();
         for path in Self::logs_in(folder) {
             let (mut from, _) = self.read.get(&path).copied().unwrap_or((0, 0));

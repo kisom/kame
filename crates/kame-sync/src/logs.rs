@@ -77,9 +77,29 @@ pub fn display_device(device: &str) -> &str {
     }
 }
 
+/// Whether a database has lost the logs it was syncing with: it remembers a revision that the
+/// logs beside it don't hold, because they're gone or belong to another document now. This is the
+/// case after a document is deleted or moved on another machine. It's false when that can't be
+/// told, for logs that can't be read or that came from a newer kame, since nothing is done on a
+/// guess.
+pub fn is_stranded(last: Option<&str>, folder: &Path) -> bool {
+    let Some(last) = last else {
+        return false;
+    };
+    if !folder.exists() {
+        return true;
+    }
+    match Store::load(folder) {
+        Ok(store) => !store.holds_newer() && !store.contains(last),
+        Err(_) => false,
+    }
+}
+
 /// What a sync did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
+    /// Whether the logs no longer belong to this database, so that nothing was written.
+    pub stranded: bool,
     /// Revisions written to this machine's log.
     pub written: usize,
     /// Whether the document changed because of what arrived.
@@ -148,6 +168,17 @@ impl Logged {
     fn write_and_merge(&mut self, session: &mut Session, now: i64) -> Result<Outcome> {
         if session.save_failed || session.replaced {
             return Ok(Outcome::default());
+        }
+        // The store keeps revisions after their files go, so ask the disk, and only when something
+        // could have changed. This is before any refresh or write, which could recreate a folder.
+        if self.last.is_some()
+            && (!self.replica.folder.exists() || self.has_news())
+            && is_stranded(self.last.as_deref(), &self.replica.folder)
+        {
+            return Ok(Outcome {
+                stranded: true,
+                ..Outcome::default()
+            });
         }
         self.store.refresh(&self.replica.folder)?;
         let local = session.document().clone();

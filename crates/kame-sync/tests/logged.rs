@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use kame_core::edit::Cursor;
 use kame_core::session::Session;
 use kame_sync::logs::{
-    build_from_logs, device_name, display_device, find_or_build, log_folder, logging_root,
-    orphaned_logs, Logged, MARKER,
+    build_from_logs, device_name, display_device, find_or_build, is_stranded, log_folder,
+    logging_root, orphaned_logs, Logged, MARKER,
 };
 use kame_sync::revlog::Store;
 
@@ -544,13 +544,18 @@ fn a_link_to_a_document_with_only_logs_builds_it() {
 
 #[test]
 fn a_remembered_revision_missing_from_the_logs_starts_from_the_history_again() {
-    let (talos, titan) = two_machines();
-    let mut there = talos.session();
-    talos.sync(&mut there, 1);
-    let checkpoints = revisions(&talos.path);
+    let (original, titan) = two_machines();
+    let mut there = original.session();
+    original.sync(&mut there, 1);
+    let checkpoints = revisions(&original.path);
     assert!(checkpoints > 1);
-    // As after Save As, or the logs being cleared: the database remembers what isn't there.
-    std::fs::remove_dir_all(log_folder(&talos.path)).unwrap();
+    // After Save As the copy has logs of its own, which the original's don't stand in for.
+    let talos = Machine {
+        path: original.path.with_file_name("copy.kame"),
+        device: original.device.clone(),
+    };
+    there.save_as(&talos.path).unwrap();
+    assert_eq!(there.sync_state(), None);
     talos.sync(&mut there, 2);
     assert_eq!(
         revisions(&talos.path),
@@ -638,4 +643,163 @@ fn undo_takes_an_idle_copy_back_before_everything_that_arrived_and_an_edit_ends_
     assert!(idle.undo());
     assert!(!idle.document().blocks[0].text.contains("Three"));
     assert!(idle.document().blocks[1].text.ends_with(" Here."));
+}
+
+fn missing_folder() -> PathBuf {
+    common::test_folder("stranded-missing").join(".gone.kame.sync")
+}
+
+/// A second document for the same machine, with logs of its own.
+fn another_document(machine: &Machine, name: &str) -> PathBuf {
+    let path = machine.path.with_file_name(name);
+    let mut session = Session::open(&path).unwrap();
+    session.insert("Nothing like the other one.");
+    machine.sync(&mut session, 2);
+    path
+}
+
+#[test]
+fn a_database_without_a_sync_state_is_never_stranded() {
+    assert!(!is_stranded(None, &missing_folder()));
+}
+
+#[test]
+fn a_recorded_revision_with_no_logs_is_stranded() {
+    assert!(is_stranded(Some("r"), &missing_folder()));
+}
+
+#[test]
+fn a_recorded_revision_in_the_logs_beside_it_is_not_stranded() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().expect("a sync leaves its state");
+    assert!(!is_stranded(Some(&state), &log_folder(&talos.path)));
+}
+
+#[test]
+fn logs_that_belong_to_another_document_leave_it_stranded() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().unwrap();
+    let other = another_document(&talos, "different.kame");
+    assert!(is_stranded(Some(&state), &log_folder(&other)));
+}
+
+#[test]
+fn logs_that_cannot_be_read_do_not_count_as_stranded() {
+    use std::os::unix::fs::PermissionsExt;
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().unwrap();
+    let folder = log_folder(&talos.path);
+    let logs: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert!(!logs.is_empty());
+    for log in &logs {
+        std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let stranded = is_stranded(Some(&state), &folder);
+    for log in &logs {
+        std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    assert!(!stranded, "nothing is done on a guess");
+}
+
+#[test]
+fn logs_from_a_newer_version_do_not_count_as_stranded() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().unwrap();
+    let folder = log_folder(&talos.path);
+    // The same lines, as a newer kame would write them: with a kind this one doesn't know.
+    let mut newer = String::new();
+    for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        std::fs::remove_file(entry.path()).unwrap();
+        for line in text
+            .lines()
+            .filter(|line| line.contains("\"kind\":\"Paragraph\""))
+        {
+            newer.push_str(&line.replace("\"kind\":\"Paragraph\"", "\"kind\":\"Table\""));
+            newer.push('\n');
+        }
+    }
+    assert!(newer.contains("Table"));
+    std::fs::write(folder.join("future-cccc.log"), newer).unwrap();
+    let store = Store::load(&folder).unwrap();
+    assert!(store.holds_newer());
+    assert!(!store.contains(&state));
+    assert!(!is_stranded(Some(&state), &folder));
+}
+
+#[test]
+fn logs_going_while_open_stop_all_writing() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    let mut logged = talos.logged(&session);
+    logged.sync(&mut session, 1).unwrap();
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    talos.append(&mut session, 0, " More words.");
+    let outcome = logged.sync(&mut session, 2).unwrap();
+    assert!(outcome.stranded);
+    assert_eq!(outcome.written, 0);
+    assert!(!folder.exists(), "nothing was written back");
+}
+
+#[test]
+fn opening_stranded_writes_nothing() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    drop(session);
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let mut session = talos.session();
+    talos.append(&mut session, 0, " More words.");
+    let outcome = talos.sync(&mut session, 2);
+    assert!(outcome.stranded);
+    assert!(!folder.exists());
+}
+
+#[test]
+fn logs_replaced_while_open_stop_all_writing() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    let mut logged = talos.logged(&session);
+    logged.sync(&mut session, 1).unwrap();
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    // Another document's logs take the place.
+    let other = another_document(&talos, "different.kame");
+    std::fs::rename(log_folder(&other), &folder).unwrap();
+    let before = Store::load(&folder).unwrap().revision_count();
+
+    talos.append(&mut session, 0, " Old words.");
+    let outcome = logged.sync(&mut session, 3).unwrap();
+    assert!(outcome.stranded);
+    let store = Store::load(&folder).unwrap();
+    assert_eq!(store.revision_count(), before, "nothing was added");
+    for head in store.heads() {
+        for block in store.document(&head).blocks {
+            assert!(!block.text.contains("Old words") && !block.text.contains("shared opening"));
+        }
+    }
+}
+
+#[test]
+fn a_first_sync_is_not_stranded() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    assert_eq!(session.sync_state(), None);
+    let outcome = talos.sync(&mut session, 1);
+    assert!(!outcome.stranded);
+    assert!(revisions(&talos.path) > 0);
 }

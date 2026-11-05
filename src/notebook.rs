@@ -790,7 +790,7 @@ impl KameApp {
     }
 
     /// Opens a document from a list, at a place in it if there is one, with Ctrl-[ coming back.
-    fn open_from_notebook(&mut self, path: PathBuf, place: Option<(BlockId, usize)>) {
+    pub(crate) fn open_from_notebook(&mut self, path: PathBuf, place: Option<(BlockId, usize)>) {
         self.nb.close_lists();
         if self.nb.page_hidden {
             self.nb.browser_open = false;
@@ -799,6 +799,9 @@ impl KameApp {
         if same_document(self.session.path(), Some(&path)) {
             self.nb.pending_place = place;
             self.apply_pending_place();
+            return;
+        }
+        if self.held_by_rename() {
             return;
         }
         if self.session.path().is_some() {

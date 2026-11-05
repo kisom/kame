@@ -4089,6 +4089,30 @@ mod tests {
     }
 
     #[test]
+    fn a_link_refused_during_a_rename_leaves_the_way_back_as_it_was() {
+        let mut page = page_in_notebook("hello");
+        other_document(&page, "other.kame", "elsewhere");
+        let _send = rename_held_open(&mut page);
+        let opened = page.app.session.path().map(Path::to_path_buf);
+
+        page.app.follow_document_link("other.kame");
+
+        assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
+        assert!(page.app.back.stops.is_empty());
+    }
+
+    #[test]
+    fn a_document_opened_from_a_list_during_a_rename_leaves_the_way_back_as_it_was() {
+        let mut page = page_in_notebook("hello");
+        let other = other_document(&page, "other.kame", "elsewhere");
+        let _send = rename_held_open(&mut page);
+
+        page.app.open_from_notebook(other, None);
+
+        assert!(page.app.back.stops.is_empty());
+    }
+
+    #[test]
     fn escape_closes_a_prompt_over_a_form_and_leaves_the_form() {
         let mut page = typed_form_over_a_citation();
         select(&mut page, 0, 3, 3);

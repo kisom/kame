@@ -5879,6 +5879,10 @@ impl KameApp {
             self.go_to_heading(heading);
             return;
         }
+        // Refused before a stop is left that leads back from nowhere.
+        if self.held_by_rename() {
+            return;
+        }
         // A document with no file has nowhere to come back to.
         if here.path.is_some() {
             self.back.push(here);

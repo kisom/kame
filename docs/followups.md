@@ -79,7 +79,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **Feed citations use fragment-only links,** as its footnotes do, so they lead nowhere off the page.
 - [ ] **`page_blocks` clones the blocks every frame** when one holds a citation. It hasn't been measured.
 - [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
-- [ ] **A followed link refused during a rename** leaves a junk stop on the way back.
 - [ ] **`stamp` and `load` run on the UI thread,** and a page's export works out `cited` twice.
 - [ ] **What's wrong with a reference file** can vanish from `last_error` or go stale there.
 - [ ] **A clicked citation's entry** stays where it opened while the page scrolls.

@@ -1022,7 +1022,7 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::F if command && modifiers.shift => {
             Some(Command::AddAnnotation(AnnotationKind::Footnote))
         }
-        Key::Backspace if modifiers.alt => Some(Command::DeleteWordBack),
+        Key::Backspace if word => Some(Command::DeleteWordBack),
         Key::Backspace => Some(Command::Backspace),
         Key::Delete => Some(Command::Delete),
         // Ctrl/Cmd-arrow moves by word, as does Alt-arrow, which is the Mac's habit;
@@ -2258,6 +2258,20 @@ xyz"
             command_for_key(Key::ArrowRight, alt_shift),
             Some(Command::SelectWordRight)
         );
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_a_word_as_ctrl_moves_by_one() {
+        // Ctrl on Linux, and Cmd on a Mac, are both the command key here.
+        for modifiers in [
+            Modifiers::CTRL | Modifiers::COMMAND,
+            Modifiers::MAC_CMD | Modifiers::COMMAND,
+        ] {
+            assert_eq!(
+                command_for_key(Key::Backspace, modifiers),
+                Some(Command::DeleteWordBack)
+            );
+        }
     }
 
     #[test]

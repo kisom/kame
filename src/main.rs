@@ -454,7 +454,10 @@ const HELP_ROWS: &[(&str, &str)] = &[
         "a line without leaving a code or prose block",
     ),
     ("Tab / Shift-Tab", "move a list item in / out"),
-    ("Alt-Backspace", "delete the word before the caret"),
+    (
+        "Ctrl-Backspace, Alt-Backspace",
+        "delete the word before the caret",
+    ),
     ("Esc then Backspace", "delete the word before the caret"),
     (
         "Esc then <  Esc then >",

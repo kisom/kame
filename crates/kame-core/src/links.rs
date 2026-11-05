@@ -280,7 +280,7 @@ fn names_document(path: &str, document: &Path, to_document: bool) -> bool {
         }
         let mut with_extension = named.clone().into_os_string();
         with_extension.push(".kame");
-        return named == document || PathBuf::from(with_extension) == document;
+        return named == document || document.as_os_str() == with_extension;
     };
     let file = if named.is_dir() {
         Some(named.join(FOLDER_INDEX))

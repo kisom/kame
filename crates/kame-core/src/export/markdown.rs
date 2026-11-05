@@ -62,7 +62,12 @@ fn markdown_with(doc: &Document, references: &References) -> String {
         // the empty-text skip drops it.
         if let BlockKind::Image { path, link, .. } = &block.kind {
             let image = format!("![]({})", link_destination(path));
+            // A link to a heading is written as the words' one is, as importing it can't tell them
+            // apart.
             parts.push(match link.as_deref().filter(|url| !is_script_url(url)) {
+                Some(url) if url.starts_with('#') => {
+                    format!("[{image}](<{}>)", heading_destination(url))
+                }
                 Some(url) => format!("[{image}]({})", link_destination(url)),
                 None => image,
             });
@@ -1744,11 +1749,36 @@ mod tests {
         let doc =
             crate::import::markdown::from_markdown(source, std::path::Path::new("/"), "t").document;
         let exported = to_markdown(&doc);
-        assert_eq!(exported, "[![](/a.png)](#The%20Intro)\n");
+        assert_eq!(exported, "[![](/a.png)](<#The Intro>)\n");
         let back =
             crate::import::markdown::from_markdown(&exported, std::path::Path::new("/"), "t")
                 .document;
         assert_eq!(back.blocks[0].kind, doc.blocks[0].kind);
+    }
+
+    #[test]
+    fn an_images_link_to_a_heading_reads_back_as_itself_as_a_words_link_does() {
+        for target in [
+            "#The Intro",
+            "#Q&A: <now> \\ (then)",
+            "#50% off",
+            "#a%20b",
+            "#a\nb",
+        ] {
+            let mut doc = Document::new("t");
+            let kind = BlockKind::Image {
+                path: "/a.png".to_string(),
+                link: Some(target.to_string()),
+                align: Default::default(),
+            };
+            doc.blocks = vec![block(kind.clone(), "")];
+            let exported = to_markdown(&doc);
+            let back =
+                crate::import::markdown::from_markdown(&exported, std::path::Path::new("/"), "t")
+                    .document;
+            assert_eq!(back.blocks[0].kind, kind, "{exported}");
+            assert_eq!(to_markdown(&back), exported);
+        }
     }
 
     fn with_code(text: &str, ranges: &[(usize, usize)]) -> Document {

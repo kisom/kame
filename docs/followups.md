@@ -111,8 +111,6 @@ keystroke in the page, a little more for a long paragraph, and nothing yet is cl
   Tables are wanted but too complex for now, and a code block is the stopgap.
 - [ ] **A relative link in an imported file breaks when it's first saved in another folder.** Until then it leads from the Markdown
   file, and Save As only says links again from a document's own earlier file, which an import doesn't have.
-- [ ] **An image's link to a heading with a literal `%XX` doesn't round trip.** `#a%20b` exports as `[![](/a.png)](#a%20b)` and imports as
-  `#a b`, since an image's link doesn't encode `%` as a text link's does.
 
 ## Export
 

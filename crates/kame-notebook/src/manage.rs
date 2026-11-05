@@ -144,10 +144,12 @@ pub(crate) fn sqlite_files(path: &Path) -> [PathBuf; 2] {
 /// conflicting and retired copies, and its logs. A file that can't be removed is an error before
 /// the logs are touched, so that a document left in place keeps them. A stranded database has no
 /// logs of its own: what's at its log folder, if anything, is another document's, and stays, as
-/// removing it would remove that document on every machine.
-pub fn delete_document(path: &Path) -> std::io::Result<()> {
+/// removing it would remove that document on every machine. This returns whether it left logs
+/// there, since the document at that path still lists, and a second delete would take them.
+pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     if !is_database(path) {
-        return std::fs::remove_file(path);
+        std::fs::remove_file(path)?;
+        return Ok(false);
     }
     // Found first, since which copies are this document's is told by reading it.
     let belonging = belonging_files(path);
@@ -167,10 +169,13 @@ pub fn delete_document(path: &Path) -> std::io::Result<()> {
         }
     }
     let logs = log_folder(path);
-    if logs.is_dir() && !stranded {
+    if !logs.is_dir() {
+        return Ok(false);
+    }
+    if !stranded {
         std::fs::remove_dir_all(&logs)?;
     }
-    Ok(())
+    Ok(stranded)
 }
 
 /// A document a move couldn't change, and why.

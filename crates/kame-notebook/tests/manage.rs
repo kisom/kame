@@ -134,7 +134,7 @@ fn deleting_a_markdown_document_removes_only_its_file() {
     let root = folder("manage-delete-md");
     std::fs::write(root.join("n.md"), "# N\n").unwrap();
     std::fs::write(root.join("n.sync-conflict-1.kame"), "").unwrap();
-    delete_document(&root.join("n.md")).unwrap();
+    assert!(!delete_document(&root.join("n.md")).unwrap());
     assert!(!root.join("n.md").exists());
     assert!(root.join("n.sync-conflict-1.kame").exists());
 }
@@ -584,7 +584,7 @@ fn deleting_a_document_with_only_logs_removes_them() {
     document(&a, "The words.");
     sync(&a);
     std::fs::remove_file(&a).unwrap();
-    delete_document(&a).unwrap();
+    assert!(!delete_document(&a).unwrap(), "no logs were left");
     assert!(!log_folder(&a).exists());
 }
 
@@ -615,15 +615,26 @@ fn deleting_a_stale_copy_leaves_the_logs_of_the_document_now_at_its_path() {
     sync(&a);
     std::fs::remove_file(&a).unwrap();
     std::fs::rename(&stale, &a).unwrap();
-    std::fs::write(root.join(".a.retired.kame"), "").unwrap();
+    std::fs::copy(&a, root.join(".a.retired.kame")).unwrap();
     let logs = files_in(&log_folder(&a));
     assert!(!logs.is_empty());
 
-    delete_document(&a).unwrap();
+    assert!(delete_document(&a).unwrap(), "it says it left the logs");
 
     assert!(!a.exists());
     assert!(!root.join(".a.retired.kame").exists());
     assert_eq!(files_in(&log_folder(&a)), logs);
+}
+
+#[test]
+fn deleting_a_stale_copy_with_no_logs_at_its_path_left_none() {
+    let (root, _nb) = logged_notebook("delete-stale-no-logs");
+    let a = root.join("a.kame");
+    document(&a, "Old words.");
+    sync(&a);
+    std::fs::remove_dir_all(log_folder(&a)).unwrap();
+    assert!(!delete_document(&a).unwrap());
+    assert!(!a.exists());
 }
 
 #[test]
@@ -632,7 +643,7 @@ fn deleting_a_document_in_step_with_its_logs_removes_them() {
     let a = root.join("a.kame");
     document(&a, "The words.");
     sync(&a);
-    delete_document(&a).unwrap();
+    assert!(!delete_document(&a).unwrap(), "no logs were left");
     assert!(!a.exists());
     assert!(!log_folder(&a).exists());
 }

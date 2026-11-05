@@ -342,6 +342,19 @@ pub(crate) fn path_selection(relative: &str, rename: bool) -> Range<usize> {
     start..start + characters(stem)
 }
 
+/// What a delete says. Logs left behind keep the document's row in the browser, so without a word
+/// about them it looks as if the delete didn't take, and a second one would remove them.
+fn deleted_notice(title: &str, left_logs: bool) -> String {
+    if left_logs {
+        format!(
+            "deleted the stale copy of {title}; the logs at that path may be another document's, \
+             and were left"
+        )
+    } else {
+        format!("deleted {title}")
+    }
+}
+
 fn documents(count: usize) -> String {
     match count {
         1 => "1 document".to_string(),
@@ -1535,12 +1548,16 @@ impl KameApp {
             return;
         }
         // Leaving a new document nobody has written in has already taken it away.
+        let mut left_logs = false;
         if path.symlink_metadata().is_ok() || log_folder(path).exists() {
-            if let Err(err) = delete_document(path) {
-                self.session.last_error =
-                    Some(format!("could not delete {} — {err}", path.display()));
-                self.notebook_files_changed();
-                return;
+            match delete_document(path) {
+                Ok(left) => left_logs = left,
+                Err(err) => {
+                    self.session.last_error =
+                        Some(format!("could not delete {} — {err}", path.display()));
+                    self.notebook_files_changed();
+                    return;
+                }
             }
         }
         self.back.forget(path);
@@ -1552,7 +1569,7 @@ impl KameApp {
         self.forget_fresh(path);
         self.notebook_files_changed();
         self.notice_tracker.announced();
-        self.notice = Some(format!("deleted {title}"));
+        self.notice = Some(deleted_notice(title, left_logs));
     }
 
     /// Goes to the contents page, or a new document if that's what's being deleted or it won't open.
@@ -1954,6 +1971,16 @@ mod tests {
         assert!(text.contains("/n/.c.retired.kame"), "{text}");
         assert!(!text.contains("/n/.d.retired.kame"), "{text}");
         assert!(text.ends_with("and 2 more."), "{text}");
+    }
+
+    #[test]
+    fn deleting_a_stale_copy_says_its_logs_were_left() {
+        assert_eq!(deleted_notice("Essay", false), "deleted Essay");
+        assert_eq!(
+            deleted_notice("Essay", true),
+            "deleted the stale copy of Essay; the logs at that path may be another document's, \
+             and were left"
+        );
     }
 
     #[test]

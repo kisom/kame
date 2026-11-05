@@ -121,7 +121,8 @@ impl Notebook {
             if !self.holds(&index) {
                 return Follow::Rotted;
             }
-            return if index.is_file() {
+            // With only logs it's there already, as below.
+            return if index.is_file() || kame_sync::logs::log_folder(&index).is_dir() {
                 Follow::Open(index)
             } else if self.in_documents_area(&index) {
                 Follow::Create(index)

@@ -791,3 +791,28 @@ fn a_dangling_symbolic_link_cannot_lead_out() {
     std::os::unix::fs::symlink(&there, root.join("other/Notebook.kame")).unwrap();
     assert_eq!(nb.follow("other/", &from), Follow::Rotted);
 }
+
+/// Logs from a machine that wrote this document, with nothing here yet.
+fn logs_for(document: &Path, words: &str) {
+    let logs = kame_notebook::log_folder(document);
+    let mut doc = kame_core::model::Document::new("t");
+    doc.blocks[0].text = words.to_string();
+    kame_sync::revlog::Replica {
+        folder: logs,
+        device: "elsewhere-0000".to_string(),
+    }
+    .sync(&doc, None, 1)
+    .unwrap();
+}
+
+#[test]
+fn a_folders_index_with_only_logs_is_there_already() {
+    use kame_notebook::links::Follow;
+    let root = folder("index-logs");
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    std::fs::create_dir(root.join("folder")).unwrap();
+    let index = root.join("folder/Notebook.kame");
+    logs_for(&index, "Contents.");
+    let followed = notebook(&root).follow("folder/", &root.join("a.kame"));
+    assert_eq!(followed, Follow::Open(index));
+}

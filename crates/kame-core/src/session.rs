@@ -2174,6 +2174,26 @@ impl Session {
         }
     }
 
+    /// Takes away the marginal `id` if nothing has been done since it was added and it still says
+    /// what it was added with, by undoing the add. A marginal that was written in, or anything
+    /// else, is left. Returns whether it went.
+    pub fn discard_unwritten_marginal(&mut self, id: AnnotationId) -> bool {
+        let unwritten = match self.editor.applied_ops().last() {
+            Some(Op::AddAnnotation { annotation }) => {
+                annotation.id == id
+                    && annotation.kind == AnnotationKind::Marginal
+                    && self
+                        .editor
+                        .document()
+                        .annotations
+                        .iter()
+                        .any(|now| now == annotation)
+            }
+            _ => false,
+        };
+        unwritten && self.undo()
+    }
+
     /// Replaces a note's body and persists it as one undoable edit.
     ///
     /// Returns whether the write landed; a refused edit leaves `last_error` set

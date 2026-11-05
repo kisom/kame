@@ -2476,6 +2476,11 @@ impl KameApp {
     /// that the field is the editor for that note and every change is committed
     /// as it is typed.
     fn set_open_note(&mut self, id: Option<AnnotationId>) {
+        let before = self.open_note;
+        // A marginal left as it was added, with nothing written in it, goes.
+        if let Some(open) = before.filter(|open| Some(*open) != id) {
+            self.session.discard_unwritten_marginal(open);
+        }
         let body = id.and_then(|id| {
             self.session
                 .document()
@@ -2486,7 +2491,6 @@ impl KameApp {
         });
         // A note that no longer exists cannot be edited: an undo that removed it
         // closes the popover instead of leaving a field pointing at nothing.
-        let before = self.open_note;
         self.open_note = match (id, body.is_some()) {
             (Some(id), true) => Some(id),
             _ => None,
@@ -9681,6 +9685,38 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             painted_line_start(&mut page, CHECKED_LINE),
             as_text[CHECKED_LINE]
         );
+    }
+
+    #[test]
+    fn closing_a_marginal_nothing_was_written_in_leaves_none() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let before = session.document().clone();
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+        page.press("Close");
+        assert!(page.app.session.document().annotations.is_empty());
+        assert_eq!(page.app.session.document(), &before);
+        assert_eq!(page.app.session.history(), (1, 1));
+    }
+
+    #[test]
+    fn closing_a_marginal_that_was_written_in_keeps_it() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        let id = page.app.open_note.unwrap();
+        page.app.session.set_annotation_body(id, "Said something.");
+        page.frame(Vec::new());
+        page.press("Close");
+        assert_eq!(page.app.session.document().annotations.len(), 1);
     }
 
     #[test]

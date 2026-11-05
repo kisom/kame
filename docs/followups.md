@@ -25,8 +25,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **A key for adding a marginal.** Notes and footnotes have one, and a marginal is only on the
   Annotate and right-click menus. Feedback suggested Ctrl-M, but Cmd-M minimises a window on a Mac.
 - [ ] **Moving a marginal.** The only way today is to remove it and add it again on the other block.
-- [ ] **A marginal that was never written.** Emptying a marginal removes it, but adding one and
-  pressing Close without typing leaves an empty one in the document.
 
 ## Help
 

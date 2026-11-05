@@ -8,8 +8,8 @@ use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::links::{image_file, retargeted, stored_image_path};
 use crate::model::{
-    Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document, ImageAlign, Metadata, Span,
-    SpanStyle,
+    bare_link_ranges, Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document,
+    ImageAlign, Metadata, Span, SpanStyle,
 };
 use crate::storage::{self, Db, DbError, SnapshotMeta};
 use crate::text::{next_boundary, next_word, prev_boundary, prev_word, widen_to_words, word_at};
@@ -1725,6 +1725,38 @@ impl Session {
         saved
     }
 
+    /// The link under `at`, of any kind, including a bare URL, which has no span.
+    pub fn link_under(&self, at: Cursor) -> Option<LinkUnder> {
+        let block = &self.document().blocks[self.block_index(at.block_id)?];
+        let under = |start: usize, end: usize| start <= at.offset && at.offset < end;
+        let stored = block.spans.iter().find_map(|span| {
+            let (url, document) = match &span.style {
+                SpanStyle::Link { url } => (url, false),
+                SpanStyle::DocumentLink { target } => (target, true),
+                _ => return None,
+            };
+            under(span.start, span.end).then(|| LinkUnder {
+                block_id: block.id,
+                start: span.start,
+                end: span.end,
+                url: url.clone(),
+                document,
+            })
+        });
+        stored.or_else(|| {
+            bare_link_ranges(block)
+                .into_iter()
+                .find(|(start, end)| under(*start, *end))
+                .map(|(start, end)| LinkUnder {
+                    block_id: block.id,
+                    start,
+                    end,
+                    url: block.text[start..end].to_string(),
+                    document: false,
+                })
+        })
+    }
+
     /// The range C-k should link — the current selection, or the link under the
     /// caret when nothing is selected — plus that link's current URL, if any,
     /// so the prompt can pre-fill it for editing.
@@ -2278,6 +2310,17 @@ pub struct Clipped {
     pub spans: Vec<Span>,
     /// What its relative links are relative to.
     pub from: PathBuf,
+}
+
+/// A link in a block, stored or bare.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkUnder {
+    pub block_id: BlockId,
+    pub start: usize,
+    pub end: usize,
+    pub url: String,
+    /// Whether it's a link to a document or a heading, which kame follows itself.
+    pub document: bool,
 }
 
 /// `spans` once `start..end` has been replaced by `new_len` bytes, with any link overlapping it gone.
@@ -5821,6 +5864,40 @@ mod tests {
         assert!(session.edit_link(block, 7, 12, "épée", "https://e.example/"));
         assert_eq!(session.document().blocks[0].text, "Voilà épée là");
         assert_eq!(links_of(&session, 0)[0].0, "épée");
+    }
+
+    #[test]
+    fn the_link_under_a_position_is_found_whatever_kind_it_is() {
+        let session = linked(
+            "A link https://bare.example/ end",
+            2,
+            6,
+            "https://l.example/",
+        );
+        let block = block_of(&session);
+        let at = |offset| Cursor {
+            block_id: block,
+            offset,
+        };
+        let found = session.link_under(at(3)).unwrap();
+        assert_eq!((found.start, found.end), (2, 6));
+        assert_eq!(found.url, "https://l.example/");
+        assert!(session.link_under(at(6)).is_none(), "just past its end");
+        assert!(session.link_under(at(0)).is_none());
+        let bare = session.link_under(at(10)).unwrap();
+        assert_eq!(bare.url, "https://bare.example/");
+        assert_eq!((bare.start, bare.end), (7, 28));
+
+        let mut session = linked("See notes", 4, 9, "notes/a.kame");
+        let block = block_of(&session);
+        let found = session
+            .link_under(Cursor {
+                block_id: block,
+                offset: 5,
+            })
+            .unwrap();
+        assert_eq!(found.url, "notes/a.kame");
+        assert!(session.set_link(block, 4, 9, String::new()));
     }
 
     #[test]

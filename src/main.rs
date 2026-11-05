@@ -13,7 +13,7 @@ mod notebook;
 mod publish;
 
 use kame_core::links::{image_file, resolve_open_path, split_document_target, stored_image_path};
-use kame_core::session::{is_markdown_path, Clipped, Session};
+use kame_core::session::{is_markdown_path, Clipped, LinkUnder, Session};
 use kame_core::{edit, model, storage};
 use kame_typeset::{layout, render};
 use std::collections::{HashMap, HashSet};
@@ -789,6 +789,14 @@ fn pick_save_path(suggested_name: &str, directory: Option<&Path>) -> Option<Path
         .add_filter("kame document", &["kame"])
         .set_file_name(suggested_name)
         .save_file()
+}
+
+/// The link a right-click landed on.
+#[derive(Clone, Debug, PartialEq)]
+struct LinkMenu {
+    /// A link on text, which can be edited. An image's link has only `url`.
+    link: Option<LinkUnder>,
+    url: String,
 }
 
 /// The link prompt (C-k): the range being linked, its words and the URL being typed.
@@ -2194,6 +2202,8 @@ struct KameApp {
     marks: Marks,
     /// The mark the page's right-click menu is about, while it's open.
     mark_menu: Option<(BlockId, Finding)>,
+    /// The link the page's menu was opened on, if any.
+    link_menu: Option<LinkMenu>,
     /// What was last copied here, with its formatting. It's kept here and not in the session, so
     /// that it can be pasted in another document.
     clipped: Option<Clipped>,
@@ -2352,6 +2362,7 @@ impl KameApp {
             last_log_tick: std::time::Instant::now(),
             marks: Marks::default(),
             mark_menu: None,
+            link_menu: None,
             clipped: None,
             image_menu: None,
             layouts: LayoutCache::new(),
@@ -4638,10 +4649,25 @@ impl KameApp {
         if response.secondary_clicked() {
             self.mark_menu = None;
             self.image_menu = None;
+            self.link_menu = None;
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
                 {
+                    self.link_menu = self.session.link_under(cursor).map(|link| LinkMenu {
+                        url: link.url.clone(),
+                        link: Some(link),
+                    });
+                    let image_link = blocks
+                        .iter()
+                        .find(|block| block.id == cursor.block_id)
+                        .and_then(|block| match &block.kind {
+                            BlockKind::Image { link, .. } => link.clone(),
+                            _ => None,
+                        });
+                    if let Some(url) = image_link {
+                        self.link_menu = Some(LinkMenu { link: None, url });
+                    }
                     self.image_menu = blocks
                         .iter()
                         .find(|block| block.id == cursor.block_id)
@@ -4841,8 +4867,26 @@ impl KameApp {
         let mut insert_image = false;
         let mut mark_action = None;
         let mark_menu = self.mark_menu.clone();
+        let link_menu = self.link_menu.clone();
+        let mut open_link = false;
+        let mut edit_link = false;
         response.context_menu(|ui| {
             ui.set_min_width(180.0);
+            if let Some(menu) = &link_menu {
+                if ui.button("Open link").clicked() {
+                    open_link = true;
+                    ui.close();
+                }
+                if ui.button("Copy link").clicked() {
+                    ui.ctx().copy_text(menu.url.clone());
+                    ui.close();
+                }
+                if menu.link.is_some() && ui.button("Edit link…").clicked() {
+                    edit_link = true;
+                    ui.close();
+                }
+                ui.separator();
+            }
             if let Some((_, finding)) = &mark_menu {
                 ui.label(egui::RichText::new(&finding.message).weak());
                 for suggestion in &finding.suggestions {
@@ -4958,6 +5002,22 @@ impl KameApp {
                 ui.close();
             }
         });
+        if let Some(menu) = link_menu.filter(|_| open_link) {
+            let document = menu.link.as_ref().is_some_and(|link| link.document);
+            let in_notebook = self.nb.notebook.is_some() && notebook::is_relative_link(&menu.url);
+            if document || in_notebook {
+                self.follow_document_link(&menu.url);
+            } else {
+                open_in_browser(&menu.url);
+            }
+        } else if let Some(link) = self
+            .link_menu
+            .clone()
+            .filter(|_| edit_link)
+            .and_then(|menu| menu.link)
+        {
+            self.open_link_prompt(link.block_id, link.start, link.end, Some(link.url));
+        }
         if insert_image {
             self.insert_image_with_dialog();
         }

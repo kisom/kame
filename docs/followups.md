@@ -20,6 +20,16 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **On Save As, a `Link` to a document that's there only as logs stays as written.** Only what's on disk counts as what it names, and core can't
   see logs, so the link stops leading to the document from another folder. A `DocumentLink` isn't affected.
 
+- [ ] **A `www.` address in capitals, or a real file named `www.x.kame`.** `WWW.Example.com/x` in a `Link` span still makes a folder and a
+  document, as only lowercase counts as a web address. A `DocumentLink` to a real `www.x.kame` stays as written on Save As to another
+  folder, and clicking it then makes an empty one. `leads_within_kame`, `retargeted`, `names_document` and `link_ranges` need one
+  case-insensitive answer, and to know a link's kind.
+- [ ] **A link to itself goes stale if the file has gone by the time of Save As.** `names_document` compares canonical paths, and a missing
+  file has none, so the link then leads to where the file was.
+- [ ] **Save As tells a saved document what exists on this machine.** A relative `Link` is rewritten only if what it names is there, and
+  nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
+  paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
+
 ## Annotations
 
 - [ ] **Moving a marginal.** The only way today is to remove it and add it again on the other block.

@@ -262,14 +262,14 @@ pub fn rename(
     if !valid_key(new) {
         return Err(format!("{new:?} is not a valid key"));
     }
-    if new.eq_ignore_ascii_case(old) {
-        return Err(format!("{new:?} is already a reference"));
-    }
     let loaded = load(notebook).references;
     let reference = loaded
         .get(old)
         .cloned()
         .ok_or_else(|| format!("there is no reference {old:?}"))?;
+    if new.eq_ignore_ascii_case(old) {
+        return Err(format!("{new:?} is already a reference"));
+    }
     let taken = format!("{new}{EXTENSION}").to_lowercase();
     let in_use = files(notebook)
         .iter()
@@ -412,6 +412,16 @@ mod tests {
         assert_eq!(reference.number, "007");
         assert_eq!(reference.pages, "1e3");
         assert_eq!(reference.year, "1981");
+    }
+
+    #[test]
+    fn renaming_a_key_that_is_not_a_reference_says_so_even_for_a_change_of_case() {
+        let notebook = notebook("ref-rename-missing-case");
+        save(&notebook, "old", &article()).unwrap();
+        let err = rename(&notebook, "missing", "MISSING", None).unwrap_err();
+        assert_eq!(err, "there is no reference \"missing\"");
+        let err = rename(&notebook, "old", "OLD", None).unwrap_err();
+        assert_eq!(err, "\"OLD\" is already a reference");
     }
 
     #[test]

@@ -85,7 +85,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **`cite` says it couldn't** when the key went in and only the write failed (`src/references.rs`).
 - [ ] **A selection wholly inside a key** comes out of a rename as an empty selection.
 - [ ] **A zero-width anchor inside a key** widens when the key is renamed.
-- [ ] **Renaming `missing` to `MISSING`** says "already a reference", not that there's no such key.
 - [ ] **Typing straight after an inserted key** joins its undo step.
 - [ ] **The browser panel and File > Open** close a form and lose what's typed in it.
 - [ ] **A note opened over a form:** Escape closes the form first.

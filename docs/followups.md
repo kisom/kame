@@ -6,8 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
-  them now, but folders already turned on won't have been told.
 - [ ] **A snapshot taken before a Save As to another folder still says its links and images from the old one.** Save As says them
   again through the history, but leaves snapshots as they were taken, so restoring one brings back paths that lead from where the
   document was.
@@ -15,11 +13,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **Save As tells a saved document what exists on this machine (accepted for now).** A relative `Link` is rewritten only if what it names is there, and
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
-
-## Search
-
-- [ ] **Ctrl-F only searches the body.** Marginals, notes and footnotes are only searched by Ctrl-R,
-  which needs a notebook, so a document on its own can't search them.
 
 ## Notebook
 
@@ -47,13 +40,14 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 ## Performance
 
 Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a
-keystroke in the page, a little more for a long paragraph, and nothing yet is close to a frame.
+keystroke in the page, a little more for a long paragraph, and nothing yet is close to a frame. On macOS, Metal keeps about 450 MB
+of buffers in use while frames come every second or so and lets them go a moment after they stop, as a bare eframe window does. An
+idle window wakes every 3 seconds, so it lets them go, and holds about 255 MB with a 3,000-word document. On Linux, on talos (Core
+i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame holds 146 MB resident, 49 MB of it its own heap, and
+250 MB of GPU buffers in system memory, which the driver keeps whether or not frames come. Idle, it takes 0.01 s of CPU a minute.
 
 - [ ] **Spell checking holds about 130 MB,** 117 MB of it Harper's dictionary as Harper builds it. It's loaded only while checking
   is on. A smaller footprint would mean a lighter dictionary from Harper, or our own.
-- [ ] **Memory on Linux hasn't been measured.** On macOS, Metal keeps about 450 MB of buffers in use while frames come every second
-  or so and lets them go a moment after they stop; a bare eframe window does the same. An idle window wakes every 3 seconds, so
-  it lets them go, and holds about 255 MB with a 3,000-word document.
 - [ ] **A keystroke redraws its whole paragraph's image.** Drawing only the lines that changed would save most of it in a long
   paragraph.
 - [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs

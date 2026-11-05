@@ -857,3 +857,28 @@ fn a_yaml_file_directly_in_the_root_references_folder_is_not_an_entry() {
         ]
     );
 }
+
+#[test]
+fn the_list_and_the_loader_agree_which_folder_holds_the_references() {
+    let root = folder("references-capitalised");
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    // On a filesystem that ignores case this is the folder `references` names; on one that
+    // doesn't it is another folder, whose files are ordinary entries.
+    std::fs::create_dir_all(root.join("References")).unwrap();
+    std::fs::write(
+        root.join("References/knuth1981.yaml"),
+        "kind: freeform\ntext: x\n",
+    )
+    .unwrap();
+    let notebook = notebook(&root);
+    let loaded = kame_notebook::references::load(&notebook);
+    let listed = notebook
+        .entries()
+        .into_iter()
+        .any(|entry| entry.relative.ends_with("knuth1981.yaml"));
+    assert_ne!(
+        loaded.references.contains("knuth1981"),
+        listed,
+        "a file is a reference or an entry, and only one of them"
+    );
+}

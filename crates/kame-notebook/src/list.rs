@@ -62,6 +62,26 @@ impl Notebook {
             .collect()
     }
 
+    /// Whether `folder` is the root's `references/`, as the filesystem has it. A name that
+    /// differs only in case is the same folder on a filesystem that ignores case, which is
+    /// where the loader looks, and another folder on one that doesn't.
+    fn is_references_folder(&self, folder: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let identity = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .ok()
+                .filter(|metadata| metadata.is_dir())
+                .map(|metadata| (metadata.dev(), metadata.ino()))
+        };
+        match (
+            identity(folder),
+            identity(&self.root.join(crate::references::FOLDER)),
+        ) {
+            (Some(one), Some(other)) => one == other,
+            _ => false,
+        }
+    }
+
     fn walk(&self, folder: &Path, documents_here: bool, found: &mut Vec<Entry>) {
         let Ok(entries) = std::fs::read_dir(folder) else {
             return;
@@ -103,8 +123,7 @@ impl Notebook {
                     continue;
                 }
                 // A reference is part of how the notebook cites, not a file to open.
-                if crate::references::is_reference_name(&name)
-                    && folder == self.root.join(crate::references::FOLDER)
+                if crate::references::is_reference_name(&name) && self.is_references_folder(folder)
                 {
                     continue;
                 }

@@ -176,7 +176,8 @@ fn clear_stale_temporaries(folder: &Path) {
 }
 
 /// Writes `reference` as `key`, through a temporary file renamed into place so that an interrupted
-/// save leaves the old one, and a save clears the temporary files an earlier crash left. A damaged file for `key` is refused and left as it was.
+/// save leaves the old one. It also clears the temporary files an earlier crash left. A damaged
+/// file for `key` is refused and left as it was.
 pub fn save(notebook: &Notebook, key: &str, reference: &Reference) -> Result<(), String> {
     reference.check()?;
     let path = check_writable(notebook, key)?;

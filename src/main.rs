@@ -2609,6 +2609,15 @@ impl KameApp {
         self.open_note_focus = self.open_note.is_some();
     }
 
+    /// Adds a note of `kind` and opens it, having closed the one that's open.
+    fn add_annotation(&mut self, kind: AnnotationKind) {
+        self.set_open_note(None);
+        if let Some(id) = self.session.add_annotation(kind) {
+            self.set_open_note(Some(id));
+            self.open_note_pos = None;
+        }
+    }
+
     /// Applies the mode chords pressed this frame, and mirrors the window's
     /// actual fullscreen state so a window-manager toggle cannot leave the
     /// flag disagreeing with the window.
@@ -2929,6 +2938,22 @@ impl KameApp {
         }
     }
 
+    /// What the window being asked to close does, before it closes or the prompt comes up.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if close_requested {
+            self.set_open_note(None);
+            self.save_position_now();
+        }
+        let unsaved =
+            !self.session.save_failed && self.session.is_anonymous() && self.session.has_content();
+        if close_requested && self.close_flow.on_close_request(unsaved) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // A hidden window has to come forward for its prompt to be answered.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
     /// The close prompt was answered by leaving this document, so do what asked.
     fn finish_close(&mut self, ctx: &egui::Context) {
         if self.close_flow.finish() {
@@ -2943,9 +2968,14 @@ impl KameApp {
     fn adopt_session(&mut self, session: Session) {
         // The last of this document's words go in its logs before it's left. Not if `session` is
         // on the same file: it has read that file already, and a merge now would leave it stale,
-        // so whoever is reopening a file syncs first.
+        // so whoever is reopening a file syncs first. An open note closes first, as closing one
+        // can change the document, and on the same file that's for `session` to do.
+        let same = same_document(self.session.path(), session.path());
+        if !same {
+            self.set_open_note(None);
+        }
         let left_untouched = self.on_untouched_fresh();
-        if !same_document(self.session.path(), session.path()) {
+        if !same {
             self.sync_logs();
         }
         self.logged = None;
@@ -2961,10 +2991,8 @@ impl KameApp {
         self.layouts = LayoutCache::new();
         self.textures = TextureCache::new();
         self.annotation_textures = AnnotationTextureCache::new();
-        self.open_note = None;
+        self.set_open_note(None);
         self.open_note_pos = None;
-        self.open_note_body = String::new();
-        self.open_note_focus = false;
         self.find = None;
         self.refs.close_windows();
         self.typewriter_anchor = None;
@@ -3450,12 +3478,7 @@ impl KameApp {
                     let caret = self.session.valid_caret();
                     self.session.set_block_kind(caret.block_id, kind);
                 }
-                Command::AddAnnotation(kind) => {
-                    if let Some(id) = self.session.add_annotation(kind) {
-                        self.set_open_note(Some(id));
-                        self.open_note_pos = None;
-                    }
-                }
+                Command::AddAnnotation(kind) => self.add_annotation(kind),
             }
         }
     }
@@ -3886,12 +3909,7 @@ impl KameApp {
             MenuAction::ImportMarkdown => self.import_markdown(),
             MenuAction::Properties => self.begin_properties(),
             MenuAction::File(command) => self.run_file_command(command),
-            MenuAction::Annotate(kind) => {
-                if let Some(id) = self.session.add_annotation(kind) {
-                    self.set_open_note(Some(id));
-                    self.open_note_pos = None;
-                }
-            }
+            MenuAction::Annotate(kind) => self.add_annotation(kind),
             MenuAction::Cite => self.begin_cite(),
             MenuAction::References => self.open_references(),
             MenuAction::TypeSize(step) => self.adjust_font_size(step),
@@ -5233,10 +5251,7 @@ impl KameApp {
                 ("Footnote", AnnotationKind::Footnote),
             ] {
                 if ui.button(label).clicked() {
-                    if let Some(id) = self.session.add_annotation(kind) {
-                        self.set_open_note(Some(id));
-                        self.open_note_pos = None;
-                    }
+                    self.add_annotation(kind);
                     ui.close();
                 }
             }
@@ -6134,6 +6149,7 @@ impl KameApp {
             .unwrap_or_default();
         let path = resolve_open_path(&typed, &base);
         // Before the open, which may be of this same file.
+        self.set_open_note(None);
         self.save_position_now();
         self.sync_logs();
         if let Err(err) = kame_sync::logs::build_from_logs(&path) {
@@ -6787,17 +6803,7 @@ impl eframe::App for KameApp {
         // pressed on coming back lands in text that's up to date.
         self.tick_logs(ctx);
         self.notebook_tick(ctx);
-        let close_requested = ctx.input(|input| input.viewport().close_requested());
-        if close_requested {
-            self.save_position_now();
-        }
-        let unsaved =
-            !self.session.save_failed && self.session.is_anonymous() && self.session.has_content();
-        if close_requested && self.close_flow.on_close_request(unsaved) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            // A hidden window has to come forward for its prompt to be answered.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
+        self.handle_close_request(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -6982,6 +6988,26 @@ impl Headless {
             app.show_citation(ui.ctx());
         });
         self.drawn = output.platform_output.accesskit_update.take();
+        output.drop_without_applying_deltas();
+    }
+
+    /// One frame in which the window is asked to close, as far as what `logic` does about it.
+    fn close_request(&mut self) {
+        self.time += 0.02;
+        let mut input = egui::RawInput {
+            time: Some(self.time),
+            ..Default::default()
+        };
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let app = &mut self.app;
+        let output = self
+            .ctx
+            .run_ui(input, |ui| app.handle_close_request(ui.ctx()));
         output.drop_without_applying_deltas();
     }
 
@@ -9977,6 +10003,108 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         assert!(page.app.session.document().annotations.is_empty());
         assert_eq!(page.app.session.document(), &before);
         assert_eq!(page.app.session.history(), (1, 0));
+    }
+
+    /// A document in a file with a word in it and an unwritten marginal up.
+    fn page_on_file_with_unwritten_marginal() -> (Headless, PathBuf, Document) {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("word");
+        let before = session.document().clone();
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+        (page, path, before)
+    }
+
+    #[test]
+    fn adding_a_second_marginal_takes_away_the_unwritten_first() {
+        let (mut page, before) = page_with_unwritten_marginal();
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+        page.press("Close");
+        assert_eq!(page.app.session.document(), &before);
+    }
+
+    #[test]
+    fn opening_another_document_takes_away_an_unwritten_marginal() {
+        let (mut page, path, before) = page_on_file_with_unwritten_marginal();
+        let other = temp_db_path();
+        page.app.open_document(other.display().to_string());
+        assert_eq!(page.app.open_note, None);
+        assert_ne!(page.app.session.path(), Some(path.as_path()));
+        assert_eq!(open(&path).document(), &before);
+    }
+
+    #[test]
+    fn a_new_document_takes_away_an_unwritten_marginal() {
+        let (mut page, path, before) = page_on_file_with_unwritten_marginal();
+        page.app.request_new();
+        assert!(page.app.session.is_anonymous());
+        assert_eq!(page.app.open_note, None);
+        assert_eq!(open(&path).document(), &before);
+    }
+
+    #[test]
+    fn reopening_the_file_takes_away_an_unwritten_marginal() {
+        let (mut page, path, before) = page_on_file_with_unwritten_marginal();
+        let history = (1, 0);
+        page.app.open_document(path.display().to_string());
+        assert_eq!(page.app.open_note, None);
+        assert_eq!(page.app.session.document(), &before);
+        assert_eq!(page.app.session.history(), history);
+        assert_eq!(open(&path).history(), history);
+    }
+
+    #[test]
+    fn adopting_a_copy_of_the_same_file_takes_away_an_unwritten_marginal() {
+        let (mut page, path, before) = page_on_file_with_unwritten_marginal();
+        let reread = open(&path);
+        assert_eq!(reread.document().annotations.len(), 1);
+        page.app.adopt_session(reread);
+        assert_eq!(page.app.open_note, None);
+        assert_eq!(page.app.session.document(), &before);
+        page.app.session.insert(" more");
+        let (document, history) = (
+            page.app.session.document().clone(),
+            page.app.session.history(),
+        );
+        let reopened = open(&path);
+        assert_eq!(reopened.document(), &document);
+        assert_eq!(reopened.history(), history);
+    }
+
+    #[test]
+    fn quitting_takes_away_an_unwritten_marginal() {
+        let (mut page, path, before) = page_on_file_with_unwritten_marginal();
+        page.close_request();
+        assert_eq!(page.app.open_note, None);
+        assert_eq!(open(&path).document(), &before);
+    }
+
+    #[test]
+    fn a_refused_quit_keeps_a_written_note() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        let id = page.app.open_note.unwrap();
+        page.app.session.set_annotation_body(id, "Said something.");
+        page.frame(Vec::new());
+        page.close_request();
+        assert!(page.app.close_flow.prompting);
+        assert_eq!(
+            page.app.session.document().annotations[0].body,
+            "Said something."
+        );
     }
 
     #[test]

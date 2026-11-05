@@ -4587,6 +4587,7 @@ mod tests {
         let mut page = page_with_browser("");
         other_document(&page, "other.kame", "elsewhere");
         page.app.nb.refresh_listing();
+        wait_for_row(&mut page, "other.kame");
         page.press("New reference…");
         fill_form(&mut page, "lamport1994");
         let opened = page.app.session.path().map(Path::to_path_buf);
@@ -4608,14 +4609,7 @@ mod tests {
         let paper = root_of(&page).join("paper.pdf");
         std::fs::write(&paper, "").unwrap();
         page.app.nb.refresh_listing();
-        // The listing comes from a background thread.
-        for _ in 0..2000 {
-            page.frame(Vec::new());
-            if page.can_press("paper.pdf") {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        wait_for_row(&mut page, "paper.pdf");
         page.press("paper.pdf");
 
         assert_eq!(
@@ -4625,6 +4619,19 @@ mod tests {
         assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
         assert_eq!(page.app.refs.form.as_ref().unwrap().form.key, "lamport1994");
         assert_eq!(page.app.notice, None);
+    }
+
+    /// Runs frames until the browser has a row saying `label`, as its listing comes from a
+    /// background thread.
+    fn wait_for_row(page: &mut Headless, label: &str) {
+        for _ in 0..2000 {
+            page.frame(Vec::new());
+            if page.can_press(label) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the browser never listed {label:?}");
     }
 
     /// A form with something typed in it, up over the document in a notebook.

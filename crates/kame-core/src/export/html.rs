@@ -457,7 +457,9 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
                 "<img class=\"{class}\" src=\"{}\" alt=\"\">",
                 escape_attribute(&src)
             );
-            match link.as_deref().filter(|url| !is_script_url(url)) {
+            // A heading has no id on the page, so a link to one would lead nowhere.
+            let leads_somewhere = |url: &&str| !is_script_url(url) && !url.starts_with('#');
+            match link.as_deref().filter(leads_somewhere) {
                 Some(url) => body.push_str(&format!(
                     "<a href=\"{}\">{image}</a>\n",
                     escape_attribute(url)
@@ -1821,6 +1823,15 @@ mod tests {
         doc.blocks = vec![image(Some("javascript:alert(1)"))];
         let html = to_html(&doc);
         assert!(!html.contains("javascript:"), "{html}");
+        assert!(html.contains(r#"<img class="image" src="a.png""#), "{html}");
+    }
+
+    #[test]
+    fn an_image_linked_to_a_heading_publishes_without_it() {
+        let mut doc = Document::new("t");
+        doc.blocks = vec![image(Some("#The Intro"))];
+        let html = to_html(&doc);
+        assert!(!html.contains("#The Intro"), "{html}");
         assert!(html.contains(r#"<img class="image" src="a.png""#), "{html}");
     }
 

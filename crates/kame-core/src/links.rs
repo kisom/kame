@@ -124,6 +124,82 @@ pub fn retargeted(target: &str, from: &Path, to: &Path) -> String {
     format!("{}{after}", path_between(&to_folder, &file))
 }
 
+/// What a link to a folder means, as kame_notebook::INDEX has it, which core can't name.
+const FOLDER_INDEX: &str = "Notebook.kame";
+
+/// `target`, a link to a document that is now the file `new_file`, written the way it was
+/// before and as the document at `document_after` has to say it. Whatever follows the path,
+/// like a heading, is kept as it was written. A `~/` path stays under the home folder, an
+/// absolute one stays absolute, and a link to a folder stays one only while the file is that
+/// folder's index. Any other is the way from the document's folder to the file.
+pub fn moved_target(target: &str, new_file: &Path, document_after: &Path) -> String {
+    let (path, _) = split_document_target(target);
+    if path.is_empty() {
+        return target.to_string();
+    }
+    let after = &target[path.len()..];
+    let real_file = match (
+        new_file
+            .parent()
+            .and_then(|folder| folder.canonicalize().ok()),
+        new_file.file_name(),
+    ) {
+        (Some(folder), Some(name)) => folder.join(name),
+        _ => new_file.to_path_buf(),
+    };
+    if path.starts_with("~/") {
+        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        let inside = home.and_then(|home| {
+            [new_file, real_file.as_path()]
+                .into_iter()
+                .find_map(|file| {
+                    let relative = file
+                        .strip_prefix(&home)
+                        .ok()
+                        .or_else(|| file.strip_prefix(home.canonicalize().ok()?).ok())?;
+                    Some(relative.display().to_string())
+                })
+        });
+        return match inside {
+            Some(relative) => format!("~/{relative}{after}"),
+            None => format!("{}{after}", new_file.display()),
+        };
+    }
+    if path.starts_with('/') || path.starts_with('~') {
+        return format!("{}{after}", new_file.display());
+    }
+    let Some(folder) = document_after.parent().map(|folder| {
+        folder
+            .canonicalize()
+            .unwrap_or_else(|_| folder.to_path_buf())
+    }) else {
+        return target.to_string();
+    };
+    if path.ends_with('/')
+        && real_file
+            .file_name()
+            .is_some_and(|name| name == FOLDER_INDEX)
+    {
+        let named = tidied(&folder.join(path));
+        let named = named.canonicalize().unwrap_or(named);
+        if real_file.parent() == Some(named.as_path()) {
+            return target.to_string();
+        }
+    }
+    format!("{}{after}", path_between(&folder, &real_file))
+}
+
+/// `target`, a link in the document that moves from `from` to `to`, as it has to be written
+/// afterward. `#Heading` means the document itself, so it stays; any other is `retargeted`.
+pub fn own_target_after_move(target: &str, from: &Path, to: &Path) -> String {
+    let (path, _) = split_document_target(target);
+    if path.is_empty() {
+        target.to_string()
+    } else {
+        retargeted(target, from, to)
+    }
+}
+
 /// A document link's target as its path and the heading it names, if any.
 pub fn split_document_target(target: &str) -> (&str, Option<&str>) {
     match target.split_once('#') {
@@ -161,6 +237,69 @@ mod tests {
         std::fs::write(root.join("static/plates/a.png"), "a").unwrap();
         std::fs::write(root.join("maritain/b.png"), "b").unwrap();
         root
+    }
+
+    #[test]
+    fn a_moved_target_keeps_its_form() {
+        let root = kame_test_dir::folder("moved-target")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let doc = root.join("a/doc.kame");
+        let new = root.join("b/new.kame");
+        assert_eq!(moved_target("old.kame", &new, &doc), "../b/new.kame");
+        assert_eq!(moved_target("old", &new, &doc), "../b/new.kame");
+        assert_eq!(
+            moved_target("old.kame#Part two", &new, &doc),
+            "../b/new.kame#Part two"
+        );
+        let absolute = new.display().to_string();
+        assert_eq!(
+            moved_target(root.join("a/old.kame").to_str().unwrap(), &new, &doc),
+            absolute
+        );
+    }
+
+    #[test]
+    fn a_tilde_target_stays_under_the_home_folder() {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let new = home.join("notes/new.kame");
+        assert_eq!(
+            moved_target("~/notes/old.kame", &new, Path::new("/x/doc.kame")),
+            "~/notes/new.kame"
+        );
+    }
+
+    #[test]
+    fn a_folder_link_stays_a_folder_link_only_while_it_is_the_index() {
+        let root = kame_test_dir::folder("moved-index").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        let doc = root.join("doc.kame");
+        assert_eq!(
+            moved_target("a/", &root.join("a/Notebook.kame"), &doc),
+            "a/"
+        );
+        assert_eq!(
+            moved_target("a/", &root.join("a/other.kame"), &doc),
+            "a/other.kame"
+        );
+    }
+
+    #[test]
+    fn a_moved_documents_heading_link_still_means_itself() {
+        let root = kame_test_dir::folder("own-target").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        let (from, to) = (root.join("a/doc.kame"), root.join("a/b/doc.kame"));
+        assert_eq!(own_target_after_move("#Part two", &from, &to), "#Part two");
+        assert_eq!(
+            own_target_after_move("other.kame", &from, &to),
+            "../other.kame"
+        );
+        assert_eq!(
+            own_target_after_move("https://example.com", &from, &to),
+            "https://example.com"
+        );
     }
 
     #[test]

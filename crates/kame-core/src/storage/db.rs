@@ -384,6 +384,13 @@ impl Db {
         Ok(())
     }
 
+    /// Forgets what a sync tool recorded, for a file that is not the one it recorded it for.
+    pub fn clear_sync_state(&mut self) -> Result<(), DbError> {
+        self.conn
+            .execute("DELETE FROM meta WHERE key = ?1", params![SYNC_KEY])?;
+        Ok(())
+    }
+
     /// Reads the document's metadata, or `None` if it has none stored yet.
     pub fn load_metadata(&self) -> Result<Option<crate::model::Metadata>, DbError> {
         let json = self

@@ -649,6 +649,8 @@ impl Session {
         }
 
         self.db = Db::open(path)?;
+        // The copy is a different file, and what a sync tool recorded was about the original.
+        self.db.clear_sync_state()?;
         self.path = Some(path.to_path_buf());
         self.on_disk = file_identity(path);
         self.log_on_disk = file_identity(&wal_path(path));
@@ -922,6 +924,68 @@ impl Session {
         let saved = self.record(&op);
         self.valid_caret();
         saved
+    }
+
+    /// Rewrites every link in the document, web links, document links and an image's link, by
+    /// `rewrite`, which answers `None` to leave one as it is. All of it is one undo step, and
+    /// nothing is written if nothing changes. Returns how many links changed.
+    pub fn rewrite_links(
+        &mut self,
+        mut rewrite: impl FnMut(&str) -> Option<String>,
+    ) -> Result<usize, String> {
+        if self.newer {
+            return Err("this document has changes from a newer version of kame".into());
+        }
+        if self.save_failed {
+            return Err("this document could not be saved".into());
+        }
+        let mut document = self.editor.document().clone();
+        let mut changed = 0;
+        let mut apply = |link: &mut String| match rewrite(link) {
+            Some(new) if new != *link => {
+                *link = new;
+                changed += 1;
+            }
+            _ => {}
+        };
+        for block in &mut document.blocks {
+            for span in &mut block.spans {
+                match &mut span.style {
+                    SpanStyle::Link { url } => apply(url),
+                    SpanStyle::DocumentLink { target } => apply(target),
+                    _ => {}
+                }
+            }
+            if let BlockKind::Image {
+                link: Some(link), ..
+            } = &mut block.kind
+            {
+                apply(link);
+            }
+        }
+        if changed > 0 && !self.replace_document(document) {
+            return Err("could not save the changed links".into());
+        }
+        Ok(changed)
+    }
+
+    /// After the file is renamed from `old_stem` to `new_stem`, a title that was only the old
+    /// name becomes the new one, in the properties and in the document. A title the author set
+    /// is left. Returns whether anything changed.
+    pub fn follow_rename(&mut self, old_stem: &str, new_stem: &str) -> bool {
+        let mut changed = false;
+        if self.metadata.title == old_stem {
+            let mut metadata = self.metadata.clone();
+            metadata.title = new_stem.to_string();
+            self.set_metadata(metadata);
+            changed = true;
+        }
+        if self.editor.document().title == old_stem {
+            let mut document = self.editor.document().clone();
+            document.title = new_stem.to_string();
+            changed |= self.replace_document(document);
+        }
+        changed
     }
 
     /// Replaces the whole document with what another machine wrote. Arrivals with no edit between
@@ -2760,6 +2824,135 @@ mod tests {
 
     fn open(path: &Path) -> Session {
         Session::open(path).expect("open a session")
+    }
+
+    fn linked_document() -> Session {
+        let mut session = Session::anonymous().unwrap();
+        let mut document = session.document().clone();
+        let block = &mut document.blocks[0];
+        block.text = "see here and there".to_string();
+        block.spans = vec![
+            Span {
+                start: 4,
+                end: 8,
+                style: SpanStyle::DocumentLink {
+                    target: "old.kame".to_string(),
+                },
+            },
+            Span {
+                start: 9,
+                end: 12,
+                style: SpanStyle::Link {
+                    url: "old.kame".to_string(),
+                },
+            },
+        ];
+        document.blocks.push(crate::model::Block {
+            id: BlockId::new_v4(),
+            kind: BlockKind::Image {
+                path: "plate.png".to_string(),
+                link: Some("old.kame".to_string()),
+                align: ImageAlign::Left,
+            },
+            text: String::new(),
+            spans: vec![],
+        });
+        assert!(session.replace_document(document));
+        session
+    }
+
+    #[test]
+    fn rewriting_links_changes_both_kinds_and_an_images_link_as_one_undo_step() {
+        let mut session = linked_document();
+        let before = session.document().clone();
+        let history = session.history();
+        let changed =
+            session.rewrite_links(|target| (target == "old.kame").then(|| "new.kame".to_string()));
+        assert_eq!(changed, Ok(3));
+        assert_eq!(session.history().0, history.0 + 1);
+        let after = session.document();
+        assert_eq!(after.blocks[0].text, before.blocks[0].text);
+        assert_eq!(after.annotations, before.annotations);
+        assert_eq!(
+            after.blocks[0].spans[0].style,
+            SpanStyle::DocumentLink {
+                target: "new.kame".to_string()
+            }
+        );
+        assert_eq!(
+            after.blocks[0].spans[1].style,
+            SpanStyle::Link {
+                url: "new.kame".to_string()
+            }
+        );
+        assert!(matches!(
+            &after.blocks[1].kind,
+            BlockKind::Image { link: Some(link), .. } if link == "new.kame"
+        ));
+        assert!(session.undo());
+        assert_eq!(session.document(), &before);
+    }
+
+    #[test]
+    fn rewriting_no_links_writes_nothing() {
+        let mut session = linked_document();
+        let history = session.history();
+        assert_eq!(session.rewrite_links(|_| None), Ok(0));
+        assert_eq!(
+            session.rewrite_links(|target| Some(target.to_string())),
+            Ok(0)
+        );
+        assert_eq!(session.history(), history);
+    }
+
+    #[test]
+    fn rewriting_links_refuses_a_document_from_a_newer_version() {
+        let mut session = linked_document();
+        session.mark_newer();
+        assert!(session.rewrite_links(|_| Some("x".to_string())).is_err());
+    }
+
+    #[test]
+    fn a_rename_changes_a_title_still_matching_the_old_name() {
+        let mut session = Session::anonymous().unwrap();
+        let mut document = session.document().clone();
+        document.title = "foo".to_string();
+        session.replace_document(document);
+        session.set_metadata(Metadata {
+            title: "foo".to_string(),
+            ..session.metadata.clone()
+        });
+        assert!(session.follow_rename("foo", "bar"));
+        assert_eq!(session.metadata.title, "bar");
+        assert_eq!(session.document().title, "bar");
+    }
+
+    #[test]
+    fn a_rename_leaves_a_title_the_author_set() {
+        let mut session = Session::anonymous().unwrap();
+        session.set_metadata(Metadata {
+            title: "On Matter".to_string(),
+            ..session.metadata.clone()
+        });
+        assert!(!session.follow_rename("foo", "bar"));
+        assert_eq!(session.metadata.title, "On Matter");
+        let mut document = session.document().clone();
+        document.title = "foo".to_string();
+        session.replace_document(document);
+        assert!(session.follow_rename("foo", "bar"));
+        assert_eq!(session.metadata.title, "On Matter");
+        assert_eq!(session.document().title, "bar");
+    }
+
+    #[test]
+    fn saving_as_clears_the_sync_state() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.set_sync_state("x");
+        assert_eq!(session.sync_state().as_deref(), Some("x"));
+        let other = path.with_file_name("other.kame");
+        session.save_as(&other).unwrap();
+        assert_eq!(session.sync_state(), None);
     }
 
     fn first_block_id(session: &Session) -> crate::model::BlockId {

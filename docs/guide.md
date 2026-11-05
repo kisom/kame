@@ -165,7 +165,7 @@ Links are how a notebook grows. Following a link to a document that isn't there 
 
 Below the footnotes, "Linked from" lists the documents that link to this one. It's only drawn on screen, and never reaches an export or a site.
 
-kame has no Move command yet. If you move or rename a document, links to it don't follow, and its published address changes with it.
+To rename, move or delete a document in a notebook, right-click it in the browser. Links to it follow a rename or a move, and its published address changes with it. Move or rename the file by hand and links to it don't follow.
 
 ## Where to put papers and images
 

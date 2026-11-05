@@ -3,6 +3,7 @@
 //! document. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
@@ -11,13 +12,16 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use kame_core::model::{BlockId, Metadata};
+use kame_core::session::Session;
 use kame_notebook::links::{create_document, linking_to, remove_untouched, Follow, LinkFrom, Made};
-use kame_notebook::list::{listed, listed_if_changed, narrow, rows, Kind, Listed, RowKind};
+use kame_notebook::list::{listed, listed_if_changed, narrow, rows, Entry, Kind, Listed, RowKind};
+use kame_notebook::log_folder;
+use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
 use kame_notebook::search::{search, Hit};
 use kame_notebook::stranded::{apply, decide, find_stranded, Done, Steps};
 use kame_notebook::Notebook;
 
-use super::{same_document, BackStop, KameApp};
+use super::{now_unix, same_document, same_place, BackStop, KameApp};
 
 /// How wide the browser is.
 const BROWSER_WIDTH: f32 = 200.0;
@@ -64,6 +68,24 @@ struct Fresh {
     metadata: Metadata,
 }
 
+/// A document's row was right-clicked, and this is the dialog that opened.
+pub(crate) enum FileOp {
+    /// A rename or a move, which are one dialog and differ in what's selected when it opens.
+    Path {
+        from: PathBuf,
+        /// The new path, from the notebook's root.
+        field: String,
+        refusal: Option<String>,
+        rename: bool,
+        /// Whether it has just opened, and is yet to take the keyboard.
+        focus: bool,
+    },
+    Delete {
+        path: PathBuf,
+        title: String,
+    },
+}
+
 /// What a clean-up pass read: when each database was first seen stranded, and what to do.
 type StrandedPass = (HashMap<PathBuf, Instant>, Steps);
 
@@ -99,6 +121,9 @@ pub(crate) struct NotebookUi {
     pub(crate) page_hidden: bool,
     /// A document clicked on in what links here.
     pub(crate) pending_open: Option<PathBuf>,
+    pub(crate) file_op: Option<FileOp>,
+    /// What a move couldn't change, waiting to be read.
+    pub(crate) move_report: Option<MoveReport>,
 }
 
 impl NotebookUi {
@@ -263,6 +288,66 @@ fn what_was_done(done: &Done) -> String {
             text
         }
     }
+}
+
+/// What's selected when the rename and move dialog opens on `relative`, in characters as the field
+/// counts them: for a rename, the file's name without its extension, and for a move, the folders.
+pub(crate) fn path_selection(relative: &str, rename: bool) -> Range<usize> {
+    let characters = |text: &str| text.chars().count();
+    let (folders, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    if !rename {
+        return 0..characters(folders);
+    }
+    let start = characters(relative) - characters(name);
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    start..start + characters(stem)
+}
+
+fn documents(count: usize) -> String {
+    match count {
+        1 => "1 document".to_string(),
+        count => format!("{count} documents"),
+    }
+}
+
+/// What a move says when there's nothing in it to read further.
+fn moved_notice(relative: &str, changed: usize) -> String {
+    match changed {
+        0 => format!("moved to {relative}"),
+        changed => format!(
+            "moved to {relative}, and updated links in {}",
+            documents(changed)
+        ),
+    }
+}
+
+/// Why the open document can't be moved. Reopening it after the move would lose whatever is only on
+/// the screen. Newer comes first, since a document from a newer version also counts as a failed save.
+fn why_not_move(save_failed: bool, newer: bool) -> Option<&'static str> {
+    if newer {
+        Some("this document has changes from a newer version of kame, so it can't be moved")
+    } else if save_failed {
+        Some("the last save failed, so retry it before moving this document")
+    } else {
+        None
+    }
+}
+
+fn path_field_id() -> egui::Id {
+    egui::Id::unique("kame-file-op-path")
+}
+
+/// Gets the field ready to open with `selection` selected. It starts from nothing, so that undo in
+/// it can't bring back the path of whatever document the dialog last opened on.
+fn select_in_path_field(ctx: &egui::Context, selection: Range<usize>) {
+    let mut state = egui::text_edit::TextEditState::default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(selection.start),
+            egui::text::CCursor::new(selection.end),
+        )));
+    state.store(ctx, path_field_id());
 }
 
 /// Where the text starts, within the room right of the browser: where it would be anyway if
@@ -667,6 +752,7 @@ impl KameApp {
         }
         let mut choose: Option<(PathBuf, Kind)> = None;
         let mut toggle: Option<String> = None;
+        let mut file_op: Option<FileOp> = None;
         let current = self.session.path().map(Path::to_path_buf);
         let entries: Vec<_> = self
             .nb
@@ -707,8 +793,17 @@ impl KameApp {
                                 RowKind::Entry(at) => {
                                     let entry = &entries[*at];
                                     let here = current.as_deref() == Some(entry.path.as_path());
-                                    if ui.selectable_label(here, &row.name).clicked() {
+                                    let label = ui.selectable_label(here, &row.name);
+                                    if label.clicked() {
                                         choose = Some((entry.path.clone(), entry.kind));
+                                    }
+                                    if entry.kind == Kind::Document {
+                                        let title = &self.nb.listing[*at].title;
+                                        label.context_menu(|ui| {
+                                            if let Some(op) = document_menu(ui, entry, title) {
+                                                file_op = Some(op);
+                                            }
+                                        });
                                     }
                                 }
                             }
@@ -729,6 +824,9 @@ impl KameApp {
                 self.nb.browser_folders.insert(folder);
             }
             self.persist();
+        }
+        if let Some(op) = file_op {
+            self.start_file_op(op);
         }
         match choose {
             Some((path, Kind::Document)) => self.open_from_notebook(path, None),
@@ -913,6 +1011,34 @@ impl KameApp {
     }
 }
 
+/// A document row's right-click menu, and the dialog chosen from it.
+fn document_menu(ui: &mut egui::Ui, entry: &Entry, title: &str) -> Option<FileOp> {
+    ui.set_min_width(120.0);
+    let path_dialog = |rename| FileOp::Path {
+        from: entry.path.clone(),
+        field: entry.relative.clone(),
+        refusal: None,
+        rename,
+        focus: true,
+    };
+    let chosen = if ui.button("Rename…").clicked() {
+        Some(path_dialog(true))
+    } else if ui.button("Move…").clicked() {
+        Some(path_dialog(false))
+    } else if ui.button("Delete…").clicked() {
+        Some(FileOp::Delete {
+            path: entry.path.clone(),
+            title: title.to_string(),
+        })
+    } else {
+        None
+    };
+    if chosen.is_some() {
+        ui.close();
+    }
+    chosen
+}
+
 /// Escape and Enter for a list, as (close, confirm), and the arrows moving through its rows.
 fn list_keys(ctx: &egui::Context, selected: &mut usize, rows: usize) -> (bool, bool) {
     ctx.input_mut(|input| {
@@ -1055,11 +1181,386 @@ impl KameApp {
         self.nb.browser_open = true;
         self.nb.refresh_listing();
     }
+
+    /// Puts up a dialog chosen from a document's right-click menu, in place of any other. Something
+    /// that can't be moved says so now, rather than after a path has been typed for it.
+    fn start_file_op(&mut self, op: FileOp) {
+        if self.close_flow.prompting {
+            return;
+        }
+        if let FileOp::Path { from, .. } = &op {
+            if self.say_if_move_refused(from) {
+                return;
+            }
+        }
+        self.dismiss_dialog();
+        self.nb.file_op = Some(op);
+    }
+
+    /// Says so if the open document is `from` and can't be moved, and returns whether it did.
+    fn say_if_move_refused(&mut self, from: &Path) -> bool {
+        if !same_document(self.session.path(), Some(from)) {
+            return false;
+        }
+        let Some(refusal) = why_not_move(self.session.save_failed, self.session.newer) else {
+            return false;
+        };
+        self.notice_tracker.announced();
+        self.notice = Some(refusal.to_string());
+        true
+    }
+
+    /// The dialog a document's menu opened.
+    pub(crate) fn show_file_op(&mut self, ctx: &egui::Context, enter: bool) {
+        match self.nb.file_op.take() {
+            Some(FileOp::Path {
+                from,
+                mut field,
+                mut refusal,
+                rename,
+                focus,
+            }) => {
+                // A chord and an Enter arriving in the same frame would otherwise submit a path
+                // nobody has looked at.
+                let mut submit = enter && !focus;
+                let mut cancel = false;
+                if focus {
+                    select_in_path_field(ctx, path_selection(&field, rename));
+                }
+                let error = self.palette.error_ink;
+                egui::Window::new(if rename { "Rename" } else { "Move" })
+                    .id(egui::Id::unique("kame-file-op-path-dialog"))
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .collapsible(false)
+                    .resizable(false)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        ui.label("Its path in this notebook:");
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut field)
+                                .id(path_field_id())
+                                // Enter would take the keyboard away, and a refusal leaves the
+                                // field there to be corrected.
+                                .return_key(None)
+                                .desired_width(420.0),
+                        );
+                        if focus {
+                            edit.request_focus();
+                        }
+                        if edit.changed() {
+                            refusal = None;
+                        }
+                        if let Some(refusal) = &refusal {
+                            ui.colored_label(error, refusal);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button(if rename { "Rename" } else { "Move" }).clicked() {
+                                submit = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                if cancel {
+                    return;
+                }
+                if submit {
+                    match self.move_to_typed_path(&from, &field) {
+                        Ok(()) => return,
+                        Err(why) => refusal = Some(why),
+                    }
+                }
+                self.nb.file_op = Some(FileOp::Path {
+                    from,
+                    field,
+                    refusal,
+                    rename,
+                    focus: false,
+                });
+            }
+            Some(FileOp::Delete { path, title }) => {
+                let (mut delete, mut cancel) = (false, false);
+                egui::Window::new("Delete")
+                    .id(egui::Id::unique("kame-file-op-delete-dialog"))
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .collapsible(false)
+                    .resizable(false)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        ui.label(format!("Delete {title}? This can't be undone."));
+                        ui.horizontal(|ui| {
+                            delete = ui.button("Delete").clicked();
+                            cancel = ui.button("Cancel").clicked();
+                        });
+                    });
+                if delete {
+                    self.delete_from_notebook(&path, &title);
+                } else if !cancel {
+                    self.nb.file_op = Some(FileOp::Delete { path, title });
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Moves a document to the path typed for it. `Err` is a refusal for the dialog, with nothing
+    /// changed.
+    fn move_to_typed_path(&mut self, from: &Path, typed: &str) -> Result<(), String> {
+        let Some(notebook) = self.nb.notebook.clone() else {
+            return Ok(());
+        };
+        let to = check_new_path(&notebook, from, typed)?;
+        // Going nowhere is no reason to leave the document and come back.
+        if to == from {
+            return Ok(());
+        }
+        self.move_document(&notebook, from, &to)
+    }
+
+    fn move_document(&mut self, notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String> {
+        let moving_open = same_document(self.session.path(), Some(from));
+        if self.say_if_move_refused(from) {
+            return Ok(());
+        }
+        // This has to go before the document is left, or leaving would take away a new document
+        // nobody has written in, which is about to be somewhere on purpose. It's also what lets the
+        // sync below give it logs to move.
+        self.forget_fresh(from);
+        self.save_position_now();
+        self.sync_logs();
+        // That can have failed to save what it merged, and then the file isn't what's on the screen.
+        if self.say_if_move_refused(from) {
+            return Ok(());
+        }
+        self.ensure_device();
+        let device = self.device.clone();
+        let now = now_unix();
+        // Before anything happens, since there's nothing to leave for if this fails.
+        let blank = if moving_open {
+            Some(
+                Session::anonymous()
+                    .map_err(|err| format!("could not leave this document — {err}"))?,
+            )
+        } else {
+            None
+        };
+        // The plan reads the open document from the screen, so it comes before leaving it.
+        let plan = plan_move(
+            notebook,
+            from,
+            to,
+            self.session
+                .path()
+                .map(|path| (path, self.session.document())),
+            &device,
+            now,
+        );
+        let (caret, scroll) = (self.session.caret, self.page_scroll);
+        // Its session is closed before the files move: a connection held across the rename would go
+        // on using its -wal under the old name, with the database under the new one.
+        if let Some(blank) = blank {
+            self.adopt_session(blank);
+        }
+        let open = (!moving_open).then_some(&mut self.session);
+        let result = carry_out(notebook, plan, open, &device, now);
+        if moving_open {
+            // Only now, since carry_out has changed the file's links and title for it to read.
+            let back_to = if result.is_ok() { to } else { from };
+            self.pending_heading = None;
+            self.open_document(back_to.display().to_string());
+            if same_document(self.session.path(), Some(back_to)) {
+                self.session.set_caret(caret);
+                self.session.restored_scroll = None;
+                self.pending_scroll = Some(scroll);
+            }
+        }
+        let report = match result {
+            Ok(report) => report,
+            Err(why) => {
+                self.notice = None;
+                return Err(why);
+            }
+        };
+        self.back.moved(from, to);
+        for recent in &mut self.nb.recent {
+            if same_place(recent, from) {
+                *recent = to.to_path_buf();
+            }
+        }
+        if self.last_document.moved(from, to) {
+            self.persist();
+        }
+        if !moving_open {
+            // carry_out saves its change to the open document, and leaves its logs to this.
+            self.sync_logs();
+        }
+        self.notebook_files_changed();
+        self.notice_tracker.announced();
+        if report.left.is_empty() {
+            let relative = to.strip_prefix(&notebook.root).unwrap_or(to).display();
+            self.notice = Some(moved_notice(&relative.to_string(), report.changed.len()));
+        } else {
+            self.notice = None;
+            self.nb.move_report = Some(report);
+        }
+        Ok(())
+    }
+
+    /// Stops treating `path` as a new document that may be taken away.
+    fn forget_fresh(&mut self, path: &Path) {
+        if self
+            .nb
+            .fresh
+            .as_ref()
+            .is_some_and(|fresh| same_place(&fresh.path, path))
+        {
+            self.nb.fresh = None;
+        }
+    }
+
+    /// Looks again at what's in the notebook and what links here. Clearing `looked_from` covers it
+    /// with a document open, and the rest is for an anonymous one, which that doesn't reach.
+    fn notebook_files_changed(&mut self) {
+        self.nb.looked_from = None;
+        self.nb.refresh_listing();
+        self.start_backlinks();
+    }
+
+    /// Deletes a document, for good. If it's open it's left first, since a session's connection
+    /// would otherwise go on writing to a file with no name, and leave a -wal beside nothing.
+    fn delete_from_notebook(&mut self, path: &Path, title: &str) {
+        self.save_position_now();
+        self.sync_logs();
+        if same_document(self.session.path(), Some(path)) && !self.leave_to_delete(path) {
+            return;
+        }
+        // Leaving a new document nobody has written in has already taken it away.
+        if path.symlink_metadata().is_ok() || log_folder(path).exists() {
+            if let Err(err) = delete_document(path) {
+                self.session.last_error =
+                    Some(format!("could not delete {} — {err}", path.display()));
+                self.notebook_files_changed();
+                return;
+            }
+        }
+        self.back.forget(path);
+        self.nb.recent.retain(|recent| !same_place(recent, path));
+        if self.last_document.is(path) {
+            self.last_document.forget();
+            self.persist();
+        }
+        self.forget_fresh(path);
+        self.notebook_files_changed();
+        self.notice_tracker.announced();
+        self.notice = Some(format!("deleted {title}"));
+    }
+
+    /// Goes to the contents page, or a new document if that's what's being deleted or it won't open.
+    /// Returns whether the document has been left.
+    fn leave_to_delete(&mut self, path: &Path) -> bool {
+        let index = self
+            .nb
+            .notebook
+            .as_ref()
+            .and_then(Notebook::index)
+            .filter(|index| !same_document(Some(index), Some(path)));
+        if let Some(index) = index {
+            self.pending_heading = None;
+            self.open_document(index.display().to_string());
+        }
+        if same_document(self.session.path(), Some(path)) {
+            match Session::anonymous() {
+                Ok(session) => self.adopt_session(session),
+                Err(err) => {
+                    self.session.last_error = Some(format!("could not leave it — {err}"));
+                    return false;
+                }
+            }
+        }
+        // A prompt about this file having been replaced was about what's now gone.
+        self.replaced_prompt = false;
+        true
+    }
+
+    /// What a move couldn't change, when there's something to name.
+    pub(crate) fn show_move_report(&mut self, ctx: &egui::Context) {
+        let Some(report) = &self.nb.move_report else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new("Moved")
+            .id(egui::Id::unique("kame-move-report"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Updated links in {}. These weren't changed:",
+                    documents(report.changed.len())
+                ));
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for left in &report.left {
+                            ui.label(format!("{}: {}", left.relative, left.why));
+                        }
+                    });
+                close = ui.button("Close").clicked();
+            });
+        if close {
+            self.nb.move_report = None;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_selects_the_name_and_move_selects_the_folders() {
+        assert_eq!(path_selection("a/b/doc.kame", true), 4..7);
+        assert_eq!(path_selection("a/b/doc.kame", false), 0..3);
+        assert_eq!(path_selection("doc.kame", true), 0..3);
+        assert_eq!(path_selection("doc.kame", false), 0..0);
+    }
+
+    #[test]
+    fn the_selection_counts_characters_not_bytes() {
+        assert_eq!(path_selection("é/matière.kame", true), 2..9);
+        assert_eq!(path_selection("é/matière.kame", false), 0..1);
+    }
+
+    #[test]
+    fn a_name_with_dots_in_it_keeps_all_but_its_extension_selected() {
+        assert_eq!(path_selection("a/v1.2.kame", true), 2..6);
+        assert_eq!(path_selection("a/plain", true), 2..7);
+    }
+
+    #[test]
+    fn a_moved_notice_says_where_and_how_many_changed() {
+        assert_eq!(moved_notice("a/b.kame", 0), "moved to a/b.kame");
+        assert_eq!(
+            moved_notice("a/b.kame", 1),
+            "moved to a/b.kame, and updated links in 1 document"
+        );
+        assert_eq!(
+            moved_notice("a/b.kame", 3),
+            "moved to a/b.kame, and updated links in 3 documents"
+        );
+    }
+
+    #[test]
+    fn a_document_with_a_failed_save_or_from_a_newer_version_is_not_moved() {
+        assert!(why_not_move(false, false).is_none());
+        assert!(why_not_move(true, false).unwrap().contains("failed"));
+        // A newer document also counts as failing to save, and that isn't what to say.
+        assert!(why_not_move(true, true).unwrap().contains("newer"));
+        assert!(why_not_move(false, true).unwrap().contains("newer"));
+    }
 
     #[test]
     fn a_stranded_database_waits_ten_minutes_from_when_it_was_first_seen() {

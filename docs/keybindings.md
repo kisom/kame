@@ -332,8 +332,25 @@ Below the footnotes, "Linked from" lists the documents linking to this one. It's
 What's searched is what this machine has. With revision logs, a closed document can be behind what another machine wrote until it's next
 opened.
 
-To move or delete a document in a folder with revision logs, move or delete both `X.kame` and `.X.kame.sync/`. Moving one leaves a stale copy
-on the other machine for now.
+Right-click a document in the browser for Rename…, Move… and Delete…. Folders and other files have no menu.
+
+Rename and Move open one dialog holding the document's path from the notebook's root. Rename selects its name and Move selects its folders,
+so you can type over either. Enter confirms, and Escape cancels. Folders it names are created. If something is already at the new path, or
+it isn't a place a document can be, the dialog says why and stays open. Nothing is ever overwritten: delete the other file first.
+
+A rename or move rewrites the links to the document in every other document, including closed ones and any with links only in their
+revision logs, and fixes its own relative links and images if it changed folders. A title that was only the file's name follows the new
+name. `.md` and `.markdown` documents are imported rather than edited, so links in them are left as they are. Those, and any other document
+that couldn't be changed, are named in a report when it's done.
+
+Delete asks once, and it's permanent. It takes the document, its logs, and any conflict or retired copies named for it. Links to it stay,
+and following one offers to create it again. If it was open, you land on the contents page, or a new document if it was the contents page.
+
+In a folder with revision logs, each of these reaches the other machines through the logs. A machine's own database doesn't travel, so on
+another machine the stale one is dealt with once kame has seen it stranded for 10 minutes: it's renamed to join its document if that moved.
+If the document was deleted, or has already been opened there, the old database is retired. It's only ever renamed, to `.X.retired.kame`
+beside where it was (`.X.retired-2.kame` if that's taken), and a notice says where and whether it holds words that never synced. Those files
+start with a dot, so the browser doesn't show them. `ls -a` finds them, and File > Open Path opens one.
 
 ### The site tool
 

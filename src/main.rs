@@ -275,6 +275,22 @@ impl LastDocument {
         self.path = None;
         self.seen = None;
     }
+
+    /// Whether this is the document at `path`, which may have gone.
+    fn is(&self, path: &Path) -> bool {
+        self.path.as_deref().is_some_and(|at| same_place(at, path))
+    }
+
+    /// The document moved, so the next launch finds it there. Returns whether that changed
+    /// anything to save.
+    fn moved(&mut self, from: &Path, to: &Path) -> bool {
+        if !self.is(from) {
+            return false;
+        }
+        self.path = Some(std::path::absolute(to).unwrap_or_else(|_| to.to_path_buf()));
+        self.seen = Some(to.to_path_buf());
+        true
+    }
 }
 
 /// The Tab presses in `events`, in order: true for Tab and false for Shift-Tab.
@@ -318,7 +334,16 @@ impl BackStack {
     /// Forgets stops in a document that's gone.
     fn forget(&mut self, path: &Path) {
         self.stops
-            .retain(|stop| !same_document(stop.path.as_deref(), Some(path)));
+            .retain(|stop| !stop.path.as_deref().is_some_and(|at| same_place(at, path)));
+    }
+
+    /// Stops in a document that has moved now lead to where it went.
+    fn moved(&mut self, from: &Path, to: &Path) {
+        for stop in &mut self.stops {
+            if stop.path.as_deref().is_some_and(|at| same_place(at, from)) {
+                stop.path = Some(to.to_path_buf());
+            }
+        }
     }
 
     fn push(&mut self, stop: BackStop) {
@@ -364,6 +389,13 @@ fn same_document(a: Option<&Path>, b: Option<&Path>) -> bool {
         },
         _ => false,
     }
+}
+
+/// Whether two paths name one place, whether or not there's anything there now, as after a move or
+/// a delete. The folder's what's compared, since it's still there to ask.
+fn same_place(a: &Path, b: &Path) -> bool {
+    let place = |path: &Path| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?));
+    same_document(Some(a), Some(b)) || place(a).is_some_and(|place_a| Some(place_a) == place(b))
 }
 
 /// Ctrl-[, or Cmd-[ on a Mac, as browsers on a Mac use.
@@ -2493,6 +2525,8 @@ impl KameApp {
             || self.restore_picker.is_some()
             || self.replaced_prompt
             || self.nb.list_open()
+            || self.nb.file_op.is_some()
+            || self.nb.move_report.is_some()
             || self.publishing.report.is_some()
     }
 
@@ -2501,6 +2535,8 @@ impl KameApp {
     fn dismiss_dialog(&mut self) -> bool {
         let open = self.dialog_open();
         self.nb.close_lists();
+        self.nb.file_op = None;
+        self.nb.move_report = None;
         self.metadata_prompt = None;
         self.snapshot_prompt = None;
         self.open_prompt = None;
@@ -5178,6 +5214,10 @@ impl KameApp {
             self.show_link_prompt(ctx, enter);
         } else if self.restore_picker.is_some() {
             self.show_restore_picker(ctx, enter);
+        } else if self.nb.file_op.is_some() {
+            self.show_file_op(ctx, enter);
+        } else if self.nb.move_report.is_some() {
+            self.show_move_report(ctx);
         }
         if self.show_help {
             self.show_help_dialog(ctx);
@@ -5942,6 +5982,14 @@ impl KameApp {
         }
     }
 
+    /// Works out this machine's name in revision logs, the first time it's wanted.
+    fn ensure_device(&mut self) {
+        if self.device.is_empty() {
+            self.device = kame_sync::logs::device_name(&kame_sync::logs::this_host());
+            self.persist();
+        }
+    }
+
     /// Writes what's here to the document's logs and merges whatever has arrived there.
     fn sync_logs(&mut self) {
         let Some(path) = self.session.path().map(Path::to_path_buf) else {
@@ -5962,10 +6010,7 @@ impl KameApp {
         if self.logged_path.as_deref() != Some(&path) || self.logged.is_none() {
             self.logged = None;
             if kame_sync::logs::logging_root(&path).is_some() {
-                if self.device.is_empty() {
-                    self.device = kame_sync::logs::device_name(&kame_sync::logs::this_host());
-                    self.persist();
-                }
+                self.ensure_device();
                 self.logged = kame_sync::logs::Logged::open(&self.session, &self.device);
             }
             self.logged_path = Some(path);
@@ -9026,6 +9071,59 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(back.pop(), Some(stop(2.0)));
         assert_eq!(back.pop(), Some(stop(1.0)));
         assert_eq!(back.pop(), None);
+    }
+
+    #[test]
+    fn back_stops_follow_a_move() {
+        let at = |path: &str| BackStop {
+            path: Some(PathBuf::from(path)),
+            caret: stop(0.0).caret,
+            scroll: 7.0,
+        };
+        let mut back = BackStack::default();
+        back.push(at("/n/a.kame"));
+        back.push(at("/n/b.kame"));
+        back.push(stop(1.0));
+        back.push(at("/n/a.kame"));
+        back.moved(Path::new("/n/a.kame"), Path::new("/n/x/c.kame"));
+        back.pop();
+        back.pop();
+        assert_eq!(
+            back.stops,
+            [at("/n/x/c.kame"), at("/n/b.kame")],
+            "the matching stops changed and the others didn't"
+        );
+    }
+
+    #[test]
+    fn a_stop_in_a_moved_document_is_found_by_any_way_of_naming_its_folder() {
+        let root = kame_test_dir::folder("app-back-stop-place");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let roundabout = root.join("sub/../gone.kame");
+        let mut back = BackStack::default();
+        back.push(BackStop {
+            path: Some(roundabout),
+            caret: stop(0.0).caret,
+            scroll: 0.0,
+        });
+        back.moved(&root.join("gone.kame"), &root.join("sub/here.kame"));
+        assert_eq!(
+            back.stops[0].path.as_deref(),
+            Some(root.join("sub/here.kame").as_path())
+        );
+        back.forget(&root.join("sub/./here.kame"));
+        assert!(back.stops.is_empty());
+    }
+
+    #[test]
+    fn the_last_document_follows_a_move_only_if_it_was_that_one() {
+        let (a, b) = (Path::new("/n/a.kame"), Path::new("/n/b.kame"));
+        let mut last = LastDocument::new(Some(a.to_path_buf()));
+        assert!(!last.moved(Path::new("/n/other.kame"), b));
+        assert_eq!(last.path.as_deref(), Some(a));
+        assert!(last.moved(a, b));
+        assert_eq!(last.path.as_deref(), Some(b));
+        assert!(!last.note(b), "it's already known");
     }
 
     #[test]

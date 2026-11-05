@@ -146,8 +146,16 @@ fn check_writable(notebook: &Notebook, key: &str) -> Result<PathBuf, String> {
 /// can still be writing it.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-/// Removes the temporary files an interrupted save left in `folder`: hidden files with
-/// `.saving-` in their names, not touched for a day. A symbolic link or anything that isn't a
+/// Whether `name` is what [`save`] calls its temporary file, which ends in a UUID.
+fn is_temporary_name(name: &str) -> bool {
+    name.starts_with('.')
+        && name
+            .rsplit_once(&format!("{EXTENSION}.saving-"))
+            .is_some_and(|(_, suffix)| uuid::Uuid::parse_str(suffix).is_ok())
+}
+
+/// Removes the temporary files an interrupted save left in `folder`: hidden files named as
+/// [`save`] names them, not touched for a day. A symbolic link or anything that isn't a
 /// plain file is left alone, and a file that can't be removed is left for next time.
 fn clear_stale_temporaries(folder: &Path) {
     let Ok(entries) = std::fs::read_dir(folder) else {
@@ -156,7 +164,7 @@ fn clear_stale_temporaries(folder: &Path) {
     let now = SystemTime::now();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with('.') || !name.contains(&format!("{EXTENSION}.saving-")) {
+        if !is_temporary_name(&name) {
             continue;
         }
         let stale = entry
@@ -532,25 +540,27 @@ mod tests {
     fn a_save_removes_old_leftover_temporary_files_and_no_others() {
         let notebook = notebook("ref-stale");
         let day = std::time::Duration::from_secs(24 * 60 * 60);
-        let old = put(&notebook, ".a.yaml.saving-1", "x");
+        let suffix = uuid::Uuid::new_v4();
+        let old = put(&notebook, &format!(".a.yaml.saving-{suffix}"), "x");
         aged(&old, day * 2);
-        let young = put(&notebook, ".b.yaml.saving-2", "x");
+        let young = put(&notebook, &format!(".b.yaml.saving-{suffix}"), "x");
         aged(&young, day / 2);
         let ordinary = put(&notebook, ".c.yaml", "x");
         aged(&ordinary, day * 2);
-        let visible = put(&notebook, "d.yaml.saving-3", "x");
+        let visible = put(&notebook, &format!("d.yaml.saving-{suffix}"), "x");
         aged(&visible, day * 2);
         let target = notebook.root.join("outside.txt");
         std::fs::write(&target, "x").unwrap();
         aged(&target, day * 2);
         #[cfg(unix)]
         let link = {
-            let link = folder(&notebook).join(".e.yaml.saving-4");
+            let link = folder(&notebook).join(format!(".e.yaml.saving-{suffix}"));
             std::os::unix::fs::symlink(&target, &link).unwrap();
             link
         };
         let folder_path = folder(&notebook);
-        std::fs::create_dir(folder_path.join(".f.yaml.saving-5")).unwrap();
+        let inner = folder_path.join(format!(".f.yaml.saving-{suffix}"));
+        std::fs::create_dir(&inner).unwrap();
 
         save(&notebook, "knuth1981", &article()).unwrap();
 
@@ -559,8 +569,25 @@ mod tests {
         assert!(ordinary.exists() && visible.exists() && target.exists());
         #[cfg(unix)]
         assert!(link.symlink_metadata().is_ok(), "a link goes");
-        assert!(folder_path.join(".f.yaml.saving-5").is_dir());
+        assert!(inner.is_dir());
         assert!(folder_path.join("knuth1981.yaml").is_file());
+    }
+
+    #[test]
+    fn a_save_leaves_an_old_hidden_file_whose_name_kame_would_not_have_written() {
+        let notebook = notebook("ref-stale-name");
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        for name in [
+            ".a.yaml.saving-1",
+            ".b.yaml.saving-",
+            ".c.yaml.saving-backup.yaml",
+            ".d.yaml.saving-not-a-uuid-at-all-really-not-one",
+        ] {
+            let file = put(&notebook, name, "someone's");
+            aged(&file, day * 2);
+            save(&notebook, "knuth1981", &article()).unwrap();
+            assert!(file.exists(), "{name}");
+        }
     }
 
     #[test]

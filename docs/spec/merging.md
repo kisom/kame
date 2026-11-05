@@ -267,6 +267,12 @@ A document with logs and no database can be built, even with no `.kame-logs` abo
 
 While a logged document stays open, the app looks at its logs every 3 seconds. It syncs only after 5 seconds without typing, when focus changes, or on returning after a gap of over 10 seconds between frames, since the machine slept or the window was hidden, and not with a dialog or a note open. It also syncs, with none of those conditions, on leaving the document, before opening a file and on exit. An untouched new document writes no logs. A document with logs but no `.kame-logs` above it gets a warning, because it may have stopped syncing.
 
+### 6.8 A newer version in the logs
+
+An older build must notice lines it can't fully read, rather than quietly falling behind. A line is from a newer version if it parses but has a field that's gone after reading and writing it again, or if it fails to parse on a kind this build doesn't know. Half a line, a damaged line and an older line lacking fields added since don't count.
+
+Having noticed, a sync still writes what's on the screen as a revision, so nothing typed is lost, and merges what it can use. Then the document goes read-only, saying that it has changes from a newer version of kame, until kame is updated.
+
 ## 7. Conflict copies and replaced files
 
 These are for a tool like Syncthing carrying the `.kame` file itself, and the app looks for them in logged folders too. There's no shared history to read here, so the base is found from the op logs:
@@ -296,7 +302,7 @@ These describe the code as it stands, and aren't rules to copy.
 
 - **Nothing checks `revision.document`.** Logs from a different document at the same name merge in, and the result takes the id of ours.
 - **A sync stops silently if the logs can't be read at open.** `Logged::open` returns nothing, and the app shows no message.
-- **A new field can stop revisions being read, with no message.** Digests and ids are recomputed from what a reader parsed, and readers drop fields they don't know. So when a newer build writes a field an older one doesn't know, the older one's digest differs. Tested at this commit: with a new field in a block, the line is read but the revision never becomes usable, and with a new field in metadata, the line is skipped. Everything built on that revision waits too. The `align` field on images does this for any centered or right-aligned image, until every machine has a build that knows it. A new variant of a block kind, style or annotation kind fails parsing, so that line is skipped.
+- **A newer build's revisions stop an older one following.** Digests and ids are recomputed from what a reader parsed, and readers drop fields they don't know. So when a newer build writes a field an older one doesn't know, the older one's digest differs: with a new field in a block, the line is read but the revision never becomes usable, and with one in metadata, the line is skipped. Everything built on that revision waits too. Section 6.8 makes that visible, but the older machine can't follow until it's updated.
 - **A new field must be left out when empty, or old revisions break.** If a new field were always written, a reader would add it when re-serializing old lines. In a revision or its metadata, the ids would stop matching and the lines would be skipped. In a block, the digest would change and the revision would stay unusable. `Metadata` writes all its fields, so a new metadata field needs a `skip_serializing_if`. Any change to how the JSON is written has the same effect.
 - **Sentences are English-shaped.** Abbreviations such as `e.g.` end a sentence if a space follows, which only makes conflicts coarser or finer and loses nothing. Text without those marks, such as Chinese with `。`, counts as one sentence until a line feed.
 - **Clocks decide which words stay in the text.** The later `when` becomes ours. The other words are kept in a note either way, so a wrong clock changes which words are in the note and loses nothing.

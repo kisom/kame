@@ -53,6 +53,9 @@ pub struct Session {
     log_on_disk: Option<FileIdentity>,
     /// Set when `path` stopped being that file. Nothing more is written.
     pub replaced: bool,
+    /// Whether this document holds something from a newer version of kame. Saving would lose it,
+    /// so nothing is saved until kame is updated.
+    pub newer: bool,
 }
 
 /// Where SQLite keeps the log of writes to the database at `path`.
@@ -95,6 +98,7 @@ impl Session {
         // it unable to write rather than merely historyless.
         let mut reset_error: Option<DbError> = None;
         let mut fresh = false;
+        let newer = db.holds_newer();
         let editor = match db.load_document() {
             Ok(document) => match db.load_ops() {
                 Ok(ops) => {
@@ -106,6 +110,8 @@ impl Session {
                     // second time.
                     Editor::with_cursor(document, ops, cursor)
                 }
+                // It belongs to a newer version of kame, and that version can still use it.
+                Err(_) if newer => Editor::new(document),
                 Err(err) => {
                     warning = Some(format!(
                         "history unavailable — {err}; opening the document with no undo history"
@@ -184,7 +190,7 @@ impl Session {
                 metadata
             }
         };
-        Ok(Session {
+        let mut session = Session {
             is_new: fresh,
             editor,
             db,
@@ -200,7 +206,24 @@ impl Session {
             on_disk: file_identity(path),
             log_on_disk: file_identity(&wal_path(path)),
             replaced: false,
-        })
+            newer: false,
+        };
+        if newer {
+            session.mark_newer();
+        }
+        Ok(session)
+    }
+
+    /// Stops saving this document, because it holds something from a newer version of kame that
+    /// saving would lose. It stays on the screen to read.
+    pub fn mark_newer(&mut self) {
+        self.newer = true;
+        self.save_failed = true;
+        self.last_error = Some(
+            "this document has changes from a newer version of kame, so it's read-only here \
+             until kame is updated"
+                .to_string(),
+        );
     }
 
     /// A session for a document that could not be opened: a fresh, in-memory
@@ -242,6 +265,7 @@ impl Session {
             on_disk: None,
             log_on_disk: None,
             replaced: false,
+            newer: false,
         })
     }
 
@@ -279,6 +303,7 @@ impl Session {
             on_disk: None,
             log_on_disk: None,
             replaced: false,
+            newer: false,
         })
     }
 
@@ -357,6 +382,7 @@ impl Session {
             on_disk: None,
             log_on_disk: None,
             replaced: false,
+            newer: false,
         };
         Ok((session, note))
     }
@@ -364,7 +390,7 @@ impl Session {
     /// Whether replacing this document would throw away work: edits a failed
     /// save left only in memory, or an anonymous document with no file at all.
     pub fn would_lose_work(&self) -> bool {
-        self.save_failed || (self.is_anonymous() && self.has_content())
+        (self.save_failed && !self.newer) || (self.is_anonymous() && self.has_content())
     }
 
     /// The name to show for this document: its metadata's title, or its file's
@@ -397,6 +423,9 @@ impl Session {
     }
 
     pub fn set_metadata(&mut self, metadata: Metadata) {
+        if self.newer {
+            return;
+        }
         self.metadata = metadata;
         if let Err(err) = self.db.save_metadata(&self.metadata) {
             self.last_error = Some(format!("could not save document properties — {err}"));
@@ -562,6 +591,9 @@ impl Session {
     /// leaves both the old file and this session as they were. The result is as
     /// private as the old file and the current document, whichever is more so.
     pub fn save_as(&mut self, path: &Path) -> AppResult<()> {
+        if self.newer {
+            return Err("this document has changes from a newer version of kame".into());
+        }
         if self.replaced && self.path.as_deref() == Some(path) {
             return Err("that file changed on disk, so this needs another name".into());
         }
@@ -681,6 +713,9 @@ impl Session {
     /// described the replaced text is dropped. Returns whether the restore
     /// landed; on failure the in-memory document is untouched.
     pub fn restore(&mut self, id: i64) -> bool {
+        if self.newer {
+            return false;
+        }
         let document = match self.db.restore_snapshot(id) {
             Ok(document) => document,
             Err(err) => {
@@ -729,7 +764,7 @@ impl Session {
     /// path for undo/redo. Returns whether the write landed.
     pub fn save_state(&mut self) -> bool {
         self.check_file();
-        if self.replaced {
+        if self.replaced || self.newer {
             return false;
         }
         match self
@@ -751,7 +786,7 @@ impl Session {
     /// Returns whether the write landed.
     pub fn record(&mut self, op: &Op) -> bool {
         self.check_file();
-        if self.replaced {
+        if self.replaced || self.newer {
             return false;
         }
         let saved = match self.editor.coalesced_edit() {
@@ -821,7 +856,7 @@ impl Session {
     /// error strip's retry (`save_state`) — and the window refuses to close
     /// until it lands.
     pub fn clear_save_error(&mut self) {
-        if self.save_failed && !self.replaced {
+        if self.save_failed && !self.replaced && !self.newer {
             self.save_failed = false;
             self.last_error = None;
         }
@@ -3568,12 +3603,13 @@ mod tests {
             let mut session = open(&path);
             assert!(session.insert("kept"));
         }
-        // A row serde cannot read — a field a future build added without
-        // `serde(default)`, or a half-written row.
+        // A row serde cannot read, but not one from a newer build, which
+        // would be a kind of step this build doesn't know: this one is missing
+        // what its kind needs, as from a half-written row.
         {
             let conn = rusqlite::Connection::open(&path).expect("open the db directly");
             conn.execute(
-                "INSERT INTO ops (json) VALUES ('{\"future\":\"variant\"}')",
+                "INSERT INTO ops (json) VALUES ('{\"SetTitle\":{\"old\":\"a\"}}')",
                 [],
             )
             .expect("write a bad op row");
@@ -4996,6 +5032,115 @@ mod tests {
             .filter(|(image, _)| *image)
             .count();
         assert_eq!(after, before);
+    }
+
+    /// A document saved by a build that knows a field this one doesn't. Nothing here may write
+    /// over it, or the field is gone.
+    fn from_a_newer_build() -> (PathBuf, String) {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("words");
+        drop(session);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let head: String = connection
+            .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let newer = head.replacen("\"spans\":[]", "\"spans\":[],\"future\":1", 1);
+        assert_ne!(newer, head);
+        connection
+            .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&newer])
+            .unwrap();
+        (path, newer)
+    }
+
+    fn head_of(path: &Path) -> String {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_document_from_a_newer_build_opens_read_only_and_says_so() {
+        let (path, _) = from_a_newer_build();
+        let session = open(&path);
+        assert!(session.newer);
+        assert!(session.save_failed, "edits are refused");
+        let said = session.last_error.clone().unwrap_or_default();
+        assert!(said.contains("newer version"), "{said:?}");
+        assert!(said.contains("read-only"), "{said:?}");
+        assert!(!session.would_lose_work(), "nothing unsaved is at stake");
+    }
+
+    #[test]
+    fn nothing_writes_over_a_document_from_a_newer_build() {
+        let (path, written) = from_a_newer_build();
+        let mut session = open(&path);
+        assert!(!session.insert("more"));
+        assert!(!session.undo());
+        session.retry_or_dismiss();
+        assert!(session.newer, "still read-only");
+        assert!(session.last_error.is_some(), "and still saying so");
+        session.set_metadata(Metadata {
+            title: "Changed".to_string(),
+            ..Metadata::default()
+        });
+        let snapshot = session.snapshot(Some("kept")).unwrap();
+        assert!(!session.restore(snapshot));
+        let elsewhere = temp_db_path();
+        assert!(session.save_as(&elsewhere).is_err());
+        assert!(!elsewhere.exists());
+        drop(session);
+        assert_eq!(head_of(&path), written);
+        let reopened = open(&path);
+        assert_ne!(reopened.metadata.title, "Changed");
+    }
+
+    #[test]
+    fn a_step_of_history_from_a_newer_build_is_kept_and_not_cleared() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("words");
+        drop(session);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO ops (json) VALUES ('{\"Future\":{\"a\":1}}')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let session = open(&path);
+        assert!(session.newer);
+        assert_eq!(session.document().blocks[0].text, "words");
+        drop(session);
+        let rows: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM ops", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "the history is all still there");
+    }
+
+    #[test]
+    fn a_document_from_an_older_build_is_not_taken_for_a_newer_one() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("words");
+        drop(session);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET json = '{\"title\":\"T\"}' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(!open(&path).newer);
     }
 
     #[test]

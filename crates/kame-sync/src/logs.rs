@@ -134,7 +134,18 @@ impl Logged {
     /// the result on the screen as one undo step. A merge that brings notes takes a snapshot
     /// first. A document that can't save, or whose file has been replaced, is left alone, since
     /// another part of kame is asking the author about that.
+    ///
+    /// If the logs hold something from a newer version of kame, this still writes down what's on
+    /// the screen, and then the document goes read-only, since this build can't see what's arrived.
     pub fn sync(&mut self, session: &mut Session, now: i64) -> Result<Outcome> {
+        let outcome = self.write_and_merge(session, now);
+        if self.store.holds_newer() && !session.newer {
+            session.mark_newer();
+        }
+        outcome
+    }
+
+    fn write_and_merge(&mut self, session: &mut Session, now: i64) -> Result<Outcome> {
         if session.save_failed || session.replaced {
             return Ok(Outcome::default());
         }
@@ -429,6 +440,32 @@ mod tests {
         assert!(build_from_logs(&path).unwrap());
         let session = Session::open(&path).unwrap();
         assert_eq!(session.document().blocks[0].text, "The words.");
+    }
+
+    /// What was typed goes in the log first, so nothing is lost, and then the document stops.
+    #[test]
+    fn logs_from_a_newer_build_make_the_document_read_only() {
+        let root = kame_test_dir::folder("logs-newer");
+        std::fs::write(root.join(MARKER), "").unwrap();
+        let path = root.join("essay.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("Typed here.");
+        let folder = log_folder(&path);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("new-0000.log"),
+            "{\"id\":\"x\",\"revision\":{\"parents\":[],\"device\":\"new-0000\",\"when\":1,\"document\":\"00000000-0000-0000-0000-000000000001\",\"title\":\"t\",\"order\":[],\"annotations\":[],\"metadata\":{},\"future\":1},\"blocks\":[]}\n",
+        )
+        .unwrap();
+
+        let mut logged = Logged::open(&session, "here-0000").unwrap();
+        logged.sync(&mut session, 100).unwrap();
+        assert!(session.newer);
+        assert!(!session.insert("Refused."));
+        let store = Store::load(&folder).unwrap();
+        let heads = store.heads();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(store.document(&heads[0]).blocks[0].text, "Typed here.");
     }
 
     /// A file whose history can't be rewound still syncs, starting from the text it has.

@@ -61,6 +61,20 @@ pub struct Store {
     blocks: HashMap<String, Block>,
     /// How far each log has been read, up to the end of its last whole line, and how long it was.
     read: HashMap<PathBuf, (u64, u64)>,
+    /// Whether a line came from a newer version of kame, holding something this build can't read.
+    newer: bool,
+}
+
+/// Whether a parsed line lost something on the way in, so that it came from a newer version.
+fn drops_something(raw: &[u8], line: &Line) -> bool {
+    if serde_json::to_vec(line).is_ok_and(|same| same == raw) {
+        return false;
+    }
+    let Ok(written) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return false;
+    };
+    serde_json::to_value(line)
+        .is_ok_and(|known| kame_core::model::has_unknown_fields(&written, &known))
 }
 
 impl Store {
@@ -103,9 +117,14 @@ impl Store {
                 .rposition(|byte| *byte == b'\n')
                 .map_or(0, |at| at + 1);
             for raw in fresh[..whole].split(|byte| *byte == b'\n') {
-                let Ok(line) = serde_json::from_slice::<Line>(raw) else {
-                    continue;
+                let line = match serde_json::from_slice::<Line>(raw) {
+                    Ok(line) => line,
+                    Err(err) => {
+                        self.newer |= err.to_string().contains("unknown variant");
+                        continue;
+                    }
                 };
+                self.newer |= drops_something(raw, &line);
                 if line.revision.id() != line.id {
                     continue;
                 }
@@ -124,6 +143,12 @@ impl Store {
                 .insert(path, (from + whole as u64, bytes.len() as u64));
         }
         Ok(found)
+    }
+
+    /// Whether anything read so far came from a newer version of kame. Its revisions can't be used
+    /// here, and neither can anything built on them.
+    pub fn holds_newer(&self) -> bool {
+        self.newer
     }
 
     /// Whether the logs in `folder` differ from when they were last read.
@@ -767,6 +792,52 @@ mod tests {
         let store = Store::load(&folder).unwrap();
         assert!(store.contains(&synced.head), "the new line reads back");
         assert_eq!(store.heads(), vec![synced.head]);
+    }
+
+    /// One log line as a newer build would write it, with `extra` in the block's kind or metadata.
+    fn line_from_a_newer_build(kind: &str, metadata_extra: &str) -> String {
+        let block = format!(
+            r#"{{"id":"00000000-0000-0000-0000-000000000010","kind":{kind},"text":"","spans":[]}}"#
+        );
+        let digest_of_block = digest(block.as_bytes());
+        let revision = format!(
+            r#"{{"parents":[],"device":"new-0000","when":1,"document":"00000000-0000-0000-0000-000000000001","title":"t","order":["{digest_of_block}"],"annotations":[],"metadata":{{"title":"","author":"","created":"","published":"","tags":[],"words":[],"accepted":[],"publish":false{metadata_extra}}}}}"#
+        );
+        let id = digest(revision.as_bytes());
+        format!("{{\"id\":\"{id}\",\"revision\":{revision},\"blocks\":[{block}]}}\n")
+    }
+
+    fn log_holding(name: &str, text: &str) -> Store {
+        let folder = kame_test_dir::folder(name);
+        std::fs::write(folder.join("new-0000.log"), text).unwrap();
+        Store::load(&folder).unwrap()
+    }
+
+    #[test]
+    fn logs_from_a_newer_build_are_noticed() {
+        let new_field = line_from_a_newer_build(r#"{"Image":{"path":"p","tilt":"Left"}}"#, "");
+        assert!(log_holding("newer-field", &new_field).holds_newer());
+        let in_metadata = line_from_a_newer_build(r#""Paragraph""#, r#","future":1"#);
+        assert!(log_holding("newer-metadata", &in_metadata).holds_newer());
+        let new_kind = line_from_a_newer_build(r#""Table""#, "");
+        assert!(log_holding("newer-kind", &new_kind).holds_newer());
+    }
+
+    #[test]
+    fn logs_this_build_understands_are_not_taken_for_a_newer_build() {
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        let store = log_holding("newer-not-ours", &ours);
+        assert!(!store.holds_newer());
+        assert_eq!(store.heads().len(), 1);
+        // Half a line, a damaged one, and an old line lacking what's been added since.
+        assert!(!log_holding("newer-not-torn", "{\"id\":\"half").holds_newer());
+        assert!(!log_holding("newer-not-junk", "{\"id\":1}\nnonsense\n").holds_newer());
+        let older = ours.replace(
+            r#","metadata":{"title":"","author":"","created":"","published":"","tags":[],"words":[],"accepted":[],"publish":false}"#,
+            "",
+        );
+        assert_ne!(older, ours);
+        assert!(!log_holding("newer-not-older", &older).holds_newer());
     }
 
     #[test]

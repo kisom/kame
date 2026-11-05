@@ -2685,7 +2685,7 @@ impl KameApp {
     /// Ctrl-N: asks about unsaved work if there is any, then starts an empty document.
     fn request_new(&mut self) {
         // The text in a document that could not be written is only in this window.
-        if self.session.save_failed {
+        if self.session.save_failed && !self.session.newer {
             self.notice = Some("the last save failed, so retry it first".to_string());
             return;
         }
@@ -6298,10 +6298,10 @@ impl eframe::App for KameApp {
         // close request per X click, so `cancel_close` counts clicks, not
         // frames.)
         let close_requested = ui.ctx().input(|input| input.viewport().close_requested());
-        if self
-            .close
-            .cancel_close(self.session.save_failed, close_requested)
-        {
+        if self.close.cancel_close(
+            self.session.save_failed && !self.session.newer,
+            close_requested,
+        ) {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
@@ -6371,7 +6371,7 @@ impl eframe::App for KameApp {
                         // A failed write's strip retries the save; any other message
                         // (a degraded open, a failed export) is dismissed, so it
                         // cannot sit there offering a write that does nothing.
-                        let retry = self.session.save_failed;
+                        let retry = self.session.save_failed && !self.session.newer;
                         if draw_error_indicator(ui, error, retry, self.palette.error_ink) {
                             self.session.retry_or_dismiss();
                             self.replaced_prompt = self.session.replaced;

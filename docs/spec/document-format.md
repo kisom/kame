@@ -86,7 +86,8 @@ An `undo_cursor` that isn't a non-negative integer is corruption, and the file m
 
 - **No head row:** a new document. Write `Document::new` with the file's stem as its title.
 - **Head unreadable:** refuse to open. The file must not be overwritten.
-- **Ops unreadable:** the text is what matters, so open anyway and warn. In one transaction, keep the head, set the cursor to 0 and empty the log, since a later edit would otherwise fall out of step with it. So one row that kame can't parse, from any program, costs the whole history.
+- **Anything from a newer version:** open read-only and say so (section 7). That means a field in the head or metadata that would be lost by saving, or an op of a kind this build doesn't know. Nothing may be written over the document, including by retrying, Save As, restoring a snapshot or changing metadata.
+- **Ops otherwise unreadable:** the text is what matters, so open anyway and warn. In one transaction, keep the head, set the cursor to 0 and empty the log, since a later edit would otherwise fall out of step with it. So one damaged row, from any program, costs the whole history.
 - **No blocks in the head:** refuse to open.
 - **Metadata missing or unreadable:** use defaults, and try to save them: the title, unless it's `Untitled`, and the file's creation date as `created`. Unreadable metadata is therefore replaced.
 
@@ -285,7 +286,7 @@ A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payl
 {"Batch":{"ops":[{"SetTitle":{"old":"a","new":"b"}}]}}
 ```
 
-All fields are required except on `DeleteText`, where `removed` and `clipped` default to empty and `old_spans` may be absent. `clipped` is left out when empty, and holds the annotations this delete cut short, as they were before it, which is what lets undo restore them. These fields are absent in rows from before they existed, where undo can't restore those notes or spans. `old_spans` is also absent inside a `Batch` that restores spans itself. A row missing a required field makes the whole log unreadable (section 1.5). kame's own commands no longer emit `SetTitle`, but readers must still apply it.
+All fields are required except on `DeleteText`, where `removed` and `clipped` default to empty and `old_spans` may be absent. `clipped` is left out when empty, and holds the annotations this delete cut short, as they were before it, which is what lets undo restore them. These fields are absent in rows from before they existed, where undo can't restore those notes or spans. `old_spans` is also absent inside a `Batch` that restores spans itself. A row missing a required field makes the whole log unreadable, and costs the history (section 1.5). kame's own commands no longer emit `SetTitle`, but readers must still apply it.
 
 ### 4.1 Applying
 
@@ -402,14 +403,16 @@ Version 1 has grown by adding things that older readers can skip:
 
 A change that older readers could misread must raise `user_version`. Older builds then refuse the file with a clear message.
 
+An older build opening a file with a new field goes read-only until it's updated (section 1.5), which is how a new optional field stays safe. To tell, compare the JSON as written with the JSON after reading and writing it again. A field missing from what was written is only one added since, and doesn't count.
+
 A new optional field must be left out when it holds its default. Revision logs hash these bytes, and [merging, section 9](merging.md) sets out what happens otherwise.
 
 ## 8. Known weak points
 
 These describe the code as it stands, and aren't rules to copy.
 
-- **Unknown fields are lost.** Readers ignore fields they don't know, and rewriting the head drops them. An older build can silently remove a newer field, so a new field must be safe to lose or else raise `user_version`. The optional `align` on `Image` behaves this way: an older build rewriting the document puts the image back on the left. In revision logs the result is worse: see [merging, section 9](merging.md).
-- **Unknown kinds and styles aren't skipped.** One unknown block kind, style or annotation kind makes the head unreadable, so the document won't open. One in the log makes the history unreadable, and opening then discards it (section 1.5). A new variant must raise `user_version`.
+- **Read-only tools don't check for newer fields.** A site build or a notebook's lists read such a document and leave out what they don't know, so a site built on an older machine can lack a newer feature.
+- **Unknown kinds and styles aren't skipped.** One unknown block kind, style or annotation kind makes the head unreadable, so the document won't open, with a message saying it may be from a different version. A new variant in the head should raise `user_version`.
 - **Ranges aren't checked on reading.** Nothing checks a span or anchor against its text when a document is read, so a damaged or hand-made file can hold offsets out of range or inside a character. Readers should clamp them for display, and must not assume they're valid.
 - **The rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
 - **Older files can hold text in an image block,** from before typing on one started a new paragraph. It isn't shown, and nothing removes it.

@@ -212,6 +212,25 @@ pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Whether JSON as written holds a field that's missing once read and written again by this
+/// build, which is how something from a newer version of kame looks. A field missing from what was
+/// written is only something added since, so that doesn't count.
+pub fn has_unknown_fields(written: &serde_json::Value, known: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (written, known) {
+        (Value::Object(written), Value::Object(known)) => written.iter().any(|(key, value)| {
+            known
+                .get(key)
+                .is_none_or(|kept| has_unknown_fields(value, kept))
+        }),
+        (Value::Array(written), Value::Array(known)) => written
+            .iter()
+            .zip(known)
+            .any(|(value, kept)| has_unknown_fields(value, kept)),
+        _ => false,
+    }
+}
+
 /// The style for a link entered as `url`: a document link if it names a `.kame` file or
 /// a heading, and an ordinary link otherwise.
 pub fn link_style(url: String) -> SpanStyle {

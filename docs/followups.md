@@ -8,11 +8,7 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
-- [ ] **New fields stop older builds reading logs, with no message.** A centered or right-aligned image
-  now does this, and any new field or kind will. Needs a decision on how logs handle versions.
-  `merging.md`, section 9.
-- [ ] **Smaller ones in the specs' weak points:** links that publish private names (a private folder, a
-  hidden file in `static/`), and two programs writing one file.
+- [ ] **A link to a hidden file in `static/`** publishes a dead link naming the file, with no warning.
 
 ## Site
 

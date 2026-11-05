@@ -407,6 +407,41 @@ impl Db {
         Ok(())
     }
 
+    /// Whether this file holds something from a newer version of kame: a field this build would
+    /// drop by saving, or a step of history it can't read.
+    pub fn holds_newer(&self) -> bool {
+        fn drops_something<T: serde::Serialize + serde::de::DeserializeOwned>(json: &str) -> bool {
+            let Ok(written) = serde_json::from_str::<serde_json::Value>(json) else {
+                return false;
+            };
+            let Ok(read) = serde_json::from_str::<T>(json) else {
+                return false;
+            };
+            serde_json::to_value(read)
+                .is_ok_and(|known| crate::model::has_unknown_fields(&written, &known))
+        }
+        let row =
+            |sql: &str| -> Option<String> { self.conn.query_row(sql, [], |row| row.get(0)).ok() };
+        if row("SELECT json FROM documents WHERE id = 1")
+            .is_some_and(|json| drops_something::<Document>(&json))
+            || row("SELECT json FROM metadata WHERE id = 1")
+                .is_some_and(|json| drops_something::<crate::model::Metadata>(&json))
+        {
+            return true;
+        }
+        let Ok(mut statement) = self.conn.prepare("SELECT json FROM ops") else {
+            return false;
+        };
+        let rows: Vec<String> = match statement.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => return false,
+        };
+        rows.iter().any(|json| {
+            serde_json::from_str::<Op>(json)
+                .is_err_and(|err| err.to_string().contains("unknown variant"))
+        })
+    }
+
     /// Reads the stored document. Errors if no document has been saved yet.
     ///
     /// Only `QueryReturnedNoRows` becomes [`DbError::NoDocument`]; every other

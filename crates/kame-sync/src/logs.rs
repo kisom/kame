@@ -143,8 +143,9 @@ impl Logged {
         let metadata = session.metadata.clone();
         // A first sync of text that's already here builds on it. Otherwise it starts from this
         // document's history, which is shared with any machine sharing that past.
-        // What's remembered may not be in these logs, after Save As or with the logs cleared.
-        self.last = self.last.take().filter(|last| self.store.contains(last));
+        // What's remembered may not be in these logs, after Save As or with the logs cleared, or
+        // may be missing what it needs.
+        self.last = self.last.take().filter(|last| self.store.is_usable(last));
         if self.last.is_none() {
             self.last = self.store.heads().into_iter().find(|head| {
                 document_digest(&self.store.document(head)) == document_digest(&local)

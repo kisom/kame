@@ -173,6 +173,11 @@ impl Store {
         usable
     }
 
+    /// Whether a revision can be read: it's here, and so is everything it needs.
+    pub fn is_usable(&self, id: &str) -> bool {
+        self.usable().contains(id)
+    }
+
     /// Usable revisions nothing usable builds on, sorted.
     pub fn heads(&self) -> Vec<String> {
         let usable = self.usable();
@@ -427,19 +432,18 @@ impl Replica {
         now: i64,
     ) -> Result<Synced> {
         let mut written = 0;
+        // One that can't be read is no place to build from: a revision on it couldn't be read
+        // either, so what's typed would be left out of the document.
+        let last = last.filter(|id| store.is_usable(id));
         let changed = match last {
-            Some(id) if store.contains(id) => {
+            Some(id) => {
                 document_digest(&store.document(id)) != document_digest(local)
                     || store.revisions[id].metadata != *metadata
             }
-            _ => true,
+            None => true,
         };
         if changed {
-            let parents: Vec<String> = last
-                .filter(|id| store.contains(id))
-                .map(str::to_string)
-                .into_iter()
-                .collect();
+            let parents: Vec<String> = last.map(str::to_string).into_iter().collect();
             let revision = Self::revision_of(local, metadata, parents, &self.device, now);
             let (_, new) = self.append(store, revision, local.blocks.clone())?;
             written += usize::from(new);
@@ -656,6 +660,75 @@ mod tests {
             .unwrap();
         assert_eq!(synced.head, merged.head, "they converge");
         assert_eq!(synced.doc.blocks[0].text, "Ours. Theirs.");
+    }
+
+    /// Every line of a log, with `change` applied to each.
+    fn rewrite_log(
+        log: &Path,
+        mut change: impl FnMut(serde_json::Value) -> Option<serde_json::Value>,
+    ) {
+        let lines: Vec<String> = std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter_map(|line| change(serde_json::from_str(line).unwrap()))
+            .map(|value| value.to_string())
+            .collect();
+        std::fs::write(log, lines.join("\n") + "\n").unwrap();
+    }
+
+    /// The revision this machine last settled on, with its block gone, as when a log it was in has
+    /// been cut short.
+    #[test]
+    fn a_last_revision_missing_its_block_does_not_stop_a_sync() {
+        let folder = kame_test_dir::folder("revlog-last-without-block");
+        let here = replica(&folder, "here");
+        let last = here
+            .sync(&document_saying("Written."), None, 1)
+            .unwrap()
+            .head;
+        rewrite_log(&folder.join("here.log"), |mut value| {
+            value["blocks"] = serde_json::json!([]);
+            Some(value)
+        });
+        let typed = document_saying("Written. And more.");
+        let synced = here.sync(&typed, Some(&last), 2).unwrap();
+        assert_eq!(synced.doc, typed);
+        assert!(Store::load(&folder).unwrap().heads().contains(&synced.head));
+    }
+
+    /// What's typed has to end up in the document, not only in a log nothing can use.
+    #[test]
+    fn words_typed_on_a_last_revision_missing_its_parent_are_kept() {
+        let folder = kame_test_dir::folder("revlog-last-without-parent");
+        let here = replica(&folder, "here");
+        let parent = here.sync(&document_saying("First."), None, 1).unwrap().head;
+        let last = here
+            .sync(&document_saying("First. Second."), Some(&parent), 2)
+            .unwrap()
+            .head;
+        let wanted = serde_json::Value::String(parent);
+        rewrite_log(&folder.join("here.log"), |value| {
+            (value["id"] != wanted).then_some(value)
+        });
+        replica(&folder, "there")
+            .sync(&document_saying("From elsewhere."), None, 3)
+            .unwrap();
+
+        let typed = document_saying("First. Second. Typed here.");
+        let synced = here.sync(&typed, Some(&last), 4).unwrap();
+        let everything = format!(
+            "{} {}",
+            synced.doc.blocks[0].text,
+            synced
+                .doc
+                .annotations
+                .iter()
+                .map(|note| note.body.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        assert!(everything.contains("Typed here."), "{everything}");
+        assert!(everything.contains("From elsewhere."), "{everything}");
     }
 
     #[test]

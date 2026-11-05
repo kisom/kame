@@ -6,8 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **An unusable last revision.** If the revision a document last settled on is in the logs but can't
-  be used, reading it panics, or the page follows another version. `merging.md`, section 9.
 - [ ] **A torn last line swallows the next revision.** Appending to a log doesn't check that it ends
   in a line feed. `merging.md`, section 9.
 - [ ] **A dangling symbolic link can lead out of a notebook.** Following a link to one creates a file at

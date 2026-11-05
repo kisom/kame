@@ -234,7 +234,7 @@ Reads can resume where the last stopped, past lines that failed to parse. A log 
 
 The `sync` key in the file's `meta` table holds the id of the revision this machine last settled on, called `last` here. To sync an open document with the logs:
 
-1. Refresh from the logs. Forget `last` if no log holds it, as after Save As. That tests whether it's present, not whether it's usable (section 9).
+1. Refresh from the logs. Forget `last` unless it's usable. It may not be in them, as after Save As, or a log it needs may have been cut short. A revision built on an unusable one couldn't be read either, so what's typed would be left out of the document.
 2. If there's no `last`, use any head with the same document digest and metadata.
 3. If there's still none, **write checkpoints** (below) and use the latest.
 4. If the document or metadata differ from `last`, append a revision with `last` as its parent.
@@ -294,7 +294,6 @@ Everything a merge adds is a `Note`, which never publishes. A merged document ca
 
 These describe the code as it stands, and aren't rules to copy.
 
-- **A `last` that's present but not usable isn't handled.** If one of its blocks is missing, reading it panics. If its parent is missing and another head is here, what was typed is written with an unusable parent, and the document then follows the other head. The words stay only in the log and the undo history. Either can follow when a log is shortened and the document reopened.
 - **A torn last line swallows the next.** Appending doesn't check for a trailing line feed. After a torn tail, the writer reports a new head written, but its line is glued to the tail and a fresh read doesn't see it.
 - **Nothing checks `revision.document`.** Logs from a different document at the same name merge in, and the result takes the id of ours.
 - **A sync stops silently if the logs can't be read at open.** `Logged::open` returns nothing, and the app shows no message.

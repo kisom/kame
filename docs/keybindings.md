@@ -107,8 +107,9 @@ out, along with its highlight. Emptying a marginal removes it too.
 
 ## Images
 
-Insert image… on the right-click menu asks for a path, and the image is set to the width of the
-text.
+Insert image… on the right-click menu asks for a file, starting in `images/`, and shows it at its own size, or at the body's width if it's wider. An image from outside the notebook is copied to `images/path/to/document/`, and a different picture with the same name becomes `name-2.jpg`. Nothing in `images/` is public until a published document shows it, and then it publishes at `/static/images/`.
+
+The document keeps the way to the image from its own folder, so it still shows on another machine and after the notebook moves. A document with no file yet, or outside a notebook, keeps the image's whole path. Saving a document somewhere else says its images' paths again from there, and an export uses whole paths, since it can land anywhere. A document whose images already have whole paths keeps them until it's saved somewhere else.
 
 ## Distraction-free modes
 
@@ -356,10 +357,6 @@ folder's page. Everything in `static/` publishes at `/static/`, whether or not a
 publication goes in another folder. A link to an unmarked document, or to a file outside `static/`, publishes as its words, and the build
 lists it. A link to something missing under `static/` or to a folder publishes as written, for the web server to answer, and any other is its words. An image from `images/` shown in a published
 document publishes at `/static/images/`, any other in the notebook is copied beside its page, and one outside the notebook doesn't publish, which the build also lists.
-
-Insert image… on the right-click menu asks for a file, starting in `images/`, and shows it at its own size, or at the body's width if it's wider. An image from outside the notebook is copied to `images/path/to/document/`, and a different picture with the same name becomes `name-2.jpg`. Nothing in `images/` is public until a published document shows it, and then it publishes at `/static/images/`.
-The document keeps the way to the image from its own folder, so it still shows on another machine and after the notebook moves. A document with no file yet, or outside a notebook, keeps the image's whole path. Saving a document somewhere else says its images' paths again from there, and an export
-uses whole paths, since it can land anywhere. A document whose images already have whole paths keeps them until it's saved somewhere else.
 
 The theme is the standard one, and a file in the notebook's `theme/` takes the place of the same file in it. With no `url` there's no feed.
 

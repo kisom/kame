@@ -109,14 +109,12 @@ enum Confirming {
 /// A rename a background thread is doing, leaving the open document for when it's done.
 struct Renaming {
     coming: Receiver<Result<Renamed, String>>,
-    /// The notebook it's in, which is the one to put anything back in.
+    /// The notebook it's in, which is the one to remove the old file from.
     notebook: Notebook,
-    /// The document it left alone, for this app to rewrite.
+    /// The document it left alone, for this app to rewrite, and the old file with it.
     open: Option<PathBuf>,
     old: String,
     new: String,
-    /// What to put back if the open document can't follow, since `rename` will have removed it.
-    reference: Reference,
 }
 
 /// What pressing something in the References… window asks for.
@@ -258,6 +256,12 @@ fn rename_outcome(old: &str, new: &str, renamed: &Renamed, root: &Path) -> Vec<S
         lines.push(format!(
             "{old} was kept, so that [{old}] still resolves. Renaming it again once this is fixed \
              finishes it."
+        ));
+    }
+    // Only a document with no file gets here, as `rename` had nothing open to leave the file for.
+    if !renamed.old_kept && !renamed.failed.is_empty() {
+        lines.push(format!(
+            "{old} has gone, so [{old}] is plain text there until it's added again."
         ));
     }
     for (path, why) in &renamed.failed {
@@ -905,9 +909,7 @@ impl KameApp {
     }
 
     fn start_rename(&mut self, old: String, new: String) {
-        let (Some(notebook), Some(reference)) =
-            (self.nb.notebook.clone(), self.refs.list.get(&old).cloned())
-        else {
+        let Some(notebook) = self.nb.notebook.clone() else {
             return;
         };
         let open = self.session.path().map(Path::to_path_buf);
@@ -918,16 +920,16 @@ impl KameApp {
             open: open.clone(),
             old: old.clone(),
             new: new.clone(),
-            reference,
         });
         std::thread::spawn(move || {
             let _ = send.send(rename(&notebook, &old, &new, open.as_deref()));
         });
     }
 
-    /// The rename has done the other documents and, if they all went well, removed the old file.
-    /// This does the open document, last because `rename` can refuse to start, and a refused
-    /// rename should have touched nothing. If this document can't follow, the old file goes back.
+    /// The rename has done the other documents, and left the old file if a document is open. This
+    /// does the open document, last because `rename` can refuse to start, and a refused rename
+    /// should have touched nothing. The old file goes once everything has followed, so that a quit
+    /// before now leaves `[old]` with its reference.
     fn finish_rename(&mut self, result: Result<Renamed, String>) {
         let Some(renaming) = self.refs.renaming.take() else {
             return;
@@ -937,7 +939,6 @@ impl KameApp {
             open,
             old,
             new,
-            reference,
             ..
         } = renaming;
         let mut renamed = match result {
@@ -947,6 +948,7 @@ impl KameApp {
                 return;
             }
         };
+        let old_is_left_here = open.is_some();
         // Left alone for being open, it's no longer what's open if it was saved as another file.
         if let Some(left) =
             open.filter(|open| !super::same_document(self.session.path(), Some(open)))
@@ -954,24 +956,34 @@ impl KameApp {
             let why = "it was saved as another file during this, so it may still cite this";
             renamed.failed.push((left, why.to_string()));
         }
-        let here = self
-            .session
-            .path()
-            .map_or_else(|| PathBuf::from("this document"), Path::to_path_buf);
-        match self.rename_in_open_document(&old, &new) {
-            Ok(true) => renamed.rewritten.push(here),
-            Ok(false) => {}
-            Err(why) => renamed.failed.push((here, why)),
+        // An import whose Markdown file couldn't be rewritten stays as that file is, keeping the
+        // words the report names, and the old key is kept for it.
+        let source = self.session.source_path.as_deref();
+        let source_failed = self.session.is_anonymous()
+            && renamed
+                .failed
+                .iter()
+                .any(|(path, _)| super::same_document(source, Some(path)));
+        if !source_failed {
+            let here = self
+                .session
+                .path()
+                .map_or_else(|| PathBuf::from("this document"), Path::to_path_buf);
+            match self.rename_in_open_document(&old, &new) {
+                Ok(true) => renamed.rewritten.push(here),
+                Ok(false) => {}
+                Err(why) => renamed.failed.push((here, why)),
+            }
         }
-        let mut not_put_back = None;
-        if !renamed.failed.is_empty() && !renamed.old_kept {
-            match save(&notebook, &old, &reference) {
-                Ok(()) => renamed.old_kept = true,
-                Err(why) => not_put_back = Some(format!("{old} wasn't put back: {why}")),
+        let mut not_removed = None;
+        if old_is_left_here && renamed.failed.is_empty() {
+            match remove(&notebook, &old) {
+                Ok(()) => renamed.old_kept = false,
+                Err(why) => not_removed = Some(format!("{old} wasn't removed: {why}")),
             }
         }
         let mut said = rename_outcome(&old, &new, &renamed, &notebook.root);
-        said.extend(not_put_back);
+        said.extend(not_removed);
         self.say_in_references(said);
         self.reload_references();
     }
@@ -2860,7 +2872,7 @@ mod tests {
 
         rename_only_key(&mut page, "plass1981");
 
-        // Where the rename had removed it, as nothing else failed.
+        // Never removed, as the open document didn't follow.
         assert_eq!(
             std::fs::read(reference_file(&page, "knuth1981")).unwrap(),
             was
@@ -2880,6 +2892,125 @@ mod tests {
         assert_eq!(only_text(&page), "see [plass1981]");
         assert!(!reference_file(&page, "knuth1981").exists());
         assert!(!page.app.refs.list.contains("knuth1981"));
+    }
+
+    #[test]
+    fn the_old_file_stays_until_the_open_document_has_followed() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        let notebook = page.app.nb.notebook.clone().unwrap();
+        let open = page.app.session.path().unwrap().to_path_buf();
+        open_list(&mut page);
+        let send = rename_held_open(&mut page);
+
+        let done = rename(&notebook, "knuth1981", "plass1981", Some(&open));
+
+        // A quit here leaves the open document with a reference for what it holds.
+        assert_eq!(text_on_disk(&open), "see [knuth1981]");
+        assert!(reference_file(&page, "knuth1981").exists());
+
+        send.send(done).unwrap();
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+        page.frame(Vec::new());
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(!page.app.refs.list.contains("knuth1981"));
+        assert!(page.sees("Renamed knuth1981 to plass1981 in 1 document."));
+        assert!(!page.sees("was kept"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_file_that_cant_be_removed_at_the_end_is_named_and_a_retry_finishes() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut page = page_in_notebook("see [knuth1981]");
+        let notebook = page.app.nb.notebook.clone().unwrap();
+        let open = page.app.session.path().unwrap().to_path_buf();
+        open_list(&mut page);
+        let send = rename_held_open(&mut page);
+        let done = rename(&notebook, "knuth1981", "plass1981", Some(&open));
+        let folder = root_of(&page).join("references");
+
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        send.send(done).unwrap();
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        page.frame(Vec::new());
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+        assert!(reference_file(&page, "knuth1981").exists());
+        assert!(page.sees("knuth1981 was kept"));
+        assert!(page.sees("knuth1981 wasn't removed"));
+
+        page.app
+            .start_rename("knuth1981".to_string(), "plass1981".to_string());
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+        assert!(!reference_file(&page, "knuth1981").exists());
+    }
+
+    /// A page in a notebook holding `knuth1981`, with a Markdown file of `on_disk` imported.
+    fn imported_markdown(on_disk: &str) -> Headless {
+        let mut page = page_in_notebook("");
+        let markdown = root_of(&page).join("a.md");
+        std::fs::write(&markdown, on_disk).unwrap();
+        let (imported, _) = Session::import(&markdown).unwrap();
+        page.app.adopt_session(imported);
+        page.frame(Vec::new());
+        assert!(page.app.session.is_anonymous());
+        page
+    }
+
+    #[test]
+    fn an_imported_copy_keeps_the_key_when_its_markdown_file_cant_be_rewritten() {
+        let mut page = imported_markdown("Cites [knuth1981].\n");
+        let history = page.app.session.history();
+        open_list(&mut page);
+
+        rename_only_key(&mut page, "plass1981");
+
+        // One account of those words: not renamed, because the file can't be.
+        assert_eq!(only_text(&page), "Cites [knuth1981].");
+        assert_eq!(page.app.session.history(), history);
+        assert_eq!(
+            std::fs::read_to_string(root_of(&page).join("a.md")).unwrap(),
+            "Cites [knuth1981].\n"
+        );
+        assert!(page.sees("Renamed knuth1981 to plass1981 in 0 documents."));
+        assert!(page.sees("knuth1981 was kept"));
+        assert!(page.sees("a.md: a Markdown document"));
+        assert!(page.app.refs.list.contains("knuth1981"));
+    }
+
+    #[test]
+    fn an_imported_copy_follows_when_its_file_doesnt_cite_the_key() {
+        let mut page = imported_markdown("No citation on disk.\n");
+        page.app.session.insert(" [knuth1981]");
+        open_list(&mut page);
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert!(
+            only_text(&page).contains("[plass1981]"),
+            "{}",
+            only_text(&page)
+        );
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(page.sees("Renamed knuth1981 to plass1981 in 1 document."));
+    }
+
+    #[test]
+    fn an_unsaved_copy_that_cant_follow_says_the_old_key_has_gone() {
+        let mut page = imported_markdown("No citation on disk.\n");
+        page.app.session.insert(" [knuth1981]");
+        open_list(&mut page);
+        page.app.session.save_failed = true;
+        page.app.session.last_error = Some("the disk is full".to_string());
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(page.sees("this document: the disk is full"));
+        assert!(page.sees("knuth1981 has gone"));
     }
 
     #[test]
@@ -2921,7 +3052,6 @@ mod tests {
             open: page.app.session.path().map(Path::to_path_buf),
             old: "knuth1981".to_string(),
             new: "plass1981".to_string(),
-            reference: Reference::default(),
         });
         let open = page.app.session.path().unwrap().to_path_buf();
 
@@ -2984,7 +3114,6 @@ mod tests {
             open: page.app.session.path().map(Path::to_path_buf),
             old: "knuth1981".to_string(),
             new: "plass1981".to_string(),
-            reference: page.app.refs.list.get("knuth1981").unwrap().clone(),
         });
         send
     }

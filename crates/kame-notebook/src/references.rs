@@ -211,7 +211,8 @@ pub struct Renamed {
     /// The documents that may still cite the old one, each with why.
     pub failed: Vec<(PathBuf, String)>,
     /// Whether the old key's file is still there, so that `[old]` still resolves: because a
-    /// document failed, or because the file couldn't be removed.
+    /// document failed, because the file couldn't be removed, or because it's left for whoever
+    /// has a document open.
     pub old_kept: bool,
 }
 
@@ -245,11 +246,13 @@ fn rewrite(path: &Path, old: &str, new: &str) -> Result<(), String> {
 
 /// Renames the reference `old` to `new`, and the citations of it in every document that has
 /// them except `open`, which the app rewrites through its own session. The new file is written
-/// first and the old one removed last, so an interruption leaves both and loses nothing. A key
-/// that differs from `old` or any other only in case is refused, as is a damaged file for either.
-/// A `new` that already holds exactly `old`'s reference is accepted, so that a rename can be run
-/// again after fixing what stopped it. A document that can't be rewritten, or read to see whether
-/// it cites `old`, is named in the result and the rest still are; the old file is then kept.
+/// first and the old one removed last, so an interruption leaves both and loses nothing. With an
+/// `open` document the old file is left, as that document still holds `[old]`, and whoever has it
+/// open removes the file with [`remove`] once it has followed. A key that differs from `old` or
+/// any other only in case is refused, as is a damaged file for either. A `new` that already holds
+/// exactly `old`'s reference is accepted, so that a rename can be run again after fixing what
+/// stopped it. A document that can't be rewritten, or read to see whether it cites `old`, is named
+/// in the result and the rest still are; the old file is then kept.
 pub fn rename(
     notebook: &Notebook,
     old: &str,
@@ -301,7 +304,8 @@ pub fn rename(
             Err(why) => renamed.failed.push((path, why)),
         }
     }
-    renamed.old_kept = !renamed.failed.is_empty() || remove(notebook, old).is_err();
+    renamed.old_kept =
+        open.is_some() || !renamed.failed.is_empty() || remove(notebook, old).is_err();
     Ok(renamed)
 }
 
@@ -693,6 +697,18 @@ mod tests {
         assert_eq!(text_of(&open), "[old]");
         assert_eq!(text_of(&other), "[fresh]");
         assert!(folder(&notebook).join("fresh.yaml").exists());
+        // `[old]` is still in the open document, so its file waits for that to follow.
+        assert!(folder(&notebook).join("old.yaml").exists());
+        assert!(renamed.old_kept);
+    }
+
+    #[test]
+    fn renaming_with_nothing_open_removes_the_old_file_itself() {
+        let notebook = notebook("ref-rename-none-open");
+        save(&notebook, "old", &article()).unwrap();
+        let renamed = rename(&notebook, "old", "fresh", None).unwrap();
+        assert!(!renamed.old_kept);
+        assert!(!folder(&notebook).join("old.yaml").exists());
     }
 
     #[test]

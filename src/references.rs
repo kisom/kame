@@ -453,15 +453,27 @@ impl ReferenceForm {
     }
 }
 
+/// What can follow a name after a comma and still be part of it.
+const NAME_SUFFIXES: [&str; 7] = ["Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV"];
+
 /// Names, each as spelled: split on semicolons if there are any, so that a name can hold a comma,
-/// and otherwise on commas.
+/// and otherwise on commas, keeping a suffix such as `Jr.` with the name before it.
 fn names(text: &str) -> Vec<String> {
     let separator = if text.contains(';') { ';' } else { ',' };
-    text.split(separator)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect()
+    let mut found: Vec<String> = Vec::new();
+    for name in text.split(separator).map(str::trim) {
+        if name.is_empty() {
+            continue;
+        }
+        match found.last_mut() {
+            Some(before) if separator == ',' && NAME_SUFFIXES.contains(&name) => {
+                before.push_str(", ");
+                before.push_str(name);
+            }
+            _ => found.push(name.to_string()),
+        }
+    }
+    found
 }
 
 /// The names in a box that was filled with `names_text(had)`: `had` as it was if the box is
@@ -475,10 +487,12 @@ fn names_from(text: &str, had: &[String]) -> Vec<String> {
 }
 
 /// `names` as the form shows them, so that `names` reads them back the same. One name holding a
-/// comma needs a semicolon even with nothing to separate.
+/// comma needs a semicolon even with nothing to separate, and so do names that commas would
+/// join, as a name that is only a suffix would be.
 fn names_text(names: &[String]) -> String {
-    if !names.iter().any(|name| name.contains(',')) {
-        return names.join(", ");
+    let joined = names.join(", ");
+    if !names.iter().any(|name| name.contains(',')) && self::names(&joined) == names {
+        return joined;
     }
     match names {
         [only] => format!("{only};"),
@@ -2426,6 +2440,35 @@ mod tests {
         // Typed in the box, the semicolon separates, as it does in any name typed there.
         form.authors_text = "Doe; J. Roe".to_string();
         assert_eq!(form.built().authors, ["Doe", "J. Roe"]);
+    }
+
+    #[test]
+    fn a_suffix_after_a_comma_stays_with_its_name() {
+        assert_eq!(names("M. L. King, Jr."), ["M. L. King, Jr."]);
+        assert_eq!(names("A. Smith, B. Jones"), ["A. Smith", "B. Jones"]);
+        assert_eq!(
+            names("A. Smith, Jr., B. Jones, Sr"),
+            ["A. Smith, Jr.", "B. Jones, Sr"]
+        );
+        assert_eq!(
+            names("H. Ford, II, J. Doe,III, K. Roe , IV, L. Poe, Sr."),
+            ["H. Ford, II", "J. Doe, III", "K. Roe, IV", "L. Poe, Sr."]
+        );
+        // With no name before it, it's a name of its own, and only the suffix itself counts.
+        assert_eq!(names("Jr., A. Smith"), ["Jr.", "A. Smith"]);
+        assert_eq!(names("A. Smith, Junior"), ["A. Smith", "Junior"]);
+
+        let mut form = ReferenceForm::new(Some("k".to_string()));
+        form.reference.kind = Kind::Book;
+        form.reference.title = "T".to_string();
+        form.authors_text = "M. L. King, Jr.".to_string();
+        let built = form.built();
+        assert_eq!(built.authors, ["M. L. King, Jr."]);
+        assert_eq!(ReferenceForm::editing("k", &built).built(), built);
+
+        // A name that is only a suffix is shown so that it doesn't join the one before.
+        let odd = vec!["A. Smith".to_string(), "Jr.".to_string()];
+        assert_eq!(names(&names_text(&odd)), odd);
     }
 
     #[test]

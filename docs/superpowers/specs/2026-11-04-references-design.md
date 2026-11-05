@@ -118,7 +118,7 @@ Closing a `[key]` that has the shape of a key but no reference shows a passing n
 
 **The new reference window has two tabs:**
 
-- **Structured:** a kind, then its fields, with a live preview of the IEEE entry. Names are comma-separated and kept as typed, or semicolon-separated if there's a semicolon in the box, so that a name can hold a comma.
+- **Structured:** a kind, then its fields, with a live preview of the IEEE entry. Names are comma-separated and kept as typed, or semicolon-separated if there's a semicolon in the box, so that a name can hold a comma. Between commas, `Jr.`, `Sr.`, `II`, `III` or `IV` stays with the name before it.
 - **Freeform:** a key and a box of text, which goes into the References section exactly as typed. This is the catch-all for anything the form doesn't fit.
 
 A key is suggested from the first author's last name and the year, adding `a`, `b` and so on if it's taken, and can be changed. Characters that can't be in a key are dropped. If that leaves nothing, the person types one.

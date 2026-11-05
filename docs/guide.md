@@ -93,7 +93,7 @@ To link to another document, type `[[essay]]`, `[[notes/essay#The Intro]]` or `[
 
 These are the reason for kame's name. Each attaches to the selection, or to the word under the caret, and stays with those words as the text changes around them. They differ mostly in who gets to read them.
 
-- A **note** (Ctrl-Shift-N) highlights a passage and holds a comment for you alone. The note's words never publish, in any format. The highlight does show in HTML, so a reader can see that you marked the passage but not what you said about it.
+- A **note** (Ctrl-Shift-N) highlights a passage and holds a comment for you alone. The note's words never publish, in any format, and neither does its highlight. Leave a note without words and it's purely a highlight, which does show in HTML.
 - A **marginal** (Annotate > Marginal, or the right-click menu) sits in the margin beside its paragraph. It publishes in HTML, and is left out of Markdown, which has nowhere to put it.
 - A **footnote** (Ctrl-Shift-F) is numbered and collected at the foot of the page, and publishes in both formats. Its selection grows to whole words.
 
@@ -127,7 +127,7 @@ File > Compact History shrinks files saved by older versions of kame. It loses o
 
 Ctrl-Shift-E exports Markdown and Ctrl-Shift-B exports a standalone HTML page. Each asks where to write, and neither needs the document saved first. Exports are the same every time for the same document, so they sit well in version control.
 
-- HTML keeps kame's type and colours, follows the reader's light or dark setting, and carries the footnotes, marginals and note highlights.
+- HTML keeps kame's type and colours, follows the reader's light or dark setting, and carries the footnotes, marginals and highlights without notes.
 - Markdown carries the footnotes, opens with a `Title:`, `Date:`, `Author:` and `Tags:` header for blog tools such as Pelican, and turns highlights back into plain text.
 - A link to a kame document exports as its words, since it can't lead anywhere outside kame.
 - An image exports with its whole path, so the page only shows it while the picture stays where it is on this machine.
@@ -243,7 +243,7 @@ This builds the site and sends it with `rsync --delete`, so `rsync` must be inst
 
 **To change the look**, copy a file from the standard theme into the notebook's `theme/` at the same path, and yours takes its place. The theme's files are in kame's source, under `crates/kame-site/theme/`, so the stylesheet goes at `theme/static/css/site.css` and the shared page layout at `theme/templates/base.html`.
 
-**Before publishing, it's worth remembering** that highlights from private notes show, though their words don't, and that everything in `static/` goes out. Everything else stays home, unless a published document shows it as an image.
+**Before publishing, it's worth remembering** that a highlight with no note on it shows, and that everything in `static/` goes out. Everything else stays home, unless a published document shows it as an image.
 
 **If you'd rather not use a notebook**, `kame-site new mysite` makes a separate site whose `site.yaml` lists each document and its address, wherever those documents live. It suits publishing a few documents from all over. Its `README.md` and `Makefile` explain the rest, with `make serve` to preview and `make sync` to send.
 

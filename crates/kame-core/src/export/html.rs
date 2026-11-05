@@ -286,7 +286,7 @@ struct BlockApparatus {
 /// - footnotes leave a `<sup class="footnote-ref"><a href="#fnN">N</a></sup>`
 ///   marker at the end of their anchored range and collect in one
 ///   `<ol class="footnotes">` at the foot, numbered in reading order,
-/// - a note's words do not publish, though the passage it highlights does, as `<mark>`,
+/// - a note with words leaves no trace, and one with none, purely a highlight, becomes `<mark>`,
 /// - empty blocks are skipped; a footnote or margin note that has lost
 ///   its anchor loses only its marker — the body is still emitted, unanchored,
 /// - text is escaped (`&`, `<`, `>`); the output carries no document or
@@ -745,13 +745,15 @@ impl InlineTag {
     }
 }
 
-/// The passages notes highlight in `block`, as byte ranges that fit its text. A note's words
-/// never publish, but what it marks does.
+/// The passages highlighted in `block`, as byte ranges that fit its text. A note holding words is
+/// the author's own, passage and all, so only one with none, which is purely a highlight, publishes.
 fn note_highlights(doc: &Document, block: &Block) -> Vec<(usize, usize)> {
     doc.annotations
         .iter()
         .filter(|annotation| {
-            annotation.kind == AnnotationKind::Note && annotation.anchor.block_id() == block.id
+            annotation.kind == AnnotationKind::Note
+                && annotation.anchor.block_id() == block.id
+                && annotation.body.trim().is_empty()
         })
         .filter_map(|annotation| {
             let (start, end) = annotation.anchor.byte_range()?;
@@ -1561,7 +1563,7 @@ mod tests {
         let html = to_html(&with_annotations(AnnotationKind::Note));
         assert!(!html.contains("SECRET BODY"), "{html}");
         assert!(!html.contains("<details"), "{html}");
-        assert!(html.contains("<mark>"), "its highlight does: {html}");
+        assert!(!html.contains("<mark>"), "nor does its highlight: {html}");
     }
 
     #[test]
@@ -2103,18 +2105,41 @@ mod tests {
         doc
     }
 
+    /// A note with no words, which is purely a highlight.
+    fn highlighted(text: &str, start: usize, end: usize) -> Document {
+        let mut doc = noted(text, start, end, AnnotationKind::Note);
+        doc.annotations[0].body = String::new();
+        doc
+    }
+
     #[test]
-    fn a_notes_highlight_publishes_without_its_words() {
-        let html = html_body(
-            &noted("See this bit now.", 4, 12, AnnotationKind::Note),
-            &Publish::plain(),
-        );
+    fn only_a_highlight_with_no_note_publishes() {
+        let with_body = |body: &str| {
+            let mut doc = noted("See this bit now.", 4, 12, AnnotationKind::Note);
+            doc.annotations[0].body = body.to_string();
+            to_html(&doc)
+        };
+        for pure in ["", "   ", "\n"] {
+            assert!(
+                with_body(pure).contains("<mark>this bit</mark>"),
+                "{pure:?}"
+            );
+        }
+        let html = with_body("what I thought of this");
+        assert!(!html.contains("<mark>"), "{html}");
+        assert!(!html.contains("what I thought"), "{html}");
+        assert!(html.contains("See this bit now."), "{html}");
+    }
+
+    #[test]
+    fn a_pure_highlight_publishes() {
+        let html = html_body(&highlighted("See this bit now.", 4, 12), &Publish::plain());
         assert_eq!(html, "<p>See <mark>this bit</mark> now.</p>\n");
     }
 
     #[test]
     fn a_highlight_nests_with_other_styles() {
-        let mut doc = noted("one two three", 4, 13, AnnotationKind::Note);
+        let mut doc = highlighted("one two three", 4, 13);
         doc.blocks[0].spans = vec![Span {
             start: 0,
             end: 7,
@@ -2138,26 +2163,17 @@ mod tests {
 
     #[test]
     fn a_highlight_counts_bytes_and_survives_a_bad_range() {
-        let html = html_body(
-            &noted("été ok", 2, 5, AnnotationKind::Note),
-            &Publish::plain(),
-        );
+        let html = html_body(&highlighted("été ok", 2, 5), &Publish::plain());
         assert_eq!(html.matches("<mark>").count(), 1, "{html}");
-        let html = html_body(
-            &noted("short", 3, 400, AnnotationKind::Note),
-            &Publish::plain(),
-        );
+        let html = html_body(&highlighted("short", 3, 400), &Publish::plain());
         assert!(html.contains("<mark>rt</mark>"), "{html}");
-        let html = html_body(
-            &noted("short", 300, 400, AnnotationKind::Note),
-            &Publish::plain(),
-        );
+        let html = html_body(&highlighted("short", 300, 400), &Publish::plain());
         assert!(!html.contains("<mark>"), "{html}");
     }
 
     #[test]
     fn two_overlapping_highlights_are_one_run() {
-        let mut doc = noted("one two three", 0, 7, AnnotationKind::Note);
+        let mut doc = highlighted("one two three", 0, 7);
         let id = doc.blocks[0].id;
         doc.annotations.push(Annotation {
             id: Uuid::new_v4(),
@@ -2183,7 +2199,7 @@ mod tests {
 
     #[test]
     fn a_highlight_in_code_stays_exact() {
-        let mut doc = noted("a < b\n  c", 0, 5, AnnotationKind::Note);
+        let mut doc = highlighted("a < b\n  c", 0, 5);
         doc.blocks[0].kind = BlockKind::Code { language: None };
         let html = html_body(&doc, &Publish::plain());
         assert!(html.contains("<mark>a &lt; b</mark>\n  c"), "{html}");

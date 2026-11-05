@@ -207,7 +207,7 @@ An annotation has `id` (UUID), `kind`, `anchor` and `body`, all required. `body`
 | `kind` | What it is | Anchor | Published |
 |---|---|---|---|
 | `"Marginal"` | A note beside a block | Whole block | In HTML only |
-| `"Note"` | A private note on a passage, starting with an empty body | Byte range | The body never. HTML marks the passage with `<mark>`, and Markdown shows it as plain text |
+| `"Note"` | A private note on a passage, starting with an empty body. With no words, it's purely a highlight | Byte range | The body never. A note with words leaves no trace. One with an empty or blank body is marked with `<mark>` in HTML, and shown as plain text in Markdown |
 | `"Footnote"` | A numbered note | Byte range, normally the words it was added to, and zero-width when imported. The marker sits at `end` | Yes |
 
 An anchor takes one of two forms, told apart by JSON type:

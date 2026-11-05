@@ -364,8 +364,9 @@ struct Logs {
     store: Store,
 }
 
-/// The logs of each of these documents. `None` if any can't be read, or hold lines from a newer
-/// kame, which are skipped when read, since either could be holding the revision being looked for.
+/// The logs of each of these documents. `None` if any can't be read, or hold lines from a newer kame
+/// or that can't be checked, which are skipped when read, since any of them could be holding the
+/// revision being looked for.
 fn log_folders(documents: &[PathBuf]) -> Option<Vec<Logs>> {
     documents
         .iter()
@@ -373,7 +374,7 @@ fn log_folders(documents: &[PathBuf]) -> Option<Vec<Logs>> {
             let folder = log_folder(document);
             std::fs::read_dir(&folder).ok()?;
             let store = Store::load(&folder).ok()?;
-            (!store.holds_newer()).then(|| Logs {
+            (!store.holds_newer() && !store.dropped_lines()).then(|| Logs {
                 document: document.clone(),
                 store,
             })

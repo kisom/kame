@@ -1484,18 +1484,16 @@ fn only_log(path: &Path) -> PathBuf {
     logs.into_iter().next().unwrap()
 }
 
+/// Blanks a log at the same size. Blank lines hold nothing, and can't be holding a revision.
+fn blank_at_the_same_size(log: &Path) {
+    let size = std::fs::metadata(log).unwrap().len();
+    std::fs::write(log, "\n".repeat(size as usize)).unwrap();
+}
+
 /// Makes a document's log say something else at the same size, so that reading it finds no sign of
-/// the revision its database remembers: a line whose bytes don't match its id is passed over.
+/// the revision its database remembers.
 fn spoil_at_the_same_size(path: &Path) {
-    let log = only_log(path);
-    let revision = Session::open(path).unwrap().sync_state().unwrap();
-    let other = if revision.starts_with('0') { "1" } else { "0" };
-    let spoiled = std::fs::read_to_string(&log)
-        .unwrap()
-        .replace(&revision, &format!("{other}{}", &revision[1..]));
-    let size = std::fs::metadata(&log).unwrap().len();
-    std::fs::write(&log, spoiled).unwrap();
-    assert_eq!(std::fs::metadata(&log).unwrap().len(), size);
+    blank_at_the_same_size(&only_log(path));
 }
 
 #[test]
@@ -1617,13 +1615,8 @@ fn logs_from_a_newer_kame_are_not_remembered_as_healthy() {
     let mut healthy = Healthy::default();
     assert!(find_stranded(&nb, &mut healthy).is_empty(), "can't be told");
 
-    let blank = "\n".repeat(std::fs::metadata(&newer).unwrap().len() as usize);
-    std::fs::write(&newer, blank).unwrap();
-    let revision = Session::open(&a).unwrap().sync_state().unwrap();
-    let spoiled = std::fs::read_to_string(&log)
-        .unwrap()
-        .replace(&revision, &format!("_{}", &revision[1..]));
-    std::fs::write(&log, spoiled).unwrap();
+    blank_at_the_same_size(&newer);
+    blank_at_the_same_size(&log);
 
     assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
 }
@@ -1986,4 +1979,182 @@ fn another_recorded_place_is_read_again() {
     Session::open(&a).unwrap().set_sync_place("a.kame");
 
     assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+/// Rewrites a document's logs as a build from before `Metadata::publish` wrote them. This build still
+/// parses each line, and works out another id for it, so that it no longer checks. Says what `state`
+/// was called then.
+fn age_logs(folder: &Path, state: &str) -> String {
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(folder).unwrap().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        let mut aged = String::new();
+        for line in text.lines() {
+            let mut line = line.replace(",\"publish\":false", "");
+            for (old, new) in &renamed {
+                line = line.replace(old.as_str(), new.as_str());
+            }
+            let start = line.find("\"revision\":").unwrap() + "\"revision\":".len();
+            let end = line.rfind(",\"blocks\":[").unwrap();
+            let id = kame_sync::digest(&line.as_bytes()[start..end]);
+            let old = line["{\"id\":\"".len()..]
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string();
+            line = line.replacen(&old, &id, 1);
+            renamed.push((old, id));
+            aged.push_str(&line);
+            aged.push('\n');
+        }
+        std::fs::write(entry.path(), aged).unwrap();
+    }
+    renamed
+        .into_iter()
+        .find(|(old, _)| old == state)
+        .map(|(_, new)| new)
+        .unwrap()
+}
+
+/// Adds a log holding one whole line that can't be checked.
+fn add_line_that_cannot_be_checked(path: &Path) {
+    let folder = log_folder(path);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("old-0000.log"), "nonsense\n").unwrap();
+}
+
+#[test]
+fn a_document_last_synced_before_a_field_was_added_is_not_retired_and_heals() {
+    let (root, nb) = logged_notebook("stranded-old-format");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let state = Session::open(&a).unwrap().sync_state().unwrap();
+    let aged = age_logs(&log_folder(&a), &state);
+    Session::open(&a).unwrap().set_sync_state(&aged);
+
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(a.is_file());
+
+    let mut session = Session::open(&a).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert!(outcome.written > 0);
+    drop(session);
+    assert!(a.is_file());
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(text_of(&a).contains("Words."));
+}
+
+#[test]
+fn a_line_that_cannot_be_checked_could_be_its_home_so_nothing_is_done() {
+    let (root, nb) = logged_notebook("stranded-dropped-home");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Words.");
+    synced(&other, "Other words.");
+    remove_logs(&a);
+    add_line_that_cannot_be_checked(&other);
+
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(a.is_file());
+}
+
+#[test]
+fn a_retired_database_waits_too_while_some_lines_cannot_be_checked() {
+    let (root, nb) = logged_notebook("stranded-dropped-return");
+    let (a, b, other) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("other.kame"),
+    );
+    synced(&a, "Words.");
+    synced(&other, "Other words.");
+    let elsewhere = root.join(".carried");
+    std::fs::rename(log_folder(&a), &elsewhere).unwrap();
+    reconcile(&nb, just(&a), None);
+    std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
+    add_line_that_cannot_be_checked(&other);
+
+    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(root.join(".a.retired.kame").is_file());
+}
+
+#[test]
+fn logs_with_a_line_that_cannot_be_checked_are_not_remembered_as_healthy_when_they_lack_it() {
+    let (root, nb) = logged_notebook("stranded-dropped-unknown");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    spoil_at_the_same_size(&a);
+    add_line_that_cannot_be_checked(&a);
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty(), "can't be told");
+
+    blank_at_the_same_size(&log_folder(&a).join("old-0000.log"));
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+/// It's there, whatever the other line was, and logs like these have to be remembered, as a document
+/// keeps a line like that for good.
+#[test]
+fn logs_holding_it_beside_a_line_that_cannot_be_checked_are_remembered_as_healthy() {
+    let (root, nb) = logged_notebook("stranded-dropped-held");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let log = only_log(&a);
+    add_line_that_cannot_be_checked(&a);
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+
+    blank_at_the_same_size(&log);
+
+    assert!(
+        find_stranded(&nb, &mut healthy).is_empty(),
+        "so it wasn't read"
+    );
+}
+
+/// It can't be told, so it isn't stranded. But what can be read is all another document's, and that
+/// a line can't be checked doesn't make them this one's to write to.
+#[test]
+fn a_line_that_cannot_be_checked_lets_no_history_into_another_documents_logs() {
+    let (root, nb) = logged_notebook("stranded-dropped-others");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Old words.");
+    synced(&other, "A different document.");
+    remove_logs(&a);
+    move_logs(&other, &a);
+    std::fs::remove_file(&other).unwrap();
+    add_line_that_cannot_be_checked(&a);
+    let before = words_in_logs(&log_folder(&a));
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(a.is_file());
+    let mut session = Session::open(&a).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.stranded);
+    assert!(outcome.others_logs);
+    assert_eq!(outcome.written, 0);
+    drop(session);
+    assert_eq!(words_in_logs(&log_folder(&a)), before);
+}
+
+/// Half a line isn't a line yet, and a stale document can't be held up by one being written.
+#[test]
+fn half_a_line_still_being_written_does_not_stop_a_pass() {
+    let (root, nb) = logged_notebook("stranded-half-line");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Words.");
+    synced(&other, "Other words.");
+    remove_logs(&a);
+    let log = only_log(&other);
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"{\"id\":\"half");
+    std::fs::write(&log, bytes).unwrap();
+
+    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
 }

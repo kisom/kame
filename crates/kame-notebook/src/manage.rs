@@ -9,8 +9,7 @@ use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::storage::Db;
 use kame_sync::logs::{
-    build_from_logs, is_on_others_logs, is_stranded, is_where_it_synced, log_folder, logging_root,
-    Logged,
+    build_from_logs, is_on_others_logs, is_stranded, log_folder, logging_root, Logged,
 };
 use kame_sync::revlog::Store;
 
@@ -268,12 +267,11 @@ pub(crate) fn is_on_others_logs_database(path: &Path) -> bool {
     let Ok(db) = Db::open_read_only(path) else {
         return false;
     };
-    let (revision, place) = (db.load_sync_state(), db.load_sync_place());
-    // Most are where they synced, which saves reading the document to find its id.
-    !is_where_it_synced(path, place.as_deref())
-        && db.load_document().is_ok_and(|document| {
-            is_on_others_logs(path, document.id, revision.as_deref(), place.as_deref())
-        })
+    let revision = db.load_sync_state();
+    revision.is_some()
+        && db
+            .load_document()
+            .is_ok_and(|document| is_on_others_logs(path, document.id, revision.as_deref()))
 }
 
 /// Whether what's at a database's log folder can be taken for its logs, to read, delete or move.
@@ -323,12 +321,7 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
     if is_stranded(path, revision.as_deref(), place.as_deref()) {
         return Err("it was moved or deleted on another machine, and isn't syncing".to_string());
     }
-    if is_on_others_logs(
-        path,
-        session.document().id,
-        revision.as_deref(),
-        place.as_deref(),
-    ) {
+    if is_on_others_logs(path, session.document().id, revision.as_deref()) {
         return Err(OTHERS_LOGS.to_string());
     }
     let logged = Logged::open(&session, device).ok_or("could not read its logs")?;

@@ -63,6 +63,8 @@ pub struct Store {
     read: HashMap<PathBuf, (u64, u64)>,
     /// Whether a line came from a newer version of kame, holding something this build can't read.
     newer: bool,
+    /// Whether a whole line was passed over, as [`Store::dropped_lines`] says.
+    dropped: bool,
     /// What has been written here and may not have reached the disk yet.
     unflushed: Unflushed,
 }
@@ -150,15 +152,20 @@ impl Store {
                 .rposition(|byte| *byte == b'\n')
                 .map_or(0, |at| at + 1);
             for raw in fresh[..whole].split(|byte| *byte == b'\n') {
+                if raw.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
                 let line = match serde_json::from_slice::<Line>(raw) {
                     Ok(line) => line,
                     Err(err) => {
                         self.newer |= err.to_string().contains("unknown variant");
+                        self.dropped = true;
                         continue;
                     }
                 };
                 self.newer |= drops_something(raw, &line);
                 if line.revision.id() != line.id {
+                    self.dropped = true;
                     continue;
                 }
                 for block in line.blocks {
@@ -182,6 +189,14 @@ impl Store {
     /// here, and neither can anything built on them.
     pub fn holds_newer(&self) -> bool {
         self.newer
+    }
+
+    /// Whether a whole line was passed over since it couldn't be checked: its id doesn't match, or
+    /// it doesn't parse. Whatever it held can't be known, so a revision that's missing may be in
+    /// one. This doesn't stop anything else: such a line may be from a build with another idea of
+    /// what a revision is, and everything that can be read is used as ever.
+    pub fn dropped_lines(&self) -> bool {
+        self.dropped
     }
 
     /// Whether the logs in `folder` differ from when they were last read.
@@ -1011,6 +1026,66 @@ mod tests {
         );
         assert_ne!(older, ours);
         assert!(!log_holding("newer-not-older", &older).holds_newer());
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_checked_is_remembered() {
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        assert!(!log_holding("dropped-not-ours", &ours).dropped_lines());
+        assert!(!log_holding("dropped-not-empty", "").dropped_lines());
+        // Still being written, so it isn't a line yet, and blank ones hold nothing.
+        let half = format!("{ours}{{\"id\":\"half");
+        let store = log_holding("dropped-not-half", &half);
+        assert!(!store.dropped_lines());
+        assert_eq!(store.revision_count(), 1);
+        assert!(!log_holding("dropped-not-blank", &format!("\n\n{ours}\n")).dropped_lines());
+
+        let nonsense = log_holding("dropped-nonsense", &format!("nonsense\n{ours}"));
+        assert!(nonsense.dropped_lines());
+        assert!(!nonsense.holds_newer(), "it isn't from a newer build");
+        assert_eq!(nonsense.revision_count(), 1, "and the rest is read");
+        let id = ours.replacen("{\"id\":\"", "{\"id\":\"0", 1);
+        assert!(log_holding("dropped-id", &id).dropped_lines());
+        // A line that's whole now, since another was written after half of one.
+        let joined = format!("{{\"id\":\"half\n{ours}");
+        assert!(log_holding("dropped-torn", &joined).dropped_lines());
+    }
+
+    #[test]
+    fn a_line_from_before_a_field_was_added_is_dropped_and_not_taken_for_a_newer_build() {
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        let revision_start = ours.find("\"revision\":").unwrap() + "\"revision\":".len();
+        let revision_end = ours.rfind(",\"blocks\":").unwrap();
+        let older = ours[revision_start..revision_end].replace(",\"publish\":false", "");
+        let line = format!(
+            "{{\"id\":\"{}\",\"revision\":{older}{}",
+            digest(older.as_bytes()),
+            &ours[revision_end..]
+        );
+        let store = log_holding("dropped-older", &line);
+        assert!(store.dropped_lines());
+        assert!(!store.holds_newer());
+        assert_eq!(store.revision_count(), 0);
+    }
+
+    #[test]
+    fn a_dropped_line_does_not_change_what_a_sync_does() {
+        let folder = kame_test_dir::folder("dropped-sync");
+        let here = replica(&folder, "here");
+        let synced = here.sync(&document_saying("Written."), None, 1).unwrap();
+        let log = folder.join("here.log");
+        let mut bytes = std::fs::read(&log).unwrap();
+        bytes.extend_from_slice(b"nonsense\n");
+        std::fs::write(&log, bytes).unwrap();
+
+        let again = here
+            .sync(&document_saying("Written. More."), Some(&synced.head), 2)
+            .unwrap();
+        assert_eq!(again.written, 1);
+        let store = Store::load(&folder).unwrap();
+        assert!(store.dropped_lines());
+        assert!(!store.holds_newer());
+        assert_eq!(store.heads(), vec![again.head]);
     }
 
     #[test]

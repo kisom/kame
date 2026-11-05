@@ -138,8 +138,8 @@ pub fn is_where_it_synced(path: &Path, place: Option<&str>) -> bool {
 /// place it last synced, and the logs beside it don't hold that revision, because they're gone or
 /// belong to another document now. This is the case after a document is deleted or moved on another
 /// machine. Being wrong here hides someone's document, so it's false anywhere else, as for a copy
-/// made by hand, and when it can't be told, for logs that can't be read or that came from a newer
-/// kame, since nothing is done on a guess.
+/// made by hand, and when it can't be told, for logs that can't be read, that came from a newer kame,
+/// or with a line that can't be checked, as the revision may be in it. Nothing is done on a guess.
 ///
 /// Every part of kame asking this asks here, with what the database says about itself.
 pub fn is_stranded(path: &Path, revision: Option<&str>, place: Option<&str>) -> bool {
@@ -159,28 +159,28 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
         return Some(true);
     }
     let store = Store::load(&folder).ok()?;
-    (!store.holds_newer()).then(|| !store.contains(revision))
+    if store.holds_newer() {
+        return None;
+    }
+    if store.contains(revision) {
+        return Some(false);
+    }
+    (!store.dropped_lines()).then_some(true)
 }
 
-/// Whether the logs beside a database are another document's and it has never been here: it isn't
-/// where it last synced, those logs don't hold its revision, and they hold only other documents. It
-/// isn't stranded, so nothing retires it. But writing its history there would bring one document's
-/// words into another's logs, on every machine, so it doesn't sync, and they aren't its to delete or
-/// move. A database that has never synced has no history here to bring, and merges as ever.
-pub fn is_on_others_logs(
-    path: &Path,
-    document: uuid::Uuid,
-    revision: Option<&str>,
-    place: Option<&str>,
-) -> bool {
+/// Whether the logs beside a database are another document's: they don't hold the revision it
+/// remembers, and they hold only other documents. It may not be stranded, if it isn't where it last
+/// synced or that can't be told, and then nothing retires it. But writing its history there would
+/// bring one document's words into another's logs, on every machine, so it doesn't sync, and they
+/// aren't its to delete or move. A database that has never synced has no history here to bring, and
+/// merges as ever.
+pub fn is_on_others_logs(path: &Path, document: uuid::Uuid, revision: Option<&str>) -> bool {
     let Some(revision) = revision else {
         return false;
     };
-    if logging_root(path).is_none() || is_where_it_synced(path, place) {
-        return false;
-    }
-    Store::load(&log_folder(path))
-        .is_ok_and(|store| !store.contains(revision) && store.holds_only_others(document))
+    logging_root(path).is_some()
+        && Store::load(&log_folder(path))
+            .is_ok_and(|store| !store.contains(revision) && store.holds_only_others(document))
 }
 
 /// What a sync did.
@@ -188,8 +188,8 @@ pub fn is_on_others_logs(
 pub struct Outcome {
     /// Whether the logs no longer belong to this database, so that nothing was written.
     pub stranded: bool,
-    /// Whether the logs at its path are another document's, and this one was never at that path, so
-    /// that nothing was written. It isn't stranded, and the clean-up leaves it alone.
+    /// Whether the logs at its path are another document's, so that nothing was written, and it
+    /// isn't known to be stranded, so that the clean-up leaves it alone.
     pub others_logs: bool,
     /// Revisions written to this machine's log.
     pub written: usize,
@@ -290,9 +290,7 @@ impl Logged {
         let local = session.document().clone();
         let metadata = session.metadata.clone();
         if self.last.as_ref().is_some_and(|last| {
-            !self.store.contains(last)
-                && !is_where_it_synced(&self.path, self.place.as_deref())
-                && self.store.holds_only_others(local.id)
+            !self.store.contains(last) && self.store.holds_only_others(local.id)
         }) {
             return Ok(Outcome {
                 others_logs: true,

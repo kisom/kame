@@ -1036,3 +1036,86 @@ fn a_database_with_no_place_on_logs_of_its_own_document_merges_with_them() {
     assert!(here.document().blocks[0].text.ends_with(" From talos."));
     assert!(here.document().blocks[1].text.ends_with(" From titan."));
 }
+
+/// Rewrites a document's logs as a build from before `Metadata::publish` wrote them. This build still
+/// parses each line, and works out another id for it, so that it no longer checks. Says what `state`
+/// was called then.
+fn age_logs(folder: &Path, state: &str) -> String {
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(folder).unwrap().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        let mut aged = String::new();
+        for line in text.lines() {
+            let mut line = line.replace(",\"publish\":false", "");
+            for (old, new) in &renamed {
+                line = line.replace(old.as_str(), new.as_str());
+            }
+            let start = line.find("\"revision\":").unwrap() + "\"revision\":".len();
+            let end = line.rfind(",\"blocks\":[").unwrap();
+            let id = kame_sync::digest(&line.as_bytes()[start..end]);
+            let old = line["{\"id\":\"".len()..]
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string();
+            line = line.replacen(&old, &id, 1);
+            renamed.push((old, id));
+            aged.push_str(&line);
+            aged.push('\n');
+        }
+        std::fs::write(entry.path(), aged).unwrap();
+    }
+    renamed
+        .into_iter()
+        .find(|(old, _)| old == state)
+        .map(|(_, new)| new)
+        .unwrap()
+}
+
+/// What's remembered may be in a line this build can't check, so nothing can be said. It carries on,
+/// and its history starts the logs again.
+#[test]
+fn a_document_last_synced_before_a_field_was_added_is_not_stranded_and_heals() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().unwrap();
+    let folder = log_folder(&talos.path);
+    let aged = age_logs(&folder, &state);
+    session.set_sync_state(&aged);
+    drop(session);
+
+    let store = Store::load(&folder).unwrap();
+    assert!(store.dropped_lines());
+    assert!(!store.holds_newer());
+    assert!(!store.contains(&aged));
+    assert!(!stranded_there(&talos.path, &aged));
+
+    let mut session = talos.session();
+    talos.append(&mut session, 0, " Edited after the upgrade.");
+    let outcome = talos.sync(&mut session, 2);
+    assert!(!outcome.stranded);
+    assert!(outcome.written > 0);
+    assert!(!session.newer);
+    let store = Store::load(&folder).unwrap();
+    assert!(store.contains(&session.sync_state().unwrap()));
+    assert!(store
+        .heads()
+        .iter()
+        .any(|head| store.document(head).blocks[0]
+            .text
+            .ends_with(" Edited after the upgrade.")));
+}
+
+#[test]
+fn half_a_line_says_nothing_so_a_revision_missing_beside_it_is_missing() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().unwrap();
+    let folder = log_folder(&talos.path);
+    for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+        std::fs::write(entry.path(), "{\"id\":\"half").unwrap();
+    }
+    assert!(stranded_there(&talos.path, &state));
+}

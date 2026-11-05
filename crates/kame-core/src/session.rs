@@ -648,9 +648,10 @@ impl Session {
             return Err(err);
         }
 
-        self.db = Db::open(path)?;
+        let mut db = Db::open(path)?;
         // The copy is a different file, and what a sync tool recorded was about the original.
-        self.db.clear_sync_state()?;
+        db.clear_sync_state()?;
+        self.db = db;
         self.path = Some(path.to_path_buf());
         self.on_disk = file_identity(path);
         self.log_on_disk = file_identity(&wal_path(path));

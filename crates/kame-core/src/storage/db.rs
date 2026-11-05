@@ -775,6 +775,43 @@ mod tests {
         );
     }
 
+    /// Notebooks arrive from other machines, so a link could be waiting at a log's name. SQLite
+    /// removes one beside a new database and refuses to open an existing one with it. kame relies
+    /// on that, so this says it still holds.
+    #[test]
+    fn a_symbolic_link_beside_a_document_cannot_take_its_writes_elsewhere() {
+        let write = |path: &Path| -> Result<(), DbError> {
+            let mut db = Db::open(path)?;
+            db.save_document(&sample_document())
+        };
+        for suffix in ["-wal", "-shm", "-journal"] {
+            for already_written in [false, true] {
+                for target_exists in [false, true] {
+                    let path = temp_db_path();
+                    let outside = path.with_file_name("outside");
+                    if already_written {
+                        write(&path).unwrap();
+                    }
+                    if target_exists {
+                        std::fs::write(&outside, "left alone").unwrap();
+                    }
+                    let link = format!("{}{suffix}", path.display());
+                    std::os::unix::fs::symlink(&outside, link).unwrap();
+
+                    let _ = write(&path);
+
+                    let case = format!("{suffix}, written {already_written}");
+                    if target_exists {
+                        let held = std::fs::read_to_string(&outside).unwrap();
+                        assert_eq!(held, "left alone", "{case}");
+                    } else {
+                        assert!(!outside.exists(), "{case}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_newer_file_is_refused_when_only_reading_it() {
         let path = temp_db_path();

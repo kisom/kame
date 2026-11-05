@@ -80,6 +80,19 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **With no file open, a rename can lose the old key** if the unsaved copy can't follow. It needs a failed write to the temporary database, and the reference survives under the new key.
 - [ ] **A new single name such as `King, Jr.`** splits on commas unless it's typed with a `;`.
 
+## Performance
+
+Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a
+keystroke in the page, a little more for a long paragraph, and nothing yet is close to a frame.
+
+- [ ] **The app holds about 680 MB on macOS with an empty document,** two-thirds of it graphics memory. It isn't kame's text, so
+  it's eframe and wgpu's: look with Instruments at what they keep.
+- [ ] **A keystroke redraws its whole paragraph's image, then converts it for upload.** Drawing straight into egui's premultiplied
+  form would save a pass, about a sixth of a keystroke on a Retina screen. Drawing only the lines that changed would save more.
+- [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs
+  far from the screen would make opening independent of length.
+- [ ] **Every frame fingerprints every block, twice,** even when nothing changed. A revision number on the document would skip it.
+
 ## Sync
 
 - [ ] **Revision logs before a real folder.** Designed in `docs/superpowers/specs/2026-11-03-sync-design.md`.

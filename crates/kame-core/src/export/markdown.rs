@@ -208,9 +208,19 @@ fn reference_markdown(reference: &Reference) -> String {
         match style {
             RunStyle::Plain => push_escaped(&mut out, &text),
             RunStyle::Italic => {
+                // Emphasis can't open before a space or close after one, so the spaces at its
+                // edges go outside.
+                let inner = text.trim();
+                if inner.is_empty() {
+                    out.push_str(&text);
+                    continue;
+                }
+                let start = text.len() - text.trim_start().len();
+                out.push_str(&text[..start]);
                 out.push('*');
-                push_escaped(&mut out, &text);
+                push_escaped(&mut out, inner);
                 out.push('*');
+                out.push_str(&text[start + inner.len()..]);
             }
             RunStyle::Url if references::linkable_url(&text) => out.push_str(&format!("<{text}>")),
             RunStyle::Url => push_escaped(&mut out, &text),
@@ -1923,6 +1933,18 @@ mod tests {
         };
         let md = md_of("See [src].", &with_reference(hostile));
         assert!(md.contains("*\\<script\\>alert(1)\\</script\\>.*"), "{md}");
+    }
+
+    #[test]
+    fn spaces_at_the_edges_of_an_italic_title_stay_outside_its_emphasis() {
+        let book = Reference {
+            kind: crate::references::Kind::Book,
+            title: " Algorithms ".to_string(),
+            edition: "2nd".to_string(),
+            ..Reference::default()
+        };
+        let md = md_of("See [src].", &with_reference(book));
+        assert!(md.contains("\\[src\\]  *Algorithms* , 2nd ed."), "{md}");
     }
 
     #[test]

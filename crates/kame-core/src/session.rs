@@ -2226,8 +2226,14 @@ impl Session {
             } = &mut annotation.anchor
             {
                 if let Some(keys) = keys_in.get(block_id) {
-                    *start = offset_after_rename(*start, keys, new.len(), false);
+                    // An anchor at one point stays at one point, where a caret there would go.
+                    let at_one_point = *start == *end;
                     *end = offset_after_rename(*end, keys, new.len(), true);
+                    *start = if at_one_point {
+                        *end
+                    } else {
+                        offset_after_rename(*start, keys, new.len(), false)
+                    };
                 }
             }
             if annotation.kind != AnnotationKind::Note {
@@ -8044,6 +8050,38 @@ mod tests {
             (first, 4)
         );
         assert_eq!((selection.end.block_id, selection.end.offset), (second, 4));
+    }
+
+    #[test]
+    fn a_zero_width_anchor_stays_zero_width_through_a_rename() {
+        let text = "see [smith2020] now";
+        let key = text.find("smith2020").unwrap();
+        let (end, new_end) = (key + "smith2020".len(), key + "li19".len());
+        for (start_of, end_of, want) in [
+            // Inside the key it goes where a caret there goes.
+            (key + 3, key + 3, (new_end, new_end)),
+            // At the key's edges, and either side of it, it moves with the text.
+            (key, key, (key, key)),
+            (end, end, (new_end, new_end)),
+            (1, 1, (1, 1)),
+            (end + 2, end + 2, (new_end + 2, new_end + 2)),
+            // A range inside the key still comes to cover it.
+            (key + 3, key + 5, (key, new_end)),
+        ] {
+            let mut session = noted(text, 0);
+            let mut document = session.document().clone();
+            let id = document.blocks[0].id;
+            document.annotations[0].anchor = Anchor::range(id, start_of, end_of);
+            assert!(session.replace_document(document));
+            let before = session.document().clone();
+            assert_eq!(session.rename_citation("smith2020", "li19"), 1);
+            assert_eq!(anchors(&session)[0], want, "{start_of}..{end_of}");
+            let after = session.document().clone();
+            assert!(session.undo());
+            assert_eq!(session.document(), &before, "{start_of}..{end_of}");
+            assert!(session.redo());
+            assert_eq!(session.document(), &after, "{start_of}..{end_of}");
+        }
     }
 
     #[test]

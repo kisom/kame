@@ -2310,6 +2310,8 @@ struct KameApp {
     /// The heading a followed document link named, until its document opens.
     pending_heading: Option<String>,
     escape_prefix: EscapePrefix,
+    /// Whether the open note was opened while a dialog was up, and so is over it.
+    note_over_dialog: bool,
     /// How far the page was scrolled on the last frame.
     page_scroll: f32,
     /// The caret and scroll last written to the document.
@@ -2438,6 +2440,7 @@ impl KameApp {
             page_key: None,
             pending_heading: None,
             escape_prefix: EscapePrefix::default(),
+            note_over_dialog: false,
             page_scroll: 0.0,
             saved_position: None,
             position_saved_at: std::time::Instant::now(),
@@ -2483,10 +2486,14 @@ impl KameApp {
         });
         // A note that no longer exists cannot be edited: an undo that removed it
         // closes the popover instead of leaving a field pointing at nothing.
+        let before = self.open_note;
         self.open_note = match (id, body.is_some()) {
             (Some(id), true) => Some(id),
             _ => None,
         };
+        if self.open_note != before {
+            self.note_over_dialog = self.open_note.is_some() && self.dialog_open();
+        }
         self.open_note_body = body.unwrap_or_default();
         self.open_note_focus = self.open_note.is_some();
     }
@@ -3185,12 +3192,18 @@ impl KameApp {
             self.adjust_font_size(-FONT_SIZE_STEP);
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            // Escape closes help, then the find bar, then a dialog, then the note.
+            // Escape closes help, then the find bar, then a note over a dialog, then a dialog, then
+            // the note.
             if self.show_help {
                 self.show_help = false;
                 return;
             }
             if self.find.take().is_some() {
+                return;
+            }
+            // A note opened over a dialog is on top of it, so it goes first.
+            if self.open_note.is_some() && self.note_over_dialog {
+                self.set_open_note(None);
                 return;
             }
             if !self.dismiss_dialog() {

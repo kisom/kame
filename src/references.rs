@@ -2977,6 +2977,46 @@ mod tests {
     }
 
     #[test]
+    fn escape_closes_a_note_opened_over_a_form_before_the_form() {
+        let mut page = page_in_notebook("hello");
+        page.app.refs.open_form_to_add();
+        fill_form(&mut page, "lamport1994");
+        let id = page
+            .app
+            .session
+            .add_annotation(AnnotationKind::Footnote)
+            .unwrap();
+        page.app.set_open_note(Some(id));
+        page.frame(Vec::new());
+
+        press_key(&mut page, egui::Key::Escape);
+
+        assert_eq!(page.app.open_note, None);
+        assert!(page.app.refs.form.is_some(), "the form is under it");
+        press_key(&mut page, egui::Key::Escape);
+        assert!(page.app.refs.form.is_none());
+    }
+
+    #[test]
+    fn escape_closes_a_form_opened_over_a_note_before_the_note() {
+        let mut page = page_in_notebook("hello");
+        let id = page
+            .app
+            .session
+            .add_annotation(AnnotationKind::Footnote)
+            .unwrap();
+        page.app.set_open_note(Some(id));
+        page.frame(Vec::new());
+        page.app.refs.open_form_to_add();
+        page.frame(Vec::new());
+
+        press_key(&mut page, egui::Key::Escape);
+
+        assert!(page.app.refs.form.is_none());
+        assert_eq!(page.app.open_note, Some(id));
+    }
+
+    #[test]
     fn the_chord_is_ignored_in_a_notes_box() {
         let mut page = page_in_notebook("hello");
         let id = page

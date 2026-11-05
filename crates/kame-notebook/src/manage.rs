@@ -295,7 +295,7 @@ fn logs_are_its_own(path: &Path) -> bool {
 
 /// The latest versions in a logged document's logs. There are none to read if it has no logs, or
 /// if what's at its log folder isn't its logs, since those say nothing about this document.
-fn versions_in_logs(path: &Path) -> Vec<Document> {
+pub(crate) fn versions_in_logs(path: &Path) -> Vec<Document> {
     if logging_root(path).is_none() {
         return Vec::new();
     }
@@ -346,7 +346,7 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
 /// Changes a closed document, and sends the change to its logs if it has them. What's in the logs
 /// comes in first, since if it were merged after the change, it would bring back what the change
 /// took out, and be left unchanged itself.
-fn edit_closed<T>(
+pub(crate) fn edit_closed<T>(
     path: &Path,
     device: &str,
     now: i64,

@@ -1062,6 +1062,9 @@ impl KameApp {
             return;
         };
         let open = self.session.path().map(Path::to_path_buf);
+        self.ensure_device();
+        let device = self.device.clone();
+        let now = super::now_unix();
         let (send, coming) = channel();
         self.refs.renaming = Some(Renaming {
             coming,
@@ -1071,7 +1074,7 @@ impl KameApp {
             new: new.clone(),
         });
         std::thread::spawn(move || {
-            let _ = send.send(rename(&notebook, &old, &new, open.as_deref()));
+            let _ = send.send(rename(&notebook, &old, &new, open.as_deref(), &device, now));
         });
     }
 
@@ -3444,7 +3447,14 @@ mod tests {
         open_list(&mut page);
         let send = rename_held_open(&mut page);
 
-        let done = rename(&notebook, "knuth1981", "plass1981", Some(&open));
+        let done = rename(
+            &notebook,
+            "knuth1981",
+            "plass1981",
+            Some(&open),
+            "here-aaaa",
+            1_000,
+        );
 
         // A quit here leaves the open document with a reference for what it holds.
         assert_eq!(text_on_disk(&open), "see [knuth1981]");
@@ -3486,7 +3496,14 @@ mod tests {
         let open = page.app.session.path().unwrap().to_path_buf();
         open_list(&mut page);
         let send = rename_held_open(&mut page);
-        let done = rename(&notebook, "knuth1981", "plass1981", Some(&open));
+        let done = rename(
+            &notebook,
+            "knuth1981",
+            "plass1981",
+            Some(&open),
+            "here-aaaa",
+            1_000,
+        );
         let folder = root_of(&page).join("references");
         if !read_only_folder_refuses_files(&folder) {
             return;
@@ -3807,8 +3824,15 @@ mod tests {
 
         let notebook = Notebook::open(&root).unwrap();
         let open = root.join("doc.kame");
-        send.send(rename(&notebook, "knuth1981", "plass1981", Some(&open)))
-            .unwrap();
+        send.send(rename(
+            &notebook,
+            "knuth1981",
+            "plass1981",
+            Some(&open),
+            "here-aaaa",
+            1_000,
+        ))
+        .unwrap();
         run_until(&mut page, |app| app.refs.renaming.is_none());
         page.frame(Vec::new());
 

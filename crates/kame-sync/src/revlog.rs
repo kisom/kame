@@ -7,7 +7,7 @@
 //! machines that merge separately write the same revision, and they have converged.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use kame_core::model::{Annotation, Block, Document, Metadata};
@@ -317,6 +317,17 @@ pub fn merge_metadata(base: Option<&Metadata>, later: &Metadata, earlier: &Metad
     merged
 }
 
+/// Whether a log has something after its last line ending.
+fn ends_mid_line(log: &mut std::fs::File) -> std::io::Result<bool> {
+    if log.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    log.seek(std::io::SeekFrom::End(-1))?;
+    let mut last = [0u8];
+    log.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
+}
+
 /// One machine's end of it.
 pub struct Replica {
     pub folder: PathBuf,
@@ -366,8 +377,13 @@ impl Replica {
         bytes.push(b'\n');
         let mut log = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(self.log_path())?;
+        // A crash can leave part of a line at the end, and this one mustn't join on to it.
+        if ends_mid_line(&mut log)? {
+            bytes.insert(0, b'\n');
+        }
         log.write_all(&bytes)?;
         // Having been read already, this machine's own line isn't news.
         let (read, seen) = store.read.entry(self.log_path()).or_insert((0, 0));
@@ -729,6 +745,28 @@ mod tests {
         );
         assert!(everything.contains("Typed here."), "{everything}");
         assert!(everything.contains("From elsewhere."), "{everything}");
+    }
+
+    /// A crash can leave half a line at the end of this machine's own log.
+    #[test]
+    fn a_revision_written_after_half_a_line_can_be_read() {
+        let folder = kame_test_dir::folder("revlog-torn-tail");
+        let here = replica(&folder, "here");
+        let last = here
+            .sync(&document_saying("Written."), None, 1)
+            .unwrap()
+            .head;
+        let log = folder.join("here.log");
+        let mut bytes = std::fs::read(&log).unwrap();
+        bytes.extend_from_slice(b"{\"id\":\"half");
+        std::fs::write(&log, bytes).unwrap();
+
+        let synced = here
+            .sync(&document_saying("Written. More."), Some(&last), 2)
+            .unwrap();
+        let store = Store::load(&folder).unwrap();
+        assert!(store.contains(&synced.head), "the new line reads back");
+        assert_eq!(store.heads(), vec![synced.head]);
     }
 
     #[test]

@@ -188,7 +188,7 @@ Only top-level `*.log` files are read. Readers ignore the log's name and take th
 
 ### 6.2 A log line
 
-Each line is one JSON object, followed by a line feed. Lines must be written whole and in one write, and a writer should start a new line first if the log doesn't end in a line feed (section 9). kame doesn't fsync them. Example, wrapped here:
+Each line is one JSON object, followed by a line feed. Lines must be written whole and in one write, and a writer must start a new line first if the log doesn't end in a line feed, since a crash can leave part of a line there. kame doesn't fsync them. Example, wrapped here:
 
 ```json
 {"id":"12d59870561bfca560505d422b9f7950",
@@ -294,7 +294,6 @@ Everything a merge adds is a `Note`, which never publishes. A merged document ca
 
 These describe the code as it stands, and aren't rules to copy.
 
-- **A torn last line swallows the next.** Appending doesn't check for a trailing line feed. After a torn tail, the writer reports a new head written, but its line is glued to the tail and a fresh read doesn't see it.
 - **Nothing checks `revision.document`.** Logs from a different document at the same name merge in, and the result takes the id of ours.
 - **A sync stops silently if the logs can't be read at open.** `Logged::open` returns nothing, and the app shows no message.
 - **`kame-sync enable` prints too little.** It leaves out the `-wal` and `-shm` lines (section 6.1), and the sync design records a mispaired `-wal` overriding a file.

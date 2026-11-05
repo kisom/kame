@@ -12,6 +12,7 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   revisions back into merges. `skip_serializing_if` on new fields is the cheap stopgap. This is the most pressing item here.
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
+- [ ] **A footnote or note added right after punctuation** has no word to anchor to, so it sits at one point and its mark moves along as you keep typing there.
 
 ## Site
 
@@ -99,7 +100,9 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **The Markdown export's notice** can name a key cited only in a footnote it dropped.
 - [ ] **A clicked citation's entry** stays where it opened while the page scrolls.
 - [ ] **A name holding a semicolon,** possible only by hand in its file, splits on Save from the form.
-- [ ] **Test gaps:** `kame_css` always having `REFERENCES_STYLE`, paste leaving no note, `chmod` as root.
+- [ ] **With no file open, a rename can lose the old key** if the unsaved copy can't follow. It needs a failed write to the temporary database, and the reference survives under the new key.
+- [ ] **A new single name such as `King, Jr.`** splits on commas unless it's typed with a `;`.
+- [ ] **Test gaps:** paste leaving no note, `chmod` as root.
 
 ## Sync
 

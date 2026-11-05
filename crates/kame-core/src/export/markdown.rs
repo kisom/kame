@@ -168,6 +168,16 @@ fn markdown_with(doc: &Document, references: &References) -> String {
     out
 }
 
+/// `doc` with the footnotes that aren't written taken out: those whose block is gone or empty.
+fn as_written(doc: &Document, footnotes: &[(usize, &crate::model::Annotation)]) -> Document {
+    let mut written = doc.clone();
+    written.annotations.retain(|annotation| {
+        annotation.kind != AnnotationKind::Footnote
+            || footnotes.iter().any(|(_, kept)| kept.id == annotation.id)
+    });
+    written
+}
+
 /// The sources cited in what is written: footnotes that aren't, because their block is gone or
 /// empty, don't count, or a source would be listed with no citation in the output.
 fn cited_in_output<'a>(
@@ -178,12 +188,15 @@ fn cited_in_output<'a>(
     if references.is_empty() {
         return Vec::new();
     }
-    let mut written = doc.clone();
-    written.annotations.retain(|annotation| {
-        annotation.kind != AnnotationKind::Footnote
-            || footnotes.iter().any(|(_, kept)| kept.id == annotation.id)
-    });
-    references::cited(&written, references, false)
+    references::cited(&as_written(doc, footnotes), references, false)
+}
+
+/// Keys cited in what [`to_markdown`] writes that have no reference and look like a suggested
+/// key, as [`references::unresolved`] finds them. A key cited only in a footnote the file leaves
+/// out, or in a marginal, isn't named.
+pub fn markdown_unresolved(doc: &Document, references: &References) -> Vec<String> {
+    let footnotes = numbered_footnotes(doc);
+    references::unresolved(&as_written(doc, &footnotes), references, false)
 }
 
 /// One entry's text: titles in italics, a web or mail address as an autolink, and any other

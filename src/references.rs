@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
 use egui::{Align2, Id, Order, Pos2, Vec2};
+use kame_core::export::markdown_unresolved;
 use kame_core::model::{Block, Document};
 use kame_core::references::{
     block_citation_ranges, citation_at, cited, key_of, plain, suggest_key, unresolved, valid_key,
@@ -710,13 +711,18 @@ pub(crate) fn just_closed_note(
 }
 
 /// What to add to an export's notice about keys that look lost. `marginals` is whether the format
-/// carries them.
+/// carries them: HTML does, and Markdown, which doesn't, is also without footnotes that have no
+/// text to hang on.
 pub(crate) fn unresolved_note(
     doc: &Document,
     references: &References,
     marginals: bool,
 ) -> Option<String> {
-    let lost = unresolved(doc, references, marginals);
+    let lost = if marginals {
+        unresolved(doc, references, true)
+    } else {
+        markdown_unresolved(doc, references)
+    };
     (!lost.is_empty()).then(|| format!("no reference for {}", lost.join(", ")))
 }
 
@@ -1720,6 +1726,22 @@ mod tests {
         assert_eq!(unresolved_note(&doc, &references, false), None);
         let note = unresolved_note(&doc, &references, true).expect("a marginal's key is named");
         assert!(note.contains("jones2019"), "{note}");
+    }
+
+    #[test]
+    fn a_markdown_notice_leaves_out_a_key_cited_only_in_a_dropped_footnote() {
+        let references = known(&["knuth1981"]);
+        let mut doc = Document::new("t");
+        doc.blocks = vec![paragraph("as [knuth1981] says"), paragraph("")];
+        doc.annotations.push(Annotation {
+            id: uuid::Uuid::new_v4(),
+            kind: AnnotationKind::Footnote,
+            anchor: Anchor::range(doc.blocks[1].id, 0, 0),
+            body: "see [smith2020]".to_string(),
+        });
+        assert_eq!(unresolved_note(&doc, &references, false), None);
+        let note = unresolved_note(&doc, &references, true).expect("HTML lists the footnote");
+        assert!(note.contains("smith2020"), "{note}");
     }
 
     #[test]

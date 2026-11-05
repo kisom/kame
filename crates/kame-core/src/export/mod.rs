@@ -5,6 +5,7 @@ pub mod markdown;
 
 pub use html::to_html;
 pub use html::{html_body, to_html_with, Publish, REFERENCES_STYLE, STYLE};
+pub use markdown::markdown_unresolved;
 #[cfg(test)]
 pub use markdown::to_markdown;
 pub use markdown::to_markdown_with;

@@ -577,6 +577,24 @@ fn a_document_with_only_logs_can_itself_be_moved() {
     assert_eq!(head(&b).1.title, "b");
 }
 
+#[test]
+fn deleting_a_document_with_only_logs_removes_them() {
+    let (root, _nb) = logged_notebook("delete-logs-only");
+    let a = root.join("a.kame");
+    document(&a, "The words.");
+    sync(&a);
+    std::fs::remove_file(&a).unwrap();
+    delete_document(&a).unwrap();
+    assert!(!log_folder(&a).exists());
+}
+
+#[test]
+fn deleting_what_isnt_there_says_so() {
+    let (root, _nb) = logged_notebook("delete-nothing");
+    let err = delete_document(&root.join("a.kame")).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+}
+
 /// A second machine: its own folder, holding a copy of the document with the same past, whose
 /// logs are played across by copying them.
 fn second_machine(root: &Path, linker: &Path, name: &str) -> PathBuf {

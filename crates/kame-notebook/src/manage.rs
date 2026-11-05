@@ -149,7 +149,13 @@ pub fn delete_document(path: &Path) -> std::io::Result<()> {
     }
     // Found first, since which copies are this document's is told by reading it.
     let belonging = belonging_files(path);
-    std::fs::remove_file(path)?;
+    // A document this machine hasn't opened yet has only its logs.
+    match std::fs::remove_file(path) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound || !log_folder(path).is_dir() => {
+            return Err(err);
+        }
+        _ => {}
+    }
     for file in sqlite_files(path).into_iter().chain(belonging) {
         match std::fs::remove_file(&file) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),

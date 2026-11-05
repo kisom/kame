@@ -1014,8 +1014,11 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::Enter if modifiers.shift => Some(Command::LineBreak),
         Key::Enter => Some(Command::SplitParagraph),
         // Ctrl-Shift-N / Ctrl-Shift-F add a note (a highlight) or a footnote at
-        // the selection.
+        // the selection, and Ctrl-Shift-M a marginal on its block.
         Key::N if command && modifiers.shift => Some(Command::AddAnnotation(AnnotationKind::Note)),
+        Key::M if command && modifiers.shift => {
+            Some(Command::AddAnnotation(AnnotationKind::Marginal))
+        }
         Key::F if command && modifiers.shift => {
             Some(Command::AddAnnotation(AnnotationKind::Footnote))
         }
@@ -2007,6 +2010,10 @@ visual form, and thus with an independent existence.";
         assert_eq!(
             command_for_key(Key::N, ctrl_shift),
             Some(Command::AddAnnotation(AnnotationKind::Note))
+        );
+        assert_eq!(
+            command_for_key(Key::M, ctrl_shift),
+            Some(Command::AddAnnotation(AnnotationKind::Marginal))
         );
         assert_eq!(
             command_for_key(Key::F, ctrl_shift),

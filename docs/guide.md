@@ -95,7 +95,7 @@ To link to another document, type `[[essay]]`, `[[notes/essay#The Intro]]` or `[
 These are the reason for kame's name. Each attaches to the selection, or to the word under the caret, and stays with those words as the text changes around them. They differ mostly in who gets to read them.
 
 - A **note** (Ctrl-Shift-N) highlights a passage and holds a comment for you alone. The note's words never publish, in any format, and neither does its highlight. Leave a note without words and it's purely a highlight, which does show in HTML.
-- A **marginal** (Annotate > Marginal, or the right-click menu) sits in the margin beside its paragraph. It publishes in HTML, and is left out of Markdown, which has nowhere to put it.
+- A **marginal** (Ctrl-Shift-M) sits in the margin beside its paragraph. It publishes in HTML, and is left out of Markdown, which has nowhere to put it.
 - A **footnote** (Ctrl-Shift-F) is numbered and collected at the foot of the page, and publishes in both formats. Its selection grows to whole words.
 
 Adding one opens a small box for its words, and Escape closes that box. Click a note's marker to open it again, or a footnote's words to edit them. The box has a Remove button. Clicking a footnote's number moves between the footnote and its place in the text.
@@ -108,7 +108,7 @@ When you want less on the screen, each of these is a toggle, and none of them ch
 
 - F11: fullscreen.
 - Ctrl-Shift-H: hide the menu bar and status row.
-- Ctrl-Shift-M: hide the margin.
+- Ctrl-Shift-G: hide the margin. Adding a marginal shows it again.
 - Ctrl-Shift-P: dim everything but the current paragraph.
 - Ctrl-Shift-T: typewriter mode, which keeps your line at the middle of the window.
 

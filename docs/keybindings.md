@@ -14,6 +14,7 @@ macOS (`Modifiers::command`).
 | Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
 | Ctrl-Shift-0 | return the caret's block to body text |
 | Ctrl-Shift-N / Ctrl-Shift-F | add a note (a highlight) / a footnote at the selection or the word under the caret. A footnote's selection grows to whole words |
+| Ctrl-Shift-M | add a marginal on the caret's block, showing the margin if it's hidden |
 | Ctrl-Shift-C | cite a reference, in a notebook. In or just after a `[key]` with no reference it opens a new one with that key, in or just after a known one it opens that reference for editing, and elsewhere it searches the references and inserts `[key]` |
 | Ctrl-K | add or edit a hyperlink on the selection, or the link under the caret: its words and its URL (empty words show the URL, and an empty URL removes the link) |
 | Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |
@@ -102,8 +103,8 @@ position on the keyboard.
 ## Notes, marginals and footnotes
 
 Ctrl-Shift-N adds a note and Ctrl-Shift-F a footnote, at the selection or the word under the
-caret. A marginal belongs to a whole block and has no key: all three are on the Annotate menu and
-the right-click menu. A note needs no words, in which case it's just a highlight.
+caret. Ctrl-Shift-M adds a marginal, which belongs to a whole block, and turns Hide margin off if it was on. All
+three are on the Annotate menu and the right-click menu. A note needs no words, in which case it's just a highlight.
 
 Each opens for writing as it's added. Ctrl-Enter, Close or Escape closes it, and Remove takes it
 out, along with its highlight. Emptying a marginal removes it too, and so does closing one that nothing was written in, which leaves nothing to undo or redo.
@@ -127,7 +128,7 @@ typewriter. Hovering one names it.
 | --- | --- | --- |
 | F11 | fullscreen | toggles the window fullscreen |
 | Ctrl-Shift-H | hide chrome | hides the menu bar and the status row |
-| Ctrl-Shift-M | hide margin | collapses the margin gutter; marginal notes and note markers are not drawn (their anchored ranges stay marked, footnotes stay at the foot) |
+| Ctrl-Shift-G | hide margin | collapses the margin gutter; marginal notes and note markers are not drawn (their anchored ranges stay marked, footnotes stay at the foot) |
 | Ctrl-Shift-P | paragraph focus | dims every block but the one holding the caret |
 | Ctrl-Shift-T | typewriter | keeps the caret's line at the vertical centre of the window; the page re-centres when the caret moves and can still be scrolled while idle |
 

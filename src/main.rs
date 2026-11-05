@@ -490,6 +490,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
         "rename, move or delete a document",
     ),
     ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
+    ("Ctrl-Shift-M", "marginal on the caret's block"),
     ("Ctrl-Shift-F", "footnote on the selection or word"),
     ("Ctrl-Shift-C", "cite a reference, in a notebook"),
     ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
@@ -513,7 +514,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Ctrl-Shift-D", "dark mode"),
     ("F11", "fullscreen"),
     (
-        "Ctrl-Shift-H/M/P/T",
+        "Ctrl-Shift-H/G/P/T",
         "hide chrome / margin / focus / typewriter",
     ),
 ];
@@ -706,7 +707,7 @@ fn mode_for_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<ModeComman
     }
     match key {
         egui::Key::H => Some(ModeCommand::HideChrome),
-        egui::Key::M => Some(ModeCommand::HideMargin),
+        egui::Key::G => Some(ModeCommand::HideMargin),
         egui::Key::P => Some(ModeCommand::ParagraphFocus),
         egui::Key::T => Some(ModeCommand::Typewriter),
         _ => None,
@@ -2640,10 +2641,14 @@ impl KameApp {
         self.open_note_focus = self.open_note.is_some();
     }
 
-    /// Adds a note of `kind` and opens it, having closed the one that's open.
+    /// Adds a note of `kind` and opens it, having closed the one that's open. A marginal shows the
+    /// margin if it's hidden, so that nobody types into something they can't see.
     fn add_annotation(&mut self, kind: AnnotationKind) {
         self.set_open_note(None);
         if let Some(id) = self.session.add_annotation(kind) {
+            if kind == AnnotationKind::Marginal {
+                self.modes.hide_margin = false;
+            }
             self.set_open_note(Some(id));
             self.open_note_pos = None;
         }
@@ -3751,7 +3756,7 @@ impl KameApp {
                     ui.set_min_width(200.0);
                     for (label, kind, shortcut) in [
                         ("Note", AnnotationKind::Note, Some("Ctrl-Shift-N")),
-                        ("Marginal", AnnotationKind::Marginal, None),
+                        ("Marginal", AnnotationKind::Marginal, Some("Ctrl-Shift-M")),
                         ("Footnote", AnnotationKind::Footnote, Some("Ctrl-Shift-F")),
                     ] {
                         if menu_item(ui, label, shortcut, false) {
@@ -3811,7 +3816,7 @@ impl KameApp {
                     for (label, mode, shortcut) in [
                         ("Fullscreen", ModeCommand::Fullscreen, "F11"),
                         ("Hide chrome", ModeCommand::HideChrome, "Ctrl-Shift-H"),
-                        ("Hide margin", ModeCommand::HideMargin, "Ctrl-Shift-M"),
+                        ("Hide margin", ModeCommand::HideMargin, "Ctrl-Shift-G"),
                         ("Paragraph focus", ModeCommand::ParagraphFocus, "Ctrl-Shift-P"),
                         ("Typewriter", ModeCommand::Typewriter, "Ctrl-Shift-T"),
                     ] {
@@ -7231,9 +7236,10 @@ mod tests {
             Some(ModeCommand::HideChrome)
         );
         assert_eq!(
-            mode_for_key(egui::Key::M, chord),
+            mode_for_key(egui::Key::G, chord),
             Some(ModeCommand::HideMargin)
         );
+        assert_eq!(mode_for_key(egui::Key::M, chord), None);
         assert_eq!(
             mode_for_key(egui::Key::P, chord),
             Some(ModeCommand::ParagraphFocus)
@@ -8573,7 +8579,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             );
         }
         // Every mode chord is still a mode, and never a file command.
-        for key in [egui::Key::H, egui::Key::M, egui::Key::P, egui::Key::T] {
+        for key in [egui::Key::H, egui::Key::G, egui::Key::P, egui::Key::T] {
             assert!(mode_for_key(key, chord).is_some());
             assert_eq!(file_command_for_key(key, chord), None);
         }
@@ -10172,6 +10178,110 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             page.app.session.document().annotations[0].body,
             "Said something."
         );
+    }
+
+    /// Ctrl-Shift and a key, or Cmd-Shift on a Mac.
+    fn press_chord(page: &mut Headless, key: egui::Key) {
+        let modifiers = egui::Modifiers {
+            command: true,
+            shift: true,
+            ..egui::Modifiers::NONE
+        };
+        page.frame(
+            [true, false]
+                .map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                })
+                .to_vec(),
+        );
+    }
+
+    fn page_with_a_word() -> Headless {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page
+    }
+
+    #[test]
+    fn ctrl_shift_m_adds_a_marginal_on_the_page() {
+        let mut page = page_with_a_word();
+        press_chord(&mut page, egui::Key::M);
+        let annotations = &page.app.session.document().annotations;
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].kind, AnnotationKind::Marginal);
+        assert_eq!(page.app.open_note, Some(annotations[0].id));
+        assert!(!page.app.modes.hide_margin, "that key used to hide it");
+    }
+
+    #[test]
+    fn ctrl_shift_g_hides_the_margin_and_nothing_else_takes_it() {
+        let mut page = page_with_a_word();
+        press_chord(&mut page, egui::Key::G);
+        assert!(page.app.modes.hide_margin);
+        assert!(page.app.session.document().annotations.is_empty());
+        press_chord(&mut page, egui::Key::G);
+        assert!(!page.app.modes.hide_margin);
+    }
+
+    #[test]
+    fn ctrl_shift_m_in_a_notes_box_adds_nothing() {
+        let (mut page, _) = page_with_unwritten_marginal();
+        let open = page.app.open_note;
+        page.frame(Vec::new());
+        press_chord(&mut page, egui::Key::M);
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+        assert_eq!(page.app.open_note, open);
+    }
+
+    #[test]
+    fn ctrl_shift_m_with_a_dialog_up_adds_nothing() {
+        let mut page = page_with_a_word();
+        page.app.begin_open();
+        page.frame(Vec::new());
+        press_chord(&mut page, egui::Key::M);
+        assert!(page.app.session.document().annotations.is_empty());
+        assert!(page.app.open_prompt.is_some());
+    }
+
+    #[test]
+    fn adding_a_marginal_by_key_or_menu_shows_a_hidden_margin() {
+        let mut page = page_with_a_word();
+        page.app.modes.hide_margin = true;
+        press_chord(&mut page, egui::Key::M);
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+        assert!(!page.app.modes.hide_margin);
+
+        let mut page = page_with_a_word();
+        page.app.modes.hide_margin = true;
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        assert!(!page.app.modes.hide_margin);
+    }
+
+    #[test]
+    fn adding_a_note_or_footnote_leaves_the_margin_hidden() {
+        for key in [egui::Key::N, egui::Key::F] {
+            let mut page = page_with_a_word();
+            page.app.modes.hide_margin = true;
+            press_chord(&mut page, key);
+            assert_eq!(page.app.session.document().annotations.len(), 1);
+            assert!(page.app.modes.hide_margin);
+        }
+    }
+
+    #[test]
+    fn the_help_names_the_keys_for_a_marginal_and_the_margin() {
+        let row = |keys: &str| HELP_ROWS.iter().find(|(row, _)| *row == keys);
+        assert!(row("Ctrl-Shift-M").is_some_and(|(_, what)| what.contains("marginal")));
+        assert!(row("Ctrl-Shift-H/G/P/T").is_some());
+        assert!(row("Ctrl-Shift-H/M/P/T").is_none());
     }
 
     #[test]

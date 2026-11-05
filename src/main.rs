@@ -2174,6 +2174,14 @@ fn leads_within_kame(url: &str, in_notebook: bool) -> bool {
         || (in_notebook && !url.starts_with("www.") && notebook::is_relative_link(url))
 }
 
+/// What to call a file in a notice: its name, or its whole path if it has none.
+fn shown_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.display().to_string(),
+    )
+}
+
 /// Opens `url` in the system browser, best-effort: a link that cannot launch is
 /// never worth an error dialog in the editor. An opener takes `www.` for a file, so it gets the
 /// web address in full.
@@ -6164,20 +6172,29 @@ impl KameApp {
 
     /// What the OS asked to open, which arrives only once, so a dialog that's up holds it rather
     /// than turning it away or being carried onto the new document. The latest asked for is the
-    /// one that opens when the dialog closes.
+    /// one that opens when the dialog closes, and a prompt asking whether to open something is
+    /// asking about it instead.
     fn request_open(&mut self, path: PathBuf) {
-        if !self.dialog_open() {
+        if let Some(prompt) = self.open_prompt.as_mut().filter(|prompt| prompt.confirming) {
+            prompt.path = path.display().to_string();
+            self.pending_heading = None;
+            self.held_open = None;
+            return;
+        }
+        if !self.holds_what_the_os_asks() {
             self.held_open = None;
             self.open_picked(path);
             return;
         }
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.display().to_string(),
-        );
+        let name = shown_name(&path);
         self.notice_tracker.announced();
-        self.notice = Some(format!("{name} opens once the open dialog is closed"));
+        self.notice = Some(format!("{name} opens once this window is closed"));
         self.held_open = Some(path);
+    }
+
+    /// Whether something is up that a document the OS asks for has to wait for.
+    fn holds_what_the_os_asks(&self) -> bool {
+        self.dialog_open() || self.close_flow.prompting
     }
 
     /// Does what the OS has asked for since the last frame, and opens what was waiting for a dialog
@@ -6194,12 +6211,21 @@ impl KameApp {
         self.open_held();
     }
 
-    /// Opens what the OS asked for, if it was waiting and the dialog that held it has closed.
+    /// Opens what the OS asked for, if it was waiting and the dialog that held it has closed. It
+    /// may have gone meanwhile, and opening a missing path would create it.
     fn open_held(&mut self) {
-        if !self.dialog_open() {
-            if let Some(path) = self.held_open.take() {
-                self.open_picked(path);
-            }
+        if self.holds_what_the_os_asks() {
+            return;
+        }
+        let Some(path) = self.held_open.take() else {
+            return;
+        };
+        self.notice = None;
+        if path.exists() {
+            self.open_picked(path);
+        } else {
+            self.notice_tracker.announced();
+            self.notice = Some(format!("{} is no longer there", shown_name(&path)));
         }
     }
 
@@ -6227,6 +6253,8 @@ impl KameApp {
     /// typewriter anchor, caches). A failed open keeps the current document and
     /// surfaces the reason through `Session::last_error`.
     fn open_document(&mut self, typed: String) {
+        // What's opening now is the latest thing asked for.
+        self.held_open = None;
         let heading = self.pending_heading.take();
         if self.held_by_rename() {
             return;

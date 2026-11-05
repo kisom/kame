@@ -4779,7 +4779,7 @@ mod tests {
         assert_eq!(page.app.refs.form.as_ref().unwrap().form.key, "lamport1994");
         assert_eq!(
             page.app.notice.as_deref(),
-            Some("other.kame opens once the open dialog is closed")
+            Some("other.kame opens once this window is closed")
         );
 
         page.app.refs.form = None;
@@ -4814,7 +4814,7 @@ mod tests {
         assert!(page.app.metadata_prompt.is_some());
         assert_eq!(
             page.app.notice.as_deref(),
-            Some("other.kame opens once the open dialog is closed")
+            Some("other.kame opens once this window is closed")
         );
 
         press_key(&mut page, egui::Key::Escape);
@@ -4874,6 +4874,99 @@ mod tests {
         page.app.open_held();
 
         assert_eq!(page.app.session.path(), Some(later.as_path()));
+    }
+
+    #[test]
+    fn a_document_the_os_asks_for_waits_for_the_close_prompt() {
+        let mut page = page_in_notebook("");
+        let opened = page.app.session.path().map(Path::to_path_buf);
+        let other = other_document(&page, "other.kame", "elsewhere");
+        page.app.close_flow.prompting = true;
+
+        page.app.request_open(other.clone());
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
+
+        page.app.close_flow.prompting = false;
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path(), Some(other.as_path()));
+    }
+
+    #[test]
+    fn what_the_person_then_picks_beats_a_document_the_os_asked_for() {
+        let mut page = page_in_notebook("");
+        let held = other_document(&page, "held.kame", "one");
+        let picked = other_document(&page, "picked.kame", "two");
+        page.app.begin_properties();
+        page.app.request_open(held);
+
+        page.app.open_document(picked.display().to_string());
+        page.app.metadata_prompt = None;
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path(), Some(picked.as_path()));
+    }
+
+    /// An unsaved document with something in it, which asks before it's left, and a file to open.
+    fn page_that_would_lose_work() -> (Headless, PathBuf) {
+        let folder = test_temp_dir().join(format!("lose-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let other = folder.join("other.kame");
+        drop(Session::open(&other).unwrap());
+        let mut session = Session::anonymous().unwrap();
+        session.insert("words");
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        (page, other)
+    }
+
+    #[test]
+    fn a_document_the_os_asks_for_takes_over_the_prompt_about_losing_work() {
+        let (mut page, other) = page_that_would_lose_work();
+        page.app.open_or_confirm(PathBuf::from("first.kame"));
+        assert!(page.app.open_prompt.is_some());
+
+        page.app.request_open(other.clone());
+
+        let prompt = page.app.open_prompt.as_ref().unwrap();
+        assert_eq!(prompt.path, other.display().to_string());
+        assert!(prompt.confirming);
+        assert_eq!(page.app.held_open, None);
+    }
+
+    #[test]
+    fn the_promise_to_open_goes_once_the_held_document_comes_up_for_opening() {
+        let (mut page, other) = page_that_would_lose_work();
+        page.app.begin_properties();
+        page.app.request_open(other);
+        assert!(page.app.notice.is_some());
+
+        page.app.metadata_prompt = None;
+        page.frame(Vec::new());
+
+        assert!(page.app.open_prompt.is_some(), "it asks about the words");
+        assert_eq!(page.app.notice, None);
+    }
+
+    #[test]
+    fn a_held_document_that_has_gone_isnt_made_again() {
+        let mut page = page_in_notebook("");
+        let opened = page.app.session.path().map(Path::to_path_buf);
+        let other = other_document(&page, "other.kame", "elsewhere");
+        page.app.begin_properties();
+        page.app.request_open(other.clone());
+        std::fs::remove_file(&other).unwrap();
+
+        page.app.metadata_prompt = None;
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
+        assert!(!other.exists());
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("other.kame is no longer there")
+        );
     }
 
     #[test]

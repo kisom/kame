@@ -17,7 +17,7 @@
 use crate::model::bare_link_ranges;
 use crate::model::{
     is_script_url, list_positions, AnnotationKind, Block, BlockId, BlockKind, Document, ImageAlign,
-    SpanStyle,
+    ListPosition, SpanStyle,
 };
 use crate::references::{
     self, citation_ranges, citation_url, key_of, Reference, References, Run, RunStyle,
@@ -401,6 +401,21 @@ pub fn html_body(doc: &Document, publish: &Publish) -> String {
     render_body(doc, publish, None)
 }
 
+/// Each block's place in a list as published, in which an image with no URL leaves no more
+/// trace than an empty block does.
+fn shown_list_positions(blocks: &[Block], publish: &Publish) -> Vec<Option<ListPosition>> {
+    let gone = |block: &Block| matches!(&block.kind, BlockKind::Image { path, .. } if (publish.image)(path).is_none());
+    if !blocks.iter().any(gone) {
+        return list_positions(blocks, true);
+    }
+    let mut shown = blocks.to_vec();
+    for block in shown.iter_mut().filter(|block| gone(block)) {
+        block.kind = BlockKind::Paragraph;
+        block.text.clear();
+    }
+    list_positions(&shown, true)
+}
+
 /// [`html_body`], with `author` as a visible byline if it is given: under a first heading, or
 /// else leading the document.
 fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> String {
@@ -418,7 +433,7 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
         body.push_str(byline);
     }
     let mut open_list: Vec<bool> = Vec::new();
-    let positions = list_positions(&doc.blocks, true);
+    let positions = shown_list_positions(&doc.blocks, publish);
     for (index, block) in doc.blocks.iter().enumerate() {
         if block.kind == BlockKind::Rule {
             close_list(&mut body, &mut open_list);
@@ -428,14 +443,15 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
         // An image is a block with no text: emit it as an `<img>` before the
         // empty-text skip drops it.
         if let BlockKind::Image { path, link, align } = &block.kind {
+            // With nothing to show, there's nothing to end a list.
+            let Some(src) = (publish.image)(path) else {
+                continue;
+            };
             close_list(&mut body, &mut open_list);
             let class = match align {
                 ImageAlign::Left => "image",
                 ImageAlign::Center => "image image-center",
                 ImageAlign::Right => "image image-right",
-            };
-            let Some(src) = (publish.image)(path) else {
-                continue;
             };
             let image = format!(
                 "<img class=\"{class}\" src=\"{}\" alt=\"\">",
@@ -2117,6 +2133,69 @@ mod tests {
             references: &References::new(),
         };
         assert_eq!(html_body(&doc, &publish), "<p>Before.</p>\n");
+    }
+
+    fn item(depth: u8, text: &str) -> Block {
+        block(
+            BlockKind::ListItem {
+                ordered: true,
+                depth,
+            },
+            text,
+        )
+    }
+
+    fn image_at(path: &str) -> Block {
+        block(
+            BlockKind::Image {
+                path: path.to_string(),
+                link: None,
+                align: Default::default(),
+            },
+            "",
+        )
+    }
+
+    /// `blocks` published with `gone.png` having no URL, and any other image having its path.
+    fn published_with_one_gone(blocks: Vec<Block>) -> String {
+        let mut doc = Document::new("t");
+        doc.blocks = blocks;
+        let publish = Publish {
+            document_link: &|_| None,
+            image: &|path| (path != "gone.png").then(|| path.to_string()),
+            references: &References::new(),
+        };
+        html_body(&doc, &publish)
+    }
+
+    #[test]
+    fn an_image_with_no_url_doesnt_split_a_list() {
+        assert_eq!(
+            published_with_one_gone(vec![item(0, "a"), image_at("gone.png"), item(0, "b")]),
+            "<ol>\n<li>a</li>\n<li>b</li>\n</ol>\n"
+        );
+    }
+
+    #[test]
+    fn an_image_with_no_url_leaves_a_nested_list_nested() {
+        assert_eq!(
+            published_with_one_gone(vec![
+                item(0, "a"),
+                item(1, "b"),
+                image_at("gone.png"),
+                item(1, "c"),
+            ]),
+            "<ol>\n<li>a\n<ol>\n<li>b</li>\n<li>c</li>\n</ol>\n</li>\n</ol>\n"
+        );
+    }
+
+    #[test]
+    fn an_image_that_shows_still_ends_a_list() {
+        assert_eq!(
+            published_with_one_gone(vec![item(0, "a"), image_at("here.png"), item(0, "b")]),
+            "<ol>\n<li>a</li>\n</ol>\n<img class=\"image\" src=\"here.png\" alt=\"\">\n\
+             <ol>\n<li>b</li>\n</ol>\n"
+        );
     }
 
     fn rule_for<'a>(selector: &str, style: &'a str) -> &'a str {

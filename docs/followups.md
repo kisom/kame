@@ -85,8 +85,11 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a
 keystroke in the page, a little more for a long paragraph, and nothing yet is close to a frame.
 
-- [ ] **The app holds about 680 MB on macOS with an empty document,** two-thirds of it graphics memory. It isn't kame's text, so
-  it's eframe and wgpu's: look with Instruments at what they keep.
+- [ ] **Spell checking holds about 130 MB,** 117 MB of it Harper's dictionary as Harper builds it. It's loaded only while checking
+  is on. A smaller footprint would mean a lighter dictionary from Harper, or our own.
+- [ ] **Memory on Linux hasn't been measured.** On macOS, Metal keeps about 450 MB of buffers in use while frames come every second
+  or so and lets them go a moment after they stop; a bare eframe window does the same. An idle window wakes every 3 seconds, so
+  it lets them go, and holds about 255 MB with a 3,000-word document.
 - [ ] **A keystroke redraws its whole paragraph's image, then converts it for upload.** Drawing straight into egui's premultiplied
   form would save a pass, about a sixth of a keystroke on a Retina screen. Drawing only the lines that changed would save more.
 - [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs

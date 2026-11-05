@@ -19,7 +19,7 @@ use kame_core::references::{
     block_citation_ranges, citation_at, cited, entry, key_of, plain, suggest_key, unresolved,
     valid_key, with_citation_spans, Kind, Reference, References, RunStyle,
 };
-use kame_notebook::references::{citing, load, remove, rename, save, stamp, Open, Renamed};
+use kame_notebook::references::{citing, load, remove, rename, save, stamp, Loaded, Open, Renamed};
 use kame_notebook::Notebook;
 
 use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window, BROWSER_INDENT};
@@ -50,6 +50,8 @@ pub(crate) struct ReferencesUi {
     root: Option<PathBuf>,
     /// When the files were last looked at.
     checked: Option<Instant>,
+    /// A look at the files under way, on a background thread.
+    reading: Option<Receiver<Read>>,
     /// The key whose entry is in its window.
     pub(crate) shown: Option<String>,
     /// Where the click that opened it was.
@@ -72,6 +74,14 @@ pub(crate) struct ReferencesUi {
     count_stopped: bool,
     /// The rename under way, on a background thread.
     renaming: Option<Renaming>,
+}
+
+/// What a background look at the reference files found.
+struct Read {
+    /// The files as they were before anything was read.
+    files: Vec<(String, SystemTime, u64)>,
+    /// What they hold, unless they were as they had been.
+    loaded: Option<Loaded>,
 }
 
 /// The search over references: what's typed, and the row chosen.
@@ -580,7 +590,8 @@ fn entry_start(reference: &Reference) -> String {
 }
 
 impl ReferencesUi {
-    /// Keeps the list up with `notebook` and its files, and with what's wrong with them.
+    /// Keeps the list up with `notebook` and its files, and with what's wrong with them. The files
+    /// are read on a background thread, and what it found is taken in on a later call.
     pub(crate) fn refresh(&mut self, notebook: Option<&Notebook>) {
         let Some(notebook) = notebook else {
             // A rename goes on, and its window stays until it has been read to say how it went.
@@ -597,38 +608,74 @@ impl ReferencesUi {
             return;
         };
         let moved = self.root.as_ref() != Some(&notebook.root);
-        let due = self
-            .checked
-            .is_none_or(|checked| checked.elapsed() >= CHECK_EVERY);
-        if !moved && !due {
-            return;
-        }
-        self.checked = Some(Instant::now());
-        // Taken before reading, so that a file changing in between is read again next time.
-        let files = stamp(notebook);
-        if !moved && files == self.stamp {
-            return;
-        }
         if moved {
             self.root = Some(notebook.root.clone());
+            // Another notebook's list mustn't show here while this one's is read.
+            self.list = References::new();
+            self.problems.clear();
+            self.stamp.clear();
             self.close_windows();
             self.counts = None;
             self.counting = None;
+            // Dropping a look at the other notebook leaves it nowhere to send what it finds.
+            self.reading = None;
+            self.checked = None;
         }
-        self.read(notebook, files)
+        self.take_read();
+        let due = self
+            .checked
+            .is_none_or(|checked| checked.elapsed() >= CHECK_EVERY);
+        if self.reading.is_some() || !due {
+            return;
+        }
+        self.checked = Some(Instant::now());
+        let (send, coming) = channel();
+        self.reading = Some(coming);
+        let notebook = notebook.clone();
+        let known = (!moved).then(|| self.stamp.clone());
+        std::thread::spawn(move || {
+            // Taken before reading, so that a file changing in between is read again next time.
+            let files = stamp(&notebook);
+            let loaded = (known.as_ref() != Some(&files)).then(|| load(&notebook));
+            let _ = send.send(Read { files, loaded });
+        });
+    }
+
+    /// Whether the files are being looked at.
+    pub(crate) fn is_reading(&self) -> bool {
+        self.reading.is_some()
+    }
+
+    /// Takes in what the look at the files under way found, if it's done.
+    fn take_read(&mut self) {
+        let Some(coming) = &self.reading else {
+            return;
+        };
+        match coming.try_recv() {
+            Ok(read) => {
+                self.reading = None;
+                self.stamp = read.files;
+                if let Some(loaded) = read.loaded {
+                    self.take_loaded(loaded);
+                }
+            }
+            Err(TryRecvError::Disconnected) => self.reading = None,
+            Err(TryRecvError::Empty) => {}
+        }
     }
 
     /// Reads the list now, for a change made here that should show at once. The files may look no
-    /// different from before, if it was quick and kept their length.
+    /// different from before, if it was quick and kept their length. A look begun before the
+    /// change could find the files as they were, so it's dropped.
     fn reload(&mut self, notebook: &Notebook) {
         self.checked = Some(Instant::now());
-        self.read(notebook, stamp(notebook));
+        self.reading = None;
+        self.stamp = stamp(notebook);
+        self.take_loaded(load(notebook));
     }
 
-    fn read(&mut self, notebook: &Notebook, files: Vec<(String, SystemTime, u64)>) {
-        self.stamp = files;
+    fn take_loaded(&mut self, loaded: Loaded) {
         self.recount = true;
-        let loaded = load(notebook);
         self.list = loaded.references;
         self.problems = loaded.problems;
     }
@@ -1017,6 +1064,9 @@ impl KameApp {
     /// Takes in what the background threads have finished, and drops the note about a key once
     /// it has a reference, however it got one.
     pub(crate) fn references_tick(&mut self, ctx: &egui::Context) {
+        if self.refs.is_reading() {
+            ctx.request_repaint_after(LOOK_AGAIN);
+        }
         let noted = self.notice.as_deref().and_then(key_in_note);
         if noted.is_some_and(|key| self.refs.list.contains(key)) {
             self.notice = None;
@@ -1855,6 +1905,42 @@ mod tests {
 
     const GOOD: &str = "kind: article\ntitle: Breaking paragraphs into lines\n";
 
+    /// Refreshes, and waits for the files to have been read.
+    fn settle(refs: &mut ReferencesUi, notebook: &Notebook) {
+        refs.refresh(Some(notebook));
+        for _ in 0..2000 {
+            if refs.reading.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            refs.refresh(Some(notebook));
+        }
+        panic!("the files were never read");
+    }
+
+    #[test]
+    fn the_files_are_read_away_from_the_page_and_the_list_follows() {
+        let root = notebook_folder("list-background");
+        write_reference(&root, "knuth1981", GOOD);
+        let notebook = Notebook::open(&root).unwrap();
+        let mut refs = ReferencesUi::default();
+
+        refs.refresh(Some(&notebook));
+        assert!(
+            refs.reading.is_some(),
+            "the files are read on another thread"
+        );
+        settle(&mut refs, &notebook);
+        assert!(refs.list.contains("knuth1981"));
+
+        write_reference(&root, "smith2020", GOOD);
+        refs.checked = None;
+        refs.refresh(Some(&notebook));
+        assert!(refs.reading.is_some());
+        settle(&mut refs, &notebook);
+        assert!(refs.list.contains("smith2020"));
+    }
+
     #[test]
     fn the_list_follows_the_files_and_the_notebook() {
         let first = notebook_folder("list-first");
@@ -1864,20 +1950,20 @@ mod tests {
         let second = Notebook::open(&second).unwrap();
 
         let mut refs = ReferencesUi::default();
-        refs.refresh(Some(&first));
+        settle(&mut refs, &first);
         assert!(refs.list.contains("knuth1981"));
 
         write_reference(&first.root, "smith2020", GOOD);
         refs.checked = None;
-        refs.refresh(Some(&first));
+        settle(&mut refs, &first);
         assert!(refs.list.contains("smith2020"), "a new file is seen");
 
         std::fs::remove_file(first.root.join("references/smith2020.yaml")).unwrap();
         // Not looked for yet, since it hasn't been long.
-        refs.refresh(Some(&first));
+        settle(&mut refs, &first);
         assert!(refs.list.contains("smith2020"));
         refs.checked = None;
-        refs.refresh(Some(&first));
+        settle(&mut refs, &first);
         assert!(!refs.list.contains("smith2020"), "a removed file is seen");
 
         refs.shown = Some("knuth1981".to_string());
@@ -1885,7 +1971,7 @@ mod tests {
         assert!(refs.list.is_empty(), "another notebook, at once");
         assert_eq!(refs.shown, None);
 
-        refs.refresh(Some(&first));
+        settle(&mut refs, &first);
         assert!(refs.list.contains("knuth1981"));
         refs.refresh(None);
         assert!(refs.list.is_empty(), "outside a notebook there are none");
@@ -1899,20 +1985,20 @@ mod tests {
         let notebook = Notebook::open(&root).unwrap();
 
         let mut refs = ReferencesUi::default();
-        refs.refresh(Some(&notebook));
+        settle(&mut refs, &notebook);
         let problem = refs.problem_line().expect("the damage is reported");
         assert!(problem.contains("broken2020"), "{problem}");
         assert!(refs.list.contains("knuth1981"));
 
         write_reference(&root, "smith2020", GOOD);
         refs.checked = None;
-        refs.refresh(Some(&notebook));
+        settle(&mut refs, &notebook);
         assert_eq!(refs.problem_line(), Some(problem), "still so");
         assert!(refs.list.contains("smith2020"));
 
         std::fs::remove_file(root.join("references/broken2020.yaml")).unwrap();
         refs.checked = None;
-        refs.refresh(Some(&notebook));
+        settle(&mut refs, &notebook);
         assert_eq!(refs.problem_line(), None);
 
         refs.refresh(None);
@@ -1930,7 +2016,7 @@ mod tests {
         let mut session = Session::open(&root.join("doc.kame")).unwrap();
         session.insert(text);
         let mut page = Headless::new(session);
-        page.frame(Vec::new());
+        page.read_references();
         page
     }
 
@@ -2186,8 +2272,7 @@ mod tests {
         assert!(page.app.notice.is_some());
 
         write_reference(&root_of(&page), "lamport1994", GOOD);
-        page.app.refs.checked = None;
-        page.frame(Vec::new());
+        look_again(&mut page);
 
         assert_eq!(page.app.notice, None);
     }
@@ -2210,8 +2295,7 @@ mod tests {
         type_into(&mut page, "[lamport1994]");
 
         write_reference(&root_of(&page), "other2000", GOOD);
-        page.app.refs.checked = None;
-        page.frame(Vec::new());
+        look_again(&mut page);
 
         assert!(page.app.refs.list.contains("other2000"));
         assert_eq!(
@@ -3236,10 +3320,10 @@ mod tests {
         assert!(page.sees("broken2020"), "the window says what's wrong too");
     }
 
-    /// Has the files looked at again on the next frame, as a second's wait would.
+    /// Has the files looked at again, as a second's wait would, and waits for that.
     fn look_again(page: &mut Headless) {
         page.app.refs.checked = None;
-        page.frame(Vec::new());
+        page.read_references();
     }
 
     #[test]

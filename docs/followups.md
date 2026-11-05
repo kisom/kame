@@ -63,7 +63,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 
 - [ ] **`page_blocks` clones the blocks every frame** when one holds a citation. It hasn't been measured.
 - [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
-- [ ] **`stamp` and `load` run on the UI thread,** and a page's export works out `cited` twice.
 
 ## Performance
 

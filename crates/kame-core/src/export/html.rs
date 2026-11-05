@@ -365,8 +365,9 @@ pub fn to_html_with(
         references,
         ..Publish::plain()
     };
-    let body = render_body(doc, &publish, Some(metadata.author.trim()));
-    let references_style = if references::cited(doc, references, true).is_empty() {
+    let cited = references::cited(doc, references, true);
+    let body = render_body(doc, &publish, Some(metadata.author.trim()), &cited);
+    let references_style = if cited.is_empty() {
         ""
     } else {
         REFERENCES_STYLE
@@ -407,7 +408,8 @@ pub fn to_html_with(
 /// A document's own markup, without the page around it, for a tool that supplies its own
 /// page. A whole page is this inside [`to_html_with`]'s head.
 pub fn html_body(doc: &Document, publish: &Publish) -> String {
-    render_body(doc, publish, None)
+    let cited = references::cited(doc, publish.references, true);
+    render_body(doc, publish, None, &cited)
 }
 
 /// Each block's place in a list as published, in which an image with no URL leaves no more
@@ -426,8 +428,13 @@ fn shown_list_positions(blocks: &[Block], publish: &Publish) -> Vec<Option<ListP
 }
 
 /// [`html_body`], with `author` as a visible byline if it is given: under a first heading, or
-/// else leading the document.
-fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> String {
+/// else leading the document. `cited` is what `doc` cites, for its References section.
+fn render_body(
+    doc: &Document,
+    publish: &Publish,
+    author: Option<&str>,
+    cited: &[(&str, &Reference)],
+) -> String {
     let collected = collect_apparatus(doc);
 
     let byline = author
@@ -594,13 +601,13 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
         }
         body.push_str("</ol>\n");
     }
-    body.push_str(&references_section(doc, publish.references));
+    body.push_str(&references_section(cited));
     body
 }
 
-/// The References section: every source `doc` cites, sorted by key, or nothing if it cites none.
-fn references_section(doc: &Document, references: &References) -> String {
-    let cited = references::cited(doc, references, true);
+/// The References section, of every source a document cites as `cited` gives them, sorted by key,
+/// or nothing if it cites none.
+fn references_section(cited: &[(&str, &Reference)]) -> String {
     if cited.is_empty() {
         return String::new();
     }
@@ -1852,7 +1859,7 @@ mod tests {
 
     #[test]
     fn a_centered_heading_says_so_and_takes_its_byline_along() {
-        let html = render_body(&headed(true), &Publish::plain(), Some("K. Isom"));
+        let html = render_body(&headed(true), &Publish::plain(), Some("K. Isom"), &[]);
         assert!(
             html.contains(
                 "<h1 class=\"centered\">Title</h1>\n<p class=\"byline centered\">K. Isom</p>"
@@ -1865,7 +1872,7 @@ mod tests {
 
     #[test]
     fn a_heading_that_isnt_centered_exports_as_it_always_has() {
-        let html = render_body(&headed(false), &Publish::plain(), Some("K. Isom"));
+        let html = render_body(&headed(false), &Publish::plain(), Some("K. Isom"), &[]);
         assert!(
             html.contains("<h1>Title</h1>\n<p class=\"byline\">K. Isom</p>"),
             "{html}"

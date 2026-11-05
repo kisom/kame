@@ -7357,6 +7357,19 @@ impl Headless {
         self.press_and_release(pos);
     }
 
+    /// Runs frames until the notebook's reference files have been read.
+    pub(crate) fn read_references(&mut self) {
+        self.frame(Vec::new());
+        for _ in 0..2000 {
+            if !self.app.refs.is_reading() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.frame(Vec::new());
+        }
+        panic!("the reference files were never read");
+    }
+
     /// Whether the last frame drew words holding `text`.
     pub(crate) fn sees(&self, text: &str) -> bool {
         self.drawn
@@ -10400,7 +10413,7 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             ..LayoutConfig::default()
         });
         // Finds the notebook, after which only a change to its files touches the list.
-        page.frame(Vec::new());
+        page.read_references();
         page
     }
 

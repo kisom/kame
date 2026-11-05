@@ -42,8 +42,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 - [ ] **A partial log folder after a move.** If a machine edits X offline while another renames X to Y, its surviving
   `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
   X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.
-- [ ] **News for a healthy open document reads its logs on the main thread,** in `is_stranded`. It's only when there's news,
-  and fine for small logs.
 - [ ] **A rename shadowing a link.** A link `b` that led to `b.md`, or offered to create `b.kame`, opens the moved
   document after something is renamed to `b.kame`.
 - [ ] **A command palette.**

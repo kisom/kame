@@ -1209,3 +1209,81 @@ fn a_document_whose_logs_come_back_syncs_again() {
     assert!(!outcome.stranded);
     assert!(outcome.written > 0);
 }
+
+/// Talos sees titan's words arrive, with the reading of every log that takes done on another
+/// thread, and the sync going by what it found.
+#[test]
+fn a_sync_with_news_goes_by_a_check_read_on_another_thread() {
+    let (talos, titan) = two_machines();
+    let mut here = talos.session();
+    let mut logged = talos.logged(&here);
+    logged.sync(&mut here, 1).unwrap();
+    assert!(logged.stranded_check().is_none(), "nothing has arrived");
+    titan.receive_from(&talos);
+    let mut there = titan.session();
+    titan.append(&mut there, 0, " From titan.");
+    titan.sync(&mut there, 2);
+    talos.receive_from(&titan);
+
+    let check = logged.stranded_check().expect("words may have arrived");
+    let answer = std::thread::spawn(move || check.run()).join().unwrap();
+    logged.know(answer);
+    assert!(logged.stranded_check().is_none(), "it's known");
+    let reads = log_reads_here();
+    let outcome = logged.sync(&mut here, 3).unwrap();
+
+    assert!(outcome.merged);
+    assert!(here.document().blocks[0].text.ends_with(" From titan."));
+    assert_eq!(log_reads_here() - reads, 1, "only to bring in what arrived");
+}
+
+#[test]
+fn a_check_from_before_the_logs_changed_again_is_not_gone_by() {
+    let (talos, titan) = two_machines();
+    let mut here = talos.session();
+    let mut logged = talos.logged(&here);
+    logged.sync(&mut here, 1).unwrap();
+    titan.receive_from(&talos);
+    let mut there = titan.session();
+    titan.append(&mut there, 0, " From titan.");
+    titan.sync(&mut there, 2);
+    talos.receive_from(&titan);
+    let answer = logged.stranded_check().unwrap().run();
+
+    titan.append(&mut there, 0, " And more.");
+    titan.sync(&mut there, 3);
+    talos.receive_from(&titan);
+    logged.know(answer);
+    assert!(
+        logged.stranded_check().is_some(),
+        "what it rested on has changed"
+    );
+    let reads = log_reads_here();
+    let outcome = logged.sync(&mut here, 4).unwrap();
+
+    assert!(outcome.merged);
+    assert!(here.document().blocks[0].text.ends_with(" And more."));
+    assert_eq!(log_reads_here() - reads, 2, "it read every log itself");
+}
+
+#[test]
+fn a_check_finding_the_logs_gone_holds_a_sync_off() {
+    let (talos, _) = two_machines();
+    let mut here = talos.session();
+    let mut logged = talos.logged(&here);
+    logged.sync(&mut here, 1).unwrap();
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let other = another_document(&talos, "different.kame");
+    std::fs::rename(log_folder(&other), &folder).unwrap();
+    let before = Store::load(&folder).unwrap().revision_count();
+
+    logged.know(logged.stranded_check().unwrap().run());
+    talos.append(&mut here, 0, " Old words.");
+    let reads = log_reads_here();
+    assert!(logged.sync(&mut here, 2).unwrap().stranded);
+
+    assert_eq!(log_reads_here(), reads);
+    assert_eq!(Store::load(&folder).unwrap().revision_count(), before);
+    assert!(logged.stranded_check().is_none(), "it's held off");
+}

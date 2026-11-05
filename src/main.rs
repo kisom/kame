@@ -2456,6 +2456,9 @@ struct KameApp {
     logged: Option<kame_sync::logs::Logged>,
     /// The file `logged` is for, and whether a problem with its logs has been mentioned.
     logged_path: Option<PathBuf>,
+    /// Whether the logs have left the open document, being read on another thread for its next
+    /// sync.
+    log_check: Option<std::sync::mpsc::Receiver<kame_sync::logs::StrandedAnswer>>,
     orphan_mentioned: bool,
     stranded_mentioned: bool,
     unreadable_mentioned: bool,
@@ -2630,6 +2633,7 @@ impl KameApp {
             refs: references::ReferencesUi::default(),
             logged: None,
             logged_path: None,
+            log_check: None,
             orphan_mentioned: false,
             stranded_mentioned: false,
             unreadable_mentioned: false,
@@ -3105,6 +3109,7 @@ impl KameApp {
         }
         self.logged = None;
         self.logged_path = None;
+        self.log_check = None;
         self.orphan_mentioned = false;
         self.stranded_mentioned = false;
         self.unreadable_mentioned = false;
@@ -6585,15 +6590,64 @@ impl KameApp {
         // copy left open is about to be written in, which shouldn't start from stale text.
         let returned = now.duration_since(self.last_log_tick).as_secs_f32() > LOG_RETURN_SECONDS;
         self.last_log_tick = now;
-        if now < self.next_log_check && !focus_changed && !returned {
+        // What a check has found is for the sync that waited on it, without waiting another round.
+        let answered = self.log_check.is_some() && !self.take_log_check();
+        if now < self.next_log_check && !focus_changed && !returned && !answered {
             return;
         }
         self.next_log_check = now + std::time::Duration::from_secs_f32(LOG_CHECK_SECONDS);
         let paused = self.last_typed.elapsed().as_secs_f32() >= LOG_PAUSE_SECONDS;
         if (paused || focus_changed || returned) && !self.dialog_open() && self.open_note.is_none()
         {
-            self.sync_logs();
+            self.sync_logs_after_reading(ctx);
         }
+    }
+
+    /// Takes the answer of a check of the logs on another thread, if it has come, for the next sync
+    /// to go by. Whether one is still being read.
+    fn take_log_check(&mut self) -> bool {
+        let Some(coming) = &self.log_check else {
+            return false;
+        };
+        match coming.try_recv() {
+            Ok(answer) => {
+                self.log_check = None;
+                if let Some(logged) = &mut self.logged {
+                    logged.know(answer);
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.log_check = None;
+                false
+            }
+        }
+    }
+
+    /// Syncs as [`KameApp::sync_logs`] does, for the checks while a document is open. When the sync
+    /// would first have to read every log, to see whether they've left this document, that's done
+    /// on another thread, and the sync waits for what it finds, so that nothing is written until
+    /// that's known, and what the sync does with it is as ever.
+    fn sync_logs_after_reading(&mut self, ctx: &egui::Context) {
+        if self.take_log_check() || !self.open_logs() {
+            return;
+        }
+        if let Some(check) = self
+            .logged
+            .as_ref()
+            .and_then(kame_sync::logs::Logged::stranded_check)
+        {
+            let (send, coming) = std::sync::mpsc::channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = send.send(check.run());
+                ctx.request_repaint();
+            });
+            self.log_check = Some(coming);
+            return;
+        }
+        self.sync_logs();
     }
 
     /// Works out this machine's name in revision logs, the first time it's wanted.
@@ -6606,39 +6660,8 @@ impl KameApp {
 
     /// Writes what's here to the document's logs and merges whatever has arrived there.
     fn sync_logs(&mut self) {
-        let Some(path) = self.session.path().map(Path::to_path_buf) else {
+        if !self.open_logs() {
             return;
-        };
-        // An untouched new document may yet be taken away, so it leaves nothing to take back.
-        if self.on_untouched_fresh() {
-            return;
-        }
-        if kame_sync::logs::orphaned_logs(&path) && !self.orphan_mentioned {
-            self.orphan_mentioned = true;
-            self.notice = Some(format!(
-                "this document has revision logs, but no {} above it, so it may have stopped \
-                 syncing",
-                kame_sync::logs::MARKER
-            ));
-        }
-        if self.logged_path.as_deref() != Some(&path) || self.logged.is_none() {
-            self.logged = None;
-            if kame_sync::logs::logging_root(&path).is_some() {
-                self.ensure_device();
-                match kame_sync::logs::Logged::try_open(&self.session, &self.device) {
-                    Ok(logged) => self.logged = Some(logged),
-                    Err(err) if !self.unreadable_mentioned => {
-                        self.unreadable_mentioned = true;
-                        self.notice_tracker.announced();
-                        self.notice = Some(format!(
-                            "this document's revision logs can't be read, so it isn't syncing: \
-                             {err}"
-                        ));
-                    }
-                    Err(_) => {}
-                }
-            }
-            self.logged_path = Some(path);
         }
         let Some(mut logged) = self.logged.take() else {
             return;
@@ -6680,6 +6703,45 @@ impl KameApp {
             }
         }
         self.logged = Some(logged);
+    }
+
+    /// Works out the open document's logs if it hasn't yet, and says whether it has some to sync
+    /// with. An untouched new document may yet be taken away, so it leaves nothing to take back.
+    fn open_logs(&mut self) -> bool {
+        let Some(path) = self.session.path().map(Path::to_path_buf) else {
+            return false;
+        };
+        if self.on_untouched_fresh() {
+            return false;
+        }
+        if kame_sync::logs::orphaned_logs(&path) && !self.orphan_mentioned {
+            self.orphan_mentioned = true;
+            self.notice = Some(format!(
+                "this document has revision logs, but no {} above it, so it may have stopped \
+                 syncing",
+                kame_sync::logs::MARKER
+            ));
+        }
+        if self.logged_path.as_deref() != Some(&path) || self.logged.is_none() {
+            self.logged = None;
+            if kame_sync::logs::logging_root(&path).is_some() {
+                self.ensure_device();
+                match kame_sync::logs::Logged::try_open(&self.session, &self.device) {
+                    Ok(logged) => self.logged = Some(logged),
+                    Err(err) if !self.unreadable_mentioned => {
+                        self.unreadable_mentioned = true;
+                        self.notice_tracker.announced();
+                        self.notice = Some(format!(
+                            "this document's revision logs can't be read, so it isn't syncing: \
+                             {err}"
+                        ));
+                    }
+                    Err(_) => {}
+                }
+            }
+            self.logged_path = Some(path);
+        }
+        self.logged.is_some()
     }
 
     /// Says so when a sync tool leaves a conflict copy of this document beside it.
@@ -11260,6 +11322,109 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
 
         page.app.sync_logs();
         assert_eq!(page.app.notice, None, "once is enough");
+    }
+
+    /// Another machine's words arriving in the open document's logs take reading every log to see
+    /// that the logs haven't left it, which is for another thread, with the sync waiting on it.
+    #[test]
+    fn news_in_the_logs_is_checked_away_from_the_screen_before_it_merges() {
+        use kame_sync::logs::{build_from_logs, log_folder, Logged, MARKER};
+        use kame_sync::revlog::log_reads_here;
+
+        let marked = |name: &str| {
+            let root = kame_test_dir::folder(name).canonicalize().unwrap();
+            std::fs::write(root.join(MARKER), "").unwrap();
+            root
+        };
+        let copy_logs = |from: &Path, to: &Path| {
+            let (from, to) = (log_folder(from), log_folder(to));
+            std::fs::create_dir_all(&to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap().flatten() {
+                std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
+        };
+        let here = marked("app-news-here").join("a.kame");
+        let mut session = Session::open(&here).unwrap();
+        session.insert("Words.");
+        let mut page = Headless::new(session);
+        page.app.device = "titan-bbbb".to_string();
+        page.app.sync_logs();
+        let there = marked("app-news-there").join("a.kame");
+        copy_logs(&here, &there);
+        build_from_logs(&there).unwrap();
+        let mut elsewhere = Session::open(&there).unwrap();
+        let end = elsewhere.document_edge(true).unwrap();
+        elsewhere.set_caret(end);
+        elsewhere.insert(" From talos.");
+        Logged::open(&elsewhere, "talos-aaaa")
+            .unwrap()
+            .sync(&mut elsewhere, 200)
+            .unwrap();
+        copy_logs(&there, &here);
+
+        let reads = log_reads_here();
+        let ctx = page.ctx.clone();
+        page.app.sync_logs_after_reading(&ctx);
+        assert_eq!(log_reads_here(), reads, "nothing was read here");
+        assert_eq!(page.app.session.document().blocks[0].text, "Words.");
+        let waited = std::time::Instant::now();
+        while page.app.session.document().blocks[0].text == "Words." {
+            assert!(waited.elapsed().as_secs() < 10, "the check came back");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            page.app.sync_logs_after_reading(&ctx);
+        }
+
+        assert_eq!(
+            page.app.session.document().blocks[0].text,
+            "Words. From talos."
+        );
+        assert_eq!(log_reads_here() - reads, 1, "only to bring in what arrived");
+    }
+
+    /// What a check away from the screen finds is gone by just as one made here would be.
+    #[test]
+    fn a_check_away_from_the_screen_finding_the_logs_replaced_writes_nothing_and_says_so() {
+        use kame_sync::logs::{log_folder, Logged, MARKER};
+        use kame_sync::revlog::Store;
+
+        let root = kame_test_dir::folder("app-check-replaced")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join(MARKER), "").unwrap();
+        let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+        let mut session = Session::open(&a).unwrap();
+        session.insert("Words.");
+        let mut page = Headless::new(session);
+        page.app.device = "titan-bbbb".to_string();
+        page.app.sync_logs();
+        let mut other = Session::open(&b).unwrap();
+        other.insert("Another document.");
+        Logged::open(&other, "titan-bbbb")
+            .unwrap()
+            .sync(&mut other, 200)
+            .unwrap();
+        std::fs::remove_dir_all(log_folder(&a)).unwrap();
+        std::fs::rename(log_folder(&b), log_folder(&a)).unwrap();
+        let before = Store::load(&log_folder(&a)).unwrap().revision_count();
+        page.app.session.insert(" Typed since.");
+        page.app.notice = None;
+
+        let ctx = page.ctx.clone();
+        let waited = std::time::Instant::now();
+        page.app.sync_logs_after_reading(&ctx);
+        assert!(page.app.log_check.is_some(), "it's being read elsewhere");
+        while page.app.notice.is_none() {
+            assert!(waited.elapsed().as_secs() < 10, "the check came back");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            page.app.sync_logs_after_reading(&ctx);
+        }
+
+        let notice = page.app.notice.clone().unwrap();
+        assert!(notice.contains("moved or deleted"), "{notice}");
+        assert_eq!(
+            Store::load(&log_folder(&a)).unwrap().revision_count(),
+            before
+        );
     }
 
     #[test]

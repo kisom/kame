@@ -238,6 +238,49 @@ pub struct Logged {
     /// Why the last sync wrote nothing, if that was because of what's at the log folder, with what
     /// that rested on.
     held_off: Option<HeldOff>,
+    /// Whether the logs have left the database, as read on another thread, for the next sync.
+    known: Option<StrandedAnswer>,
+}
+
+/// What reading every log beside a database takes, to find out whether they've left it: a sync with
+/// news has to know that before it writes anything. Reading them is slow for long logs, so this can
+/// go to another thread, and [`StrandedCheck::run`] there gives the answer, for [`Logged::know`].
+#[derive(Debug)]
+pub struct StrandedCheck {
+    path: PathBuf,
+    revision: String,
+    place: Option<String>,
+    /// Each log's name and size from before any reading, which the answer rests on.
+    logs: Option<Vec<(PathBuf, u64)>>,
+}
+
+/// Whether the logs have left a database, as [`is_stranded`] says, and what that was asked about.
+#[derive(Debug)]
+pub struct StrandedAnswer {
+    check: StrandedCheck,
+    stranded: bool,
+}
+
+impl StrandedCheck {
+    /// Reads every log, on whatever thread this is.
+    pub fn run(self) -> StrandedAnswer {
+        let stranded = is_stranded(&self.path, Some(&self.revision), self.place.as_deref());
+        StrandedAnswer {
+            check: self,
+            stranded,
+        }
+    }
+}
+
+impl StrandedAnswer {
+    /// Whether this answers what a sync of `logged` would ask now, with the logs as `logs` says.
+    fn holds_for(&self, logged: &Logged, logs: Option<&Vec<(PathBuf, u64)>>) -> bool {
+        let check = &self.check;
+        check.path == logged.path
+            && logged.last.as_ref() == Some(&check.revision)
+            && check.place == logged.place
+            && check.logs.as_ref() == logs
+    }
 }
 
 /// A sync that wrote nothing because the logs have left the database, or may be another document's,
@@ -275,12 +318,67 @@ impl Logged {
             here,
             synced: None,
             held_off: None,
+            known: None,
         })
     }
 
     /// Whether another machine's words may have arrived.
     pub fn has_news(&self) -> bool {
         self.store.has_news(&self.replica.folder)
+    }
+
+    /// Whether a sync has to find out if the logs have left this database before it can write: when
+    /// it has a revision to lose, and its logs are gone, or something may have arrived, or this is
+    /// the first sync and the logs as read when this opened don't hold the revision, as when it's
+    /// been opened on another document's logs, where there's no news to see. The store keeps
+    /// revisions after their files go, so it's the disk that's asked, and only when something could
+    /// have changed.
+    fn must_ask(&self) -> bool {
+        let not_held = self.synced.is_none()
+            && self
+                .last
+                .as_ref()
+                .is_some_and(|last| !self.store.could_hold(last));
+        self.last.is_some() && (!self.replica.folder.exists() || self.has_news() || not_held)
+    }
+
+    /// What the next sync would have to read first, if anything: every log, when it has to find out
+    /// whether they've left this database, and doesn't already know. Logs that are gone take no
+    /// reading to tell, and nor does what a held-off sync found while they're unchanged.
+    pub fn stranded_check(&self) -> Option<StrandedCheck> {
+        if !self.must_ask() || !self.replica.folder.exists() {
+            return None;
+        }
+        let logs = Store::log_sizes(&self.replica.folder);
+        let answered = self
+            .held_off
+            .as_ref()
+            .is_some_and(|held_off| held_off.logs == logs)
+            || self
+                .known
+                .as_ref()
+                .is_some_and(|known| known.holds_for(self, logs.as_ref()));
+        if answered {
+            return None;
+        }
+        Some(StrandedCheck {
+            path: self.path.clone(),
+            revision: self.last.clone()?,
+            place: self.place.clone(),
+            logs,
+        })
+    }
+
+    /// Takes an answer to [`Logged::stranded_check`], for the next sync to go by instead of reading
+    /// the logs itself, if they're still as they were when it was asked. One for something else, as
+    /// after a sync since, is let go.
+    pub fn know(&mut self, answer: StrandedAnswer) {
+        let current = answer.check.path == self.path
+            && self.last.as_ref() == Some(&answer.check.revision)
+            && answer.check.place == self.place;
+        if current {
+            self.known = Some(answer);
+        }
     }
 
     /// Whether a sync would have anything to do, for asking often and cheaply.
@@ -319,18 +417,16 @@ impl Logged {
                 return Ok(outcome);
             }
         }
-        // The store keeps revisions after their files go, so ask the disk, and only when something
-        // could have changed. This is before any refresh or write, which could recreate a folder.
-        // A first sync also asks if the logs as read when this opened don't hold the revision,
-        // since it may have been opened on another document's logs, where there's no news to see.
-        let not_held = self.synced.is_none()
-            && self
-                .last
-                .as_ref()
-                .is_some_and(|last| !self.store.could_hold(last));
-        if self.last.is_some()
-            && (!self.replica.folder.exists() || self.has_news() || not_held)
-            && is_stranded(&self.path, self.last.as_deref(), self.place.as_deref())
+        // Before any refresh or write, which could recreate a folder. An answer read on another
+        // thread is what's gone by, if the logs are as they were when it was read.
+        let known = self.known.take();
+        if self.must_ask()
+            && known
+                .filter(|known| known.holds_for(self, logs.as_ref()))
+                .map_or_else(
+                    || is_stranded(&self.path, self.last.as_deref(), self.place.as_deref()),
+                    |known| known.stranded,
+                )
         {
             let held_off = HeldOff {
                 stranded: true,

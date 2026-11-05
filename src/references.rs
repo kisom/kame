@@ -4608,6 +4608,14 @@ mod tests {
         let paper = root_of(&page).join("paper.pdf");
         std::fs::write(&paper, "").unwrap();
         page.app.nb.refresh_listing();
+        // The listing comes from a background thread.
+        for _ in 0..2000 {
+            page.frame(Vec::new());
+            if page.can_press("paper.pdf") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         page.press("paper.pdf");
 
         assert_eq!(

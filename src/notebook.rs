@@ -100,6 +100,7 @@ enum OpenDialog {
     Snapshot,
     OpenPath,
     Link,
+    ReferenceForm,
     JumpList,
     Search,
     MoveReport,
@@ -118,7 +119,8 @@ impl OpenDialog {
             | OpenDialog::Metadata
             | OpenDialog::Snapshot
             | OpenDialog::OpenPath
-            | OpenDialog::Link => true,
+            | OpenDialog::Link
+            | OpenDialog::ReferenceForm => true,
             OpenDialog::JumpList
             | OpenDialog::Search
             | OpenDialog::MoveReport
@@ -221,7 +223,7 @@ impl NotebookUi {
         });
     }
 
-    fn refresh_listing(&mut self) {
+    pub(crate) fn refresh_listing(&mut self) {
         let Some(notebook) = self.notebook.clone() else {
             return;
         };
@@ -1001,6 +1003,9 @@ impl KameApp {
         if let Some(chosen) = reference {
             self.browser_reference(chosen);
         }
+        if choose.is_some() && self.say_if_reference_form_up() {
+            choose = None;
+        }
         match choose {
             Some((path, Kind::Document)) => self.open_from_notebook(path, None),
             Some((path, Kind::File)) => {
@@ -1370,6 +1375,7 @@ impl KameApp {
             (self.snapshot_prompt.is_some(), OpenDialog::Snapshot),
             (self.open_prompt.is_some(), OpenDialog::OpenPath),
             (self.link_prompt.is_some(), OpenDialog::Link),
+            (self.refs.typing_open(), OpenDialog::ReferenceForm),
             (self.nb.jump.is_some(), OpenDialog::JumpList),
             (self.nb.search.is_some(), OpenDialog::Search),
             (self.nb.move_report.is_some(), OpenDialog::MoveReport),
@@ -1379,6 +1385,17 @@ impl KameApp {
         .into_iter()
         .filter_map(|(open, dialog)| open.then_some(dialog))
         .collect()
+    }
+
+    /// Says so, and returns true, if a reference form or the Cite search is up. Opening another
+    /// document or file would take it away with whatever is typed in it.
+    pub(crate) fn say_if_reference_form_up(&mut self) -> bool {
+        if !self.open_dialogs().contains(&OpenDialog::ReferenceForm) {
+            return false;
+        }
+        self.notice_tracker.announced();
+        self.notice = Some("finish or close the open dialog first".to_string());
+        true
     }
 
     /// Puts up a dialog chosen from a document's right-click menu. One that's open may hold something
@@ -1867,6 +1884,7 @@ mod tests {
             OpenDialog::Snapshot,
             OpenDialog::OpenPath,
             OpenDialog::Link,
+            OpenDialog::ReferenceForm,
         ] {
             assert!(dialog.makes_menu_wait(), "{dialog:?}");
         }

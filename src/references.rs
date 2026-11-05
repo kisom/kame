@@ -634,6 +634,11 @@ impl ReferencesUi {
             || self.window.is_some()
     }
 
+    /// Whether a form or the Cite search is up, either of which may hold something typed.
+    pub(crate) fn typing_open(&self) -> bool {
+        self.form.is_some() || self.cite_search.is_some()
+    }
+
     /// Closes everything, for another document or notebook, but for the window of a rename under
     /// way, which has yet to say how it went.
     pub(crate) fn close_windows(&mut self) {
@@ -4389,6 +4394,42 @@ mod tests {
             .browser_reference(BrowserReference::Delete("knuth1981".to_string()));
 
         assert!(page.app.refs.window.is_none());
+    }
+
+    #[test]
+    fn a_document_row_in_the_browser_doesnt_take_away_a_form_being_typed_in() {
+        let mut page = page_with_browser("");
+        other_document(&page, "other.kame", "elsewhere");
+        page.app.nb.refresh_listing();
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+        let opened = page.app.session.path().map(Path::to_path_buf);
+
+        page.press("other.kame");
+
+        assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
+        let form = &page.app.refs.form.as_ref().expect("still up").form;
+        assert_eq!(form.key, "lamport1994");
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("finish or close the open dialog first")
+        );
+    }
+
+    #[test]
+    fn opening_a_path_doesnt_take_away_a_search_being_typed_in() {
+        let mut page = page_with_browser("");
+        cite_chord(&mut page);
+        type_into(&mut page, "knu");
+
+        page.app.begin_open();
+
+        assert!(page.app.open_prompt.is_none());
+        assert_eq!(page.app.refs.cite_search.as_ref().unwrap().query, "knu");
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("finish or close the open dialog first")
+        );
     }
 
     #[test]

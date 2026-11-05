@@ -5738,6 +5738,9 @@ impl KameApp {
     /// Opens the path prompt, clearing any other file dialog so it is the one
     /// thing on screen.
     fn begin_open(&mut self) {
+        if self.say_if_reference_form_up() {
+            return;
+        }
         self.pending_heading = None;
         self.snapshot_prompt = None;
         self.restore_picker = None;
@@ -5758,6 +5761,9 @@ impl KameApp {
 
     /// File > Open: asks for a document in the system's file browser and opens it.
     fn open_with_dialog(&mut self) {
+        if self.say_if_reference_form_up() {
+            return;
+        }
         self.snapshot_prompt = None;
         self.restore_picker = None;
         self.open_prompt = None;

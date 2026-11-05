@@ -365,8 +365,8 @@ pub fn invert(op: &Op) -> Op {
             start: *offset,
             end: *offset + text.len(),
             text: text.clone(),
-            // An insertion cannot leave an anchor wholly inside the inserted
-            // run: existing anchors at or after the offset move right with it.
+            // In a history that fits, no anchor is wholly inside the inserted run:
+            // existing anchors at or after the offset move right with it.
             removed: Vec::new(),
             old_spans: None,
             clipped: Vec::new(),
@@ -489,6 +489,28 @@ pub fn apply_inverse(doc: &mut Document, op: &Op) {
             }
         }
     }
+}
+
+/// Runs `change` on a copy of `doc`, which takes the result only if it got through.
+fn staged(doc: &mut Document, change: impl FnOnce(&mut Document)) -> bool {
+    let mut copy = doc.clone();
+    let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| change(&mut copy))).is_ok();
+    if done {
+        *doc = copy;
+    }
+    done
+}
+
+/// [`apply`], for an op from a saved history, which isn't always one that fits: history written
+/// before deletes recorded the notes they cut short can have drifted from the document. Returns
+/// whether it applied, and if it didn't, `doc` is as it was.
+pub fn try_apply(doc: &mut Document, op: &Op) -> bool {
+    staged(doc, |copy| apply(copy, op))
+}
+
+/// [`apply_inverse`], in the same way as [`try_apply`].
+pub fn try_apply_inverse(doc: &mut Document, op: &Op) -> bool {
+    staged(doc, |copy| apply_inverse(copy, op))
 }
 
 /// Applies `op` to `doc`.

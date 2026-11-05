@@ -245,7 +245,7 @@ Appending writes only blocks that no log has, and does nothing if the id is alre
 
 The app skips all this if no log has changed size and the document and metadata match the last sync.
 
-**Checkpoints** give two machines a shared past from the start. Undoing back through the applied ops, take the document's state at each op count divisible by 50, and at every count after the last of those. Write them oldest first, each the parent of the next, with no device, default metadata and the op count as `when`. Machines with the same history write the same ones, so a merge has an ancestor near where they really parted. The interval is part of what machines agree on.
+**Checkpoints** give two machines a shared past from the start. Undoing back through the applied ops, take the document's state at each op count divisible by 50, and at every count after the last of those. Write them oldest first, each the parent of the next, with no device, default metadata and the op count as `when`. Machines with the same history write the same ones, so a merge has an ancestor near where they really parted. The interval is part of what machines agree on. If the history can't be undone any further, there are no checkpoints before that point.
 
 ### 6.5 Applying the result
 
@@ -273,7 +273,7 @@ These are for a tool like Syncthing carrying the `.kame` file itself, and the ap
 
 1. Read each file's applied ops, leaving out anything undone.
 2. Count how many ops they share from the start.
-3. Start from one side's document and undo its other ops. If compacting has left nothing shared, this gives an older document than the true one, which means more conflicts and no lost words.
+3. Start from one side's document and undo its other ops. If compacting has left nothing shared, this gives an older document than the true one, which means more conflicts and no lost words. If the ops can't be undone that far, merge with no base. Stopping partway would count this side's later words as shared, and the other side as having cut them.
 
 **Conflict copies.** kame looks every 5 seconds for files beside the document named `STEM.sync-conflict-*.kame` that hold the same document id. To merge one:
 

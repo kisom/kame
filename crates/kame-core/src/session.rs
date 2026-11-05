@@ -1724,6 +1724,7 @@ impl Session {
             return false;
         }
         let Some(op) = self.editor.undo() else {
+            self.report_refused("undo");
             return false;
         };
         self.selection = None;
@@ -1737,12 +1738,24 @@ impl Session {
             return false;
         }
         let Some(op) = self.editor.redo() else {
+            self.report_refused("redo");
             return false;
         };
         self.selection = None;
         self.save_state();
         self.place_caret_from(&op);
         true
+    }
+
+    /// Says so if an undo or redo was refused because this step of the history no longer fits the
+    /// document, which older files can do. Nothing changed, and editing carries on.
+    fn report_refused(&mut self, which: &str) {
+        if self.editor.take_refused() {
+            self.last_error = Some(format!(
+                "could not {which} this step: it no longer fits the document. Nothing changed, \
+                 and any snapshots still have earlier versions"
+            ));
+        }
     }
 
     /// Moves the caret to the position implied by an applied undo/redo op.
@@ -4915,6 +4928,28 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_refused_undo_says_so_and_keeps_the_document() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("words");
+        let block_id = session.document().blocks[0].id;
+        let text_before = session.document().blocks[0].text.clone();
+        let doc = session.document().clone();
+        let stale = Op::InsertText {
+            block_id,
+            offset: 0,
+            text: "elsewhere".to_string(),
+        };
+        session.editor = Editor::with_cursor(doc, vec![stale], 1);
+        assert!(!session.undo());
+        assert_eq!(session.document().blocks[0].text, text_before);
+        let said = session.last_error.clone().unwrap_or_default();
+        assert!(said.contains("undo"), "{said:?}");
+        assert!(said.contains("napshot"), "{said:?}");
+        assert!(!session.save_failed, "the document can still be edited");
     }
 
     #[test]

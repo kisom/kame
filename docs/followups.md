@@ -6,8 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **Undo can crash the app.** A note that has changed shape through a delete and undo can come to
-  lie inside an earlier insert, and undoing that insert panics. `document-format.md`, section 8.
 - [ ] **A merge can hang the app.** If a merge's revision is in the logs but a block it needs hasn't
   arrived, the sync loop never ends, on the interface thread. `merging.md`, section 9.
 - [ ] **An unusable last revision.** If the revision a document last settled on is in the logs but can't

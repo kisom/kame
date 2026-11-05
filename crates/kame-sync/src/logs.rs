@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kame_core::edit::{apply_inverse, Cursor};
+use kame_core::edit::{try_apply_inverse, Cursor};
 use kame_core::links::{find_document, resolve_open_path};
 use kame_core::model::{Document, Metadata};
 use kame_core::session::Session;
@@ -219,8 +219,9 @@ impl Logged {
             if at % CHECKPOINT_EVERY == 0 || at > last_fixed {
                 states.push((at, doc.clone()));
             }
-            if at > 0 {
-                apply_inverse(&mut doc, &version.ops[at - 1]);
+            // A history that can't be rewound any further just has no checkpoints before that.
+            if at > 0 && !try_apply_inverse(&mut doc, &version.ops[at - 1]) {
+                break;
             }
         }
         let mut last = None;
@@ -379,6 +380,30 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file whose history can't be rewound still syncs, starting from the text it has.
+    #[test]
+    fn a_history_that_does_not_fit_stops_the_checkpoints_and_not_the_sync() {
+        use kame_core::edit::{Editor, Op};
+        let root = kame_test_dir::folder("logs-unfit-history");
+        std::fs::write(root.join(MARKER), "").unwrap();
+        let path = root.join("essay.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("words");
+        let doc = session.document().clone();
+        let stale = Op::InsertText {
+            block_id: doc.blocks[0].id,
+            offset: 0,
+            text: "elsewhere".to_string(),
+        };
+        session.editor = Editor::with_cursor(doc.clone(), vec![stale], 1);
+        let mut logged = Logged::open(&session, "here-0000").unwrap();
+        logged.sync(&mut session, 100).unwrap();
+        assert_eq!(*session.document(), doc);
+        let store = Store::load(&log_folder(&path)).unwrap();
+        assert_eq!(store.heads().len(), 1);
+        assert_eq!(store.document(&store.heads()[0]), doc);
+    }
 
     #[test]
     fn an_offset_is_carried_past_a_change_before_it() {

@@ -259,9 +259,9 @@ Each row in `ops` is one JSON object with a single key naming the operation. **A
 
 Removals carry what they remove, so that undoing one needs nothing else. `apply` checks `DeleteText.text`, `DeleteText.removed`, `DeleteBlock.annotations` and the id of `DeleteBlock.block`. `RemoveAnnotation` isn't checked, a missing id does nothing, and undo restores what the op carries, so a wrong payload there changes the document silently.
 
-A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payload, because that would lose notes. An implementation should validate before changing anything. kame panics, so its disk stays as it was, but its memory doesn't, because `DeleteText` checks `removed` after changing the text.
+A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payload, because that would lose notes. An implementation should validate before changing anything. For a new edit, kame panics, so its disk stays as it was, but its memory doesn't, because `DeleteText` checks `removed` after changing the text. Undo and redo run on a copy and refuse the step instead.
 
-`apply` also fails on an unknown `block_id`, an out-of-range index or a position that's not a character boundary. `AddAnnotation` checks nothing, so an implementation must validate the anchor first, as kame's command does. Nothing checks at open that the log fits the head, so drift only shows at undo.
+`apply` also fails on an unknown `block_id`, an out-of-range index or a position that's not a character boundary. `AddAnnotation` checks nothing, so an implementation must validate the anchor first, as kame's command does. Nothing checks at open that the log fits the head, so drift only shows at undo or redo.
 
 | Operation | Fields |
 |---|---|
@@ -321,7 +321,7 @@ A writer must set `clipped` to every range anchor that step 3 changes, in terms 
 
 **`SetTitle`.** `old` must match. **`ReplaceDocument`.** Replaces the whole document, without checking `old`.
 
-**`Batch`.** Members apply in order, each to the result of the last, on a copy that replaces the document only when all have applied. Each member's payload must be built from the document as it'll be when that member applies. Undoing a `Batch` isn't staged like this in kame, and an implementation should stage it.
+**`Batch`.** Members apply in order, each to the result of the last, on a copy that replaces the document only when all have applied. Each member's payload must be built from the document as it'll be when that member applies. Undo and redo stage the whole step the same way.
 
 ### 4.2 Undoing
 
@@ -353,7 +353,7 @@ Redo applies the original operation.
 | Starts before it and ends inside it or at its end | `a..s` |
 | Starts at or inside it and ends after it | `e..b` |
 
-**So an undo of older history may not apply.** A note that has changed shape can come to lie wholly inside an earlier insert, and undoing that insert then fails the `removed` check, and redoing a delete can fail it the same way. An implementation should undo and redo on a copy and write nothing on failure.
+**So an undo of older history may not apply.** A note that has changed shape can come to lie wholly inside an earlier insert, and undoing that insert then fails the `removed` check, and redoing a delete can fail it the same way. An implementation must undo and redo on a copy and write nothing on failure. kame refuses that step and says so, and the history stays where it is, so the document can still be edited.
 
 ### 4.3 Commands
 
@@ -413,5 +413,4 @@ These describe the code as it stands, and aren't rules to copy.
 - **Ranges aren't checked on reading.** Nothing checks a span or anchor against its text when a document is read, so a damaged or hand-made file can hold offsets out of range or inside a character. Readers should clamp them for display, and must not assume they're valid.
 - **The rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
 - **Typing on an image block stores text in it.** `Session::insert` starts a new paragraph on a `Rule`, but has no such case for an `Image`. This is a bug to fix.
-- **An undo of older history can panic.** History from before `clipped` can hold a note that has changed shape, and undo or redo then fails its check (section 4.2). This is a bug to fix. Undoing a `Batch` that fails partway also leaves the document half undone in memory.
 - **Paths aren't portable by themselves.** A whole image path or a `~/` link only works where it was made. Only relative forms hold on another machine.

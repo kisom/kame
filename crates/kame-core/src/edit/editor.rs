@@ -16,7 +16,8 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::edit::ops::{
-    anchor_wholly_inside, apply, apply_inverse, coalesce, invert, normalize, with_clipped, Op,
+    anchor_wholly_inside, apply, coalesce, invert, normalize, try_apply, try_apply_inverse,
+    with_clipped, Op,
 };
 use crate::model::{
     link_style, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
@@ -97,6 +98,8 @@ pub struct Editor {
     redo: Vec<Op>,
     /// Whether the last edit joined up with the one before it.
     coalesced: bool,
+    /// Whether an undo or redo was just refused, because the history doesn't fit the document.
+    refused: bool,
 }
 
 impl Editor {
@@ -107,6 +110,7 @@ impl Editor {
             undo: Vec::new(),
             redo: Vec::new(),
             coalesced: false,
+            refused: false,
         }
     }
 
@@ -137,6 +141,7 @@ impl Editor {
             undo,
             redo,
             coalesced: false,
+            refused: false,
         }
     }
 
@@ -215,16 +220,23 @@ impl Editor {
     /// cursor after this call is one lower, and head + cursor must move
     /// together.
     ///
-    /// The undo goes through [`apply_inverse`], so the notes destroyed by a
+    /// The undo goes through [`crate::edit::apply_inverse`], so the notes destroyed by a
     /// deletion come back with it: a `DeleteBlock` restores its block and the
     /// notes anchored in it; a `DeleteText` restores the deleted text and the
     /// notes that lay wholly inside the deleted range.
     ///
     /// A note the deletion cut short gets back the range it had, which keeps undo and redo exact:
     /// anything they check still matches.
+    ///
+    /// A step that doesn't fit the document is refused, with nothing changed: `None`, and
+    /// [`Editor::take_refused`] says so.
     pub fn undo(&mut self) -> Option<Op> {
-        let op = self.undo.pop()?;
-        apply_inverse(&mut self.doc, &op);
+        let op = self.undo.last()?.clone();
+        if !try_apply_inverse(&mut self.doc, &op) {
+            self.refused = true;
+            return None;
+        }
+        self.undo.pop();
         let inverse = invert(&op);
         self.redo.push(op);
         Some(inverse)
@@ -234,12 +246,21 @@ impl Editor {
     /// `None` when there is nothing to redo.
     ///
     /// Persist with `Db::save_state(document(), cursor())`, as for
-    /// [`Editor::undo`].
+    /// [`Editor::undo`], which also says what happens to a step that doesn't fit.
     pub fn redo(&mut self) -> Option<Op> {
-        let op = self.redo.pop()?;
-        apply(&mut self.doc, &op);
+        let op = self.redo.last()?.clone();
+        if !try_apply(&mut self.doc, &op) {
+            self.refused = true;
+            return None;
+        }
+        self.redo.pop();
         self.undo.push(op.clone());
         Some(op)
+    }
+
+    /// Whether the last undo or redo was refused, rather than having nothing to do. Told once.
+    pub fn take_refused(&mut self) -> bool {
+        std::mem::take(&mut self.refused)
     }
 
     /// `(undo depth, redo depth)` — how many edits can be undone and redone.
@@ -2983,6 +3004,67 @@ mod tests {
             editor.document().annotations[0].anchor,
             Anchor::range(block, 6, 9)
         );
+    }
+
+    /// An insert that the document no longer holds, as history from before deletes recorded the notes
+    /// they cut short can leave.
+    fn with_history_that_does_not_fit() -> Editor {
+        let doc = doc_with("words");
+        let block_id = doc.blocks[0].id;
+        let ops = vec![
+            Op::InsertText {
+                block_id,
+                offset: 0,
+                text: "elsewhere".to_string(),
+            },
+            Op::InsertText {
+                block_id,
+                offset: 5,
+                text: "!".to_string(),
+            },
+        ];
+        Editor::with_cursor(doc, ops, 1)
+    }
+
+    #[test]
+    fn an_undo_that_does_not_fit_is_refused_and_changes_nothing() {
+        let mut editor = with_history_that_does_not_fit();
+        let before = editor.document().clone();
+        let history = editor.history();
+        assert!(editor.undo().is_none());
+        assert!(editor.take_refused(), "refused, not out of history");
+        assert!(!editor.take_refused(), "told once");
+        assert_eq!(*editor.document(), before);
+        assert_eq!(editor.history(), history);
+    }
+
+    #[test]
+    fn a_redo_that_does_not_fit_is_refused_and_changes_nothing() {
+        let doc = doc_with("words");
+        let block_id = doc.blocks[0].id;
+        let wrong = Op::DeleteText {
+            block_id,
+            start: 0,
+            end: 1,
+            text: "x".to_string(),
+            removed: Vec::new(),
+            old_spans: None,
+            clipped: Vec::new(),
+        };
+        let mut editor = Editor::with_cursor(doc, vec![wrong], 0);
+        let before = editor.document().clone();
+        assert!(editor.redo().is_none());
+        assert!(editor.take_refused());
+        assert_eq!(*editor.document(), before);
+        assert_eq!(editor.history(), (0, 1));
+    }
+
+    #[test]
+    fn running_out_of_history_is_not_a_refusal() {
+        let mut editor = Editor::new(doc_with("words"));
+        assert!(editor.undo().is_none());
+        assert!(editor.redo().is_none());
+        assert!(!editor.take_refused());
     }
 
     /// Blocks and notes, with notes in an order that doesn't depend on how they got there.

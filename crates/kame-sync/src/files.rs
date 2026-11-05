@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use kame_core::edit::apply_inverse;
+use kame_core::edit::try_apply_inverse;
 use kame_core::edit::Op;
 use kame_core::model::Document;
 use kame_core::storage::Db;
@@ -40,12 +40,17 @@ pub fn shared_ops(one: &[Op], other: &[Op]) -> usize {
 ///
 /// The ops are only a way to get there. If compacting one side's history has left nothing shared,
 /// this gives an older document than the true one, which means more conflicts and no lost words.
-pub fn shared_base(version: &Version, shared: usize) -> Document {
+///
+/// `None` if the history can't be rewound that far. Stopping partway would be worse than having no
+/// base: it would count this side's later words as shared, and the other side as having cut them.
+pub fn shared_base(version: &Version, shared: usize) -> Option<Document> {
     let mut doc = version.doc.clone();
     for op in version.ops[shared..].iter().rev() {
-        apply_inverse(&mut doc, op);
+        if !try_apply_inverse(&mut doc, op) {
+            return None;
+        }
     }
-    doc
+    Some(doc)
 }
 
 /// As [`merge_versions`], with `one` being what is on the screen: its words are the ones left in
@@ -53,7 +58,7 @@ pub fn shared_base(version: &Version, shared: usize) -> Document {
 fn merge_into_screen(one: &Version, other: &Version, other_label: &str) -> Merged {
     let base = shared_base(one, shared_ops(&one.ops, &other.ops));
     merge(
-        Some(&base),
+        base.as_ref(),
         Side {
             doc: &one.doc,
             label: "this machine",
@@ -77,7 +82,7 @@ pub fn merge_versions(
     let base = shared_base(one, shared);
     // A file does not say when it was written, so the longer history counts as the later.
     merge(
-        Some(&base),
+        base.as_ref(),
         Side {
             doc: &one.doc,
             label: one_label,
@@ -265,4 +270,59 @@ pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
             changed,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kame_core::model::{Block, BlockKind};
+    use uuid::Uuid;
+
+    fn document(id: Uuid, block: Uuid, text: &str) -> Document {
+        Document {
+            id,
+            title: "t".to_string(),
+            blocks: vec![Block {
+                id: block,
+                kind: BlockKind::Paragraph,
+                text: text.to_string(),
+                spans: Vec::new(),
+            }],
+            annotations: Vec::new(),
+        }
+    }
+
+    /// With no way back to what they share, nothing counts as shared but what they agree on. A
+    /// base partway back would make the other side's text look like it cut this side's words.
+    #[test]
+    fn a_history_that_does_not_fit_merges_with_no_base_and_loses_no_words() {
+        let (id, block) = (Uuid::new_v4(), Uuid::new_v4());
+        let one = Version {
+            doc: document(id, block, "Mine. Shared."),
+            ops: vec![Op::InsertText {
+                block_id: block,
+                offset: 0,
+                text: "not in the document".to_string(),
+            }],
+        };
+        let other = Version {
+            doc: document(id, block, "Theirs. Shared."),
+            ops: Vec::new(),
+        };
+        assert!(shared_base(&one, 0).is_none());
+        let merged = merge_versions(&one, "one", &other, "other");
+        let everything = format!(
+            "{} {}",
+            merged.doc.blocks[0].text,
+            merged
+                .doc
+                .annotations
+                .iter()
+                .map(|note| note.body.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        assert!(everything.contains("Mine."), "{everything}");
+        assert!(everything.contains("Theirs."), "{everything}");
+    }
 }

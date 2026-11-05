@@ -22,7 +22,7 @@ pub struct Run {
 const MOST_NAMES: usize = 6;
 
 /// What comes after a piece of an entry: `mid` if another piece follows and `end` if it is
-/// the last. A leading `.` is dropped where the text already ends with one.
+/// the last. A leading `.` is dropped where the text already ends a sentence.
 #[derive(Clone, Copy)]
 struct After {
     mid: &'static str,
@@ -65,6 +65,11 @@ impl After {
     }
 }
 
+/// Whether `text` already has the punctuation that ends a sentence.
+fn ends_sentence(text: &str) -> bool {
+    text.ends_with(['.', '?', '!'])
+}
+
 struct Builder {
     runs: Vec<Run>,
     after: After,
@@ -78,13 +83,13 @@ impl Builder {
         }
     }
 
-    fn ends_with_period(&self) -> bool {
-        self.runs.last().is_some_and(|run| run.text.ends_with('.'))
+    fn ends_sentence(&self) -> bool {
+        self.runs.last().is_some_and(|run| ends_sentence(&run.text))
     }
 
     fn punctuation(&mut self, text: &'static str) {
         let text = match text.strip_prefix('.') {
-            Some(rest) if self.ends_with_period() => rest,
+            Some(rest) if self.ends_sentence() => rest,
             _ => text,
         };
         if !text.is_empty() {
@@ -117,8 +122,8 @@ impl Builder {
         if title.is_empty() {
             return;
         }
-        // A title that ends in a period already has its punctuation, so no comma follows it.
-        let after = if title.ends_with('.') && after.mid == QUOTE.mid {
+        // A title that ends a sentence already has its punctuation, so no comma follows it.
+        let after = if ends_sentence(title) && after.mid == QUOTE.mid {
             After {
                 mid: "” ", ..after
             }
@@ -272,7 +277,7 @@ fn book(reference: &Reference, b: &mut Builder) {
     // place and publisher.
     if edition.is_none() && !editors_follow {
         if !reference.title.is_empty() {
-            let closed = if reference.title.ends_with('.') {
+            let closed = if ends_sentence(&reference.title) {
                 reference.title.clone()
             } else {
                 format!("{}.", reference.title)
@@ -281,7 +286,13 @@ fn book(reference: &Reference, b: &mut Builder) {
         }
     } else {
         if !reference.title.is_empty() {
-            b.italic(&reference.title, COMMA);
+            // A period may be an abbreviation's, and takes the comma as it would in a sentence.
+            let after = if reference.title.ends_with(['?', '!']) {
+                SPACE
+            } else {
+                COMMA
+            };
+            b.italic(&reference.title, after);
         }
         if editors_follow {
             let last = edition.is_none();
@@ -613,6 +624,126 @@ mod tests {
             ..Reference::default()
         };
         assert_eq!(plain(&alone), "“Birds, bees, etc.”");
+    }
+
+    #[test]
+    fn an_article_with_a_title_ending_in_a_question_or_exclamation_adds_no_punctuation() {
+        for (title, quoted) in [("Why?", "“Why?”"), ("Stop!", "“Stop!”")] {
+            let mut article = Reference {
+                kind: Kind::Article,
+                authors: names(&["A. Author"]),
+                title: s(title),
+                published_in: s("Nature"),
+                year: s("2001"),
+                ..Reference::default()
+            };
+            assert_eq!(
+                plain(&article),
+                format!("A. Author, {quoted} Nature, 2001.")
+            );
+            article.published_in = s("");
+            article.year = s("");
+            assert_eq!(plain(&article), format!("A. Author, {quoted}"));
+            article.url = s("http://a.example");
+            assert_eq!(
+                plain(&article),
+                format!("A. Author, {quoted} [Online]. Available: http://a.example")
+            );
+        }
+    }
+
+    #[test]
+    fn a_conference_paper_with_a_title_ending_in_a_question_or_exclamation_adds_no_punctuation() {
+        for (title, quoted) in [("Why?", "“Why?”"), ("Stop!", "“Stop!”")] {
+            let paper = Reference {
+                kind: Kind::Conference,
+                title: s(title),
+                published_in: s("Proc. ISLPED"),
+                year: s("2012"),
+                ..Reference::default()
+            };
+            assert_eq!(plain(&paper), format!("{quoted} in Proc. ISLPED, 2012."));
+        }
+    }
+
+    #[test]
+    fn a_chapter_with_a_title_ending_in_a_question_or_exclamation_adds_no_punctuation() {
+        for (title, quoted) in [("Why?", "“Why?”"), ("Stop!", "“Stop!”")] {
+            let chapter = Reference {
+                kind: Kind::Book,
+                chapter: s(title),
+                title: s("Computers and You"),
+                publisher: s("Wiley"),
+                ..Reference::default()
+            };
+            assert_eq!(
+                plain(&chapter),
+                format!("{quoted} in Computers and You. Wiley.")
+            );
+        }
+    }
+
+    #[test]
+    fn a_book_with_a_title_ending_in_a_question_or_exclamation_adds_no_punctuation() {
+        for title in ["Why?", "Stop!"] {
+            let mut book = Reference {
+                kind: Kind::Book,
+                title: s(title),
+                ..Reference::default()
+            };
+            assert_eq!(plain(&book), title);
+            book.place = s("City");
+            book.publisher = s("Publisher");
+            assert_eq!(plain(&book), format!("{title} City: Publisher."));
+            book.edition = s("2nd");
+            assert_eq!(plain(&book), format!("{title} 2nd ed. City: Publisher."));
+            book.edition = s("");
+            book.editors = names(&["J. S. Brake"]);
+            book.authors = names(&["L. Stein"]);
+            assert_eq!(
+                plain(&book),
+                format!("L. Stein, {title} J. S. Brake, Ed. City: Publisher.")
+            );
+            // The whole title stays one italic run.
+            book.authors.clear();
+            book.editors.clear();
+            assert_eq!(entry(&book)[0].text, title);
+            assert_eq!(entry(&book)[0].style, RunStyle::Italic);
+        }
+    }
+
+    #[test]
+    fn a_web_page_with_a_title_ending_in_a_question_or_exclamation_adds_no_punctuation() {
+        for (title, quoted) in [("Why?", "“Why?”"), ("Stop!", "“Stop!”")] {
+            let mut page = Reference {
+                kind: Kind::Web,
+                title: s(title),
+                site: s("CNN.com"),
+                url: s("http://a.example"),
+                ..Reference::default()
+            };
+            assert_eq!(
+                plain(&page),
+                format!("{quoted} CNN.com. [Online]. Available: http://a.example")
+            );
+            page.site = s("");
+            assert_eq!(
+                plain(&page),
+                format!("{quoted} [Online]. Available: http://a.example")
+            );
+            page.url = s("");
+            assert_eq!(plain(&page), quoted);
+        }
+    }
+
+    #[test]
+    fn a_comma_stays_after_a_title_with_a_question_mark_only_inside_it() {
+        let article = Reference {
+            title: s("Why? A study"),
+            published_in: s("Nature"),
+            ..Reference::default()
+        };
+        assert_eq!(plain(&article), "“Why? A study,” Nature.");
     }
 
     #[test]

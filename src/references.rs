@@ -19,7 +19,7 @@ use kame_core::references::{
     block_citation_ranges, citation_at, cited, entry, key_of, plain, suggest_key, unresolved,
     valid_key, with_citation_spans, Kind, Reference, References, RunStyle,
 };
-use kame_notebook::references::{citing, load, remove, rename, save, stamp, Renamed};
+use kame_notebook::references::{citing, load, remove, rename, save, stamp, Open, Renamed};
 use kame_notebook::Notebook;
 
 use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window, BROWSER_INDENT};
@@ -287,12 +287,6 @@ fn rename_outcome(old: &str, new: &str, renamed: &Renamed, root: &Path) -> Vec<S
         lines.push(format!(
             "{old} was kept, so that [{old}] still resolves. Renaming it again once this is fixed \
              finishes it."
-        ));
-    }
-    // Only a document with no file gets here, as `rename` had nothing open to leave the file for.
-    if !renamed.old_kept && !renamed.failed.is_empty() {
-        lines.push(format!(
-            "{old} has gone, so [{old}] is plain text there until it's added again."
         ));
     }
     for (path, why) in &renamed.failed {
@@ -1074,11 +1068,13 @@ impl KameApp {
             new: new.clone(),
         });
         std::thread::spawn(move || {
-            let _ = send.send(rename(&notebook, &old, &new, open.as_deref(), &device, now));
+            // A document with no file can hold `[old]` too, so the old file is always left here.
+            let leaving = open.as_deref().map_or(Open::Unsaved, Open::File);
+            let _ = send.send(rename(&notebook, &old, &new, leaving, &device, now));
         });
     }
 
-    /// The rename has done the other documents, and left the old file if a document is open. This
+    /// The rename has done the other documents, and left the old file for the open document. This
     /// does the open document, last because `rename` can refuse to start, and a refused rename
     /// should have touched nothing. The old file goes once everything has followed, so that a quit
     /// before now leaves `[old]` with its reference.
@@ -1100,7 +1096,6 @@ impl KameApp {
                 return;
             }
         };
-        let old_is_left_here = open.is_some();
         // Left alone for being open, it's no longer what's open if it was saved as another file.
         if let Some(left) =
             open.filter(|open| !super::same_document(self.session.path(), Some(open)))
@@ -1128,7 +1123,7 @@ impl KameApp {
             }
         }
         let mut not_removed = None;
-        if old_is_left_here && renamed.failed.is_empty() {
+        if renamed.failed.is_empty() {
             match remove(&notebook, &old) {
                 Ok(()) => renamed.old_kept = false,
                 Err(why) => not_removed = Some(format!("{old} wasn't removed: {why}")),
@@ -3451,7 +3446,7 @@ mod tests {
             &notebook,
             "knuth1981",
             "plass1981",
-            Some(&open),
+            Open::File(&open),
             "here-aaaa",
             1_000,
         );
@@ -3500,7 +3495,7 @@ mod tests {
             &notebook,
             "knuth1981",
             "plass1981",
-            Some(&open),
+            Open::File(&open),
             "here-aaaa",
             1_000,
         );
@@ -3577,7 +3572,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unsaved_copy_that_cant_follow_says_the_old_key_has_gone() {
+    fn an_unsaved_copy_that_cant_follow_keeps_the_old_key() {
         let mut page = imported_markdown("No citation on disk.\n");
         page.app.session.insert(" [knuth1981]");
         open_list(&mut page);
@@ -3586,9 +3581,11 @@ mod tests {
 
         rename_only_key(&mut page, "plass1981");
 
-        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(reference_file(&page, "knuth1981").exists());
+        assert!(reference_file(&page, "plass1981").exists());
+        assert!(page.app.refs.list.contains("knuth1981"));
         assert!(page.sees("this document: the disk is full"));
-        assert!(page.sees("knuth1981 has gone"));
+        assert!(page.sees("knuth1981 was kept"));
     }
 
     #[test]
@@ -3828,7 +3825,7 @@ mod tests {
             &notebook,
             "knuth1981",
             "plass1981",
-            Some(&open),
+            Open::File(&open),
             "here-aaaa",
             1_000,
         ))

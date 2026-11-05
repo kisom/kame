@@ -6,6 +6,10 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
+- [ ] **Before the next field on `Metadata` or `Annotation`, stop it invalidating every log.** `Revision::id()` hashes the
+  re-serialized struct, so adding a field makes every line of every log fail its check, and they drop out of every merge. Checking the
+  digest against the line's raw `revision` bytes would validate every line ever written. It needs its own task, since it brings old
+  revisions back into merges. `skip_serializing_if` on new fields is the cheap stopgap. This is the most pressing item here.
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
 
@@ -40,14 +44,13 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
-- [ ] **A clean-up pass stops without a word** on any log it can't read, one from a newer kame, or one with a whole line
-  that can't be checked, since any of those could hold the revision being looked for. The user is told nothing, and stranded
-  databases stay until it's fixed. Such a line stays for good, as logs are only added to: every line written before a `Metadata`
-  field was added, and a line torn by a crash that another was then written after. So a notebook with one has no clean-up at all
-  until something rewrites or removes it.
-- [ ] **A stale database from before places were recorded.** It has no place, so it isn't recognised as stale until it's next
-  synced, and opening one on another machine after a delete can bring the document back, as it did before. Once every
-  machine has synced its documents, there are none.
+- [ ] **A corrupt log line stays for good.** Logs are only added to, so a line that doesn't parse, and isn't torn, stays until it's
+  removed by hand. Until then a document it could belong to can't be retired as having no home. A notice says which logs.
+- [ ] **A stale database from before places were recorded,** whose logs left before a pass first saw it, has no place, so it isn't
+  recognised as stale until it's next synced, and opening one on another machine after a delete can bring the document back, as it
+  did before. A pass stamps every other one.
+- [ ] **A document with logs that can't be read never syncs and doesn't say why.** `src/main.rs` leaves `logged` as `None` when
+  `Logged::open` fails, with no notice. Not new.
 - [ ] **A partial log folder after a move.** If a machine edits X offline while another renames X to Y, its surviving
   `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
   X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.

@@ -188,8 +188,9 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
 /// doesn't sync, and they aren't its to delete or move. A folder or a log that can't be read shows
 /// nothing either.
 ///
-/// `revision` is `None` for a database that has never synced. It has no history to bring, so it merges
-/// with what's there as ever, but what's there still isn't its to take away.
+/// `revision` is `None` for a database that has never synced. Its first sync merges its words with
+/// what's there, whoever's that is, as documents created through a link on two machines rely on, and
+/// that's an accepted limit. But what's there still isn't its to take away.
 pub fn logs_can_be_its_own(path: &Path, document: uuid::Uuid, revision: Option<&str>) -> bool {
     let folder = log_folder(path);
     if !folder.exists() {
@@ -383,13 +384,10 @@ impl Logged {
         if synced.metadata != metadata {
             session.set_metadata(synced.metadata);
         }
-        // The state first. Were the place to get there alone, a crash would leave a database at its
-        // place naming a revision from somewhere else, which reads as the logs having left.
-        session.set_sync_state(&synced.head);
-        if self.place.as_deref() != Some(self.here.as_str()) {
-            session.set_sync_place(&self.here);
-            self.place = Some(self.here.clone());
-        }
+        // Together. Were the place to get there alone, a database would be at its place naming a
+        // revision from somewhere else, which reads as the logs having left.
+        session.set_sync(&synced.head, &self.here);
+        self.place = Some(self.here.clone());
         self.last = Some(synced.head);
         self.synced = Some((session.document().clone(), session.metadata.clone()));
         Ok(outcome)
@@ -565,9 +563,9 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
         let mut db = Db::open(&scratch)?;
         db.save_document(&store.document(head))?;
         db.save_metadata(&store.metadata(head))?;
-        db.save_sync_state(head)?;
-        if let Some(place) = place_of(path) {
-            db.save_sync_place(&place)?;
+        match place_of(path) {
+            Some(place) => db.save_sync(head, &place)?,
+            None => db.save_sync_state(head)?,
         }
     }
     // Closing has folded the log into the file, and the name stays free of these if it hasn't.

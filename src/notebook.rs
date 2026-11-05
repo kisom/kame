@@ -404,7 +404,7 @@ fn move_hint(rename: bool, from: &Path, root: Option<&Path>) -> Option<&'static 
 fn deleted_notice(title: &str, left_logs: bool) -> String {
     if left_logs {
         format!(
-            "deleted the stale copy of {title}; the logs at that path may be another document's, \
+            "deleted {title}; the logs at that path may be another document's, \
              and were left"
         )
     } else {
@@ -2080,11 +2080,11 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_stale_copy_says_its_logs_were_left() {
+    fn a_delete_that_left_logs_says_so() {
         assert_eq!(deleted_notice("Essay", false), "deleted Essay");
         assert_eq!(
             deleted_notice("Essay", true),
-            "deleted the stale copy of Essay; the logs at that path may be another document's, \
+            "deleted Essay; the logs at that path may be another document's, \
              and were left"
         );
     }

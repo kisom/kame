@@ -405,6 +405,20 @@ impl Db {
         Ok(())
     }
 
+    /// A sync tool's state and place, saved together or not at all. A file with one and not the
+    /// other would say it had synced somewhere it hadn't.
+    pub fn save_sync(&mut self, state: &str, place: &str) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        for (key, value) in [(SYNC_KEY, state), (SYNC_PLACE_KEY, place)] {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Forgets what a sync tool recorded, for a file that is not the one it recorded it for.
     pub fn clear_sync_state(&mut self) -> Result<(), DbError> {
         self.conn.execute(
@@ -1449,6 +1463,27 @@ mod tests {
         db.clear_sync_state().unwrap();
         assert_eq!(db.load_sync_state(), None);
         assert_eq!(db.load_sync_place(), None);
+    }
+
+    #[test]
+    fn a_sync_state_and_place_are_saved_together_or_not_at_all() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.save_sync("r1", "first.kame").unwrap();
+        assert_eq!(db.load_sync_state().as_deref(), Some("r1"));
+        assert_eq!(db.load_sync_place().as_deref(), Some("first.kame"));
+
+        for key in [SYNC_KEY, SYNC_PLACE_KEY] {
+            db.conn
+                .execute_batch(&format!(
+                    "CREATE TRIGGER refuse BEFORE INSERT ON meta WHEN NEW.key = '{key}' \
+                     BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+                ))
+                .unwrap();
+            assert!(db.save_sync("r2", "second.kame").is_err(), "{key}");
+            assert_eq!(db.load_sync_state().as_deref(), Some("r1"), "{key}");
+            assert_eq!(db.load_sync_place().as_deref(), Some("first.kame"), "{key}");
+            db.conn.execute_batch("DROP TRIGGER refuse").unwrap();
+        }
     }
 
     #[test]

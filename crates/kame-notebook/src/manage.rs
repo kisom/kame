@@ -208,7 +208,9 @@ pub struct MoveReport {
 }
 
 const NEWER: &str = "it has changes from a newer version of kame";
-const OTHERS_LOGS: &str = "the logs at its path may be another document's, and it isn't syncing";
+const OTHERS_LOGS: &str =
+    "the logs at its path may be another document's, so it isn't syncing. Save As gives it logs of \
+     its own";
 
 /// Every link in a document: web links and document links in its text, and an image's link.
 fn links_in(document: &Document) -> Vec<&str> {
@@ -263,16 +265,16 @@ pub(crate) fn is_stranded_database(path: &Path) -> bool {
 }
 
 /// Whether a database with a history sits on logs that can't be shown to be its own, as read from
-/// its file.
+/// its file. A file that can't say whose it is can't show that either.
 pub(crate) fn is_on_others_logs_database(path: &Path) -> bool {
     let Ok(db) = Db::open_read_only(path) else {
-        return false;
+        return true;
     };
     let revision = db.load_sync_state();
     revision.is_some()
-        && db
-            .load_document()
-            .is_ok_and(|document| !logs_can_be_its_own(path, document.id, revision.as_deref()))
+        && db.load_document().map_or(true, |document| {
+            !logs_can_be_its_own(path, document.id, revision.as_deref())
+        })
 }
 
 /// Whether what's at a database's log folder can be taken for its logs, to read, delete or move. With

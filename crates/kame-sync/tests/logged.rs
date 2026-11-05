@@ -4,6 +4,10 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
+#[path = "shared/age_logs.rs"]
+mod aged;
+use aged::age_logs;
+
 use kame_core::edit::Cursor;
 use kame_core::session::Session;
 use kame_core::storage::Db;
@@ -1040,41 +1044,6 @@ fn a_database_with_no_place_on_logs_of_its_own_document_merges_with_them() {
     assert_eq!(outcome.notes, 0);
     assert!(here.document().blocks[0].text.ends_with(" From talos."));
     assert!(here.document().blocks[1].text.ends_with(" From titan."));
-}
-
-/// Rewrites a document's logs as a build from before `Metadata::publish` wrote them. This build still
-/// parses each line, and works out another id for it, so that it no longer checks. Says what `state`
-/// was called then.
-fn age_logs(folder: &Path, state: &str) -> String {
-    let mut renamed: Vec<(String, String)> = Vec::new();
-    for entry in std::fs::read_dir(folder).unwrap().flatten() {
-        let text = std::fs::read_to_string(entry.path()).unwrap();
-        let mut aged = String::new();
-        for line in text.lines() {
-            let mut line = line.replace(",\"publish\":false", "");
-            for (old, new) in &renamed {
-                line = line.replace(old.as_str(), new.as_str());
-            }
-            let start = line.find("\"revision\":").unwrap() + "\"revision\":".len();
-            let end = line.rfind(",\"blocks\":[").unwrap();
-            let id = kame_sync::digest(&line.as_bytes()[start..end]);
-            let old = line["{\"id\":\"".len()..]
-                .split('"')
-                .next()
-                .unwrap()
-                .to_string();
-            line = line.replacen(&old, &id, 1);
-            renamed.push((old, id));
-            aged.push_str(&line);
-            aged.push('\n');
-        }
-        std::fs::write(entry.path(), aged).unwrap();
-    }
-    renamed
-        .into_iter()
-        .find(|(old, _)| old == state)
-        .map(|(_, new)| new)
-        .unwrap()
 }
 
 /// What's remembered may be in a line this build can't check, so nothing can be said. It carries on,

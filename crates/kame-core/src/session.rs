@@ -485,6 +485,12 @@ impl Session {
         let _ = self.db.save_sync_state(state);
     }
 
+    /// Records what a sync tool got to and where, together. A failed write isn't reported, as with
+    /// the state, and leaves both as they were.
+    pub fn set_sync(&mut self, state: &str, place: &str) {
+        let _ = self.db.save_sync(state, place);
+    }
+
     /// Where a sync tool last synced this document, in its own terms.
     pub fn sync_place(&self) -> Option<String> {
         self.db.load_sync_place()

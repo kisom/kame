@@ -4,6 +4,10 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+#[path = "../../kame-sync/tests/shared/age_logs.rs"]
+mod aged;
+use aged::age_logs;
+
 use kame_core::session::Session;
 use kame_core::storage::Db;
 use kame_notebook::manage::{carry_out, delete_document, plan_move};
@@ -2008,41 +2012,6 @@ fn another_recorded_place_is_read_again() {
     assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
 }
 
-/// Rewrites a document's logs as a build from before `Metadata::publish` wrote them. This build still
-/// parses each line, and works out another id for it, so that it no longer checks. Says what `state`
-/// was called then.
-fn age_logs(folder: &Path, state: &str) -> String {
-    let mut renamed: Vec<(String, String)> = Vec::new();
-    for entry in std::fs::read_dir(folder).unwrap().flatten() {
-        let text = std::fs::read_to_string(entry.path()).unwrap();
-        let mut aged = String::new();
-        for line in text.lines() {
-            let mut line = line.replace(",\"publish\":false", "");
-            for (old, new) in &renamed {
-                line = line.replace(old.as_str(), new.as_str());
-            }
-            let start = line.find("\"revision\":").unwrap() + "\"revision\":".len();
-            let end = line.rfind(",\"blocks\":[").unwrap();
-            let id = kame_sync::digest(&line.as_bytes()[start..end]);
-            let old = line["{\"id\":\"".len()..]
-                .split('"')
-                .next()
-                .unwrap()
-                .to_string();
-            line = line.replacen(&old, &id, 1);
-            renamed.push((old, id));
-            aged.push_str(&line);
-            aged.push('\n');
-        }
-        std::fs::write(entry.path(), aged).unwrap();
-    }
-    renamed
-        .into_iter()
-        .find(|(old, _)| old == state)
-        .map(|(_, new)| new)
-        .unwrap()
-}
-
 /// Adds a log holding one whole line that can't be checked.
 fn add_line_that_cannot_be_checked(path: &Path) {
     let folder = log_folder(path);
@@ -2611,8 +2580,8 @@ fn a_line_that_names_no_document_beside_its_own_lines_changes_nothing() {
     assert!(listed(&nb).is_empty());
 }
 
-/// It has no history to bring, so its first sync merges with them as ever. Until then it hasn't
-/// been shown to be the same document, so those logs aren't its to take away.
+/// Its first sync merges its words with them, as documents created through a link on two machines rely
+/// on. Until then it hasn't been shown to be the same document, so those logs aren't its to take away.
 #[test]
 fn a_database_that_never_synced_keeps_its_hands_off_another_documents_logs() {
     let (root, nb) = logged_notebook("stranded-never-synced-others");
@@ -2783,4 +2752,21 @@ fn a_stamp_that_cannot_be_written_is_no_trouble() {
     set_mode(&a, 0o644);
     assert!(done.is_empty());
     assert_eq!(place_in(&a), None);
+}
+
+/// That can't say it's the moved document, so this doesn't take it for that having been opened.
+#[test]
+fn a_database_at_the_new_home_whose_document_cannot_be_read_leaves_the_stale_one_alone() {
+    let (root, nb) = logged_notebook("stranded-unreadable-document-home");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    rusqlite::Connection::open(&b)
+        .unwrap()
+        .execute("UPDATE documents SET json = 'nonsense' WHERE id = 1", [])
+        .unwrap();
+
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(a.is_file());
 }

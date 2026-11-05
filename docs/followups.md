@@ -85,7 +85,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **`cite` says it couldn't** when the key went in and only the write failed (`src/references.rs`).
 - [ ] **A long year in a suggested key** can pass the 64-byte limit, as only the name is capped.
 - [ ] **An unquoted `2.10` in a reference file** reads as `2.1`, since YAML takes it for a number.
-- [ ] **A title ending in a period** gets a comma after it too, as `etc.,` in a quoted title.
 - [ ] **A selection wholly inside a key** comes out of a rename as an empty selection.
 - [ ] **A zero-width anchor inside a key** widens when the key is renamed.
 - [ ] **Renaming `missing` to `MISSING`** says "already a reference", not that there's no such key.

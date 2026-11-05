@@ -117,6 +117,14 @@ impl Builder {
         if title.is_empty() {
             return;
         }
+        // A title that ends in a period already has its punctuation, so no comma follows it.
+        let after = if title.ends_with('.') && after.mid == QUOTE.mid {
+            After {
+                mid: "” ", ..after
+            }
+        } else {
+            after
+        };
         self.plain(&format!("“{title}"), after);
     }
 
@@ -590,6 +598,21 @@ mod tests {
             ..Reference::default()
         };
         assert_eq!(plain(&article), "“Title.”");
+    }
+
+    #[test]
+    fn a_quoted_title_ending_in_a_period_has_no_comma_after_it() {
+        let article = Reference {
+            title: s("Birds, bees, etc."),
+            published_in: s("Nature"),
+            ..Reference::default()
+        };
+        assert_eq!(plain(&article), "“Birds, bees, etc.” Nature.");
+        let alone = Reference {
+            title: s("Birds, bees, etc."),
+            ..Reference::default()
+        };
+        assert_eq!(plain(&alone), "“Birds, bees, etc.”");
     }
 
     #[test]

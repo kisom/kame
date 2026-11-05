@@ -58,6 +58,7 @@ pub struct Steps {
     retiring: Vec<Retiring>,
     moving: Vec<Going>,
     returning: Vec<Going>,
+    stamping: Vec<(PathBuf, LastSync)>,
     unsettled: Option<Unsettled>,
 }
 
@@ -176,6 +177,7 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
         retiring: Vec::new(),
         moving: Vec::new(),
         returning: Vec::new(),
+        stamping: those_to_stamp(notebook),
         unsettled: None,
     };
     let mut to_settle = may_act_on.to_vec();
@@ -282,6 +284,11 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
             });
         }
     }
+    for (path, last) in steps.stamping {
+        if as_it_was(&path, &last) {
+            record_place(&path);
+        }
+    }
     done
 }
 
@@ -319,8 +326,29 @@ fn last_sync(path: &Path) -> Option<LastSync> {
     })
 }
 
-/// Says where a database has just been put, so that it's recognised if its logs move on before it's
-/// next opened. If this fails, it's left saying somewhere else, and is merely not stranded.
+/// Databases from before places were recorded, with their revision in the logs beside them, which
+/// shows they synced where they are, so that they can say so. A copy made by hand, with no logs beside
+/// it, doesn't show that. Once one has a place it isn't asked about again, so this reads logs for a
+/// database only until then, and on every pass only for one whose revision isn't beside it.
+fn those_to_stamp(notebook: &Notebook) -> Vec<(PathBuf, LastSync)> {
+    notebook
+        .documents()
+        .into_iter()
+        .map(|entry| entry.path)
+        .filter(|path| is_database(path) && path.is_file() && log_folder(path).is_dir())
+        .filter(|path| logging_root(path).is_some())
+        .filter_map(|path| {
+            let last = last_sync(&path)?;
+            let shows_it = last.place.is_none()
+                && Store::load(&log_folder(&path))
+                    .is_ok_and(|store| store.could_hold(&last.revision));
+            shows_it.then_some((path, last))
+        })
+        .collect()
+}
+
+/// Says where a database is, so that it's recognised if its logs move on before it's next opened. If
+/// this fails, it's left saying somewhere else or nothing, and is merely not stranded.
 fn record_place(path: &Path) {
     if let (Some(place), Ok(mut db)) = (place_of(path), Db::open(path)) {
         let _ = db.save_sync_place(&place);

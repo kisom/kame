@@ -2662,3 +2662,125 @@ fn a_database_that_cannot_be_read_leaves_its_logs_and_a_row_of_only_logs_does_no
     assert!(!delete_document(&a).unwrap());
     assert!(!log_folder(&a).exists());
 }
+
+/// The whole of what's on disk before places were recorded is like this, so it isn't left until each
+/// document happens to be opened on each machine.
+#[test]
+fn a_pass_stamps_a_database_with_its_logs_and_losing_them_then_strands_it() {
+    let (root, nb) = logged_notebook("stamp-with-logs");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+
+    let steps = decide(&nb, &[]);
+    assert_eq!(place_in(&a), None, "deciding changes nothing");
+    assert!(
+        apply(&nb, steps, None).is_empty(),
+        "and there's nothing to say"
+    );
+    assert_eq!(place_in(&a), place_of(&a));
+
+    remove_logs(&a);
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+}
+
+#[test]
+fn a_hand_copy_with_no_logs_beside_it_is_not_stamped() {
+    let (root, nb) = logged_notebook("stamp-hand-copy");
+    let (a, copy) = (root.join("a.kame"), root.join("copy.kame"));
+    synced(&a, "Words.");
+    std::fs::copy(&a, &copy).unwrap();
+    as_an_older_kame_left_it(&copy);
+
+    reconcile(&nb, &[], None);
+    assert_eq!(place_in(&copy), None);
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+}
+
+#[test]
+fn a_database_whose_revision_is_not_beside_it_is_not_stamped() {
+    let (root, nb) = logged_notebook("stamp-not-beside");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Old words.");
+    synced(&other, "A different document.");
+    remove_logs(&a);
+    move_logs(&other, &a);
+    std::fs::remove_file(&other).unwrap();
+    as_an_older_kame_left_it(&a);
+
+    reconcile(&nb, &[], None);
+    assert_eq!(place_in(&a), None);
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+}
+
+#[test]
+fn an_older_line_that_could_hold_the_revision_counts_as_beside_it() {
+    let (root, nb) = logged_notebook("stamp-older-line");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let state = Session::open(&a).unwrap().sync_state().unwrap();
+    let aged = age_logs(&log_folder(&a), &state);
+    Session::open(&a).unwrap().set_sync_state(&aged);
+    as_an_older_kame_left_it(&a);
+
+    reconcile(&nb, &[], None);
+    assert_eq!(place_in(&a), place_of(&a));
+}
+
+#[test]
+fn a_database_that_never_synced_is_not_stamped() {
+    let (root, nb) = logged_notebook("stamp-never-synced");
+    let a = root.join("a.kame");
+    Session::open(&a).unwrap().insert("Never synced.");
+    reconcile(&nb, &[], None);
+    assert_eq!(place_in(&a), None);
+}
+
+#[test]
+fn the_open_document_is_never_stamped() {
+    let (root, nb) = logged_notebook("stamp-open");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+
+    reconcile(&nb, &[], Some(&a));
+    assert_eq!(place_in(&a), None);
+    reconcile(&nb, &[], None);
+    assert_eq!(place_in(&a), place_of(&a));
+}
+
+#[test]
+fn a_stamp_is_skipped_if_what_it_found_has_changed() {
+    let (root, nb) = logged_notebook("stamp-changed");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+
+    let steps = decide(&nb, &[]);
+    Session::open(&a).unwrap().set_sync_state("something else");
+    apply(&nb, steps, None);
+    assert_eq!(place_in(&a), None);
+
+    let (root, nb) = logged_notebook("stamp-changed-place");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+    let steps = decide(&nb, &[]);
+    Session::open(&a).unwrap().set_sync_place("elsewhere");
+    apply(&nb, steps, None);
+    assert_eq!(place_in(&a).as_deref(), Some("elsewhere"));
+}
+
+/// Then it's as it was, and merely not stranded.
+#[test]
+fn a_stamp_that_cannot_be_written_is_no_trouble() {
+    let (root, nb) = logged_notebook("stamp-unwritable");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+    set_mode(&a, 0o444);
+    let done = reconcile(&nb, &[], None);
+    set_mode(&a, 0o644);
+    assert!(done.is_empty());
+    assert_eq!(place_in(&a), None);
+}

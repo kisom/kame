@@ -2467,6 +2467,8 @@ struct KameApp {
     /// it first appears: a note that was just created is a note you meant to
     /// write, and the keystrokes that follow should land in it.
     open_note_focus: bool,
+    /// Whether the open note has just been added, so that its starting words get typed over.
+    open_note_fresh: bool,
     /// Distraction-free view toggles (never persisted).
     modes: Modes,
     /// The body font size, in px. Every other size (leading, headings, margin
@@ -2616,6 +2618,7 @@ impl KameApp {
             open_note_pos: None,
             open_note_body: String::new(),
             open_note_focus: false,
+            open_note_fresh: false,
             modes: Modes::default(),
             body_size,
             dark,
@@ -2688,6 +2691,7 @@ impl KameApp {
         }
         self.open_note_body = body.unwrap_or_default();
         self.open_note_focus = self.open_note.is_some();
+        self.open_note_fresh = false;
     }
 
     /// Adds a note of `kind` and opens it, having closed the one that's open. A marginal shows the
@@ -2699,6 +2703,7 @@ impl KameApp {
                 self.modes.hide_margin = false;
             }
             self.set_open_note(Some(id));
+            self.open_note_fresh = true;
             self.open_note_pos = None;
         }
     }
@@ -5432,6 +5437,23 @@ impl KameApp {
         // than `self`; the copy is committed and stored back once the area closes.
         let mut buffer = self.open_note_body.clone();
         let focus = self.open_note_focus;
+        // A new note's starting words are selected, both before the field is drawn, for it to read,
+        // and after, as a field drawn without the keyboard collapses its selection onto its end.
+        let select_all = std::mem::take(&mut self.open_note_fresh);
+        let select_body = |ctx: &egui::Context, buffer: &str| {
+            let mut state = egui::text_edit::TextEditState::default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(buffer.chars().count()),
+                )));
+            state.store(ctx, note_body_edit_id());
+        };
+        if select_all {
+            select_body(ctx, &buffer);
+            ctx.memory_mut(|memory| memory.request_focus(note_body_edit_id()));
+        }
         let mut changed = false;
         let mut close = false;
         let mut remove = false;
@@ -5456,6 +5478,10 @@ impl KameApp {
                     changed = field.changed();
                     if focus {
                         field.request_focus();
+                    }
+                    if select_all {
+                        select_body(ui.ctx(), &buffer);
+                        ui.ctx().request_repaint();
                     }
                     ui.horizontal(|ui| {
                         if ui
@@ -10563,6 +10589,50 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         page.frame(Vec::new());
         page.press("Close");
         assert_eq!(page.app.session.document().annotations.len(), 1);
+    }
+
+    fn page_with_new(kind: AnnotationKind) -> Headless {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app.run_menu_action(&ctx, MenuAction::Annotate(kind));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        page
+    }
+
+    fn type_letters(page: &mut Headless, text: &str) {
+        for letter in text.chars() {
+            page.frame(vec![egui::Event::Text(letter.to_string())]);
+        }
+    }
+
+    #[test]
+    fn typing_in_a_new_marginal_replaces_its_starting_words() {
+        let mut page = page_with_new(AnnotationKind::Marginal);
+        type_letters(&mut page, "Said so.");
+        assert_eq!(page.app.session.document().annotations[0].body, "Said so.");
+    }
+
+    #[test]
+    fn typing_in_a_new_footnote_replaces_its_starting_words() {
+        let mut page = page_with_new(AnnotationKind::Footnote);
+        type_letters(&mut page, "Said so.");
+        assert_eq!(page.app.session.document().annotations[0].body, "Said so.");
+    }
+
+    #[test]
+    fn typing_in_a_note_opened_again_adds_to_its_words() {
+        let mut page = page_with_new(AnnotationKind::Marginal);
+        type_letters(&mut page, "One.");
+        let id = page.app.open_note.unwrap();
+        page.press("Close");
+        page.app.set_open_note(Some(id));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        type_letters(&mut page, " Two.");
+        assert_eq!(page.app.session.document().annotations[0].body, "One. Two.");
     }
 
     // --- the help dialog -------------------------------------------------------

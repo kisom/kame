@@ -238,10 +238,10 @@ The `sync` key in the file's `meta` table holds the id of the revision this mach
 2. If there's no `last`, use any head with the same document digest and metadata.
 3. If there's still none, **write checkpoints** (below) and use the latest.
 4. If the document or metadata differ from `last`, append a revision with `last` as its parent.
-5. While there are two or more heads, take the first two. Merge them against their shared ancestor (section 4), or with no base if they have none, using their labels and `when`s. Merge their metadata (section 5) the same way, with the greater `(when, id)` as later. Append the result with both as parents, no device, and the later `when`. If that revision already exists, nothing is written. Repeat. Stop if that leaves the heads unchanged, and try again after the next refresh (section 9).
+5. While there are two or more heads, take the first two. Merge them against their shared ancestor (section 4), or with no base if they have none, using their labels and `when`s. Merge their metadata (section 5) the same way, with the greater `(when, id)` as later. Append the result with both as parents, no device, and the later `when`. If that revision already exists with all its blocks here, nothing is written. If it's there but waiting on blocks in a log that hasn't arrived, write the line again with the blocks missing here, which this machine has just worked out. Repeat.
 6. If there's no head at all, fail.
 
-Appending writes only blocks that no log has, and does nothing if the id is already there.
+Appending writes only blocks that no log here has, and does nothing if the id is already there and no blocks are missing.
 
 The app skips all this if no log has changed size and the document and metadata match the last sync.
 
@@ -294,7 +294,6 @@ Everything a merge adds is a `Note`, which never publishes. A merged document ca
 
 These describe the code as it stands, and aren't rules to copy.
 
-- **A merge can hang.** If a merge's id is already in the logs but isn't usable, because a block it needs is in a log that hasn't arrived, appending does nothing and the loop in section 6.4 never ends, on the app's interface thread. It needs a third machine's log arriving late, or a shortened log, so it should be rare, but it's a bug to fix.
 - **A `last` that's present but not usable isn't handled.** If one of its blocks is missing, reading it panics. If its parent is missing and another head is here, what was typed is written with an unusable parent, and the document then follows the other head. The words stay only in the log and the undo history. Either can follow when a log is shortened and the document reopened.
 - **A torn last line swallows the next.** Appending doesn't check for a trailing line feed. After a torn tail, the writer reports a new head written, but its line is glued to the tail and a fresh read doesn't see it.
 - **Nothing checks `revision.document`.** Logs from a different document at the same name merge in, and the result takes the id of ours.

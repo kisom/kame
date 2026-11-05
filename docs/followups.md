@@ -6,8 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **A merge can hang the app.** If a merge's revision is in the logs but a block it needs hasn't
-  arrived, the sync loop never ends, on the interface thread. `merging.md`, section 9.
 - [ ] **An unusable last revision.** If the revision a document last settled on is in the logs but can't
   be used, reading it panics, or the page follows another version. `merging.md`, section 9.
 - [ ] **A torn last line swallows the next revision.** Appending to a log doesn't check that it ends

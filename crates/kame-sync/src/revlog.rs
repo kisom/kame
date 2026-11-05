@@ -342,14 +342,16 @@ impl Replica {
         blocks: Vec<Block>,
     ) -> Result<(String, bool)> {
         let id = revision.id();
-        if store.contains(&id) {
-            return Ok((id, false));
-        }
-        std::fs::create_dir_all(&self.folder)?;
         let fresh: Vec<Block> = blocks
             .into_iter()
             .filter(|block| !store.blocks.contains_key(&block_digest(block)))
             .collect();
+        // Already there, unless what's there is waiting on blocks in a log yet to arrive, which
+        // this machine has just worked out for itself and can supply.
+        if store.contains(&id) && fresh.is_empty() {
+            return Ok((id, false));
+        }
+        std::fs::create_dir_all(&self.folder)?;
         let line = Line {
             id: id.clone(),
             revision: revision.clone(),
@@ -584,6 +586,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn document_saying(words: &str) -> Document {
+        Document {
+            id: Uuid::from_u128(1),
+            title: "t".to_string(),
+            blocks: vec![Block {
+                id: Uuid::from_u128(2),
+                kind: kame_core::model::BlockKind::Paragraph,
+                text: words.to_string(),
+                spans: Vec::new(),
+            }],
+            annotations: Vec::new(),
+        }
+    }
+
+    fn replica(folder: &Path, device: &str) -> Replica {
+        Replica {
+            folder: folder.to_path_buf(),
+            device: device.to_string(),
+        }
+    }
+
+    /// A merge whose result was written by a machine whose log hasn't arrived. What it lists is
+    /// here, what it needs isn't, and merging the same two heads arrives at the same revision.
+    #[test]
+    fn a_merge_already_in_the_logs_without_its_blocks_does_not_stop_a_sync() {
+        let folder = kame_test_dir::folder("revlog-merge-without-blocks");
+        let start = replica(&folder, "one")
+            .sync(&document_saying("Shared. Old."), None, 1)
+            .unwrap();
+        let ours = document_saying("Ours. Old.");
+        let one = replica(&folder, "one")
+            .sync(&ours, Some(&start.head), 2)
+            .unwrap();
+        let merged = replica(&folder, "two")
+            .sync(&document_saying("Shared. Theirs."), Some(&start.head), 3)
+            .unwrap();
+        assert_eq!(merged.doc.blocks[0].text, "Ours. Theirs.");
+
+        // The merge's line, as if its new block had gone in a third machine's log.
+        let log = folder.join("two.log");
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if value["id"] == serde_json::Value::String(merged.head.clone()) {
+                    value["blocks"] = serde_json::json!([]);
+                }
+                value.to_string()
+            })
+            .collect();
+        std::fs::write(&log, lines.join("\n") + "\n").unwrap();
+        assert!(!Store::load(&folder).unwrap().heads().contains(&merged.head));
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let (three, last) = (replica(&folder, "three"), one.head.clone());
+        std::thread::spawn(move || {
+            let synced = three
+                .sync(&ours, Some(&last), 4)
+                .map_err(|err| err.to_string());
+            let _ = done.send(synced);
+        });
+        let synced = finished
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the sync should finish")
+            .unwrap();
+        assert_eq!(synced.head, merged.head, "they converge");
+        assert_eq!(synced.doc.blocks[0].text, "Ours. Theirs.");
     }
 
     #[test]

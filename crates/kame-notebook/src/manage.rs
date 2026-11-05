@@ -9,7 +9,7 @@ use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::storage::Db;
 use kame_sync::logs::{
-    build_from_logs, is_on_others_logs, is_stranded, log_folder, logging_root, Logged,
+    build_from_logs, is_stranded, log_folder, logging_root, logs_can_be_its_own, Logged,
 };
 use kame_sync::revlog::Store;
 
@@ -146,10 +146,10 @@ pub(crate) fn sqlite_files(path: &Path) -> [PathBuf; 2] {
 /// Deletes a document, and with it what belongs to it: what SQLite keeps beside the file, its
 /// conflicting and retired copies, by id, and its logs. A file that can't be removed is an error before
 /// the logs are touched, so that a document left in place keeps them. A stranded database has no
-/// logs of its own, nor has one on another document's logs: what's at its log folder, if anything,
-/// is another document's, and stays, as removing it would remove that document on every machine.
-/// This returns whether it left logs there, since the document at that path still lists, and a
-/// second delete would take them.
+/// logs of its own, and one whose logs can't be shown to be its own may not: what's at its log
+/// folder stays, as removing it could remove another document on every machine. This returns whether
+/// it left logs there, since the document at that path still lists, and a second delete would take
+/// them.
 pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     if !is_database(path) {
         std::fs::remove_file(path)?;
@@ -208,7 +208,7 @@ pub struct MoveReport {
 }
 
 const NEWER: &str = "it has changes from a newer version of kame";
-const OTHERS_LOGS: &str = "the logs at its path are another document's, and it isn't syncing";
+const OTHERS_LOGS: &str = "the logs at its path may be another document's, and it isn't syncing";
 
 /// Every link in a document: web links and document links in its text, and an image's link.
 fn links_in(document: &Document) -> Vec<&str> {
@@ -262,7 +262,8 @@ pub(crate) fn is_stranded_database(path: &Path) -> bool {
     )
 }
 
-/// Whether the database at `path` sits on another document's logs, as read from its file.
+/// Whether a database with a history sits on logs that can't be shown to be its own, as read from
+/// its file.
 pub(crate) fn is_on_others_logs_database(path: &Path) -> bool {
     let Ok(db) = Db::open_read_only(path) else {
         return false;
@@ -271,12 +272,23 @@ pub(crate) fn is_on_others_logs_database(path: &Path) -> bool {
     revision.is_some()
         && db
             .load_document()
-            .is_ok_and(|document| is_on_others_logs(path, document.id, revision.as_deref()))
+            .is_ok_and(|document| !logs_can_be_its_own(path, document.id, revision.as_deref()))
 }
 
-/// Whether what's at a database's log folder can be taken for its logs, to read, delete or move.
+/// Whether what's at a database's log folder can be taken for its logs, to read, delete or move. With
+/// no file, only logs, they're the document. A file that can't be read can't show they're its own.
 fn logs_are_its_own(path: &Path) -> bool {
-    !is_stranded_database(path) && !is_on_others_logs_database(path)
+    if matches!(path.symlink_metadata(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+    {
+        return true;
+    }
+    let read =
+        Db::open_read_only(path).and_then(|db| Ok((db.load_document()?, db.load_sync_state())));
+    let Ok((document, revision)) = read else {
+        return !log_folder(path).exists();
+    };
+    !is_stranded_database(path) && logs_can_be_its_own(path, document.id, revision.as_deref())
 }
 
 /// The latest versions in a logged document's logs. There are none to read if it has no logs, or
@@ -321,7 +333,8 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
     if is_stranded(path, revision.as_deref(), place.as_deref()) {
         return Err("it was moved or deleted on another machine, and isn't syncing".to_string());
     }
-    if is_on_others_logs(path, session.document().id, revision.as_deref()) {
+    if revision.is_some() && !logs_can_be_its_own(path, session.document().id, revision.as_deref())
+    {
         return Err(OTHERS_LOGS.to_string());
     }
     let logged = Logged::open(&session, device).ok_or("could not read its logs")?;
@@ -641,7 +654,7 @@ pub fn carry_out(
                 .to_string(),
         );
     }
-    if is_database(&from) && is_on_others_logs_database(&from) {
+    if is_database(&from) && !logs_are_its_own(&from) {
         return Err(OTHERS_LOGS.to_string());
     }
     move_files(notebook, &from, &to)?;

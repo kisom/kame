@@ -361,8 +361,8 @@ start with a dot, so the browser doesn't show them. `ls -a` finds them, and File
 
 A copy made by hand or in Finder is a document of its own. It starts logs of its own when it's opened, and nothing retires it, since a database
 only counts as left behind at the place it last synced. The exception is a copy put at the path of a document with logs, or at the same path in
-another notebook with logs turned on. Over another document's logs it says the logs are another document's and doesn't sync, and Save As gives it
-logs of its own. In another notebook it can't be told from a stale copy, and is retired, which is undone as below.
+another notebook with logs turned on. Over another document's logs it says they may be another document's and doesn't sync, and Save As gives it
+logs of its own. A delete leaves those logs, and a move is refused. In another notebook it can't be told from a stale copy, and is retired, which is undone as below.
 
 To get a retired file back, rename it to a `.kame` name of your choice, without the leading dot, and open it. It's then a document of its own, with
 its own logs. The name it left is the one that doesn't work if its logs are still gone, as that's where it was left behind, and it's retired

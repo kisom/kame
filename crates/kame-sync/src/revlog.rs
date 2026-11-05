@@ -63,10 +63,35 @@ pub struct Store {
     read: HashMap<PathBuf, (u64, u64)>,
     /// Whether a line came from a newer version of kame, holding something this build can't read.
     newer: bool,
-    /// Whether a whole line was passed over, as [`Store::dropped_lines`] says.
-    dropped: bool,
+    /// Whole lines passed over, as [`Store::dropped_lines`] says.
+    dropped: Dropped,
     /// What has been written here and may not have reached the disk yet.
     unflushed: Unflushed,
+}
+
+/// What's known of the lines that were passed over: which documents they say they're of, and whether
+/// any says nothing.
+#[derive(Debug, Default)]
+struct Dropped {
+    documents: HashSet<Uuid>,
+    nameless: bool,
+}
+
+impl Dropped {
+    fn add(&mut self, document: Option<Uuid>) {
+        match document {
+            Some(document) => {
+                self.documents.insert(document);
+            }
+            None => self.nameless = true,
+        }
+    }
+}
+
+/// The document a line says it's of, when it doesn't parse as a line, if that can still be read.
+fn document_named_in(raw: &[u8]) -> Option<Uuid> {
+    let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    value["revision"]["document"].as_str()?.parse().ok()
 }
 
 /// What [`Replica::flush`] has to do.
@@ -159,13 +184,13 @@ impl Store {
                     Ok(line) => line,
                     Err(err) => {
                         self.newer |= err.to_string().contains("unknown variant");
-                        self.dropped = true;
+                        self.dropped.add(document_named_in(raw));
                         continue;
                     }
                 };
                 self.newer |= drops_something(raw, &line);
                 if line.revision.id() != line.id {
-                    self.dropped = true;
+                    self.dropped.add(Some(line.revision.document));
                     continue;
                 }
                 for block in line.blocks {
@@ -196,7 +221,7 @@ impl Store {
     /// one. This doesn't stop anything else: such a line may be from a build with another idea of
     /// what a revision is, and everything that can be read is used as ever.
     pub fn dropped_lines(&self) -> bool {
-        self.dropped
+        self.dropped.nameless || !self.dropped.documents.is_empty()
     }
 
     /// Whether the logs in `folder` differ from when they were last read.
@@ -361,13 +386,18 @@ impl Store {
         self.revisions.contains_key(id)
     }
 
-    /// Whether there are revisions here and none of them are of this document.
-    pub fn holds_only_others(&self, document: Uuid) -> bool {
-        !self.revisions.is_empty()
-            && self
+    /// Whether these logs can be taken as this document's: a line says it's of this document, even
+    /// one that can't be checked, as a line in an older format can't, or there's nothing here to
+    /// lose. A line that can't say whose it is shows nothing, and that isn't enough to write to these
+    /// logs or to take them away.
+    pub fn can_be_for(&self, document: Uuid) -> bool {
+        let nothing_here = self.revisions.is_empty() && !self.dropped_lines();
+        nothing_here
+            || self.dropped.documents.contains(&document)
+            || self
                 .revisions
                 .values()
-                .all(|revision| revision.document != document)
+                .any(|revision| revision.document == document)
     }
 }
 
@@ -1066,6 +1096,42 @@ mod tests {
         assert!(store.dropped_lines());
         assert!(!store.holds_newer());
         assert_eq!(store.revision_count(), 0);
+    }
+
+    #[test]
+    fn logs_can_be_for_a_document_only_if_nothing_is_there_or_a_line_names_it() {
+        let (one, other) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        let readable = log_holding("for-readable", &ours);
+        assert!(readable.can_be_for(one));
+        assert!(!readable.can_be_for(other));
+
+        let empty = log_holding("for-empty", "");
+        assert!(empty.can_be_for(other), "nothing there to take");
+        let half = log_holding("for-half", "{\"id\":\"half");
+        assert!(half.can_be_for(other), "nor in half a line");
+
+        // Parses and fails its check, which still says whose it is.
+        let bad_id = ours.replacen("{\"id\":\"", "{\"id\":\"0", 1);
+        let failed = log_holding("for-failed", &bad_id);
+        assert_eq!(failed.revision_count(), 0);
+        assert!(failed.can_be_for(one));
+        assert!(!failed.can_be_for(other));
+
+        // Doesn't parse as a line, and the document is still to be read in it.
+        let new_kind = log_holding("for-kind", &line_from_a_newer_build(r#""Table""#, ""));
+        assert_eq!(new_kind.revision_count(), 0);
+        assert!(new_kind.can_be_for(one));
+        assert!(!new_kind.can_be_for(other));
+
+        // Says nothing at all.
+        let nonsense = log_holding("for-nonsense", "nonsense\n");
+        assert!(!nonsense.can_be_for(one));
+        assert!(!nonsense.can_be_for(other));
+
+        // One that names it is enough, beside any others.
+        let both = log_holding("for-both", &format!("nonsense\n{ours}"));
+        assert!(both.can_be_for(one));
     }
 
     #[test]

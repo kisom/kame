@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use kame_core::session::Session;
 use kame_core::storage::Db;
+use kame_notebook::manage::{carry_out, delete_document, plan_move};
 use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done, Healthy};
 use kame_notebook::Notebook;
 use kame_sync::logs::{build_from_logs, log_folder, Logged, MARKER};
@@ -2157,4 +2158,169 @@ fn half_a_line_still_being_written_does_not_stop_a_pass() {
     std::fs::write(&log, bytes).unwrap();
 
     assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+}
+
+/// Tries to move a database, and then to delete it, and shows that its logs stayed each time.
+fn assert_logs_are_kept(nb: &Notebook, path: &Path) {
+    let logs = log_folder(path);
+    let before = words_in_logs(&logs);
+    let plan = plan_move(
+        nb,
+        path,
+        &with_suffix(path, "-moved.kame"),
+        None,
+        DEVICE,
+        100,
+    );
+    let err = carry_out(nb, plan, None, DEVICE, 100).unwrap_err();
+    assert!(err.contains("another document's"), "{err}");
+    assert!(path.is_file());
+    assert_eq!(words_in_logs(&logs), before);
+
+    assert!(delete_document(path).unwrap(), "it says it left the logs");
+    assert!(!path.exists());
+    assert_eq!(words_in_logs(&logs), before);
+}
+
+/// A database at its recorded place, with what's there now another document's, in the older format.
+/// Every line parses and fails its check, and each still says which document it's of.
+#[test]
+fn another_documents_aged_logs_at_its_recorded_place_are_not_taken_for_its_own() {
+    let (root, nb) = logged_notebook("stranded-aged-others");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&a, "Old words.");
+    synced(&other, "A different document.");
+    let state = Session::open(&other).unwrap().sync_state().unwrap();
+    remove_logs(&a);
+    move_logs(&other, &a);
+    std::fs::remove_file(&other).unwrap();
+    age_logs(&log_folder(&a), &state);
+    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+    assert_eq!(Store::load(&log_folder(&a)).unwrap().revision_count(), 0);
+    let before = words_in_logs(&log_folder(&a));
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None).is_empty());
+    let mut session = Session::open(&a).unwrap();
+    session.insert(" Typed here.");
+    let outcome = sync(&mut session);
+    assert!(outcome.others_logs);
+    assert_eq!(outcome.written, 0);
+    drop(session);
+    assert_eq!(words_in_logs(&log_folder(&a)), before);
+
+    assert_logs_are_kept(&nb, &a);
+}
+
+/// Its own lines in the older format say they're its own, so its logs still go with it.
+#[test]
+fn a_documents_own_aged_logs_are_deleted_and_moved_with_it() {
+    let (root, nb) = logged_notebook("stranded-aged-own");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    let state = Session::open(&a).unwrap().sync_state().unwrap();
+    let aged = age_logs(&log_folder(&a), &state);
+    Session::open(&a).unwrap().set_sync_state(&aged);
+
+    let plan = plan_move(&nb, &a, &b, None, DEVICE, 100);
+    let report = carry_out(&nb, plan, None, DEVICE, 100).unwrap();
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert!(b.is_file());
+    assert!(log_folder(&b).is_dir());
+    assert!(!log_folder(&a).exists());
+
+    assert!(!delete_document(&b).unwrap());
+    assert!(!log_folder(&b).exists());
+}
+
+/// Lines that don't even parse can't say whose they are, so nothing shows these logs are this one's.
+#[test]
+fn logs_holding_only_lines_that_name_no_document_are_kept_and_not_written_to() {
+    let (root, nb) = logged_notebook("stranded-unnamed");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    add_line_that_cannot_be_checked(&a);
+    let before = words_in_logs(&log_folder(&a));
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    let mut session = Session::open(&a).unwrap();
+    session.insert(" Typed here.");
+    let outcome = sync(&mut session);
+    assert!(outcome.others_logs);
+    assert_eq!(outcome.written, 0);
+    drop(session);
+    assert_eq!(words_in_logs(&log_folder(&a)), before);
+
+    assert_logs_are_kept(&nb, &a);
+}
+
+/// One line it can't check is no reason to stop, with its own revisions there to say whose they are.
+#[test]
+fn a_line_that_names_no_document_beside_its_own_lines_changes_nothing() {
+    let (root, nb) = logged_notebook("stranded-unnamed-beside-own");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    add_line_that_cannot_be_checked(&a);
+    let mut session = Session::open(&a).unwrap();
+    session.insert(" More.");
+    let outcome = sync(&mut session);
+    assert!(!outcome.others_logs);
+    assert!(outcome.written > 0);
+    drop(session);
+    assert!(!delete_document(&a).unwrap());
+    assert!(!log_folder(&a).exists());
+    assert!(listed(&nb).is_empty());
+}
+
+/// It has no history to bring, so its first sync merges with them as ever. Until then it hasn't
+/// been shown to be the same document, so those logs aren't its to take away.
+#[test]
+fn a_database_that_never_synced_keeps_its_hands_off_another_documents_logs() {
+    let (root, nb) = logged_notebook("stranded-never-synced-others");
+    let (a, other) = (root.join("a.kame"), root.join("other.kame"));
+    synced(&other, "A different document.");
+    move_logs(&other, &a);
+    std::fs::remove_file(&other).unwrap();
+    Session::open(&a).unwrap().insert("Never synced.");
+
+    let copy = root.join("copy.kame");
+    std::fs::copy(&a, &copy).unwrap();
+    copy_logs(&a, &copy);
+    let mut session = Session::open(&copy).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.others_logs);
+    assert!(outcome.merged);
+    drop(session);
+
+    assert_logs_are_kept(&nb, &a);
+}
+
+#[test]
+fn logs_that_cannot_be_read_are_kept() {
+    let (root, _nb) = logged_notebook("stranded-unreadable-kept");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let log = only_log(&a);
+    set_mode(&log, 0o000);
+    let left = delete_document(&a);
+    set_mode(&log, 0o644);
+    assert!(left.unwrap(), "it says it left the logs");
+    assert!(!a.exists());
+    assert!(log.is_file());
+}
+
+/// With the file there and unreadable, nothing can show the logs are its. With no file at all,
+/// they're the document, and a delete of that row takes them.
+#[test]
+fn a_database_that_cannot_be_read_leaves_its_logs_and_a_row_of_only_logs_does_not() {
+    let (root, _nb) = logged_notebook("stranded-garbage-delete");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    std::fs::write(&a, "not a database").unwrap();
+    assert!(delete_document(&a).unwrap());
+    assert!(log_folder(&a).is_dir());
+
+    assert!(!delete_document(&a).unwrap());
+    assert!(!log_folder(&a).exists());
 }

@@ -168,19 +168,27 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
     (!store.dropped_lines()).then_some(true)
 }
 
-/// Whether the logs beside a database are another document's: they don't hold the revision it
-/// remembers, and they hold only other documents. It may not be stranded, if it isn't where it last
-/// synced or that can't be told, and then nothing retires it. But writing its history there would
-/// bring one document's words into another's logs, on every machine, so it doesn't sync, and they
-/// aren't its to delete or move. A database that has never synced has no history here to bring, and
-/// merges as ever.
-pub fn is_on_others_logs(path: &Path, document: uuid::Uuid, revision: Option<&str>) -> bool {
-    let Some(revision) = revision else {
+/// Whether what's beside a database can be taken for its logs: there's nothing there, they hold the
+/// revision it remembers, or a line in them says it's of this document. Otherwise they're another
+/// document's, or can't be shown not to be, which may be so even when it isn't stranded, as when it
+/// isn't where it last synced, or that can't be told. Nothing retires it for that. But writing its
+/// history there could bring one document's words into another's logs, on every machine, so it
+/// doesn't sync, and they aren't its to delete or move. A folder or a log that can't be read shows
+/// nothing either.
+///
+/// `revision` is `None` for a database that has never synced. It has no history to bring, so it merges
+/// with what's there as ever, but what's there still isn't its to take away.
+pub fn logs_can_be_its_own(path: &Path, document: uuid::Uuid, revision: Option<&str>) -> bool {
+    let folder = log_folder(path);
+    if !folder.exists() {
+        return true;
+    }
+    if std::fs::read_dir(&folder).is_err() {
         return false;
-    };
-    logging_root(path).is_some()
-        && Store::load(&log_folder(path))
-            .is_ok_and(|store| !store.contains(revision) && store.holds_only_others(document))
+    }
+    Store::load(&folder).is_ok_and(|store| {
+        revision.is_some_and(|revision| store.contains(revision)) || store.can_be_for(document)
+    })
 }
 
 /// What a sync did.
@@ -188,8 +196,9 @@ pub fn is_on_others_logs(path: &Path, document: uuid::Uuid, revision: Option<&st
 pub struct Outcome {
     /// Whether the logs no longer belong to this database, so that nothing was written.
     pub stranded: bool,
-    /// Whether the logs at its path are another document's, so that nothing was written, and it
-    /// isn't known to be stranded, so that the clean-up leaves it alone.
+    /// Whether the logs at its path may be another document's, as [`logs_can_be_its_own`] says, so
+    /// that nothing was written, and it isn't known to be stranded, so that the clean-up leaves it
+    /// alone.
     pub others_logs: bool,
     /// Revisions written to this machine's log.
     pub written: usize,
@@ -289,9 +298,11 @@ impl Logged {
         self.store.refresh(&self.replica.folder)?;
         let local = session.document().clone();
         let metadata = session.metadata.clone();
-        if self.last.as_ref().is_some_and(|last| {
-            !self.store.contains(last) && self.store.holds_only_others(local.id)
-        }) {
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|last| !self.store.contains(last) && !self.store.can_be_for(local.id))
+        {
             return Ok(Outcome {
                 others_logs: true,
                 ..Outcome::default()

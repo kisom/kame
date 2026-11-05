@@ -6046,7 +6046,7 @@ impl KameApp {
                         self.stranded_mentioned = true;
                         self.notice_tracker.announced();
                         self.notice = Some(
-                            "the logs at this path are another document's, so this one isn't \
+                            "the logs at this path may be another document's, so this one isn't \
                              syncing. Save As gives it logs of its own"
                                 .to_string(),
                         );

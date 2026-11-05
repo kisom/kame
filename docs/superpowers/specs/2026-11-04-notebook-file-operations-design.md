@@ -184,13 +184,20 @@ found by its revision, whatever its place. Under a name it never synced at, it's
 by hand. Under the name it left it's stale again. Under its retired name it's not a document: opened there, it's held off as
 stranded, whatever its place, since logs for it would go to every machine and be taken there for a home.
 
-**Logs that are another document's.** A database that isn't stranded can still have another document's logs beside it, if a copy
-is put at a path that has logs, or a database with no place was left behind when its path was reused. If those logs don't
-hold its revision, and every revision in them is of another document, by `Document::id`, `Logged` writes nothing, as its history
-would otherwise reach another document's logs on every machine. `Outcome::others_logs` says so, and the app says this one isn't
-syncing and that Save As gives it logs of its own. A delete leaves those logs, and a move is refused, as for a stranded database. A
-pass leaves it alone, and doesn't take a copy like this at a stranded database's new home for the moved document having been
-opened there.
+**Logs that may be another document's.** A database that isn't stranded can still have another document's logs beside it, if a
+copy is put at a path that has logs, or a database with no place was left behind when its path was reused, or a verdict can't be
+reached since none of the lines there can be checked. Logs count as a database's own only if there's nothing there, they hold the
+revision it remembers, or a line in them says it's of this document (`Store::can_be_for`, by `Document::id`). Each line holds its
+document's id inside its revision, so a line in an older format still says, even with an id that fails its check, and a line
+that doesn't parse says if its JSON can still be read. Only a line with no id to read says nothing. A document's own old lines
+therefore heal, and another document's don't count. Logs that say nothing, or that can't be read, show nothing, and "can't be told" means doing less.
+
+Otherwise `Logged` writes nothing, as its history could reach another document's logs on every machine. `Outcome::others_logs` says
+so, and the app says the logs may be another document's, and that Save As gives this one logs of its own. A delete leaves
+those logs, and a move is refused, as for a stranded database. A pass leaves it alone, and doesn't take a copy like this at a stranded
+database's new home for the moved document having been opened there. A database that has never synced has no history to bring, so it
+merges as ever, but until it has, a delete or a move doesn't take what's there. Nor does one whose file can't be read. With no file at
+all, the logs are the document, and a delete takes them.
 
 **Lines that can't be read.** `Store` remembers dropping a whole line it couldn't check: one whose id doesn't match, or that doesn't
 parse, other than the unterminated last line still being written. The missing revision may be in one, so that's "can't be told",

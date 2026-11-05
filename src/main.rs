@@ -6322,9 +6322,14 @@ impl KameApp {
 
     /// Saves the document at `path`, and says its images and links again from there.
     fn save_to(&mut self, ctx: &egui::Context, path: &Path, close_after: bool) {
-        // An open note closes first, as closing one can change the document, and it can't once
-        // this has logged a step after it.
-        self.set_open_note(None);
+        // An unwritten marginal goes first, as it can't once this has logged a step after it. A
+        // note being written stays open, since what's typed while writes are refused is only in
+        // its field, and saving here is the way out of that.
+        if let Some(open) = self.open_note {
+            if self.session.discard_unwritten_marginal(open) {
+                self.set_open_note(None);
+            }
+        }
         let from = self.session.path().map(Path::to_path_buf);
         match self.session.save_as(path) {
             Ok(()) => {
@@ -9249,6 +9254,29 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(page.app.open_note, None);
         drop(page);
         assert!(open(&to).document().annotations.is_empty());
+    }
+
+    #[test]
+    fn saving_as_leaves_a_written_note_open_with_what_its_field_holds() {
+        let root = kame_test_dir::folder("app-note-save-as")
+            .canonicalize()
+            .unwrap();
+        let mut session = open(&root.join("a.kame"));
+        session.insert("word");
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        let id = page.app.open_note.unwrap();
+        page.app.session.set_annotation_body(id, "first second");
+        // A write being refused leaves what's typed after it only in the field.
+        page.app.open_note_body = "first second third".to_string();
+
+        page.app.save_to(&ctx, &root.join("b.kame"), false);
+
+        assert_eq!(page.app.open_note, Some(id));
+        assert_eq!(page.app.open_note_body, "first second third");
     }
 
     #[test]

@@ -14,7 +14,7 @@ macOS (`Modifiers::command`).
 | Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
 | Ctrl-Shift-0 | return the caret's block to body text |
 | Ctrl-Shift-N / Ctrl-Shift-F | add a note (a highlight) / a footnote at the selection or the word under the caret. A footnote's selection grows to whole words |
-| Ctrl-Shift-M | add a marginal on the caret's block, showing the margin if it's hidden |
+| Ctrl-Shift-M | add a marginal on the caret's block, or on the first block of a selection, showing the margin if it's hidden |
 | Ctrl-Shift-C | cite a reference, in a notebook. In or just after a `[key]` with no reference it opens a new one with that key, in or just after a known one it opens that reference for editing, and elsewhere it searches the references and inserts `[key]` |
 | Ctrl-K | add or edit a hyperlink on the selection, or the link under the caret: its words and its URL (empty words show the URL, and an empty URL removes the link) |
 | Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |

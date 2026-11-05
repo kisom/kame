@@ -490,7 +490,10 @@ const HELP_ROWS: &[(&str, &str)] = &[
         "rename, move or delete a document",
     ),
     ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
-    ("Ctrl-Shift-M", "marginal on the caret's block"),
+    (
+        "Ctrl-Shift-M",
+        "marginal on the caret's block, or a selection's first",
+    ),
     ("Ctrl-Shift-F", "footnote on the selection or word"),
     ("Ctrl-Shift-C", "cite a reference, in a notebook"),
     ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
@@ -2438,9 +2441,9 @@ struct KameApp {
     annotation_textures: AnnotationTextureCache,
     /// Decoded image textures for `BlockKind::Image` blocks, keyed by path.
     image_textures: HashMap<String, egui::TextureHandle>,
-    /// The note whose popover is open, and where its marker was painted.
     /// A document the OS asked for while a dialog was up, to open once it closes.
     held_open: Option<PathBuf>,
+    /// The note whose popover is open, and where its marker was painted.
     open_note: Option<AnnotationId>,
     open_note_pos: Option<Pos2>,
     /// The open note's body while the popover's field holds it. Seeded from the

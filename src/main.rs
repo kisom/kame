@@ -405,6 +405,86 @@ fn follow_move(path: &mut PathBuf, from: &Path, to: &Path) {
     }
 }
 
+/// The help dialog's id, which stays the same so that its scroll position does.
+fn help_id() -> Id {
+    Id::unique("kame-help")
+}
+
+/// The most the help dialog is wide, and the room it leaves at the window's edges.
+const HELP_MAX_WIDTH: f32 = 1040.0;
+const HELP_EDGE: f32 = 16.0;
+/// What a column of the help needs to be worth having another, and what its dialog takes beyond
+/// the rows and the window's margin: the title bar and the Close button below the rows.
+const HELP_COLUMN_WIDTH: f32 = 340.0;
+const HELP_CHROME: f32 = 72.0;
+
+/// What the help dialog lists, as keys and what they do, in the order shown.
+const HELP_ROWS: &[(&str, &str)] = &[
+    ("F1", "this help"),
+    (
+        "type / click / drag",
+        "type to write · click to place the caret · drag to select",
+    ),
+    ("Backspace / Delete", "delete a character, or the selection"),
+    ("Ctrl-Z / Ctrl-Shift-Z", "undo / redo"),
+    (
+        "Ctrl-Left / Right",
+        "move by word · add Shift to select words",
+    ),
+    ("Ctrl-A", "select the block; again, the whole document"),
+    (
+        "Enter",
+        "split a block; on an empty list item, end the list",
+    ),
+    (
+        "Ctrl-N",
+        "a new document, asking first if there is unsaved work",
+    ),
+    ("Ctrl-O", "open a document, replacing this one"),
+    ("Ctrl-S", "save (prompts for a file if unsaved)"),
+    ("Ctrl-Shift-S", "snapshot now"),
+    ("Ctrl-Shift-R", "restore a snapshot"),
+    ("Ctrl-Shift-E", "export Markdown"),
+    ("Ctrl-Shift-B", "export HTML"),
+    ("Ctrl-F", "find"),
+    (
+        "F7",
+        "select the next spelling or grammar mark, when checking is on",
+    ),
+    ("Ctrl-[", "back to where a link was followed from"),
+    ("Ctrl-L", "jump to a document, in a notebook"),
+    ("Ctrl-Shift-L", "a notebook's contents page"),
+    ("Ctrl-R", "search a notebook"),
+    ("Ctrl-Shift-O", "a notebook's browser"),
+    (
+        "right-click in the browser",
+        "rename, move or delete a document",
+    ),
+    ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
+    ("Ctrl-Shift-F", "footnote on the selection or word"),
+    ("Ctrl-Shift-C", "cite a reference, in a notebook"),
+    ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
+    ("Ctrl-Shift-0", "back to body text"),
+    ("#  ##  ###", "heading, typed at the start of a line"),
+    ("-  *  1.", "list item, typed at the start of a line"),
+    (">", "block quote, typed at the start of a line"),
+    ("|", "prose block, typed at the start of a line"),
+    (
+        "```",
+        "code block: three backticks and a language if wanted, then Enter",
+    ),
+    ("*x*  **x**", "italic / bold emphasis, typed around a word"),
+    ("[text](url)", "a hyperlink, typed around the anchor text"),
+    ("Ctrl-K", "add or edit a link on the selection"),
+    ("Ctrl +  Ctrl -", "larger / smaller type"),
+    ("Ctrl-Shift-D", "dark mode"),
+    ("F11", "fullscreen"),
+    (
+        "Ctrl-Shift-H/M/P/T",
+        "hide chrome / margin / focus / typewriter",
+    ),
+];
+
 /// Ctrl-[, or Cmd-[ on a Mac, as browsers on a Mac use.
 fn is_back_chord(event: &egui::Event) -> bool {
     matches!(
@@ -5331,74 +5411,70 @@ impl KameApp {
 
     /// The usage and keybinding reference, in a modal window. This is where the
     /// "how to use it" text lives; the status bar stays to counts and toggles.
+    ///
+    /// It is as wide as the window allows, up to a limit, with the rows in as many columns as
+    /// fit, and scrolls when the window is too short for them. The Close button stays below.
     fn show_help_dialog(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut close_clicked = false;
+        let screen = ctx.content_rect();
+        let margin = ctx.global_style().spacing.window_margin;
+        let frame = Vec2::new(
+            f32::from(margin.left) + f32::from(margin.right),
+            f32::from(margin.top) + f32::from(margin.bottom),
+        );
+        let width = (screen.width() - HELP_EDGE * 2.0).clamp(160.0, HELP_MAX_WIDTH);
+        let inner = width - frame.x - 2.0;
+        // Room for the title bar, the Close button and the space around them.
+        let scroll_height = (screen.height() - HELP_EDGE * 2.0 - frame.y - HELP_CHROME).max(40.0);
+        let columns = ((inner / HELP_COLUMN_WIDTH) as usize).clamp(1, 3);
+        let per_column = HELP_ROWS.len().div_ceil(columns);
         egui::Window::new("kame — help")
-            .id(Id::unique("kame-help"))
+            .id(help_id())
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                egui::Grid::new("kame-help-grid")
-                    .num_columns(2)
-                    .spacing([16.0, 4.0])
+                ui.set_width(inner);
+                egui::ScrollArea::vertical()
+                    .id_salt("kame-help-rows")
+                    .max_height(scroll_height)
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        for (keys, what) in [
-                            ("F1", "this help"),
-                            (
-                                "type / click / drag",
-                                "type to write · click to place the caret · drag to select",
-                            ),
-                            ("Backspace / Delete", "delete a character, or the selection"),
-                            ("Ctrl-Z / Ctrl-Shift-Z", "undo / redo"),
-                            (
-                                "Ctrl-Left / Right",
-                                "move by word · add Shift to select words",
-                            ),
-                            (
-                                "Enter",
-                                "split a block; on an empty list item, end the list",
-                            ),
-                            ("Ctrl-F", "find"),
-                            ("Ctrl-L", "jump to a document, in a notebook"),
-                            ("Ctrl-Shift-L", "a notebook's contents page"),
-                            ("Ctrl-R", "search a notebook"),
-                            ("Ctrl-Shift-O", "a notebook's browser"),
-                            (
-                                "right-click in the browser",
-                                "rename, move or delete a document",
-                            ),
-                            ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
-                            ("Ctrl-Shift-F", "footnote on the selection or word"),
-                            ("Ctrl-Shift-C", "cite a reference, in a notebook"),
-                            ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
-                            ("Ctrl-Shift-0", "back to body text"),
-                            ("#  ##  ###", "heading, typed at the start of a line"),
-                            ("-  *  1.", "list item, typed at the start of a line"),
-                            (">", "block quote, typed at the start of a line"),
-                            ("*x*  **x**", "italic / bold emphasis, typed around a word"),
-                            ("[text](url)", "a hyperlink, typed around the anchor text"),
-                            ("Ctrl-K", "add or edit a link on the selection"),
-                            ("Ctrl +  Ctrl -", "larger / smaller type"),
-                            ("Ctrl-Shift-D", "dark mode"),
-                            ("F11", "fullscreen"),
-                            (
-                                "Ctrl-Shift-H/M/P/T",
-                                "hide chrome / margin / focus / typewriter",
-                            ),
-                            ("Ctrl-Shift-E", "export Markdown"),
-                            ("Ctrl-Shift-B", "export HTML"),
-                            ("Ctrl-S", "save (prompts for a file if unsaved)"),
-                            ("Ctrl-Shift-S", "snapshot now"),
-                            ("Ctrl-Shift-R", "restore a snapshot"),
-                            ("Ctrl-O", "open a document, replacing this one"),
-                        ] {
-                            ui.monospace(keys);
-                            ui.label(what);
-                            ui.end_row();
-                        }
+                        ui.columns(columns, |cells| {
+                            for (cell, rows) in cells.iter_mut().zip(HELP_ROWS.chunks(per_column)) {
+                                let keys_width = (cell.available_width() * 0.4).floor();
+                                let what_width =
+                                    (cell.available_width() - keys_width - 8.0).max(40.0);
+                                for (keys, what) in rows {
+                                    cell.horizontal_top(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(keys_width, 0.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.set_width(keys_width);
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(*keys).monospace(),
+                                                    )
+                                                    .wrap(),
+                                                );
+                                            },
+                                        );
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(what_width, 0.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.set_width(what_width);
+                                                ui.add(egui::Label::new(*what).wrap());
+                                            },
+                                        );
+                                    });
+                                }
+                            }
+                        });
                     });
                 ui.add_space(6.0);
                 if ui.button("Close").clicked() {
@@ -6746,11 +6822,14 @@ pub(crate) struct Headless {
     time: f64,
     /// What the last frame drew, as a screen reader is told it, for finding a window's buttons.
     drawn: Option<egui::accesskit::TreeUpdate>,
+    /// How tall the window is. It is `HEIGHT` unless a test shrinks it.
+    height: f32,
 }
 
 #[cfg(test)]
 impl Headless {
     const WIDTH: f32 = 1000.0;
+    const HEIGHT: f32 = 800.0;
 
     pub(crate) fn new(session: Session) -> Headless {
         let ctx = egui::Context::default();
@@ -6762,6 +6841,7 @@ impl Headless {
             ctx,
             time: 0.0,
             drawn: None,
+            height: Self::HEIGHT,
         }
     }
 
@@ -6771,7 +6851,7 @@ impl Headless {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
-                Vec2::new(Self::WIDTH, 800.0),
+                Vec2::new(Self::WIDTH, self.height),
             )),
             time: Some(self.time),
             events,
@@ -9717,6 +9797,119 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         page.frame(Vec::new());
         page.press("Close");
         assert_eq!(page.app.session.document().annotations.len(), 1);
+    }
+
+    // --- the help dialog -------------------------------------------------------
+
+    /// The window the help is in, as it was drawn.
+    fn help_window(page: &Headless) -> Rect {
+        page.ctx
+            .memory(|memory| memory.area_rect(help_id()))
+            .expect("the help is up")
+    }
+
+    /// Where the last frame drew the help's `words`, as (top, bottom), if it did.
+    fn help_row(page: &Headless, words: &str) -> Option<(f32, f32)> {
+        page.drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .find_map(|(_, node)| node.bounds().filter(|_| node.value() == Some(words)))
+            .map(|bounds| (bounds.y0 as f32, bounds.y1 as f32))
+    }
+
+    fn help_page() -> Headless {
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.frame(vec![egui::Event::Key {
+            key: egui::Key::F1,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for _ in 0..3 {
+            page.frame(Vec::new());
+        }
+        page
+    }
+
+    #[test]
+    fn the_help_draws_every_row_inside_the_window() {
+        let page = help_page();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(Headless::WIDTH, Headless::HEIGHT));
+        let window = help_window(&page);
+        assert!(
+            screen.contains_rect(window),
+            "{window:?} is not on {screen:?}"
+        );
+        assert!(
+            window.width() > window.height(),
+            "it is landscape: {window:?}"
+        );
+        for (keys, what) in HELP_ROWS {
+            for words in [keys, what] {
+                let (top, bottom) =
+                    help_row(&page, words).unwrap_or_else(|| panic!("{words:?} is not drawn"));
+                assert!(
+                    top >= window.top() && bottom <= window.bottom(),
+                    "{words:?} is outside the window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_lists_what_it_used_to_leave_out() {
+        let page = help_page();
+        for keys in ["Ctrl-N", "Ctrl-A", "Ctrl-[", "F7", "|", "```"] {
+            assert!(
+                HELP_ROWS.iter().any(|(row, _)| row.contains(keys)),
+                "no row for {keys}"
+            );
+            assert!(page.sees(keys), "{keys} is not drawn");
+        }
+    }
+
+    #[test]
+    fn the_help_scrolls_to_any_row_in_the_smallest_window() {
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.height = 220.0;
+        page.ctx.set_zoom_factor(1.0);
+        page.frame(vec![egui::Event::Key {
+            key: egui::Key::F1,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for _ in 0..3 {
+            page.frame(Vec::new());
+        }
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(Headless::WIDTH, page.height));
+        let window = help_window(&page);
+        assert!(
+            screen.contains_rect(window),
+            "{window:?} is not on {screen:?}"
+        );
+        let last = HELP_ROWS.last().unwrap().1;
+        assert!(
+            help_row(&page, last).is_none_or(|(top, _)| top >= window.bottom()),
+            "the last row starts below the window"
+        );
+        page.frame(vec![egui::Event::PointerMoved(window.center())]);
+        for _ in 0..40 {
+            page.frame(vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+                delta: Vec2::new(0.0, -5.0),
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        let (top, bottom) = help_row(&page, last).expect("it was scrolled to");
+        assert!(
+            top >= window.top() && bottom <= window.bottom(),
+            "the last row is at {top}..{bottom} in {window:?}"
+        );
     }
 
     #[test]

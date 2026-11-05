@@ -20,14 +20,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   Annotate and right-click menus. Feedback suggested Ctrl-M, but Cmd-M minimises a window on a Mac.
 - [ ] **Moving a marginal.** The only way today is to remove it and add it again on the other block.
 
-## Help
-
-- [ ] **The F1 dialog should be landscape, not portrait.** Some of it seems to run off the screen as
-  it is. Laying it out wide would make room without shrinking anything.
-- [ ] **The F1 dialog is missing commands:** at least Ctrl-N, Ctrl-A, Ctrl-[, F7, and typing `|` or a
-  code fence. It doesn't scroll and is already taller than the smallest window, so it needs to scroll
-  before it gets more rows.
-
 ## Search
 
 - [ ] **Ctrl-F only searches the body.** Marginals, notes and footnotes are only searched by Ctrl-R,

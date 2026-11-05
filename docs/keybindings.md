@@ -27,7 +27,7 @@ macOS (`Modifiers::command`).
 | Ctrl + / Ctrl - / Ctrl-0 | increase / decrease / reset the type size |
 | drag, shift-click, Shift-arrows | select / extend the selection |
 | Escape | close the find bar, a dialog, or the note popover |
-| F1 | toggle the help dialog |
+| F1 | toggle the help dialog: every command in columns as wide as the window allows, scrolling when the window is short |
 
 ## Selecting
 

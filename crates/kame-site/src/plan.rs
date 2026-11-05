@@ -206,15 +206,17 @@ pub fn build_plan(site_dir: &Path, include_drafts: bool, problems: &mut Problems
         }
     };
     let sources = read_all(&config, include_drafts, problems);
-    plan_site(site_dir, &config, sources, problems)
+    plan_site(site_dir, &config, sources, &References::new(), problems)
 }
 
 /// Works out a whole site from what it's made of, with nothing written. A document at `/` is the
 /// home page, in place of the usual listing, and a site with no URL has no feed, which needs one.
+/// Each page lists the `references` its document cites.
 pub fn plan_site(
     site_dir: &Path,
     config: &Config,
     sources: Vec<Source>,
+    references: &References,
     problems: &mut Problems,
 ) -> Option<Plan> {
     let pages: Vec<Page> = pages::read_all(site_dir, problems);
@@ -252,7 +254,7 @@ pub fn plan_site(
             &Publish {
                 document_link: &document_link,
                 image: &image,
-                references: &References::new(),
+                references,
             },
         );
         let url = source.url();
@@ -364,7 +366,7 @@ pub fn plan_site(
 
     // The feed.
     if !config.url.is_empty() {
-        let xml = feed::render(config, &sources, &index, site_dir);
+        let xml = feed::render(config, &sources, &index, site_dir, references);
         plan.add(
             PathBuf::from("feed.xml"),
             Output::Bytes(xml.into_bytes()),
@@ -397,6 +399,26 @@ mod tests {
     use crate::starter::new_site;
     use crate::testing::{metadata, paragraph, temp_dir, write_kame};
     use kame_core::model::{Document, Metadata};
+
+    #[test]
+    fn a_site_yaml_site_leaves_a_key_as_text() {
+        let site = Site::new("plankey");
+        let path = site.add(
+            "a.kame",
+            &metadata("A", "2026-01-01", &[]),
+            "See [smith2020].",
+        );
+        site.config(&[("a", &path)], &[]);
+        let mut problems = Problems::default();
+        let plan = build_plan(&site.dir, false, &mut problems).unwrap();
+        assert!(problems.warnings.is_empty(), "{:?}", problems.warnings);
+        let Some(Output::Bytes(bytes)) = plan.files.get(Path::new("k/a/index.html")) else {
+            panic!("{:?}", plan.files.keys().collect::<Vec<_>>());
+        };
+        let html = String::from_utf8_lossy(bytes);
+        assert!(html.contains("[smith2020]"), "{html}");
+        assert!(!html.contains("ref-smith2020"), "{html}");
+    }
 
     struct Site {
         dir: PathBuf,

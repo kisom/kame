@@ -34,7 +34,13 @@ fn escape(text: &str) -> String {
 /// The feed, holding the newest published documents. Rendered apart from their pages, because
 /// feed readers don't reliably resolve relative links. There is no `lastBuildDate`, which would
 /// change on every build.
-pub fn render(config: &Config, sources: &[Source], index: &SiteIndex, site_dir: &Path) -> String {
+pub fn render(
+    config: &Config,
+    sources: &[Source],
+    index: &SiteIndex,
+    site_dir: &Path,
+    references: &References,
+) -> String {
     let site = &config.url;
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n<channel>\n",
@@ -64,7 +70,7 @@ pub fn render(config: &Config, sources: &[Source], index: &SiteIndex, site_dir: 
             &Publish {
                 document_link: &document_link,
                 image: &image,
-                references: &References::new(),
+                references,
             },
         );
         let url = format!("{site}{doc_url}");
@@ -149,7 +155,13 @@ mod tests {
     }
 
     fn feed(dir: &Path, sources: &[Source]) -> String {
-        render(&config(), sources, &SiteIndex::new(sources), dir)
+        render(
+            &config(),
+            sources,
+            &SiteIndex::new(sources),
+            dir,
+            &References::new(),
+        )
     }
 
     #[test]

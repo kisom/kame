@@ -7,8 +7,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use kame_core::model::{BlockKind, SpanStyle};
+use kame_core::references::unresolved;
 use kame_notebook::images::IMAGES;
 use kame_notebook::links::{is_web_link, Follow};
+use kame_notebook::references;
 use kame_notebook::{read_document, Notebook, INDEX};
 
 use crate::config::Config;
@@ -341,7 +343,21 @@ pub fn plan_notebook(
             source.author = config.author.clone();
         }
     }
-    let mut plan = plan_site(site_dir, &config, sources, problems)?;
+    let loaded = references::load(notebook);
+    problems.warnings.extend(loaded.problems);
+    for source in &sources {
+        let name = source
+            .path
+            .strip_prefix(&notebook.root)
+            .unwrap_or(&source.path)
+            .display();
+        for key in unresolved(&source.doc, &loaded.references, true) {
+            problems.warnings.push(format!(
+                "{name} cites [{key}], which has no reference, so it stays as typed"
+            ));
+        }
+    }
+    let mut plan = plan_site(site_dir, &config, sources, &loaded.references, problems)?;
     let mut statics = Vec::new();
     files_under(&notebook.root.join("static"), Path::new(""), &mut statics);
     for relative in statics {
@@ -732,6 +748,115 @@ mod tests {
         }];
         doc.blocks = vec![block];
         doc
+    }
+
+    const KNUTH: &str = "kind: article\ntitle: Breaking paragraphs into lines\nauthors: [D. E. Knuth]\nyear: 1981\n";
+    const UNCITED: &str = "kind: article\ntitle: Uncited Title\nauthors: [A. Nobody]\nyear: 1999\n";
+
+    #[test]
+    fn a_published_document_lists_what_it_cites_and_nothing_else() {
+        let nb = made("nbcites", "title: P\n");
+        nb.file("references/knuth1981.yaml", KNUTH);
+        nb.file("references/other1999.yaml", UNCITED);
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("a.kame", true, "See [knuth1981] for this.");
+        let (plan, problems) = nb.plan();
+        let html = page(&plan, "a/index.html");
+        assert!(html.contains("Breaking paragraphs into lines"), "{html}");
+        assert!(html.contains("href=\"#ref-knuth1981\""), "{html}");
+        assert!(html.contains("id=\"ref-knuth1981\""), "{html}");
+        assert!(problems.warnings.is_empty(), "{:?}", problems.warnings);
+        for body in plan.files.values() {
+            if let Output::Bytes(bytes) = body {
+                assert!(!String::from_utf8_lossy(bytes).contains("Uncited Title"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_reference_cited_only_by_an_unpublished_document_reaches_nothing() {
+        let nb = made("nbhidden", "title: P\n");
+        nb.file("references/knuth1981.yaml", KNUTH);
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("a.kame", true, "Public words.");
+        nb.words("secret.kame", false, "Private [knuth1981] words.");
+        let (plan, problems) = nb.plan();
+        assert!(problems.warnings.is_empty(), "{:?}", problems.warnings);
+        for body in plan.files.values() {
+            if let Output::Bytes(bytes) = body {
+                assert!(!String::from_utf8_lossy(bytes).contains("Breaking paragraphs"));
+            }
+        }
+    }
+
+    #[test]
+    fn no_reference_file_reaches_the_site() {
+        let nb = made("nbfiles", "title: P\n");
+        nb.file("references/knuth1981.yaml", KNUTH);
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("a.kame", true, "See [knuth1981].");
+        let (plan, _) = nb.plan();
+        for path in plan.files.keys() {
+            assert!(
+                !path.to_string_lossy().contains("knuth1981.yaml")
+                    && !path.starts_with("references"),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_key_warns_and_stays_as_typed() {
+        let nb = made("nblost", "title: P\n");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("a.kame", true, "Lost [smith2020] and [sic].");
+        nb.words("draft.kame", false, "Unpublished [jones2001].");
+        let (plan, problems) = nb.plan();
+        let html = page(&plan, "a/index.html");
+        assert!(html.contains("[smith2020]"), "{html}");
+        assert!(html.contains("[sic]"), "{html}");
+        assert_eq!(problems.warnings.len(), 1, "{:?}", problems.warnings);
+        assert!(problems.warnings[0].contains("a.kame"));
+        assert!(problems.warnings[0].contains("smith2020"));
+    }
+
+    #[test]
+    fn a_damaged_reference_is_a_warning_not_a_failed_build() {
+        let nb = made("nbdamaged", "title: P\n");
+        nb.file("references/bad2020.yaml", "kind: nonsense\n");
+        nb.file("references/knuth1981.yaml", KNUTH);
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("a.kame", true, "See [knuth1981].");
+        let (plan, problems) = nb.plan();
+        assert!(
+            problems
+                .warnings
+                .iter()
+                .any(|said| said.contains("bad2020")),
+            "{:?}",
+            problems.warnings
+        );
+        assert!(page(&plan, "a/index.html").contains("Breaking paragraphs"));
+    }
+
+    #[test]
+    fn the_feed_lists_references_too() {
+        let nb = made("nbfeedrefs", "url: https://x.example/\n");
+        nb.file("references/knuth1981.yaml", KNUTH);
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("a.kame", true, "See [knuth1981].");
+        let (plan, _) = nb.plan();
+        let feed = page(&plan, "feed.xml");
+        assert!(feed.contains("Breaking paragraphs into lines"), "{feed}");
+    }
+
+    #[test]
+    fn a_built_page_carries_the_references_style() {
+        let nb = made("nbstyle", "title: P\n");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("a.kame", true, "Words.");
+        let (plan, _) = nb.plan();
+        assert!(page(&plan, "a/index.html").contains(kame_core::export::REFERENCES_STYLE));
     }
 
     #[test]

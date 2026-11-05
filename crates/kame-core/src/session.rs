@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
-use crate::links::{image_file, stored_image_path};
+use crate::links::{image_file, retargeted, stored_image_path};
 use crate::model::{
-    Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document, ImageAlign, Metadata,
+    Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document, ImageAlign, Metadata, Span,
     SpanStyle,
 };
 use crate::storage::{self, Db, DbError, SnapshotMeta};
@@ -1105,6 +1105,11 @@ impl Session {
     // --- editing commands --------------------------------------------------
 
     pub fn insert(&mut self, text: &str) -> bool {
+        self.insert_styled(text, &[])
+    }
+
+    /// [`Session::insert`], with `spans` on the words, their offsets being within `text`.
+    fn insert_styled(&mut self, text: &str, spans: &[Span]) -> bool {
         if self.save_failed {
             return false;
         }
@@ -1124,7 +1129,12 @@ impl Session {
             return false;
         }
         let caret = self.valid_caret();
-        match self.editor.insert_text(&caret, text) {
+        let inserted = if spans.is_empty() {
+            self.editor.insert_text(&caret, text)
+        } else {
+            self.editor.insert_styled(&caret, text, spans)
+        };
+        match inserted {
             Ok(op) => {
                 let saved = self.record(&op);
                 self.caret = Cursor {
@@ -1245,6 +1255,11 @@ impl Session {
     /// The selected text, with a line break between blocks so that pasting it makes
     /// blocks again. `None` when nothing is selected.
     pub fn selected_text(&self) -> Option<String> {
+        self.clipped().map(|clipped| clipped.text)
+    }
+
+    /// What's selected, with its formatting, for pasting. An image or a rule is an empty line.
+    pub fn clipped(&self) -> Option<Clipped> {
         let (start, end) = self.ordered_selection()?;
         if start == end {
             return None;
@@ -1252,20 +1267,34 @@ impl Session {
         let blocks = &self.document().blocks;
         let first = self.block_index(start.block_id)?;
         let last = self.block_index(end.block_id)?;
-        let lines: Vec<&str> = blocks[first..=last]
-            .iter()
-            .enumerate()
-            .map(|(index, block)| {
-                let from = if index == 0 { start.offset } else { 0 };
-                let to = if first + index == last {
-                    end.offset
-                } else {
-                    block.text.len()
-                };
-                block.text.get(from..to).unwrap_or("")
-            })
-            .collect();
-        Some(lines.join("\n"))
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        for (index, block) in blocks[first..=last].iter().enumerate() {
+            if index > 0 {
+                text.push('\n');
+            }
+            let from = if index == 0 { start.offset } else { 0 };
+            let to = if first + index == last {
+                end.offset
+            } else {
+                block.text.len()
+            };
+            let base = text.len();
+            spans.extend(block.spans.iter().filter_map(|span| {
+                let (span_start, span_end) = (span.start.max(from), span.end.min(to));
+                (span_start < span_end).then(|| Span {
+                    start: span_start - from + base,
+                    end: span_end - from + base,
+                    style: span.style.clone(),
+                })
+            }));
+            text.push_str(block.text.get(from..to).unwrap_or(""));
+        }
+        Some(Clipped {
+            text,
+            spans,
+            from: self.link_base(),
+        })
     }
 
     /// The blocks a Tab acts on: those the selection touches, or the caret's. A selection
@@ -1684,6 +1713,75 @@ impl Session {
 
     /// Inserts pasted text one line per block: each newline becomes a
     /// paragraph break, so the block model keeps its one-paragraph invariant.
+    /// [`Session::paste`], keeping the formatting of `clipped`, what kame last copied, if that's
+    /// what's being pasted. The clipboard itself is the system's and holds only text, so anything
+    /// copied elsewhere since will differ, and goes in as text.
+    pub fn paste_clipped(&mut self, text: &str, clipped: Option<&Clipped>) -> bool {
+        let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+        let Some(clipped) = clipped.filter(|clipped| clipped.text == normalised) else {
+            return self.paste(text);
+        };
+        if self.save_failed {
+            return false;
+        }
+        if self.selection.is_some() && !self.delete_selected() {
+            return false;
+        }
+        // A relative link has to lead to the same place from here.
+        let here = self.link_base();
+        let moved: Vec<Span> = clipped
+            .spans
+            .iter()
+            .map(|span| {
+                let style = match &span.style {
+                    SpanStyle::Link { url } => SpanStyle::Link {
+                        url: retargeted(url, &clipped.from, &here),
+                    },
+                    SpanStyle::DocumentLink { target } => SpanStyle::DocumentLink {
+                        target: retargeted(target, &clipped.from, &here),
+                    },
+                    other => other.clone(),
+                };
+                Span {
+                    start: span.start,
+                    end: span.end,
+                    style,
+                }
+            })
+            .collect();
+        let caret = self.valid_caret();
+        let verbatim = self
+            .block_index(caret.block_id)
+            .is_some_and(|index| self.document().blocks[index].kind.is_verbatim());
+        if verbatim {
+            return self.insert_styled(&normalised, &moved);
+        }
+        let mut changed = false;
+        let mut base = 0;
+        for (index, line) in normalised.split('\n').enumerate() {
+            if index > 0 {
+                changed |= self.split();
+            }
+            if !line.is_empty() {
+                let end = base + line.len();
+                let spans: Vec<Span> = moved
+                    .iter()
+                    .filter_map(|span| {
+                        let (start, stop) = (span.start.max(base), span.end.min(end));
+                        (start < stop).then(|| Span {
+                            start: start - base,
+                            end: stop - base,
+                            style: span.style.clone(),
+                        })
+                    })
+                    .collect();
+                changed |= self.insert_styled(line, &spans);
+            }
+            base += line.len() + 1;
+        }
+        changed
+    }
+
     pub fn paste(&mut self, text: &str) -> bool {
         if self.save_failed {
             return false;
@@ -2086,6 +2184,16 @@ impl Session {
 }
 
 pub type AppResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+/// What kame copied: the words as they went on the system's clipboard, and their formatting, with
+/// offsets into those words.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clipped {
+    pub text: String,
+    pub spans: Vec<Span>,
+    /// What its relative links are relative to.
+    pub from: PathBuf,
+}
 
 /// Readable and writable by the owner alone.
 pub const PRIVATE_MODE: u32 = 0o600;
@@ -5141,6 +5249,310 @@ mod tests {
             .unwrap();
         drop(connection);
         assert!(!open(&path).newer);
+    }
+
+    fn linked(words: &str, from: usize, to: usize, url: &str) -> Session {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        assert!(session.insert(words));
+        let block = session.document().blocks[0].id;
+        assert!(session.set_link(block, from, to, url.to_string()));
+        session
+    }
+
+    fn select_range(session: &mut Session, block: BlockId, from: usize, to: usize) {
+        session.set_caret(Cursor {
+            block_id: block,
+            offset: from,
+        });
+        session.select_to(Cursor {
+            block_id: block,
+            offset: to,
+        });
+    }
+
+    fn links_of(session: &Session, index: usize) -> Vec<(String, String)> {
+        let block = &session.document().blocks[index];
+        block
+            .spans
+            .iter()
+            .filter_map(|span| match &span.style {
+                SpanStyle::Link { url } | SpanStyle::DocumentLink { target: url } => {
+                    Some((block.text[span.start..span.end].to_string(), url.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cutting_and_pasting_a_link_keeps_it() {
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        let block = session.document().blocks[0].id;
+        select_range(&mut session, block, 8, 13);
+        let clipped = session.clipped().unwrap();
+        assert_eq!(clipped.text, "paper");
+        assert!(session.backspace());
+        assert_eq!(session.document().blocks[0].text, "See the  now.");
+        assert!(session.paste_clipped("paper", Some(&clipped)));
+        assert_eq!(session.document().blocks[0].text, "See the paper now.");
+        assert_eq!(
+            links_of(&session, 0),
+            [("paper".to_string(), "https://p.example/".to_string())]
+        );
+        assert_eq!(session.caret.offset, 13);
+    }
+
+    #[test]
+    fn pasting_a_link_is_one_undo_step() {
+        let mut session = linked("A link", 2, 6, "https://l.example/");
+        let block = session.document().blocks[0].id;
+        select_range(&mut session, block, 2, 6);
+        let clipped = session.clipped().unwrap();
+        session.set_caret(Cursor {
+            block_id: block,
+            offset: 0,
+        });
+        let before = session.document().clone();
+        let (depth, _) = session.history();
+        assert!(session.paste_clipped("link", Some(&clipped)));
+        assert_eq!(session.history().0, depth + 1);
+        assert!(session.undo());
+        assert_eq!(*session.document(), before);
+    }
+
+    #[test]
+    fn what_was_copied_keeps_only_the_part_of_a_link_it_covers() {
+        let mut session = linked("before words after", 7, 12, "https://w.example/");
+        let block = session.document().blocks[0].id;
+        select_range(&mut session, block, 3, 9);
+        let clipped = session.clipped().unwrap();
+        assert_eq!(clipped.text, "ore wo");
+        session.set_caret(Cursor {
+            block_id: block,
+            offset: 18,
+        });
+        assert!(session.paste_clipped("ore wo", Some(&clipped)));
+        assert!(
+            links_of(&session, 0).contains(&("wo".to_string(), "https://w.example/".to_string()))
+        );
+    }
+
+    /// The clipboard is the system's, so something copied elsewhere since is only text.
+    #[test]
+    fn text_other_than_what_was_copied_pastes_plain() {
+        let mut session = linked("A link", 2, 6, "https://l.example/");
+        let block = session.document().blocks[0].id;
+        select_range(&mut session, block, 2, 6);
+        let clipped = session.clipped().unwrap();
+        session.set_caret(Cursor {
+            block_id: block,
+            offset: 0,
+        });
+        assert!(session.paste_clipped("other", Some(&clipped)));
+        assert_eq!(links_of(&session, 0).len(), 1, "only the original link");
+        assert_eq!(session.document().blocks[0].text, "otherA link");
+    }
+
+    #[test]
+    fn pasting_keeps_every_kind_of_formatting_across_blocks() {
+        let mut session = linked("one two", 4, 7, "https://t.example/");
+        assert!(session.split());
+        assert!(session.insert("three four"));
+        let (first, second) = (
+            session.document().blocks[0].id,
+            session.document().blocks[1].id,
+        );
+        let bold = session.editor.set_spans_of(
+            second,
+            vec![Span {
+                start: 0,
+                end: 5,
+                style: SpanStyle::Bold,
+            }],
+        );
+        session.commit(bold);
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 4,
+        });
+        session.select_to(Cursor {
+            block_id: second,
+            offset: 5,
+        });
+        let clipped = session.clipped().unwrap();
+        assert_eq!(clipped.text, "two\nthree");
+
+        session.set_caret(Cursor {
+            block_id: second,
+            offset: "three four".len(),
+        });
+        assert!(session.split());
+        assert!(session.paste_clipped("two\nthree", Some(&clipped)));
+        let blocks = &session.document().blocks;
+        assert_eq!(blocks[2].text, "two");
+        assert_eq!(blocks[3].text, "three");
+        assert_eq!(
+            links_of(&session, 2),
+            [("two".to_string(), "https://t.example/".to_string())]
+        );
+        assert_eq!(session.document().blocks[3].spans[0].style, SpanStyle::Bold);
+        assert_eq!(session.document().blocks[3].spans[0].end, 5);
+    }
+
+    #[test]
+    fn code_takes_a_pasted_links_words_and_not_the_link() {
+        let mut session = linked("A link", 2, 6, "https://l.example/");
+        let block = session.document().blocks[0].id;
+        select_range(&mut session, block, 2, 6);
+        let clipped = session.clipped().unwrap();
+        assert!(session.split());
+        let code = session.valid_caret().block_id;
+        assert!(session.set_block_kind(code, BlockKind::Code { language: None }));
+        assert!(session.paste_clipped("link", Some(&clipped)));
+        let block = session
+            .document()
+            .blocks
+            .iter()
+            .find(|block| block.id == code)
+            .unwrap();
+        assert!(block.text.contains("link"));
+        assert!(block.spans.is_empty());
+    }
+
+    /// Text inserted inside a link is already part of it, and two links can't share words.
+    #[test]
+    fn a_link_pasted_inside_a_link_joins_it() {
+        let mut session = linked("A link", 2, 6, "https://outer.example/");
+        let mut source = linked("other", 0, 5, "https://inner.example/");
+        let from = source.document().blocks[0].id;
+        select_range(&mut source, from, 0, 5);
+        let clipped = source.clipped().unwrap();
+        session.set_caret(Cursor {
+            block_id: session.document().blocks[0].id,
+            offset: 4,
+        });
+        assert!(session.paste_clipped("other", Some(&clipped)));
+        assert_eq!(
+            links_of(&session, 0),
+            [(
+                "liothernk".to_string(),
+                "https://outer.example/".to_string()
+            )]
+        );
+    }
+
+    /// Moved far from where it was copied: another document, in another folder.
+    fn moved_to_another_folder(target: &str) -> String {
+        let root = crate::test_temp_dir().join(format!("moved-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::create_dir_all(root.join("far/away")).unwrap();
+        let mut source = open(&root.join("notes/a.kame"));
+        assert!(source.insert("A link"));
+        let block = source.document().blocks[0].id;
+        assert!(source.set_link(block, 2, 6, target.to_string()));
+        select_range(&mut source, block, 2, 6);
+        let clipped = source.clipped().unwrap();
+
+        let mut there = open(&root.join("far/away/c.kame"));
+        assert!(there.paste_clipped("link", Some(&clipped)));
+        links_of(&there, 0)[0].1.clone()
+    }
+
+    #[test]
+    fn a_relative_link_still_leads_to_the_same_place_from_another_folder() {
+        assert_eq!(moved_to_another_folder("b.kame"), "../../notes/b.kame");
+        assert_eq!(
+            moved_to_another_folder("b.kame#Intro"),
+            "../../notes/b.kame#Intro"
+        );
+        assert_eq!(
+            moved_to_another_folder("sub/b.kame"),
+            "../../notes/sub/b.kame"
+        );
+        assert_eq!(moved_to_another_folder("../top.kame"), "../../top.kame");
+        assert_eq!(moved_to_another_folder("../far/away/c.kame"), "c.kame");
+        assert_eq!(
+            moved_to_another_folder("../static/p.pdf"),
+            "../../static/p.pdf"
+        );
+    }
+
+    /// `#Intro` means a heading in this document, so elsewhere it has to name the document.
+    #[test]
+    fn a_link_to_a_heading_here_names_its_document_from_elsewhere() {
+        assert_eq!(
+            moved_to_another_folder("#Intro"),
+            "../../notes/a.kame#Intro"
+        );
+    }
+
+    #[test]
+    fn links_that_dont_depend_on_where_they_are_stay_as_they_are() {
+        for target in [
+            "https://example.com/a.kame",
+            "mailto:k@example.com",
+            "/srv/whole/path.kame",
+            "~/writing/a.kame",
+            "//host/x",
+        ] {
+            assert_eq!(moved_to_another_folder(target), target);
+        }
+    }
+
+    #[test]
+    fn a_relative_link_is_untouched_within_a_document_or_a_folder() {
+        let root = crate::test_temp_dir().join(format!("moved-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut source = open(&root.join("a.kame"));
+        assert!(source.insert("One link and #here"));
+        let block = source.document().blocks[0].id;
+        assert!(source.set_link(block, 4, 8, "b.kame#Intro".to_string()));
+        assert!(source.set_link(block, 13, 18, "#Intro".to_string()));
+        select_range(&mut source, block, 4, 18);
+        let clipped = source.clipped().unwrap();
+        source.set_caret(Cursor {
+            block_id: block,
+            offset: 0,
+        });
+        assert!(source.paste_clipped(&clipped.text, Some(&clipped)));
+        let urls: Vec<String> = links_of(&source, 0)
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect();
+        assert!(
+            urls.iter().filter(|url| *url == "#Intro").count() == 2,
+            "{urls:?}"
+        );
+
+        let mut neighbour = open(&root.join("c.kame"));
+        assert!(neighbour.paste_clipped(&clipped.text, Some(&clipped)));
+        let urls: Vec<String> = links_of(&neighbour, 0)
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect();
+        assert_eq!(urls[0], "b.kame#Intro", "same folder, same way there");
+        assert_eq!(urls[1], "a.kame#Intro", "but no longer the same document");
+    }
+
+    /// With no file, there's no folder to say the way from.
+    #[test]
+    fn a_document_with_no_file_keeps_a_links_target() {
+        let mut source = Session::anonymous().unwrap();
+        assert!(source.insert("A link"));
+        let block = source.document().blocks[0].id;
+        assert!(source.set_link(block, 2, 6, "b.kame".to_string()));
+        select_range(&mut source, block, 2, 6);
+        let clipped = source.clipped().unwrap();
+        let mut other = Session::anonymous().unwrap();
+        assert!(other.paste_clipped("link", Some(&clipped)));
+        assert_eq!(links_of(&other, 0)[0].1, "b.kame");
+    }
+
+    #[test]
+    fn nothing_selected_means_nothing_clipped() {
+        let session = linked("A link", 2, 6, "https://l.example/");
+        assert_eq!(session.clipped(), None);
     }
 
     #[test]

@@ -83,7 +83,7 @@ Formatting applies as you type, and undoes as one step.
 - `---` then Enter is a horizontal rule.
 - Three backticks then Enter starts a code block, and you can put a language straight after them. Press Enter on a blank last line to leave it.
 - `| ` at the start of a line starts a prose block, for poetry or anything else whose line breaks and spacing should stand exactly as typed. It leaves the same way as a code block.
-- `[words](https://example.com)` is a link. So is Ctrl-K on a selection, where an empty address removes the link.
+- `[words](https://example.com)` is a link. So is Ctrl-K on a selection, where an empty address removes the link. Cutting or copying within kame keeps links and formatting when you paste, even in another document, and a relative link still leads to the same place from there.
 
 The right-click menu changes the kind of the block under the caret, adds annotations, and has Insert image…, which asks for a file and shows the picture at its own size, or at the body's width if it's wider. Right-click a picture for Align, to put it at the left, center or right of its line. It's on a line of its own, whichever you choose, and Markdown exports leave the alignment out. "Where to put papers and images" below says where the file ends up.
 

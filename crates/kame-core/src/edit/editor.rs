@@ -284,6 +284,74 @@ impl Editor {
         Ok(self.apply_edit(op))
     }
 
+    /// Inserts `text` at `cursor` with `spans`, whose offsets are within `text`, as one step. Code
+    /// is literal, so it takes only the words. Words inserted inside a link are part of that link
+    /// already, and two links can't share them, so a link in `spans` that would overlap one is left out.
+    pub fn insert_styled(
+        &mut self,
+        cursor: &Cursor,
+        text: &str,
+        spans: &[Span],
+    ) -> Result<Op, EditError> {
+        self.check_cursor(*cursor)?;
+        let insert = Op::InsertText {
+            block_id: cursor.block_id,
+            offset: cursor.offset,
+            text: text.to_string(),
+        };
+        let mut after = self.doc.clone();
+        apply(&mut after, &insert);
+        let block = self.block(cursor.block_id)?;
+        let literal = matches!(block.kind, BlockKind::Code { .. });
+        let old_spans = after
+            .blocks
+            .iter()
+            .find(|block| block.id == cursor.block_id)
+            .map(|block| block.spans.clone())
+            .unwrap_or_default();
+        let is_link = |span: &Span| {
+            matches!(
+                span.style,
+                SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
+            )
+        };
+        let moved: Vec<Span> = spans
+            .iter()
+            .filter(|_| !literal)
+            .map(|span| Span {
+                start: span.start + cursor.offset,
+                end: span.end + cursor.offset,
+                style: span.style.clone(),
+            })
+            .filter(|span| {
+                !is_link(span)
+                    || !old_spans.iter().any(|existing| {
+                        is_link(existing) && existing.start < span.end && span.start < existing.end
+                    })
+            })
+            .collect();
+        if moved.is_empty() {
+            return Ok(self.apply_edit(insert));
+        }
+        let new_spans = old_spans.iter().cloned().chain(moved).collect();
+        Ok(self.apply_edit(Op::Batch {
+            ops: vec![
+                insert,
+                Op::SetSpans {
+                    block_id: cursor.block_id,
+                    old_spans,
+                    spans: new_spans,
+                },
+            ],
+        }))
+    }
+
+    /// Replaces `block_id`'s spans.
+    pub fn set_spans_of(&mut self, block_id: BlockId, spans: Vec<Span>) -> Result<Op, EditError> {
+        self.block(block_id)?;
+        Ok(self.apply_edit(Op::set_spans(&self.doc, block_id, spans)))
+    }
+
     /// Deletes the text covered by `sel`, returning the op that was applied.
     ///
     /// A selection may run backwards (the two carets are put in document
@@ -3105,7 +3173,18 @@ mod tests {
                 let (from, to) = (one.min(other), one.max(other));
                 let at = |offset| Cursor { block_id, offset };
                 let notes = editor.document().annotations.clone();
-                let _ = match pick(9) {
+                let _ = match pick(10) {
+                    9 => editor.insert_styled(
+                        &at(from),
+                        "link",
+                        &[Span {
+                            start: 1,
+                            end: 3,
+                            style: crate::model::SpanStyle::Link {
+                                url: "u".to_string(),
+                            },
+                        }],
+                    ),
                     0 | 1 => editor.insert_text(&at(from), ["abc", "é", " ", "x"][pick(4)]),
                     2 | 3 => editor.delete_selection(&Selection {
                         start: at(from),

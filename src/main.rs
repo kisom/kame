@@ -13,7 +13,7 @@ mod notebook;
 mod publish;
 
 use kame_core::links::{image_file, resolve_open_path, split_document_target, stored_image_path};
-use kame_core::session::{is_markdown_path, Session};
+use kame_core::session::{is_markdown_path, Clipped, Session};
 use kame_core::{edit, model, storage};
 use kame_typeset::{layout, render};
 use std::collections::{HashMap, HashSet};
@@ -2191,6 +2191,9 @@ struct KameApp {
     marks: Marks,
     /// The mark the page's right-click menu is about, while it's open.
     mark_menu: Option<(BlockId, Finding)>,
+    /// What was last copied here, with its formatting. It's kept here and not in the session, so
+    /// that it can be pasted in another document.
+    clipped: Option<Clipped>,
     /// The image the page's menu was opened on. The menu's other rows change the caret's block,
     /// but a right-click doesn't move the caret.
     image_menu: Option<BlockId>,
@@ -2346,6 +2349,7 @@ impl KameApp {
             last_log_tick: std::time::Instant::now(),
             marks: Marks::default(),
             mark_menu: None,
+            clipped: None,
             image_menu: None,
             layouts: LayoutCache::new(),
             textures: TextureCache::new(),
@@ -3149,12 +3153,13 @@ impl KameApp {
                     }
                 }
                 Command::Paste(text) => {
-                    self.session.paste(&text);
+                    self.session.paste_clipped(&text, self.clipped.as_ref());
                 }
                 // With nothing selected these leave the clipboard as it was.
                 Command::Copy | Command::Cut => {
-                    if let Some(text) = self.session.selected_text() {
-                        ctx.copy_text(text);
+                    if let Some(clipped) = self.session.clipped() {
+                        ctx.copy_text(clipped.text.clone());
+                        self.clipped = Some(clipped);
                         if matches!(command, Command::Cut) {
                             self.session.backspace();
                         }

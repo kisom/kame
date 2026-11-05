@@ -70,6 +70,60 @@ fn path_between(folder: &Path, file: &Path) -> String {
         .join("/")
 }
 
+/// Takes out `.` and `..` by what they say, since what's named may not exist.
+fn tidied(path: &Path) -> PathBuf {
+    let mut tidy = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                tidy.pop();
+            }
+            other => tidy.push(other),
+        }
+    }
+    tidy
+}
+
+/// `target`, a link copied from the document at `from`, as it has to be written to lead to the
+/// same place from the document at `to`. Only a relative one depends on where it is. `#Heading`
+/// means the document it's in, so elsewhere it names `from`. If either document has no file, or
+/// no folder that can be found, there's no way to say, and it stays as it is.
+pub fn retargeted(target: &str, from: &Path, to: &Path) -> String {
+    let (path, _) = split_document_target(target);
+    let has_scheme = path.split_once(':').is_some_and(|(before, _)| {
+        before
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && before
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if has_scheme || path.starts_with('/') || path.starts_with('~') {
+        return target.to_string();
+    }
+    let real_folder = |document: &Path| document.parent()?.canonicalize().ok();
+    let (Some(from_folder), Some(to_folder)) = (real_folder(from), real_folder(to)) else {
+        return target.to_string();
+    };
+    let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name()) else {
+        return target.to_string();
+    };
+    let same_folder = from_folder == to_folder;
+    if same_folder && (from_name == to_name || !path.is_empty()) {
+        return target.to_string();
+    }
+    let file = if path.is_empty() {
+        from_folder.join(from_name)
+    } else {
+        tidied(&from_folder.join(path))
+    };
+    // What follows the path, as it was written, which is the `#` and the heading if there are any.
+    let after = &target[path.len()..];
+    format!("{}{after}", path_between(&to_folder, &file))
+}
+
 /// A document link's target as its path and the heading it names, if any.
 pub fn split_document_target(target: &str) -> (&str, Option<&str>) {
     match target.split_once('#') {

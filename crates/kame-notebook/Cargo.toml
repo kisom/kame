@@ -8,9 +8,9 @@ description = "A notebook: a folder of kame documents to move through, search an
 kame-core = { path = "../kame-core" }
 kame-sync = { path = "../kame-sync" }
 serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 yaml_serde = "0.10"
 
 [dev-dependencies]
 kame-test-dir = { path = "../kame-test-dir" }
 rusqlite = "0.41"
-uuid = { version = "1", features = ["v4", "serde"] }

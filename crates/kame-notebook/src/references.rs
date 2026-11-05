@@ -3,6 +3,7 @@
 //! `docs/superpowers/specs/2026-11-04-references-design.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -30,17 +31,33 @@ fn folder(notebook: &Notebook) -> PathBuf {
 }
 
 /// Whether a file of this name in the root's `references/` is a reference: a `.yaml` that isn't
-/// one a sync tool or kame keeps for itself.
+/// hidden or a sync tool's conflict copy.
 pub(crate) fn is_reference_name(name: &str) -> bool {
-    name.ends_with(EXTENSION)
-        && !name.starts_with('.')
-        && !name.ends_with(".building")
-        && !name.contains(".sync-conflict-")
+    name.ends_with(EXTENSION) && !name.starts_with('.') && !name.contains(".sync-conflict-")
+}
+
+/// Whether the folder is there to use. `Ok(false)` is a folder not made yet, and `Err` says why a
+/// path that is there can't be used: a symbolic link, which a synced notebook could point
+/// anywhere, or something that isn't a folder.
+fn folder_ready(notebook: &Notebook) -> Result<bool, String> {
+    let folder = folder(notebook);
+    match std::fs::symlink_metadata(&folder) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(metadata) if metadata.is_symlink() => Err(format!(
+            "{FOLDER} is a symbolic link, which is not followed"
+        )),
+        Ok(_) => Err(format!("{FOLDER} is not a folder")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("could not read {FOLDER}: {err}")),
+    }
 }
 
 /// The reference files, in order by name, as (file name, path). Symbolic links, other folders and
 /// anything that isn't a reference are left out.
 fn files(notebook: &Notebook) -> Vec<(String, PathBuf)> {
+    if !folder_ready(notebook).unwrap_or(false) {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(folder(notebook)) else {
         return Vec::new();
     };
@@ -74,6 +91,10 @@ fn read(path: &Path) -> Result<Reference, String> {
 pub fn load(notebook: &Notebook) -> Loaded {
     let mut loaded = Loaded::default();
     let mut lowercase = BTreeSet::new();
+    if let Err(problem) = folder_ready(notebook) {
+        loaded.problems.push(problem);
+        return loaded;
+    }
     for (name, path) in files(notebook) {
         let Some(key) = key_of(&name) else {
             loaded
@@ -97,13 +118,19 @@ pub fn load(notebook: &Notebook) -> Loaded {
     loaded
 }
 
-/// Whether the file for `key` can be replaced or removed: it is absent or a good reference, and
-/// no other key differs from it only in case.
+/// Whether the file for `key` can be replaced or removed: the folder is usable, and the file is
+/// absent or a good reference and not a symbolic link, and no other key differs from it only in
+/// case.
 fn check_writable(notebook: &Notebook, key: &str) -> Result<PathBuf, String> {
     if !valid_key(key) {
         return Err(format!("{key:?} is not a valid key"));
     }
+    folder_ready(notebook)?;
     let wanted = format!("{key}{EXTENSION}");
+    let path = folder(notebook).join(&wanted);
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_symlink()) {
+        return Err(format!("{FOLDER}/{wanted} is a symbolic link"));
+    }
     for (name, path) in files(notebook) {
         if name == wanted {
             read(&path)
@@ -112,7 +139,7 @@ fn check_writable(notebook: &Notebook, key: &str) -> Result<PathBuf, String> {
             return Err(format!("{FOLDER}/{name} has the same key, but for case"));
         }
     }
-    Ok(folder(notebook).join(wanted))
+    Ok(path)
 }
 
 /// Writes `reference` as `key`, through a temporary file renamed into place so that an interrupted
@@ -122,12 +149,23 @@ pub fn save(notebook: &Notebook, key: &str, reference: &Reference) -> Result<(),
     let path = check_writable(notebook, key)?;
     let yaml = yaml_serde::to_string(reference).map_err(|err| err.to_string())?;
     let folder = folder(notebook);
+    // `check_writable` found the folder absent or a real one, so this never goes through a link.
     std::fs::create_dir_all(&folder)
         .map_err(|err| format!("could not make {}: {err}", folder.display()))?;
-    let temporary = folder.join(format!(".{key}{EXTENSION}.saving"));
-    std::fs::write(&temporary, yaml)
-        .map_err(|err| format!("could not write {}: {err}", temporary.display()))?;
-    std::fs::rename(&temporary, &path).map_err(|err| {
+    // A name nobody can have planted, made new and never followed, and hidden so that listing
+    // skips it.
+    let temporary = folder.join(format!(".{key}{EXTENSION}.saving-{}", uuid::Uuid::new_v4()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(yaml.as_bytes())?;
+            // So that a power loss can't leave the new name on an empty file.
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&temporary, &path));
+    written.map_err(|err| {
         let _ = std::fs::remove_file(&temporary);
         format!("could not write {}: {err}", path.display())
     })
@@ -414,6 +452,70 @@ mod tests {
         assert_eq!(names, ["1.yaml", "kept.yaml"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_link_planted_where_a_save_used_to_write_is_not_followed() {
+        let notebook = notebook("ref-planted-temporary");
+        let target = kame_test_dir::folder("ref-planted-target").join("victim");
+        std::fs::write(&target, "precious").unwrap();
+        let folder = folder(&notebook);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::os::unix::fs::symlink(&target, folder.join(".knuth1981.yaml.saving")).unwrap();
+        save(&notebook, "knuth1981", &article()).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"precious");
+        assert_eq!(
+            load(&notebook).references.get("knuth1981"),
+            Some(&article())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_folder_is_not_followed() {
+        let notebook = notebook("ref-linked-folder");
+        let outside = kame_test_dir::folder("ref-linked-outside");
+        let yaml = "kind: freeform\ntext: x\n";
+        std::fs::write(outside.join("there.yaml"), yaml).unwrap();
+        std::os::unix::fs::symlink(&outside, folder(&notebook)).unwrap();
+        let loaded = load(&notebook);
+        assert!(loaded.references.is_empty());
+        assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
+        assert!(loaded.problems[0].contains(FOLDER));
+        assert!(save(&notebook, "knuth1981", &article()).is_err());
+        assert!(remove(&notebook, "there").is_err());
+        assert!(stamp(&notebook).is_empty());
+        assert!(citing(&notebook).is_empty());
+        let mut left: Vec<String> = std::fs::read_dir(&outside)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["there.yaml"]);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("there.yaml")).unwrap(),
+            yaml
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_keys_file_is_neither_replaced_nor_removed() {
+        let notebook = notebook("ref-linked-file");
+        let target = kame_test_dir::folder("ref-linked-file-target").join("victim.yaml");
+        std::fs::write(&target, "kind: freeform\ntext: x\n").unwrap();
+        let folder = folder(&notebook);
+        std::fs::create_dir_all(&folder).unwrap();
+        let link = folder.join("knuth1981.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(save(&notebook, "knuth1981", &article()).is_err());
+        assert!(remove(&notebook, "knuth1981").is_err());
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"kind: freeform\ntext: x\n"
+        );
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+    }
+
     #[test]
     fn an_interrupted_save_leaves_the_old_file() {
         let notebook = notebook("ref-interrupted");
@@ -429,8 +531,12 @@ mod tests {
         assert_eq!(loaded.references.get("knuth1981"), Some(&article()));
         // A finished save leaves no temporary file behind.
         save(&notebook, "other", &article()).unwrap();
-        let temporary = folder(&notebook).join(".other.yaml.saving");
-        assert!(!temporary.exists());
+        let hidden = std::fs::read_dir(folder(&notebook))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+            .count();
+        assert_eq!(hidden, 1, "only the planted one");
     }
 
     #[test]

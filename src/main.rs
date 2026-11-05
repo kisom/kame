@@ -1400,7 +1400,8 @@ enum MenuAction {
     Back,
     CompactHistory,
     LinkDocument,
-    Site(publish::SiteJob),
+    SiteBuild,
+    SiteSync,
     New,
     Open,
     OpenPath,
@@ -3527,16 +3528,14 @@ impl KameApp {
                             menu_item(ui, "Build", None, false)
                         });
                         if build.inner {
-                            action = Some(MenuAction::Site(publish::SiteJob::Build));
+                            action = Some(MenuAction::SiteBuild);
                         }
                         let sync = ui.add_enabled_ui(!working && has_remote, |ui| {
                             menu_entry(ui, "Sync", None, false)
                                 .on_disabled_hover_text("Set remote in notebook.yaml to send the site")
                         });
                         if sync.inner.clicked() {
-                            action = Some(MenuAction::Site(publish::SiteJob::Send {
-                                go_ahead: false,
-                            }));
+                            action = Some(MenuAction::SiteSync);
                         }
                     });
                     site_menu = Some(menu.response);
@@ -3654,7 +3653,11 @@ impl KameApp {
             }
             MenuAction::Mode(mode) => self.apply_mode(ctx, mode),
             MenuAction::Help => self.show_help = true,
-            MenuAction::Site(job) => self.start_site_job(ctx, job),
+            MenuAction::SiteBuild => self.start_site_job(ctx, publish::SiteJob::Build),
+            MenuAction::SiteSync => {
+                let ask = kame_site::notebook::GoAhead::Ask;
+                self.start_site_job(ctx, publish::SiteJob::Send(ask));
+            }
         }
     }
 

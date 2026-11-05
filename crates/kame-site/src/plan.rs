@@ -179,6 +179,22 @@ fn group_tags<'a>(
     tags
 }
 
+/// Where the navigation's About link leads: the page at `/about/`, however its name is
+/// capitalised, since addresses follow file names and a web server tells them apart. `None` if
+/// nothing publishes there. Should there be two, the largest is all lowercase, and a build
+/// always picks the same one.
+fn about_url(sources: &[Source], pages: &[Page]) -> Option<String> {
+    let documents = sources
+        .iter()
+        .filter(|source| !source.draft)
+        .map(|source| source.url());
+    let pages = pages.iter().map(|page| page.url.clone());
+    documents
+        .chain(pages)
+        .filter(|url| url.eq_ignore_ascii_case("/about/"))
+        .max()
+}
+
 /// Works out the whole site. `None` if anything stops it, with `problems` saying what.
 pub fn build_plan(site_dir: &Path, include_drafts: bool, problems: &mut Problems) -> Option<Plan> {
     let config = match Config::load(site_dir) {
@@ -212,6 +228,7 @@ pub fn plan_site(
         url => safe(config.url.clone()),
         description => config.description.clone(),
         author => config.author.clone(),
+        about => about_url(&sources, &pages).map(safe),
     };
     let kame_css = safe(STYLE);
     let index = SiteIndex::new(&sources);
@@ -453,6 +470,7 @@ mod tests {
             assert!(plan.files.contains_key(Path::new(path)), "{path}");
         }
         assert!(text(&plan, "index.html").contains("A paragraph about this site."));
+        assert!(text(&plan, "index.html").contains("<a href=\"/about/\">About</a>"));
     }
 
     #[test]

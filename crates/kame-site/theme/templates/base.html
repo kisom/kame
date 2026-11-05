@@ -16,8 +16,8 @@
 <nav class="site">
 <a href="/">{{ site.name }}</a> ·
 <a href="/archive/">Archive</a> ·
-<a href="/tags/">Tags</a> ·
-<a href="/about/">About</a>
+<a href="/tags/">Tags</a>{% if site.about %} ·
+<a href="{{ site.about }}">About</a>{% endif %}
 <button id="theme-toggle" type="button" hidden></button>
 </nav>
 {% block content %}{% endblock %}

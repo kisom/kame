@@ -806,6 +806,57 @@ mod tests {
         assert!(!plan.files.contains_key(Path::new("notes/index.html")));
     }
 
+    /// What the navigation's About link leads to, if there is one.
+    fn about_link(plan: &Plan) -> Option<String> {
+        let home = page(plan, "index.html");
+        let (before, _) = home.split_once(">About</a>")?;
+        let (_, href) = before.rsplit_once("href=\"")?;
+        Some(href.trim_end_matches('"').to_string())
+    }
+
+    #[test]
+    fn the_about_link_leads_to_an_about_page_named_with_a_capital() {
+        let nb = made("nbaboutupper", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("About.kame", true, "About words.");
+        let (plan, _) = nb.plan();
+        assert!(plan.files.contains_key(Path::new("About/index.html")));
+        assert_eq!(about_link(&plan).as_deref(), Some("/About/"));
+    }
+
+    #[test]
+    fn the_about_link_leads_to_an_about_page_named_in_lowercase() {
+        let nb = made("nbaboutlower", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("about.kame", true, "About words.");
+        let (plan, _) = nb.plan();
+        assert!(plan.files.contains_key(Path::new("about/index.html")));
+        assert_eq!(about_link(&plan).as_deref(), Some("/about/"));
+    }
+
+    #[test]
+    fn the_lowercase_about_page_wins_when_a_notebook_publishes_both() {
+        let nb = made("nbaboutboth", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("About.kame", true, "Capital.");
+        nb.file(
+            "about.md",
+            "---\ntitle: About\ndate: 2026-11-03\npublish: true\n---\n\nLower.\n",
+        );
+        let (plan, _) = nb.plan();
+        assert_eq!(about_link(&plan).as_deref(), Some("/about/"));
+    }
+
+    #[test]
+    fn there_is_no_about_link_without_a_published_about_page() {
+        let nb = made("nbaboutnone", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("About.kame", false, "Not marked to publish.");
+        nb.words("Elsewhere/About.kame", true, "Not the site's about page.");
+        let (plan, _) = nb.plan();
+        assert_eq!(about_link(&plan), None);
+    }
+
     #[test]
     fn a_notebooks_theme_overrides_the_standard_one_file_by_file() {
         let nb = made("nbtheme", "");

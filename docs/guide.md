@@ -231,7 +231,7 @@ Then open `http://localhost:8000`. Opening the files directly won't work, becaus
 
 Read what the build prints. It lists each link that became plain words because it leads to something unpublished, and each image it couldn't find or won't publish. These are warnings, so the site still builds.
 
-**Make an About page.** The standard theme's navigation has an About link, which leads nowhere until you make `about.kame` in the notebook's root and mark it to publish. The site also gets an archive and a tags page, and a feed if you've set `url`.
+**Make an About page.** The standard theme's navigation gains an About link once you make `about.kame` or `About.kame` in the notebook's root and mark it to publish. The site also gets an archive and a tags page, and a feed if you've set `url`.
 
 **To send it to your server**, set `remote` in `notebook.yaml`, then:
 

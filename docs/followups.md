@@ -7,8 +7,6 @@ Open work, most pressing first. Delete items as they land.
 - [ ] **A missing image publishes its local path.** A published page's `src` gets the path on this
   machine, such as `/home/you/notes/images/gone.png`, though the build does warn that it's missing. It
   should publish as nothing, or as its words.
-- [ ] **The theme's About link leads nowhere** until the notebook has a published `about.kame` or
-  `about.md`. It's hard-coded in `theme/templates/base.html`.
 
 ## Annotations
 

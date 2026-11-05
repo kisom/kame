@@ -358,7 +358,7 @@ publication goes in another folder. A link to an unmarked document, or to a file
 lists it. A link to something missing under `static/` or to a folder publishes as written, for the web server to answer, and any other is its words. An image from `images/` shown in a published
 document publishes at `/static/images/`, any other in the notebook is copied beside its page, and one outside the notebook doesn't publish, which the build also lists.
 
-The theme is the standard one, and a file in the notebook's `theme/` takes the place of the same file in it. With no `url` there's no feed.
+The theme is the standard one, and a file in the notebook's `theme/` takes the place of the same file in it. Its About link leads to an `about` document or page in the root, however its name is capitalised, and doesn't show without one. With no `url` there's no feed.
 
 ## Revision logs
 

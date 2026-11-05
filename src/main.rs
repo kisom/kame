@@ -590,8 +590,12 @@ const MAX_BACK_STOPS: usize = 64;
 const DOUBLE_CLICK_SECONDS: f32 = 0.4;
 /// How far from a click a second press can land and still count as a double click.
 const DOUBLE_CLICK_REACH: f32 = 6.0;
-/// How often to look for the open file having been replaced on disk.
-const FILE_CHECK_SECONDS: f32 = 1.0;
+/// How often to look for the open file having been replaced on disk, which is also how often an
+/// idle window wakes for the other checks to run. On macOS, Metal keeps about 450 MB of buffers in
+/// use while frames come every second, and lets them go a moment after they stop, so an idle window
+/// that woke every second held on to them for good. It stays under `LOG_RETURN_SECONDS`, which a
+/// gap between frames would otherwise take for the machine having slept.
+const FILE_CHECK_SECONDS: f32 = 3.0;
 /// How often to look for a sync tool's conflict copies beside the open file.
 const COPY_CHECK_SECONDS: f32 = 5.0;
 /// How often to look at a logged document's revision logs.

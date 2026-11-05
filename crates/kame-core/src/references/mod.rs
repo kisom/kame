@@ -512,6 +512,10 @@ pub fn citation_at(text: &str, offset: usize) -> Option<(usize, usize)> {
         .find(|(start, end)| *start < offset && offset <= *end)
 }
 
+/// How many digits of a year go in a suggested key, so that with a name of at most 40 letters
+/// there is room left for a suffix within `MAX_KEY`.
+const MAX_YEAR_DIGITS: usize = 8;
+
 /// A key for `reference` from its first author's last name and its year, with `a`, `b` and so
 /// on added if that's taken. Characters a key can't hold are dropped. `None` if no letter is
 /// left of the name.
@@ -534,6 +538,7 @@ pub fn suggest_key(reference: &Reference, references: &References) -> Option<Str
         .year
         .chars()
         .filter(char::is_ascii_digit)
+        .take(MAX_YEAR_DIGITS)
         .collect();
     let base = format!("{name}{year}");
     if !references.contains(&base) {
@@ -842,6 +847,17 @@ mod tests {
         );
         assert_eq!(suggest_key(&author("王", "2020"), &none), None);
         assert_eq!(suggest_key(&Reference::default(), &none), None);
+    }
+
+    #[test]
+    fn a_suggested_key_is_always_a_valid_key() {
+        let long = author(&"k".repeat(100), &"1".repeat(100));
+        let mut taken = References::new();
+        for _ in 0..30 {
+            let key = suggest_key(&long, &taken).expect("a key");
+            assert!(valid_key(&key), "{key}");
+            taken.insert(key, Reference::default());
+        }
     }
 
     #[test]

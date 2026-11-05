@@ -279,6 +279,14 @@ fn rewrite(path: &Path, old: &str, new: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `path` is a document with no file and a log folder with no logs in it, which holds
+/// nothing that could cite a reference. A log folder that can't be looked at doesn't count.
+fn holds_no_logs(path: &Path) -> bool {
+    !path.is_file()
+        && kame_sync::revlog::Store::log_sizes(&kame_sync::logs::log_folder(path))
+            .is_some_and(|logs| logs.is_empty())
+}
+
 /// Renames the reference `old` to `new`, and the citations of it in every document that has
 /// them except `open`, which the app rewrites through its own session. The new file is written
 /// first and the old one removed last, so an interruption leaves both and loses nothing. With an
@@ -323,6 +331,9 @@ pub fn rename(
             continue;
         }
         let Some((doc, _)) = read_document(&path) else {
+            if holds_no_logs(&path) {
+                continue;
+            }
             renamed
                 .failed
                 .push((path, "couldn't be read, so it may cite this".to_string()));
@@ -783,6 +794,33 @@ mod tests {
         assert_eq!(loaded.references.keys().collect::<Vec<_>>(), ["fresh"]);
         assert_eq!(loaded.references.get("fresh"), Some(&article()));
         assert!(!folder(&notebook).join("old.yaml").exists());
+    }
+
+    #[test]
+    fn an_empty_log_folder_does_not_keep_the_old_key() {
+        let notebook = notebook("ref-rename-empty-logs");
+        save(&notebook, "old", &article()).unwrap();
+        let document = notebook.root.join("x.kame");
+        std::fs::create_dir(kame_sync::logs::log_folder(&document)).unwrap();
+        assert!(citing(&notebook).is_empty());
+        let renamed = rename(&notebook, "old", "fresh", None).unwrap();
+        assert_eq!(renamed.failed, []);
+        assert!(!renamed.old_kept);
+        assert!(!folder(&notebook).join("old.yaml").exists());
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_read_still_keeps_the_old_key() {
+        let notebook = notebook("ref-rename-bad-logs");
+        save(&notebook, "old", &article()).unwrap();
+        let document = notebook.root.join("x.kame");
+        let logs = kame_sync::logs::log_folder(&document);
+        std::fs::create_dir(&logs).unwrap();
+        // A folder where a log should be can't be read as one.
+        std::fs::create_dir(logs.join("a.log")).unwrap();
+        let renamed = rename(&notebook, "old", "fresh", None).unwrap();
+        assert_eq!(renamed.failed.len(), 1);
+        assert!(renamed.old_kept);
     }
 
     #[test]

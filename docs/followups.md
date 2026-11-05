@@ -76,7 +76,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 
 - [ ] **The form's preview isn't italic.** It shows the entry as plain text, unlike an export.
 - [ ] **Citations a rename can't see.** One only in another log head or unmerged logs stays `[old]`.
-- [ ] **An empty `.x.kame.sync` folder** keeps an old key's file forever, as it can't be read to check.
 - [ ] **Feed citations use fragment-only links,** as its footnotes do, so they lead nowhere off the page.
 - [ ] **`page_blocks` clones the blocks every frame** when one holds a citation. It hasn't been measured.
 - [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.

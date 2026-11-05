@@ -4800,6 +4800,69 @@ mod tests {
     }
 
     #[test]
+    fn a_document_the_os_asks_for_waits_for_a_dialog_and_leaves_it_alone() {
+        let mut page = page_in_notebook("");
+        let opened = page.app.session.path().map(Path::to_path_buf);
+        let other = other_document(&page, "other.kame", "elsewhere");
+        page.app.begin_properties();
+        page.frame(Vec::new());
+
+        page.app.request_open(other.clone());
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
+        assert!(page.app.metadata_prompt.is_some());
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("other.kame opens once the open dialog is closed")
+        );
+
+        press_key(&mut page, egui::Key::Escape);
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path(), Some(other.as_path()));
+        assert!(page.app.metadata_prompt.is_none());
+    }
+
+    #[test]
+    fn properties_saved_after_the_os_asks_for_a_document_stay_on_the_first() {
+        let mut page = page_in_notebook("");
+        let other = other_document(&page, "other.kame", "elsewhere");
+        {
+            let mut session = Session::open(&other).unwrap();
+            let mut metadata = session.metadata.clone();
+            metadata.author = "Other author".to_string();
+            session.set_metadata(metadata);
+        }
+        page.app.begin_properties();
+        page.frame(Vec::new());
+        let prompt = page.app.metadata_prompt.as_mut().unwrap();
+        prompt.title = "Title of the first".to_string();
+
+        page.app.request_open(other.clone());
+        page.frame(Vec::new());
+        page.press("Save");
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path(), Some(other.as_path()));
+        assert_eq!(page.app.session.metadata.author, "Other author");
+        assert_ne!(page.app.session.metadata.title, "Title of the first");
+    }
+
+    #[test]
+    fn a_document_the_os_asks_for_on_a_window_just_started_opens_at_once() {
+        let folder = test_temp_dir().join(format!("start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let other = folder.join("other.kame");
+        drop(Session::open(&other).unwrap());
+        let mut page = Headless::new(Session::anonymous().unwrap());
+
+        page.app.request_open(other.clone());
+
+        assert_eq!(page.app.session.path(), Some(other.as_path()));
+    }
+
+    #[test]
     fn a_document_the_os_asks_for_opens_at_once_with_no_form() {
         let mut page = page_in_notebook("");
         let other = other_document(&page, "other.kame", "elsewhere");

@@ -2439,7 +2439,7 @@ struct KameApp {
     /// Decoded image textures for `BlockKind::Image` blocks, keyed by path.
     image_textures: HashMap<String, egui::TextureHandle>,
     /// The note whose popover is open, and where its marker was painted.
-    /// A document the OS asked for while a form was up, to open once it closes.
+    /// A document the OS asked for while a dialog was up, to open once it closes.
     held_open: Option<PathBuf>,
     open_note: Option<AnnotationId>,
     open_note_pos: Option<Pos2>,
@@ -6159,10 +6159,11 @@ impl KameApp {
         self.open_or_confirm(path);
     }
 
-    /// What the OS asked to open, which arrives only once, so a form that's up holds it rather
-    /// than turning it away. The latest asked for is the one that opens when the form closes.
+    /// What the OS asked to open, which arrives only once, so a dialog that's up holds it rather
+    /// than turning it away or being carried onto the new document. The latest asked for is the
+    /// one that opens when the dialog closes.
     fn request_open(&mut self, path: PathBuf) {
-        if !self.refs.typing_open() {
+        if !self.dialog_open() {
             self.open_picked(path);
             return;
         }
@@ -6175,9 +6176,9 @@ impl KameApp {
         self.held_open = Some(path);
     }
 
-    /// Opens what the OS asked for, if it was waiting and the form that held it has closed.
+    /// Opens what the OS asked for, if it was waiting and the dialog that held it has closed.
     fn open_held(&mut self) {
-        if !self.refs.typing_open() {
+        if !self.dialog_open() {
             if let Some(path) = self.held_open.take() {
                 self.open_picked(path);
             }

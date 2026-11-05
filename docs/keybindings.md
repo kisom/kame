@@ -106,7 +106,7 @@ caret. A marginal belongs to a whole block and has no key: all three are on the 
 the right-click menu. A note needs no words, in which case it's just a highlight.
 
 Each opens for writing as it's added. Ctrl-Enter, Close or Escape closes it, and Remove takes it
-out, along with its highlight. Emptying a marginal removes it too, and so does closing one that nothing was written in.
+out, along with its highlight. Emptying a marginal removes it too, and so does closing one that nothing was written in, which leaves nothing to undo or redo.
 
 ## Images
 

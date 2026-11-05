@@ -242,6 +242,28 @@ impl Editor {
         Some(inverse)
     }
 
+    /// Takes the most recent edit back out of the history, as if it had never been made, with
+    /// nothing for a redo to return to. An edit waiting for a redo was made on top of it, so this
+    /// does nothing then, or if it has nothing to take back or the step doesn't fit, as for
+    /// [`Editor::undo`]. Returns whether it did.
+    ///
+    /// Persist with `Db::forget_last_edit(document(), cursor())`.
+    pub fn forget_last_edit(&mut self) -> bool {
+        if !self.redo.is_empty() {
+            return false;
+        }
+        let Some(op) = self.undo.last() else {
+            return false;
+        };
+        if !try_apply_inverse(&mut self.doc, op) {
+            self.refused = true;
+            return false;
+        }
+        self.undo.pop();
+        self.coalesced = false;
+        true
+    }
+
     /// Redoes the most recently undone edit, returning the op that was applied.
     /// `None` when there is nothing to redo.
     ///

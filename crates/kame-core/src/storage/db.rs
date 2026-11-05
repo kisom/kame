@@ -648,6 +648,22 @@ impl Db {
         Ok(())
     }
 
+    /// Persists an edit taken out of the history: the head becomes `doc`, the cursor becomes
+    /// `cursor`, and the log loses everything past it, all in one transaction, so that a crash
+    /// can't leave an op for a redo to bring back.
+    pub fn forget_last_edit(&mut self, doc: &Document, cursor: usize) -> Result<(), DbError> {
+        let json = serde_json::to_string(doc)?;
+        let tx = self.conn.transaction()?;
+        truncate_ops_to_cursor(&tx, cursor)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO documents (id, json) VALUES (1, ?1)",
+            params![json],
+        )?;
+        write_cursor(&tx, cursor)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Replaces the head document with `doc`, resets the cursor to `0` and
     /// drops the whole op log — all in one transaction.
     ///
@@ -903,6 +919,25 @@ mod tests {
             Db::open_read_only(&path),
             Err(DbError::SchemaTooNew { found: 99, .. })
         ));
+    }
+
+    #[test]
+    fn forgetting_an_edit_moves_log_head_and_cursor_together() {
+        let path = temp_db_path();
+        let first = sample_document();
+        let mut second = first.clone();
+        second.title = "Second".to_string();
+        let mut db = Db::open(&path).unwrap();
+        db.record_edit(&first, &insert_op(0)).unwrap();
+        db.record_edit(&second, &insert_op(1)).unwrap();
+
+        db.forget_last_edit(&first, 1).unwrap();
+        drop(db);
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.load_document().unwrap(), first);
+        assert_eq!(db.load_ops().unwrap().len(), 1);
+        assert_eq!(db.cursor().unwrap(), 1);
     }
 
     #[test]

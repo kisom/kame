@@ -2190,8 +2190,10 @@ impl Session {
     }
 
     /// Takes away the marginal `id` if nothing has been done since it was added and it still says
-    /// what it was added with, by undoing the add. A marginal that was written in, or anything
-    /// else, is left. Returns whether it went.
+    /// what it was added with. The add leaves the history as well, so that nothing is left to
+    /// redo, unless words written in it and undone are still waiting for a redo, when the add is
+    /// undone instead. A marginal that was written in, or anything else, is left, and the caret
+    /// and selection stay as they are. Returns whether it went.
     pub fn discard_unwritten_marginal(&mut self, id: AnnotationId) -> bool {
         let unwritten = match self.editor.applied_ops().last() {
             Some(Op::AddAnnotation { annotation }) => {
@@ -2206,7 +2208,33 @@ impl Session {
             }
             _ => false,
         };
-        unwritten && self.undo()
+        if !unwritten || self.save_failed {
+            return false;
+        }
+        let (caret, selection) = (self.caret, self.selection);
+        if self.history().1 > 0 {
+            if !self.undo() {
+                return false;
+            }
+            self.caret = caret;
+            self.selection = selection;
+            return true;
+        }
+        if !self.editor.forget_last_edit() {
+            self.report_refused("undo");
+            return false;
+        }
+        self.check_file();
+        if !self.replaced && !self.newer {
+            let forgotten = self
+                .db
+                .forget_last_edit(self.editor.document(), self.editor.cursor());
+            match forgotten {
+                Ok(()) => self.clear_save_error(),
+                Err(err) => self.mark_save_failed(err),
+            }
+        }
+        true
     }
 
     /// Replaces a note's body and persists it as one undoable edit. A body the note already has
@@ -3043,6 +3071,107 @@ mod tests {
 
     fn open(path: &Path) -> Session {
         Session::open(path).expect("open a session")
+    }
+
+    #[test]
+    fn a_discarded_marginal_leaves_no_step_and_a_reopen_agrees() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("some words");
+        let before = session.document().clone();
+        let history = session.history();
+
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.discard_unwritten_marginal(id));
+
+        assert_eq!(session.document(), &before);
+        assert_eq!(session.history(), history);
+        assert_eq!(session.history().1, 0, "nothing for a redo to bring back");
+        assert!(!session.redo());
+        assert_eq!(session.db.load_ops().unwrap().len(), history.0);
+        assert_eq!(session.db.cursor().unwrap(), history.0);
+
+        drop(session);
+        let mut reopened = open(&path);
+        assert_eq!(reopened.document(), &before);
+        assert_eq!(reopened.history(), history);
+        assert!(!reopened.redo());
+        assert!(reopened.undo());
+        assert!(reopened.document().blocks[0].text.is_empty());
+    }
+
+    #[test]
+    fn editing_after_a_discarded_marginal_keeps_the_log_and_the_history_together() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("one");
+        session.split();
+        session.insert("two");
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.discard_unwritten_marginal(id));
+        session.insert(" more");
+        let (document, history) = (session.document().clone(), session.history());
+        assert_eq!(session.db.load_ops().unwrap().len(), history.0);
+
+        drop(session);
+        let mut reopened = open(&path);
+        assert_eq!(reopened.document(), &document);
+        assert_eq!(reopened.history(), history);
+        while reopened.undo() {}
+        assert!(reopened.document().annotations.is_empty());
+        assert_eq!(reopened.document().blocks.len(), 1);
+        assert_eq!(reopened.document().blocks[0].text, "");
+    }
+
+    #[test]
+    fn discarding_a_marginal_leaves_the_caret_and_selection_alone() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("some words here");
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: 4,
+        });
+        let (caret, selection) = (session.caret, session.selection);
+        assert!(selection.is_some());
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.discard_unwritten_marginal(id));
+        assert_eq!(session.caret, caret);
+        assert_eq!(session.selection, selection);
+    }
+
+    #[test]
+    fn words_undone_in_a_marginal_can_still_come_back_after_it_is_closed() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("some words here");
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: 4,
+        });
+        let (caret, selection) = (session.caret, session.selection);
+        let id = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.set_annotation_body(id, "said something"));
+        assert!(session.undo());
+        session.caret = caret;
+        session.selection = selection;
+
+        assert!(session.discard_unwritten_marginal(id));
+
+        assert!(session.document().annotations.is_empty());
+        assert_eq!(session.caret, caret);
+        assert_eq!(session.selection, selection);
+        assert!(session.redo());
+        assert!(session.redo());
+        assert_eq!(session.document().annotations[0].body, "said something");
     }
 
     #[test]

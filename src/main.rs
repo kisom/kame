@@ -9976,7 +9976,59 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         page.press("Close");
         assert!(page.app.session.document().annotations.is_empty());
         assert_eq!(page.app.session.document(), &before);
-        assert_eq!(page.app.session.history(), (1, 1));
+        assert_eq!(page.app.session.history(), (1, 0));
+    }
+
+    #[test]
+    fn closing_an_unwritten_marginal_keeps_the_selection() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("some words");
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        session.select_to(Cursor {
+            block_id,
+            offset: 4,
+        });
+        let selection = session.selection;
+        assert!(selection.is_some());
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        page.press("Close");
+        assert!(page.app.session.document().annotations.is_empty());
+        assert_eq!(page.app.session.selection, selection);
+    }
+
+    #[test]
+    fn shift_clicking_the_page_past_an_unwritten_marginal_selects() {
+        let (mut page, before) = page_with_unwritten_marginal();
+        let block_id = page.app.session.document().blocks[0].id;
+        page.app.session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        let at = Pos2::new(page.body_left() + 12.0, PAGE_PADDING + 8.0);
+        let modifiers = egui::Modifiers {
+            shift: true,
+            ..egui::Modifiers::NONE
+        };
+        page.frame(vec![egui::Event::ModifiersChanged(modifiers)]);
+        page.frame(vec![egui::Event::PointerMoved(at)]);
+        for pressed in [true, false] {
+            page.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            }]);
+        }
+        assert_eq!(page.app.session.document(), &before);
+        assert!(page.app.session.selection.is_some());
     }
 
     /// A page with a word on it and a marginal just added to it, as Annotate > Marginal leaves it.

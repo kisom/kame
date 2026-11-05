@@ -2497,6 +2497,10 @@ struct KameApp {
     open_note_focus: bool,
     /// Whether the open note has just been added, so that its starting words get typed over.
     open_note_fresh: bool,
+    /// What the input method is composing at the caret, such as an accent waiting for its letter.
+    ime_preedit: String,
+    /// Where the page drew its caret last, on the screen.
+    page_caret_rect: Option<Rect>,
     /// Distraction-free view toggles (never persisted).
     modes: Modes,
     /// The body font size, in px. Every other size (leading, headings, margin
@@ -2647,6 +2651,8 @@ impl KameApp {
             open_note_body: String::new(),
             open_note_focus: false,
             open_note_fresh: false,
+            ime_preedit: String::new(),
+            page_caret_rect: None,
             modes: Modes::default(),
             body_size,
             dark,
@@ -3507,6 +3513,15 @@ impl KameApp {
         let events = ctx.input(|input| input.events.clone());
         let now = std::time::Instant::now();
         for event in &events {
+            // What the input method is composing is shown at the caret until it's finished.
+            match event {
+                egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                    self.ime_preedit = text.clone();
+                    continue;
+                }
+                egui::Event::Ime(egui::ImeEvent::Commit(_)) => self.ime_preedit.clear(),
+                _ => {}
+            }
             let prefixed = self.escape_prefix.command_for(event, now);
             let Some(command) = prefixed.or_else(|| command_for_event(event)) else {
                 continue;
@@ -4710,6 +4725,48 @@ impl KameApp {
             );
             block_painter(index).rect_filled(rect, 0.0, self.palette.caret_ink);
             caret_rect = Some(rect);
+        }
+        self.page_caret_rect = caret_rect;
+
+        // --- the input method ------------------------------------------------
+        // Accents typed as two keys, and other scripts, are composed by the system's input method,
+        // which only takes the keys while something asks for it: the page does, at its caret, when
+        // no field has the keyboard. What's being composed shows after the caret, underlined,
+        // until it's finished and typed.
+        if let Some(rect) = caret_rect {
+            if ui.ctx().memory(|memory| memory.focused().is_none()) {
+                let to_screen = ui
+                    .ctx()
+                    .layer_transform_to_global(ui.layer_id())
+                    .unwrap_or_default();
+                let shown = ui.clip_rect();
+                ui.ctx().output_mut(|output| {
+                    output.ime = Some(egui::output::IMEOutput {
+                        purpose: egui::IMEPurpose::Normal,
+                        rect: to_screen * shown,
+                        cursor_rect: to_screen * rect,
+                        should_interrupt_composition: false,
+                    });
+                });
+            }
+            if !self.ime_preedit.is_empty() {
+                let ink = Color32::from_rgb(
+                    self.palette.body_ink[0],
+                    self.palette.body_ink[1],
+                    self.palette.body_ink[2],
+                );
+                let composed = painter.text(
+                    rect.left_top(),
+                    Align2::LEFT_TOP,
+                    &self.ime_preedit,
+                    FontId::proportional(config.body_size),
+                    ink,
+                );
+                painter.line_segment(
+                    [composed.left_bottom(), composed.right_bottom()],
+                    egui::Stroke::new(1.0, ink),
+                );
+            }
         }
 
         // --- reveal the caret (find navigation) ------------------------------
@@ -7132,6 +7189,8 @@ pub(crate) struct Headless {
     time: f64,
     /// What the last frame drew, as a screen reader is told it, for finding a window's buttons.
     drawn: Option<egui::accesskit::TreeUpdate>,
+    /// What the last frame asked of the input method, if anything did.
+    ime: Option<egui::output::IMEOutput>,
     /// How wide the window is. It is `WIDTH` unless a test narrows it.
     width: f32,
     /// How tall the window is. It is `HEIGHT` unless a test shrinks it.
@@ -7153,6 +7212,7 @@ impl Headless {
             ctx,
             time: 0.0,
             drawn: None,
+            ime: None,
             width: Self::WIDTH,
             height: Self::HEIGHT,
         }
@@ -7197,6 +7257,7 @@ impl Headless {
             app.show_citation(ui.ctx());
         });
         self.drawn = output.platform_output.accesskit_update.take();
+        self.ime = output.platform_output.ime;
         output.drop_without_applying_deltas();
     }
 
@@ -10760,6 +10821,61 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
     fn tests_keep_their_settings_out_of_the_persons() {
         let path = config_path().unwrap();
         assert!(path.starts_with(test_temp_dir()), "{}", path.display());
+    }
+
+    fn composing(text: &str) -> egui::Event {
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: text.to_string(),
+            active_range_chars: None,
+        })
+    }
+
+    #[test]
+    fn an_accent_composed_through_the_input_method_is_typed_once() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("caf");
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+
+        page.frame(vec![composing("´")]);
+        assert_eq!(page.app.ime_preedit, "´", "shown while it's being composed");
+        assert_eq!(page.app.session.document().blocks[0].text, "caf");
+
+        page.frame(vec![
+            composing(""),
+            egui::Event::Ime(egui::ImeEvent::Commit("é".to_string())),
+        ]);
+        assert_eq!(page.app.session.document().blocks[0].text, "café");
+        assert_eq!(page.app.ime_preedit, "");
+    }
+
+    #[test]
+    fn the_page_asks_for_the_input_method_at_its_caret() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        let ime = page.ime.expect("the page asks for it");
+        assert!(ime.cursor_rect.height() > 0.0);
+        assert!(ime.rect.contains(ime.cursor_rect.center()));
+    }
+
+    #[test]
+    fn a_note_box_has_the_input_method_rather_than_the_page() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("word");
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, MenuAction::Annotate(AnnotationKind::Marginal));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        let page_caret = page.app.page_caret_rect.expect("the page's caret");
+
+        let ime = page.ime.expect("the note's box asks for it");
+        assert_ne!(ime.cursor_rect, page_caret);
     }
 
     // --- the help dialog -------------------------------------------------------

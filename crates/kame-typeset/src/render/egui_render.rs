@@ -981,6 +981,10 @@ pub fn adjacent_line(
 pub fn command_for_event(event: &Event) -> Option<Command> {
     match event {
         Event::Text(text) if !text.is_empty() => Some(Command::Insert(text.clone())),
+        // What an input method finishes composing, such as an accent and its letter, is typed.
+        Event::Ime(egui::ImeEvent::Commit(text)) if !text.is_empty() => {
+            Some(Command::Insert(text.clone()))
+        }
         Event::Paste(text) if !text.is_empty() => Some(Command::Paste(text.clone())),
         Event::Copy => Some(Command::Copy),
         Event::Cut => Some(Command::Cut),
@@ -2335,6 +2339,24 @@ xyz"
         assert_eq!(
             command_for_key(Key::ArrowRight, alt_shift),
             Some(Command::SelectWordRight)
+        );
+    }
+
+    #[test]
+    fn a_finished_composition_is_typed_and_one_in_progress_is_not() {
+        use egui::ImeEvent;
+        assert_eq!(
+            command_for_event(&Event::Ime(ImeEvent::Commit("é".to_string()))),
+            Some(Command::Insert("é".to_string()))
+        );
+        let composing = ImeEvent::Preedit {
+            text: "´".to_string(),
+            active_range_chars: None,
+        };
+        assert_eq!(command_for_event(&Event::Ime(composing)), None);
+        assert_eq!(
+            command_for_event(&Event::Ime(ImeEvent::Commit(String::new()))),
+            None
         );
     }
 

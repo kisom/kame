@@ -213,6 +213,39 @@ pub fn own_target_after_move(target: &str, from: &Path, to: &Path) -> String {
     }
 }
 
+/// `target`, a link in the document saved as `to` having been at `from`, as it has to be written
+/// afterward. A link to the document itself goes on meaning the document, under the name it now
+/// has, and any other goes on leading where it did, as for a move.
+pub fn own_target_after_save_as(target: &str, from: &Path, to: &Path) -> String {
+    let (path, _) = split_document_target(target);
+    let same_file = match (from.canonicalize(), to.canonicalize()) {
+        (Ok(from), Ok(to)) => from == to,
+        _ => from == to,
+    };
+    if !same_file && names_document(path, from) {
+        moved_target(target, to, to)
+    } else {
+        own_target_after_move(target, from, to)
+    }
+}
+
+/// Whether a link's path, written in the document at `document`, leads to that document. `www.`
+/// starts a web address, as it does in a document's text.
+fn names_document(path: &str, document: &Path) -> bool {
+    if path.is_empty() || path.starts_with("www.") {
+        return false;
+    }
+    let named = resolve_open_path(path, document);
+    let file = if named.is_dir() {
+        Some(named.join(FOLDER_INDEX))
+    } else {
+        find_document(path, document)
+    };
+    let real = |file: &Path| file.canonicalize().ok();
+    file.and_then(|file| real(&file))
+        .is_some_and(|file| real(document) == Some(file))
+}
+
 /// A document link's target as its path and the heading it names, if any.
 pub fn split_document_target(target: &str) -> (&str, Option<&str>) {
     match target.split_once('#') {

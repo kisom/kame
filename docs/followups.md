@@ -13,6 +13,7 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
 - [ ] **A footnote or note added right after punctuation** has no word to anchor to, so it sits at one point and its mark moves along as you keep typing there.
+- [ ] **Typing straight after a paste** joins its undo step, so undo takes away both. `Session::insert_as_step` is what a cited key uses to stay apart.
 
 ## Site
 

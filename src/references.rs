@@ -431,11 +431,6 @@ impl ReferenceForm {
         self.problem(references).is_none()
     }
 
-    /// The entry as it would read.
-    pub(crate) fn preview(&self) -> String {
-        plain(&self.built())
-    }
-
     /// The entry as it would read, with the runs an export italicises in italics.
     pub(crate) fn preview_job(&self, color: egui::Color32, font: egui::FontId) -> LayoutJob {
         let mut job = LayoutJob::default();
@@ -2338,7 +2333,7 @@ mod tests {
                 .collect();
             assert!(!italic.is_empty(), "{kind:?} has an italic section");
             assert!(job.sections.iter().any(|section| !section.format.italics));
-            assert_eq!(job.text, form.preview());
+            assert_eq!(job.text, plain(&form.built()));
         }
     }
 
@@ -2486,7 +2481,7 @@ mod tests {
                 ..Reference::default()
             }
         );
-        assert_eq!(form.preview(), typed);
+        assert_eq!(plain(&form.built()), typed);
 
         // What was typed on the other tab is still there.
         form.tab = Tab::Structured;

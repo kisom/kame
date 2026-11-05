@@ -11,8 +11,10 @@ mod external;
 mod macos;
 mod notebook;
 mod publish;
+mod references;
 
 use kame_core::links::{image_file, resolve_open_path, split_document_target, stored_image_path};
+use kame_core::references::{cited_key, with_citation_spans};
 use kame_core::session::{is_markdown_path, Clipped, LinkUnder, Session};
 use kame_core::{edit, model, storage};
 use kame_typeset::{layout, render};
@@ -2227,6 +2229,8 @@ struct KameApp {
     /// The notebook this document is in, and what's showing of it.
     nb: notebook::NotebookUi,
     publishing: publish::Publishing,
+    /// The notebook's references.
+    refs: references::ReferencesUi,
     /// The open document's revision logs, if its folder has them turned on.
     logged: Option<kame_sync::logs::Logged>,
     /// The file `logged` is for, and whether a problem with its logs has been mentioned.
@@ -2391,6 +2395,7 @@ impl KameApp {
             device,
             nb: notebook::NotebookUi::new(browser_open, browser_folders),
             publishing: publish::Publishing::default(),
+            refs: references::ReferencesUi::default(),
             logged: None,
             logged_path: None,
             orphan_mentioned: false,
@@ -2533,6 +2538,7 @@ impl KameApp {
             || self.nb.file_op.is_some()
             || self.nb.move_report.is_some()
             || self.publishing.report.is_some()
+            || self.refs.shown.is_some()
     }
 
     /// Closes whichever file dialog is open. Returns whether one was closed, so
@@ -2548,6 +2554,7 @@ impl KameApp {
         self.link_prompt = None;
         self.restore_picker = None;
         self.publishing.report = None;
+        self.refs.shown = None;
         open
     }
 
@@ -2573,10 +2580,10 @@ impl KameApp {
                 else {
                     return;
                 };
-                self.notice = self
-                    .session
-                    .export_markdown_to(&path, &kame_core::references::References::new())
-                    .map(|path| format!("exported Markdown to {}", path.display()));
+                let exported = self.session.export_markdown_to(&path, &self.refs.list);
+                self.notice = exported.map(|path| {
+                    self.export_notice(format!("exported Markdown to {}", path.display()), false)
+                });
             }
             FileCommand::ExportHtml => {
                 let suggestion = self.session.export_suggestion("html");
@@ -2584,10 +2591,10 @@ impl KameApp {
                 else {
                     return;
                 };
-                self.notice = self
-                    .session
-                    .export_html_to(&path, &kame_core::references::References::new())
-                    .map(|path| format!("exported HTML to {}", path.display()));
+                let exported = self.session.export_html_to(&path, &self.refs.list);
+                self.notice = exported.map(|path| {
+                    self.export_notice(format!("exported HTML to {}", path.display()), true)
+                });
             }
             FileCommand::SnapshotNow => {
                 self.restore_picker = None;
@@ -3208,6 +3215,9 @@ impl KameApp {
                         self.session.apply_markdown_shortcut();
                         self.session.apply_inline_markdown();
                         self.session.apply_markdown_link();
+                        if text == "]" {
+                            self.note_closed_citation();
+                        }
                     }
                 }
                 Command::Paste(text) => {
@@ -3906,9 +3916,8 @@ impl KameApp {
         // Shape only blocks whose content changed since the last frame; an
         // idle repaint shapes nothing, and an edit re-shapes one block.
         let marks = footnote_marks(self.session.document());
-        let layouts =
-            self.layouts
-                .sync_marked(&mut self.renderer, &self.session.document().blocks, &marks);
+        let page = references::page_blocks(&self.session.document().blocks, &self.refs.list);
+        let layouts = self.layouts.sync_marked(&mut self.renderer, &page, &marks);
 
         let paper: [u8; 3] = [
             self.palette.background.r(),
@@ -3919,7 +3928,7 @@ impl KameApp {
         self.textures.sync(
             ui.ctx(),
             &mut self.renderer,
-            &self.session.document().blocks,
+            &page,
             &layouts,
             self.palette.body_ink,
             paper,
@@ -3927,7 +3936,7 @@ impl KameApp {
         );
 
         let document = self.session.document();
-        let blocks = &document.blocks;
+        let blocks: &[Block] = &page;
         let caret = self.session.caret;
 
         // List markers: a bullet that changes with the level, or a number.
@@ -4861,7 +4870,11 @@ impl KameApp {
                     } else if let Some(target) = document_link_at(blocks, &cursor) {
                         followed_link = Some(target);
                     } else if let Some(url) = url_at(blocks, &cursor) {
-                        if self.nb.notebook.is_some() && notebook::is_relative_link(&url) {
+                        if let Some(key) =
+                            cited_key(&url).filter(|key| self.refs.list.contains(key))
+                        {
+                            self.refs.show(key, pos);
+                        } else if self.nb.notebook.is_some() && notebook::is_relative_link(&url) {
                             followed_link = Some(url);
                         } else {
                             open_in_browser(&url);
@@ -4881,6 +4894,7 @@ impl KameApp {
         } else if let Some(at) = word_selection {
             self.session.select_word_at(at);
             self.set_open_note(None);
+            self.refs.shown = None;
         } else if let Some(target) = followed_link {
             self.follow_document_link(&target);
         } else if let Some(cursor) = footnote_return {
@@ -5475,7 +5489,8 @@ impl KameApp {
     fn layout_of(&mut self, block: &Block) -> BlockLayout {
         let marks = footnote_marks(self.session.document());
         let block_marks = marks.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
-        self.renderer.layout_marked(block, block_marks)
+        self.renderer
+            .layout_marked(&with_citation_spans(block, &self.refs.list), block_marks)
     }
 
     /// Opens the Document Properties dialog on the current metadata.
@@ -6602,6 +6617,7 @@ impl eframe::App for KameApp {
         self.open_pending_backlink();
         self.show_replaced_prompt(ui.ctx());
         self.show_site_report(ui.ctx());
+        self.show_citation(ui.ctx());
         self.remember_document();
         self.keep_position(ui.ctx());
     }
@@ -6611,6 +6627,90 @@ impl eframe::App for KameApp {
 #[cfg(test)]
 pub(crate) fn test_temp_dir() -> std::path::PathBuf {
     kame_test_dir::root().to_path_buf()
+}
+
+/// An app with no window, driven one frame at a time. It draws the page and runs what a frame
+/// runs around it, leaving out what writes kame's settings.
+#[cfg(test)]
+pub(crate) struct Headless {
+    pub(crate) app: KameApp,
+    ctx: egui::Context,
+    time: f64,
+}
+
+#[cfg(test)]
+impl Headless {
+    const WIDTH: f32 = 1000.0;
+
+    pub(crate) fn new(session: Session) -> Headless {
+        let ctx = egui::Context::default();
+        let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+        let app = KameApp::new(&creation, session, None, KameConfig::default());
+        Headless {
+            app,
+            ctx,
+            time: 0.0,
+        }
+    }
+
+    /// One frame, in the order `logic` and `ui` run things, with `events` having just happened.
+    pub(crate) fn frame(&mut self, events: Vec<egui::Event>) {
+        self.time += 0.02;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(Self::WIDTH, 800.0),
+            )),
+            time: Some(self.time),
+            events,
+            ..Default::default()
+        };
+        let app = &mut self.app;
+        app.notebook_tick(&self.ctx);
+        let output = self.ctx.run_ui(input, |ui| {
+            app.handle_input(ui.ctx());
+            let history = app.session.history();
+            app.notice_tracker.update(&mut app.notice, history);
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| app.draw_surface(ui));
+                });
+            app.show_citation(ui.ctx());
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    /// A press and a release at `pos`, with the pointer having come there first.
+    fn press_and_release(&mut self, pos: Pos2) {
+        self.frame(vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            self.frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+    }
+
+    /// A click at `pos`, long enough after the last one not to make a double click.
+    pub(crate) fn click(&mut self, pos: Pos2) {
+        self.time += 1.0;
+        self.press_and_release(pos);
+    }
+
+    pub(crate) fn double_click(&mut self, pos: Pos2) {
+        self.click(pos);
+        self.press_and_release(pos);
+    }
+
+    /// Where the text starts across the page.
+    pub(crate) fn body_left(&self) -> f32 {
+        page_geometry(self.app.renderer.config(), Self::WIDTH).body_left
+    }
 }
 
 #[cfg(test)]
@@ -9269,5 +9369,113 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(merged_notice(0), "merged");
         assert_eq!(merged_notice(1), "merged, with 1 note to look at");
         assert_eq!(merged_notice(3), "merged, with 3 notes to look at");
+    }
+
+    // --- citations on the page -----------------------------------------------
+
+    /// At a 400 point measure, this hyphenates its key if that's only text, and sets it whole
+    /// if it's a link, which moves the lines around it.
+    const BREAKS_AROUND_KEY: &str = "Characteristically unexceptionable compositions accommodate \
+extraordinarily disproportionate considerations, as in [internationalization] and notwithstanding \
+misunderstandings about organization while straightforward arrangements occasionally demonstrate \
+remarkably counterintuitive properties, whatever anybody happens to believe about them afterwards.";
+
+    fn page_with_breaks_around_key() -> Headless {
+        let path = temp_db_path();
+        std::fs::write(path.with_file_name("notebook.yaml"), "").unwrap();
+        let mut session = open(&path);
+        session.insert(BREAKS_AROUND_KEY);
+        let mut page = Headless::new(session);
+        page.app.renderer.set_config(LayoutConfig {
+            body_width: 400.0,
+            hyphenate: true,
+            ..LayoutConfig::default()
+        });
+        // Finds the notebook, after which only a change to its files touches the list.
+        page.frame(Vec::new());
+        page
+    }
+
+    fn known_key() -> kame_core::references::References {
+        let mut references = kame_core::references::References::new();
+        references.insert(
+            "internationalization".to_string(),
+            kame_core::references::Reference {
+                title: "T".to_string(),
+                ..Default::default()
+            },
+        );
+        references
+    }
+
+    /// Where each line starts, as the caret keys see them.
+    fn caret_lines(page: &mut Headless) -> Vec<usize> {
+        let block = page.app.session.document().blocks[0].clone();
+        let layout = page.app.layout_of(&block);
+        layout.lines.iter().map(|line| line.start).collect()
+    }
+
+    /// Where a click at the left of the line at `line` puts the caret, which is where the page
+    /// has that line starting.
+    fn painted_line_start(page: &mut Headless, line: usize) -> usize {
+        let block = page.app.session.document().blocks[0].clone();
+        let layout = page.app.layout_of(&block);
+        let run = &layout.runs[line];
+        let y = PAGE_PADDING + run.line_top + run.line_height / 2.0;
+        page.click(Pos2::new(1.0, y));
+        page.app.session.caret.offset
+    }
+
+    #[test]
+    fn a_citation_shapes_the_same_for_the_caret_and_the_page() {
+        let mut page = page_with_breaks_around_key();
+        let as_text = caret_lines(&mut page);
+
+        page.app.refs.list = known_key();
+        let as_link = caret_lines(&mut page);
+        assert_ne!(as_text, as_link, "the key has to change where lines break");
+
+        page.frame(Vec::new());
+        assert_eq!(painted_line_start(&mut page, 3), as_link[3]);
+    }
+
+    #[test]
+    fn the_page_shapes_again_when_a_key_comes_and_goes() {
+        let mut page = page_with_breaks_around_key();
+        let as_text = caret_lines(&mut page);
+        page.frame(Vec::new());
+        assert_eq!(painted_line_start(&mut page, 3), as_text[3]);
+
+        page.app.refs.list = known_key();
+        let as_link = caret_lines(&mut page);
+        page.frame(Vec::new());
+        assert_eq!(painted_line_start(&mut page, 3), as_link[3]);
+
+        page.app.refs.list = kame_core::references::References::new();
+        page.frame(Vec::new());
+        assert_eq!(painted_line_start(&mut page, 3), as_text[3]);
+    }
+
+    #[test]
+    fn a_known_key_is_coloured_as_a_link_and_drawn_again() {
+        let mut page = page_with_breaks_around_key();
+        let block = page.app.session.document().blocks[0].clone();
+        let coloured = |layout: &BlockLayout| {
+            layout
+                .runs
+                .iter()
+                .flat_map(|run| &run.glyphs)
+                .any(|glyph| glyph.color_opt.is_some())
+        };
+        let texture = |page: &Headless| page.app.textures.get(block.id).unwrap().texture.id();
+        assert!(!coloured(&page.app.layout_of(&block)));
+        let as_text = texture(&page);
+
+        page.app.refs.list = known_key();
+        page.frame(Vec::new());
+
+        assert!(coloured(&page.app.layout_of(&block)));
+        assert_ne!(texture(&page), as_text);
+        assert_eq!(page.app.session.document().blocks[0], block, "only drawn");
     }
 }

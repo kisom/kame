@@ -552,6 +552,9 @@ impl KameApp {
                 self.start_backlinks();
             }
         }
+        if let Some(problem) = self.refs.refresh(self.nb.notebook.as_ref()) {
+            self.session.last_error = Some(problem);
+        }
         self.nb.check_listing();
         if let Some(coming) = &self.nb.listing_coming {
             match coming.try_recv() {

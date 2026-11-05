@@ -5,6 +5,7 @@ use harper_core::linting::{LintGroup, LintKind, Suggestion};
 use harper_core::spell::FstDictionary;
 use harper_core::{Dialect, Document};
 use kame_core::model::{bare_link_ranges, AcceptedMark, Block, BlockKind, SpanStyle};
+use kame_core::references::citation_ranges;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 /// Rules that mark more that's right than wrong in the writing this was tried on.
@@ -152,7 +153,7 @@ impl Checker {
     }
 
     /// Everything to mark in a block, which is nothing in the kinds that aren't the writer's
-    /// prose, or in its code and links.
+    /// prose, or in its code, links and citations.
     pub fn check_block(&mut self, block: &Block) -> Vec<Finding> {
         if !matches!(
             block.kind,
@@ -172,6 +173,8 @@ impl Checker {
             .map(|span| (span.start, span.end))
             .collect();
         skipped.extend(bare_link_ranges(block));
+        // Whether or not its key has a reference, since this has no list to ask.
+        skipped.extend(citation_ranges(&block.text));
         self.check(&block.text)
             .into_iter()
             .filter(|f| {
@@ -483,5 +486,23 @@ mod tests {
         };
         assert!(!exceptions.allows(&finding(text, "words", "Compounds"), text));
         assert!(exceptions.allows(&finding(text, "words", "Other"), text));
+    }
+
+    #[test]
+    fn a_citation_isnt_a_misspelling() {
+        // The checker leaves most of these alone itself, taking them for Markdown's links, but
+        // reads on past an underscore.
+        for text in [
+            "As shown in [zzqxj2020] already.",
+            "As shown in [foo_zzqxj] already.",
+        ] {
+            assert_eq!(check_block(&block(BlockKind::Paragraph, text)), Vec::new());
+        }
+
+        let bare = block(BlockKind::Paragraph, "As shown in zzqxj already.");
+        let found = check_block(&bare);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(&bare.text[found[0].start..found[0].end], "zzqxj");
+        assert_eq!(found[0].kind, FindingKind::Spelling);
     }
 }

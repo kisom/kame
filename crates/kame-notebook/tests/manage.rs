@@ -1,10 +1,16 @@
-//! Checking a document's new path, and deleting one.
+//! Checking a document's new path, deleting one, and moving one.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use kame_core::links::image_file;
+use kame_core::model::{BlockKind, Document, ImageAlign, Metadata, Span, SpanStyle};
 use kame_core::session::Session;
-use kame_notebook::manage::{check_new_path, delete_document};
+use kame_notebook::links::Follow;
+use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
 use kame_notebook::Notebook;
+use kame_sync::logs::{log_folder, Logged, MARKER};
+use kame_sync::revlog::Store;
 
 fn folder(name: &str) -> PathBuf {
     kame_test_dir::folder(name).canonicalize().unwrap()
@@ -131,4 +137,939 @@ fn deleting_a_markdown_document_removes_only_its_file() {
     delete_document(&root.join("n.md")).unwrap();
     assert!(!root.join("n.md").exists());
     assert!(root.join("n.sync-conflict-1.kame").exists());
+}
+
+// Moving a document.
+
+const DEVICE: &str = "here-0000";
+const NOW: i64 = 100;
+
+fn document_link(target: &str) -> SpanStyle {
+    SpanStyle::DocumentLink {
+        target: target.to_string(),
+    }
+}
+
+/// Adds `words` to the end of the document's first block, styled as a link.
+fn link(path: &Path, words: &str, style: SpanStyle) {
+    let mut session = Session::open(path).unwrap();
+    let mut doc = session.document().clone();
+    let block = &mut doc.blocks[0];
+    let start = block.text.len();
+    block.text.push_str(words);
+    block.spans.push(Span {
+        start,
+        end: start + words.len(),
+        style,
+    });
+    assert!(session.replace_document(doc));
+}
+
+fn links_of(doc: &Document) -> Vec<String> {
+    let mut found = Vec::new();
+    for block in &doc.blocks {
+        for span in &block.spans {
+            match &span.style {
+                SpanStyle::DocumentLink { target } => found.push(target.clone()),
+                SpanStyle::Link { url } => found.push(url.clone()),
+                _ => {}
+            }
+        }
+        if let BlockKind::Image {
+            link: Some(link), ..
+        } = &block.kind
+        {
+            found.push(link.clone());
+        }
+    }
+    found
+}
+
+fn read(path: &Path) -> Document {
+    Session::open(path).unwrap().document().clone()
+}
+
+fn make_move(nb: &Notebook, from: &Path, to: &Path) -> MoveReport {
+    let plan = plan_move(nb, from, to, None, DEVICE, NOW);
+    carry_out(nb, plan, None, DEVICE, NOW).unwrap()
+}
+
+fn plain_notebook(name: &str) -> (PathBuf, Notebook) {
+    let root = folder(name);
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    (root.clone(), Notebook::open(&root).unwrap())
+}
+
+fn logged_notebook(name: &str) -> (PathBuf, Notebook) {
+    let (root, nb) = plain_notebook(name);
+    std::fs::write(root.join(MARKER), "").unwrap();
+    (root, nb)
+}
+
+fn sync(path: &Path) {
+    let mut session = Session::open(path).unwrap();
+    let mut logged = Logged::open(&session, DEVICE).unwrap();
+    logged.sync(&mut session, NOW).unwrap();
+}
+
+/// The one latest revision in a document's logs.
+fn head(path: &Path) -> (Document, Metadata) {
+    let store = Store::load(&log_folder(path)).unwrap();
+    let heads = store.heads();
+    assert_eq!(heads.len(), 1);
+    (store.document(&heads[0]), store.metadata(&heads[0]))
+}
+
+fn assert_follows(nb: &Notebook, target: &str, base: &Path, to: &Path) {
+    assert_eq!(
+        nb.follow(target, base),
+        Follow::Open(to.to_path_buf()),
+        "{target}"
+    );
+}
+
+/// Makes a document's head say something only a newer kame knows.
+fn make_newer(path: &Path) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let head: String = connection
+        .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let newer = head.replacen("\"spans\":[", "\"future\":1,\"spans\":[", 1);
+    assert_ne!(newer, head);
+    connection
+        .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&newer])
+        .unwrap();
+}
+
+#[test]
+fn every_form_of_link_follows_a_rename() {
+    let (root, nb) = plain_notebook("move-forms");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    let absolute = a.display().to_string();
+    link(&linker, "one", document_link("a.kame"));
+    link(&linker, "two", document_link("a"));
+    link(&linker, "three", document_link("a.kame#Heading"));
+    link(
+        &linker,
+        "four",
+        SpanStyle::Link {
+            url: "a".to_string(),
+        },
+    );
+    link(&linker, "five", document_link(&absolute));
+    {
+        let mut session = Session::open(&linker).unwrap();
+        assert!(session.insert_image("p.png".to_string()));
+        let mut doc = session.document().clone();
+        let image = doc
+            .blocks
+            .iter_mut()
+            .find(|block| matches!(block.kind, BlockKind::Image { .. }))
+            .unwrap();
+        image.kind = BlockKind::Image {
+            path: "p.png".to_string(),
+            link: Some("a.kame".to_string()),
+            align: ImageAlign::Left,
+        };
+        assert!(session.replace_document(doc));
+    }
+    let below = root.join("sub/below.kame");
+    document(&below, "");
+    link(&below, "up", document_link("../a.kame"));
+
+    let b = root.join("b.kame");
+    let report = make_move(&nb, &a, &b);
+    let mut changed = report.changed.clone();
+    changed.sort();
+    assert_eq!(changed, ["linker.kame", "sub/below.kame"]);
+    assert!(report.left.is_empty());
+    let links = links_of(&read(&linker));
+    assert_eq!(
+        links,
+        [
+            "b.kame",
+            "b.kame",
+            "b.kame#Heading",
+            "b.kame",
+            b.to_str().unwrap(),
+            "b.kame",
+        ]
+    );
+    for target in &links {
+        assert_follows(&nb, target, &linker, &b);
+    }
+    assert_eq!(links_of(&read(&below)), ["../b.kame"]);
+    assert_follows(&nb, "../b.kame", &below, &b);
+
+    // And on to another folder, where the same links have to go down into it.
+    let c = root.join("x/y/c.kame");
+    make_move(&nb, &b, &c);
+    let links = links_of(&read(&linker));
+    assert_eq!(links[0], "x/y/c.kame");
+    assert_eq!(links[2], "x/y/c.kame#Heading");
+    assert_eq!(links[4], c.to_str().unwrap());
+    for target in &links {
+        assert_follows(&nb, target, &linker, &c);
+    }
+    assert_eq!(links_of(&read(&below)), ["../x/y/c.kame"]);
+}
+
+#[test]
+fn a_link_elsewhere_is_left_alone() {
+    let (root, nb) = plain_notebook("move-elsewhere");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    document(&root.join("other/a.kame"), "Another A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("other/a.kame"));
+    link(
+        &linker,
+        "two",
+        SpanStyle::Link {
+            url: "https://example.com/a.kame".to_string(),
+        },
+    );
+    link(&linker, "three", document_link("#Heading"));
+    let before = read(&linker);
+    let history = Session::open(&linker).unwrap().history();
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty());
+    assert_eq!(read(&linker), before);
+    assert_eq!(Session::open(&linker).unwrap().history(), history);
+}
+
+#[test]
+fn a_move_across_folders_fixes_its_own_links_and_images() {
+    let (root, nb) = plain_notebook("move-own");
+    let own = root.join("own.kame");
+    document(&own, "");
+    document(&root.join("sib.kame"), "Sib.");
+    std::fs::create_dir_all(root.join("images")).unwrap();
+    std::fs::write(root.join("images/p.png"), "p").unwrap();
+    link(&own, "one", document_link("sib.kame"));
+    link(&own, "two", document_link("#Heading"));
+    {
+        let mut session = Session::open(&own).unwrap();
+        assert!(session.insert_image("images/p.png".to_string()));
+    }
+    let to = root.join("deep/er/own.kame");
+    let report = make_move(&nb, &own, &to);
+    assert_eq!(report.changed, ["deep/er/own.kame"]);
+    let doc = read(&to);
+    assert_eq!(links_of(&doc), ["../../sib.kame", "#Heading"]);
+    let stored = doc
+        .blocks
+        .iter()
+        .find_map(|block| match &block.kind {
+            BlockKind::Image { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(stored, "../../images/p.png");
+    assert_eq!(std::fs::read(image_file(&stored, Some(&to))).unwrap(), b"p");
+}
+
+#[test]
+fn a_rename_in_the_same_folder_leaves_how_an_image_is_written() {
+    let (root, nb) = plain_notebook("move-image-same-folder");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    std::fs::write(root.join("p.png"), "p").unwrap();
+    let absolute = root.join("p.png").display().to_string();
+    {
+        let mut session = Session::open(&a).unwrap();
+        assert!(session.insert_image(absolute.clone()));
+    }
+    let b = root.join("b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert!(report.changed.is_empty());
+    assert!(read(&b)
+        .blocks
+        .iter()
+        .any(|block| matches!(&block.kind, BlockKind::Image { path, .. } if *path == absolute)));
+}
+
+#[test]
+fn a_document_linking_to_itself_by_name_follows() {
+    let (root, nb) = plain_notebook("move-itself");
+    let a = root.join("a.kame");
+    document(&a, "");
+    link(&a, "me", document_link("a.kame"));
+    let b = root.join("b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert_eq!(report.changed, ["b.kame"]);
+    assert_eq!(links_of(&read(&b)), ["b.kame"]);
+}
+
+#[test]
+fn a_rename_carries_files_and_history() {
+    let (root, nb) = plain_notebook("move-carries");
+    let x = root.join("X.kame");
+    let y = root.join("Y.kame");
+    let (history, snapshots) = {
+        let mut session = Session::open(&x).unwrap();
+        session.insert("Some words.");
+        session.snapshot(Some("kept"));
+        session.insert(" More.");
+        // A title of its own, so that the move has no reason to add a step.
+        let mut doc = session.document().clone();
+        doc.title = "Mine".to_string();
+        assert!(session.replace_document(doc));
+        let mut metadata = session.metadata.clone();
+        metadata.title = "Mine".to_string();
+        session.set_metadata(metadata);
+        (session.history(), session.snapshots().unwrap())
+    };
+    std::fs::copy(&x, root.join("X.sync-conflict-1.kame")).unwrap();
+    for name in [
+        "X.kame-wal",
+        "X.kame-shm",
+        "X.sync-conflict-1.kame.merged",
+        ".X.retired.kame",
+        ".X.retired-2.kame",
+    ] {
+        std::fs::write(root.join(name), "").unwrap();
+    }
+    std::fs::create_dir_all(root.join(".X.kame.sync")).unwrap();
+    std::fs::write(root.join(".X.kame.sync/titan.log"), "").unwrap();
+    document(&root.join("XY.kame"), "XY.");
+    std::fs::write(root.join(".XY.retired.kame"), "").unwrap();
+
+    let report = make_move(&nb, &x, &y);
+    assert!(report.left.is_empty());
+    let mut names: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.contains("XY"))
+        .collect();
+    names.sort();
+    // SQLite folds in what's beside the file when the move's last connection closes, so these
+    // leave no `-wal` or `-shm` here. `words_only_in_the_wal_move_with_the_file` shows it arrives.
+    assert_eq!(
+        names,
+        [
+            ".Y.kame.sync",
+            ".Y.retired-2.kame",
+            ".Y.retired.kame",
+            "Y.kame",
+            "Y.sync-conflict-1.kame",
+            "Y.sync-conflict-1.kame.merged",
+            "notebook.yaml",
+        ]
+    );
+    assert!(root.join(".Y.kame.sync/titan.log").is_file());
+    assert!(root.join("XY.kame").is_file());
+    assert!(root.join(".XY.retired.kame").is_file());
+    let mut session = Session::open(&y).unwrap();
+    assert_eq!(session.history(), history);
+    let carried = session.snapshots().unwrap();
+    assert_eq!(carried.len(), snapshots.len());
+    assert_eq!(carried[0].id, snapshots[0].id);
+    assert_eq!(carried[0].label, snapshots[0].label);
+}
+
+#[test]
+fn a_rename_changes_a_matching_title_and_a_move_within_the_same_name_does_not() {
+    let (root, nb) = plain_notebook("move-title");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let b = root.join("b.kame");
+    make_move(&nb, &a, &b);
+    {
+        let session = Session::open(&b).unwrap();
+        assert_eq!(session.document().title, "b");
+        assert_eq!(session.metadata.title, "b");
+    }
+
+    let history = Session::open(&b).unwrap().history();
+    let moved = root.join("x/b.kame");
+    make_move(&nb, &b, &moved);
+    {
+        let session = Session::open(&moved).unwrap();
+        assert_eq!(session.document().title, "b");
+        assert_eq!(session.metadata.title, "b");
+        assert_eq!(session.history(), history);
+    }
+
+    let mine = root.join("mine.kame");
+    {
+        let mut session = Session::open(&mine).unwrap();
+        let mut metadata = session.metadata.clone();
+        metadata.title = "A title of my own".to_string();
+        session.set_metadata(metadata);
+    }
+    let renamed = root.join("renamed.kame");
+    make_move(&nb, &mine, &renamed);
+    let session = Session::open(&renamed).unwrap();
+    assert_eq!(session.metadata.title, "A title of my own");
+    assert_eq!(session.document().title, "renamed");
+}
+
+#[test]
+fn a_title_change_reaches_the_logs() {
+    let (root, nb) = logged_notebook("move-title-logs");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    sync(&a);
+    let b = root.join("b.kame");
+    make_move(&nb, &a, &b);
+    assert!(!log_folder(&a).exists());
+    let (doc, metadata) = head(&b);
+    assert_eq!(metadata.title, "b");
+    assert_eq!(doc.title, "b");
+}
+
+#[test]
+fn changes_to_a_closed_logged_document_reach_its_logs() {
+    let (root, nb) = logged_notebook("move-closed-logged");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert_eq!(report.changed, ["linker.kame"]);
+    assert_eq!(links_of(&head(&linker).0), ["b.kame"]);
+}
+
+#[test]
+fn a_document_with_only_logs_is_changed_too() {
+    let (root, nb) = logged_notebook("move-logs-only");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    std::fs::remove_file(&linker).unwrap();
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert_eq!(report.changed, ["linker.kame"]);
+    assert_eq!(links_of(&head(&linker).0), ["b.kame"]);
+}
+
+#[test]
+fn a_document_with_only_logs_can_itself_be_moved() {
+    let (root, nb) = logged_notebook("move-logs-only-moved");
+    let a = root.join("a.kame");
+    document(&a, "The words.");
+    sync(&a);
+    std::fs::remove_file(&a).unwrap();
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+
+    let b = root.join("x/b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert!(!a.exists());
+    assert!(!log_folder(&a).exists());
+    assert_eq!(links_of(&read(&linker)), ["x/b.kame"]);
+    assert!(read(&b).blocks[0].text.contains("The words."));
+    assert_eq!(head(&b).1.title, "b");
+}
+
+/// A second machine: its own folder, holding a copy of the document with the same past, whose
+/// logs are played across by copying them.
+fn second_machine(root: &Path, linker: &Path, name: &str) -> PathBuf {
+    let elsewhere = folder(name);
+    std::fs::write(elsewhere.join(MARKER), "").unwrap();
+    let copy = elsewhere.join(linker.strip_prefix(root).unwrap());
+    std::fs::copy(linker, &copy).unwrap();
+    let (from, to) = (log_folder(linker), log_folder(&copy));
+    std::fs::create_dir_all(&to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+    copy
+}
+
+fn write_and_send(copy: &Path, linker: &Path, change: impl FnOnce(&mut Session)) {
+    let mut session = Session::open(copy).unwrap();
+    change(&mut session);
+    let mut logged = Logged::open(&session, "there-1111").unwrap();
+    logged.sync(&mut session, NOW + 1).unwrap();
+    let (from, to) = (log_folder(copy), log_folder(linker));
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+}
+
+#[test]
+fn a_link_only_in_the_logs_is_found() {
+    let (root, nb) = logged_notebook("move-only-in-logs");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "Words.");
+    sync(&linker);
+    let copy = second_machine(&root, &linker, "move-only-in-logs-there");
+    write_and_send(&copy, &linker, |session| {
+        let mut doc = session.document().clone();
+        let block = &mut doc.blocks[0];
+        let start = block.text.len();
+        block.text.push_str(" Link.");
+        block.spans.push(Span {
+            start,
+            end: block.text.len(),
+            style: document_link("a.kame"),
+        });
+        assert!(session.replace_document(doc));
+    });
+    assert!(links_of(&read(&linker)).is_empty());
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert_eq!(report.changed, ["linker.kame"]);
+    assert_eq!(links_of(&head(&linker).0), ["b.kame"]);
+    assert_eq!(links_of(&read(&linker)), ["b.kame"]);
+}
+
+/// Its database has the same link already, so that looking for one it lacks wouldn't find this.
+#[test]
+fn another_use_of_a_link_arriving_in_the_logs_is_changed_too() {
+    let (root, nb) = logged_notebook("move-again-in-logs");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    let copy = second_machine(&root, &linker, "move-again-in-logs-there");
+    write_and_send(&copy, &linker, |session| {
+        let mut doc = session.document().clone();
+        let block = &mut doc.blocks[0];
+        let start = block.text.len();
+        block.text.push_str(" two");
+        block.spans.push(Span {
+            start: start + 1,
+            end: block.text.len(),
+            style: document_link("a.kame"),
+        });
+        assert!(session.replace_document(doc));
+    });
+
+    make_move(&nb, &a, &root.join("b.kame"));
+    assert_eq!(links_of(&head(&linker).0), ["b.kame", "b.kame"]);
+}
+
+#[test]
+fn markdown_and_newer_documents_are_listed_and_untouched() {
+    let (root, nb) = plain_notebook("move-left");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let note = root.join("note.md");
+    std::fs::write(&note, "See [a](a.kame).\n").unwrap();
+    let longer = root.join("note.markdown");
+    std::fs::write(&longer, "See [a](a.kame).\n").unwrap();
+    let newer = root.join("newer.kame");
+    document(&newer, "");
+    link(&newer, "one", document_link("a.kame"));
+    make_newer(&newer);
+    let newer_bytes = std::fs::read(&newer).unwrap();
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty());
+    assert_eq!(std::fs::read(&note).unwrap(), b"See [a](a.kame).\n");
+    assert_eq!(std::fs::read(&longer).unwrap(), b"See [a](a.kame).\n");
+    assert_eq!(std::fs::read(&newer).unwrap(), newer_bytes);
+    let mut left: Vec<&str> = report
+        .left
+        .iter()
+        .map(|left| left.relative.as_str())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["newer.kame", "note.markdown", "note.md"]);
+    for entry in &report.left {
+        let wants = if entry.relative == "newer.kame" {
+            "newer version"
+        } else {
+            "Markdown"
+        };
+        assert!(entry.why.contains(wants), "{}", entry.why);
+        assert_eq!(entry.path, root.join(&entry.relative));
+    }
+}
+
+#[test]
+fn a_moved_document_from_a_newer_kame_moves_and_is_listed_and_untouched() {
+    let (root, nb) = plain_notebook("move-newer-itself");
+    let a = root.join("a.kame");
+    document(&a, "");
+    link(&a, "me", document_link("a.kame"));
+    make_newer(&a);
+    let bytes = std::fs::read(&a).unwrap();
+    let b = root.join("x/b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert!(!a.exists());
+    assert_eq!(std::fs::read(&b).unwrap(), bytes);
+    assert_eq!(report.left.len(), 1);
+    assert_eq!(report.left[0].relative, "x/b.kame");
+    assert!(report.left[0].why.contains("newer version"));
+}
+
+#[test]
+fn a_rename_in_case_only_works_where_the_disk_sees_one_file() {
+    let (root, nb) = plain_notebook("move-case");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    if !root.join("A.kame").exists() {
+        return;
+    }
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    std::fs::write(root.join(".a.retired.kame"), "kept").unwrap();
+    let upper = root.join("A.kame");
+    let report = make_move(&nb, &a, &upper);
+    assert!(report.left.is_empty());
+    assert_eq!(links_of(&read(&linker)), ["A.kame"]);
+    let names: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.contains(&"A.kame".to_string()), "{names:?}");
+    assert!(!names.contains(&"a.kame".to_string()), "{names:?}");
+    assert!(names.contains(&".A.retired.kame".to_string()), "{names:?}");
+    assert_eq!(read(&upper).title, "A");
+}
+
+#[test]
+fn a_move_to_where_it_already_is_changes_nothing() {
+    let (root, nb) = plain_notebook("move-nowhere");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a"));
+    let report = make_move(&nb, &a, &a);
+    assert!(report.changed.is_empty());
+    assert!(a.is_file());
+    assert_eq!(links_of(&read(&linker)), ["a"]);
+}
+
+#[test]
+fn a_moved_markdown_document_with_relative_links_is_listed_and_untouched() {
+    let (root, nb) = plain_notebook("move-markdown");
+    let words = "See [s](sib.kame) and ![p](p.png).\n";
+    std::fs::write(root.join("m.md"), words).unwrap();
+    std::fs::write(root.join("p.md"), "![p](p.png)\n").unwrap();
+    std::fs::write(root.join("web.md"), "[s](https://example.com) [h](#h)\n").unwrap();
+    document(&root.join("sib.kame"), "Sib.");
+
+    let to = root.join("sub/m.md");
+    let report = make_move(&nb, &root.join("m.md"), &to);
+    assert!(!root.join("m.md").exists());
+    assert_eq!(std::fs::read(&to).unwrap(), words.as_bytes());
+    assert_eq!(report.left.len(), 1);
+    assert_eq!(report.left[0].relative, "sub/m.md");
+    assert_eq!(report.left[0].path, to);
+    assert!(report.left[0].why.contains("weren't changed"));
+
+    // An image alone is relative too.
+    let report = make_move(&nb, &root.join("p.md"), &root.join("sub/p.md"));
+    assert_eq!(report.left[0].relative, "sub/p.md");
+
+    // Nothing here depends on the folder.
+    let report = make_move(&nb, &root.join("web.md"), &root.join("sub/web.md"));
+    assert!(report.left.is_empty());
+    // And a rename doesn't change a folder.
+    let report = make_move(&nb, &to, &root.join("sub/n.md"));
+    assert!(report.left.is_empty());
+}
+
+#[test]
+fn a_document_that_cannot_be_written_is_listed_and_the_others_still_change() {
+    let (root, nb) = plain_notebook("move-read-only");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let locked = root.join("locked.kame");
+    document(&locked, "");
+    link(&locked, "one", document_link("a.kame"));
+    let other = root.join("other.kame");
+    document(&other, "");
+    link(&other, "one", document_link("a.kame"));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let bytes = std::fs::read(&locked).unwrap();
+
+    let b = root.join("b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert_eq!(report.changed, ["other.kame"]);
+    assert_eq!(report.left.len(), 1);
+    assert_eq!(report.left[0].relative, "locked.kame");
+    assert!(!report.left[0].why.is_empty());
+    assert_eq!(std::fs::read(&locked).unwrap(), bytes);
+    assert_eq!(links_of(&read(&other)), ["b.kame"]);
+    assert!(b.is_file());
+}
+
+#[test]
+fn the_open_document_changes_through_its_session() {
+    let (root, nb) = plain_notebook("move-open");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    let mut session = Session::open(&linker).unwrap();
+    let before = session.history();
+    let b = root.join("b.kame");
+    let plan = plan_move(
+        &nb,
+        &a,
+        &b,
+        Some((linker.as_path(), session.document())),
+        DEVICE,
+        NOW,
+    );
+    let report = carry_out(&nb, plan, Some(&mut session), DEVICE, NOW).unwrap();
+    assert_eq!(report.changed, ["linker.kame"]);
+    assert_eq!(links_of(session.document()), ["b.kame"]);
+    assert_eq!(session.history().0, before.0 + 1);
+}
+
+#[test]
+fn a_session_on_the_moving_document_is_refused() {
+    let (root, nb) = plain_notebook("move-open-itself");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let mut session = Session::open(&a).unwrap();
+    let b = root.join("b.kame");
+    let plan = plan_move(
+        &nb,
+        &a,
+        &b,
+        Some((a.as_path(), session.document())),
+        DEVICE,
+        NOW,
+    );
+    assert!(carry_out(&nb, plan, Some(&mut session), DEVICE, NOW).is_err());
+    assert!(a.is_file());
+    assert!(!b.exists());
+}
+
+#[test]
+fn renaming_the_root_index_keeps_links_to_it() {
+    let (root, nb) = plain_notebook("move-index");
+    let index = root.join("Notebook.kame");
+    document(&index, "Contents.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("./"));
+    link(&linker, "two", document_link("Notebook.kame"));
+    let below = root.join("sub/below.kame");
+    document(&below, "");
+    link(&below, "up", document_link("../"));
+    assert_eq!(nb.index(), Some(index.clone()));
+
+    let home = root.join("Home.kame");
+    make_move(&nb, &index, &home);
+    assert_eq!(links_of(&read(&linker)), ["Home.kame", "Home.kame"]);
+    assert_eq!(links_of(&read(&below)), ["../Home.kame"]);
+    assert_follows(&nb, "Home.kame", &linker, &home);
+    assert_follows(&nb, "../Home.kame", &below, &home);
+    assert_eq!(nb.index(), None);
+}
+
+#[test]
+fn a_folder_link_stays_one_while_the_index_stays_its_folders() {
+    let (root, nb) = plain_notebook("move-index-link");
+    let index = root.join("old/Notebook.kame");
+    document(&index, "");
+    link(&index, "me", document_link("./"));
+    link(&index, "here", document_link("#Part"));
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("old/"));
+
+    let to = root.join("new/Notebook.kame");
+    make_move(&nb, &index, &to);
+    assert_eq!(links_of(&read(&to)), ["./", "#Part"]);
+    assert_eq!(links_of(&read(&linker)), ["new/Notebook.kame"]);
+}
+
+#[test]
+fn a_move_with_unsaved_typing_keeps_all_of_it() {
+    let (root, nb) = plain_notebook("move-typing");
+    let a = root.join("a.kame");
+    {
+        let mut session = Session::open(&a).unwrap();
+        for word in ["Every ", "word ", "typed ", "is ", "kept."] {
+            session.insert(word);
+        }
+    }
+    let b = root.join("x/b.kame");
+    make_move(&nb, &a, &b);
+    assert_eq!(read(&b).blocks[0].text, "Every word typed is kept.");
+}
+
+/// As a crash would leave it: the words are in the `-wal`, and no connection folded them in.
+#[test]
+fn words_only_in_the_wal_move_with_the_file() {
+    let (root, nb) = plain_notebook("move-wal");
+    let live = folder("move-wal-live").join("live.kame");
+    let a = root.join("a.kame");
+    {
+        let mut session = Session::open(&live).unwrap();
+        session.insert("Only in the log.");
+        std::fs::copy(&live, &a).unwrap();
+        let wal = PathBuf::from(format!("{}-wal", live.display()));
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        std::fs::copy(&wal, root.join("a.kame-wal")).unwrap();
+    }
+    let b = root.join("x/b.kame");
+    make_move(&nb, &a, &b);
+    assert_eq!(read(&b).blocks[0].text, "Only in the log.");
+}
+
+#[test]
+fn a_name_with_spaces_and_accents_survives() {
+    let (root, nb) = plain_notebook("move-accents");
+    let from = root.join("maritain/matière première.kame");
+    document(&from, "");
+    std::fs::write(root.join("maritain/é.png"), "p").unwrap();
+    {
+        let mut session = Session::open(&from).unwrap();
+        assert!(session.insert_image("é.png".to_string()));
+    }
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(
+        &linker,
+        "one",
+        document_link("maritain/matière première.kame"),
+    );
+    link(
+        &linker,
+        "two",
+        document_link("maritain/matière première#Été"),
+    );
+    let to = root.join("été/première matière.kame");
+    let report = make_move(&nb, &from, &to);
+    assert!(report.left.is_empty());
+    assert_eq!(
+        links_of(&read(&linker)),
+        ["été/première matière.kame", "été/première matière.kame#Été"]
+    );
+    assert_follows(&nb, "été/première matière.kame#Été", &linker, &to);
+    let session = Session::open(&to).unwrap();
+    assert_eq!(session.document().title, "première matière");
+    assert!(session.document().blocks.iter().any(|block| matches!(
+        &block.kind,
+        BlockKind::Image { path, .. } if path == "../maritain/é.png"
+    )));
+}
+
+#[test]
+fn a_failed_move_leaves_everything_as_it_was() {
+    let (root, nb) = plain_notebook("move-failed");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    std::fs::write(root.join("a.kame-wal"), "").unwrap();
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    let locked = root.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    let before = read(&linker);
+    let history = Session::open(&linker).unwrap().history();
+    let to = locked.join("b.kame");
+
+    let plan = plan_move(&nb, &a, &to, None, DEVICE, NOW);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = carry_out(&nb, plan, None, DEVICE, NOW);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(result.is_err());
+    assert!(a.is_file());
+    assert!(root.join("a.kame-wal").is_file());
+    assert!(!to.exists());
+    assert_eq!(read(&linker), before);
+    assert_eq!(Session::open(&linker).unwrap().history(), history);
+    assert_eq!(read(&a).title, "a");
+}
+
+#[test]
+fn a_file_in_the_way_stops_the_move_and_is_not_overwritten() {
+    let (root, nb) = plain_notebook("move-in-the-way");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    std::fs::write(root.join("a.kame-wal"), "").unwrap();
+    // Left over from a `b` that's gone. Beside a new `b.kame`, SQLite could read it as its log.
+    std::fs::write(root.join("b.kame-wal"), "stale").unwrap();
+    let b = root.join("b.kame");
+    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    assert_eq!(err, "something is already at b.kame-wal; delete it first");
+    assert!(a.is_file());
+    assert!(root.join("a.kame-wal").is_file());
+    assert!(!b.exists());
+    assert_eq!(std::fs::read(root.join("b.kame-wal")).unwrap(), b"stale");
+}
+
+#[test]
+fn a_retired_copy_in_the_way_is_kept_and_the_new_one_gets_a_number() {
+    let (root, nb) = plain_notebook("move-retired-taken");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    std::fs::write(root.join(".a.retired.kame"), "from a").unwrap();
+    std::fs::write(root.join(".b.retired.kame"), "from b").unwrap();
+    make_move(&nb, &a, &root.join("b.kame"));
+    assert_eq!(
+        std::fs::read(root.join(".b.retired.kame")).unwrap(),
+        b"from b"
+    );
+    assert_eq!(
+        std::fs::read(root.join(".b.retired-2.kame")).unwrap(),
+        b"from a"
+    );
+    assert!(!root.join(".a.retired.kame").exists());
+}
+
+#[test]
+fn logs_from_a_newer_kame_leave_a_document_listed_and_unchanged() {
+    let (root, nb) = logged_notebook("move-newer-logs");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    std::fs::write(
+        log_folder(&linker).join("new-0000.log"),
+        "{\"id\":\"x\",\"revision\":{\"parents\":[],\"device\":\"new-0000\",\"when\":1,\"document\":\"00000000-0000-0000-0000-000000000001\",\"title\":\"t\",\"order\":[],\"annotations\":[],\"metadata\":{},\"future\":1},\"blocks\":[]}\n",
+    )
+    .unwrap();
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty());
+    assert_eq!(report.left.len(), 1);
+    assert!(report.left[0].why.contains("newer version"));
+    assert_eq!(links_of(&read(&linker)), ["a.kame"]);
+}
+
+#[test]
+fn a_stranded_document_is_listed_and_no_logs_come_back_for_it() {
+    let (root, nb) = logged_notebook("move-stranded");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    std::fs::remove_dir_all(log_folder(&linker)).unwrap();
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty());
+    assert_eq!(report.left[0].relative, "linker.kame");
+    assert!(report.left[0].why.contains("moved or deleted"));
+    assert!(!log_folder(&linker).exists());
+    assert_eq!(links_of(&read(&linker)), ["a.kame"]);
 }

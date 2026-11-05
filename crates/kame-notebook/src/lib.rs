@@ -7,7 +7,7 @@
 //! - [`search`] finds text across its documents
 //! - [`links`] works out what links where, and where a link can create a document
 //! - [`images`] brings an image from outside into the notebook
-//! - [`manage`] checks where a document may go, and deletes one
+//! - [`manage`] checks where a document may go, and moves or deletes one
 
 pub mod images;
 pub mod links;

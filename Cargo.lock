@@ -4157,6 +4157,7 @@ dependencies = [
  "kame-core",
  "kame-sync",
  "kame-test-dir",
+ "rusqlite",
  "serde",
  "yaml_serde",
 ]

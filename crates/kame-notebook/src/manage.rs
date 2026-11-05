@@ -1,11 +1,19 @@
-//! Changing what's in a notebook: where a document may be put, and deleting one.
+//! Changing what's in a notebook: where a document may be put, deleting one, and moving one with
+//! the links that lead to it.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use crate::links::tidied;
+use kame_core::links::{moved_target, own_target_after_move};
+use kame_core::model::{BlockKind, Document, SpanStyle};
+use kame_core::session::{is_markdown_path, Session};
+use kame_core::storage::Db;
+use kame_sync::logs::{build_from_logs, is_stranded, log_folder, logging_root, Logged};
+use kame_sync::revlog::Store;
+
+use crate::links::{is_relative, tidied, Follow};
 use crate::search::same_file;
-use crate::Notebook;
-use kame_sync::logs::log_folder;
+use crate::{read_document, Notebook};
 
 /// Where `typed` puts `document`, or why it can't go there. The path is taken from the notebook's
 /// root, and gets the document's extension if it names none. Nothing is changed on disk.
@@ -118,26 +126,31 @@ pub fn belonging_files(path: &Path) -> Vec<PathBuf> {
     found
 }
 
+fn is_database(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("kame"))
+}
+
+/// What SQLite keeps beside a database.
+fn sqlite_files(path: &Path) -> [PathBuf; 2] {
+    ["-wal", "-shm"].map(|suffix| {
+        let mut beside = path.as_os_str().to_owned();
+        beside.push(suffix);
+        PathBuf::from(beside)
+    })
+}
+
 /// Deletes a document, and with it what belongs to it: what SQLite keeps beside the file, its
 /// conflicting and retired copies, and its logs. A file that can't be removed is an error before
 /// the logs are touched, so that a document left in place keeps them.
 pub fn delete_document(path: &Path) -> std::io::Result<()> {
-    let is_database = path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("kame"));
-    if !is_database {
+    if !is_database(path) {
         return std::fs::remove_file(path);
     }
     // Found first, since which copies are this document's is told by reading it.
     let belonging = belonging_files(path);
     std::fs::remove_file(path)?;
-    let mut sqlite = Vec::new();
-    for suffix in ["-wal", "-shm"] {
-        let mut beside = path.as_os_str().to_owned();
-        beside.push(suffix);
-        sqlite.push(PathBuf::from(beside));
-    }
-    for file in sqlite.into_iter().chain(belonging) {
+    for file in sqlite_files(path).into_iter().chain(belonging) {
         match std::fs::remove_file(&file) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
             _ => {}
@@ -148,4 +161,482 @@ pub fn delete_document(path: &Path) -> std::io::Result<()> {
         std::fs::remove_dir_all(&logs)?;
     }
     Ok(())
+}
+
+/// A document a move couldn't change, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Left {
+    pub path: PathBuf,
+    pub relative: String,
+    pub why: String,
+}
+
+/// What moving a document will change, worked out before anything has moved.
+#[derive(Debug)]
+pub struct MovePlan {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    /// Each document with links to change: its old target string to its new one.
+    rewrites: Vec<(PathBuf, HashMap<String, String>)>,
+    left: Vec<Left>,
+}
+
+/// What a move did: the documents whose links changed, and the ones that couldn't be changed.
+#[derive(Debug, Default)]
+pub struct MoveReport {
+    pub changed: Vec<String>,
+    pub left: Vec<Left>,
+}
+
+const NEWER: &str = "it has changes from a newer version of kame";
+
+/// Every link in a document: web links and document links in its text, and an image's link.
+fn links_in(document: &Document) -> Vec<&str> {
+    let mut links = Vec::new();
+    for block in &document.blocks {
+        for span in &block.spans {
+            match &span.style {
+                SpanStyle::Link { url } => links.push(url.as_str()),
+                SpanStyle::DocumentLink { target } => links.push(target.as_str()),
+                _ => {}
+            }
+        }
+        if let BlockKind::Image {
+            link: Some(link), ..
+        } = &block.kind
+        {
+            links.push(link.as_str());
+        }
+    }
+    links
+}
+
+/// The links in `document`, kept at `base`, that lead to `file`.
+fn links_leading_to(
+    notebook: &Notebook,
+    document: &Document,
+    base: &Path,
+    file: &Path,
+) -> Vec<String> {
+    links_in(document)
+        .into_iter()
+        .filter(|link| match notebook.follow(link, base) {
+            Follow::Open(found) => same_file(&found, file),
+            _ => false,
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The latest versions in a logged document's logs. There are none to read if it has no logs, or
+/// if what's at its log folder isn't its logs, since those say nothing about this document.
+fn versions_in_logs(path: &Path) -> Vec<Document> {
+    if logging_root(path).is_none() {
+        return Vec::new();
+    }
+    let folder = log_folder(path);
+    let last = Db::open_read_only(path)
+        .ok()
+        .and_then(|db| db.load_sync_state());
+    if is_stranded(last.as_deref(), &folder) {
+        return Vec::new();
+    }
+    let Ok(store) = Store::load(&folder) else {
+        return Vec::new();
+    };
+    store
+        .heads()
+        .iter()
+        .map(|head| store.document(head))
+        .collect()
+}
+
+/// A closed document, ready to change: built from its logs if it has only those, and with those
+/// logs if it's logged. This says no before anything has changed if a change couldn't reach them.
+fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>), String> {
+    build_from_logs(path).map_err(|err| format!("could not build it from its logs: {err}"))?;
+    if !path.exists() {
+        return Err("it's no longer there".to_string());
+    }
+    let session = Session::open(path).map_err(|err| err.to_string())?;
+    if session.newer {
+        return Err(NEWER.to_string());
+    }
+    if logging_root(path).is_none() {
+        return Ok((session, None));
+    }
+    let folder = log_folder(path);
+    let store = Store::load(&folder).map_err(|err| format!("could not read its logs: {err}"))?;
+    if store.holds_newer() {
+        return Err(NEWER.to_string());
+    }
+    if is_stranded(session.sync_state().as_deref(), &folder) {
+        return Err("it was moved or deleted on another machine, and isn't syncing".to_string());
+    }
+    let logged = Logged::open(&session, device).ok_or("could not read its logs")?;
+    Ok((session, Some(logged)))
+}
+
+/// Changes a closed document, and sends the change to its logs if it has them.
+fn edit_closed<T>(
+    path: &Path,
+    device: &str,
+    now: i64,
+    change: impl FnOnce(&mut Session) -> Result<T, String>,
+) -> Result<T, String> {
+    let (mut session, logged) = open_to_change(path, device)?;
+    let result = change(&mut session)?;
+    if session.save_failed {
+        return Err("could not save the change".to_string());
+    }
+    if let Some(mut logged) = logged {
+        logged
+            .sync(&mut session, now)
+            .map_err(|err| format!("it changed, but its logs couldn't be written: {err}"))?;
+    }
+    Ok(result)
+}
+
+/// The path from the notebook's root.
+fn relative_in(notebook: &Notebook, path: &Path) -> String {
+    path.strip_prefix(&notebook.root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn same_folder(one: &Path, other: &Path) -> bool {
+    same_file(
+        one.parent().unwrap_or(Path::new("")),
+        other.parent().unwrap_or(Path::new("")),
+    )
+}
+
+/// Why a Markdown document's links will be wrong after this move, if they will. It's imported with
+/// no folder given, so that its images stay as written and the relative ones can be told.
+fn why_markdown_is_left(
+    notebook: &Notebook,
+    path: &Path,
+    moving: bool,
+    from: &Path,
+    to: &Path,
+) -> Option<String> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let stem = path.file_stem()?.to_string_lossy();
+    let document =
+        kame_core::import::markdown::from_markdown(&source, Path::new(""), &stem).document;
+    let depends_on_its_folder = links_in(&document)
+        .into_iter()
+        .any(|link| is_relative(link) && !link.starts_with('/') && !link.starts_with('~'))
+        || document.blocks.iter().any(|block| match &block.kind {
+            BlockKind::Image { path, .. } => {
+                !path.contains("://") && !Path::new(path).is_absolute()
+            }
+            _ => false,
+        });
+    if moving && !same_folder(from, to) && depends_on_its_folder {
+        return Some(
+            "it's Markdown, which kame doesn't edit, so its relative links weren't changed"
+                .to_string(),
+        );
+    }
+    (!links_leading_to(notebook, &document, path, from).is_empty()).then(|| {
+        "it's Markdown, which kame doesn't edit, so its links to this document weren't changed"
+            .to_string()
+    })
+}
+
+/// Works out which links lead to `from` and what each becomes once the document is at `to`. Files
+/// don't move yet. What this does change is `to`'s folders, which have to exist for the new links
+/// to be worked out, and any closed document that links here and is behind its logs, which is
+/// synced so that what gets rewritten is the whole of it. `open` is what's on the screen, read in
+/// place of its file and left for its own session to sync.
+pub fn plan_move(
+    notebook: &Notebook,
+    from: &Path,
+    to: &Path,
+    open: Option<(&Path, &Document)>,
+    device: &str,
+    now: i64,
+) -> MovePlan {
+    let mut plan = MovePlan {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+        rewrites: Vec::new(),
+        left: Vec::new(),
+    };
+    // Going nowhere, a rewrite would only tidy how links are written.
+    if from == to {
+        return plan;
+    }
+    if let Some(folder) = to.parent() {
+        // If this fails, so will moving the file, and that says why.
+        let _ = std::fs::create_dir_all(folder);
+    }
+    for entry in notebook.documents() {
+        let moving = same_file(&entry.path, from);
+        if is_markdown_path(&entry.path) {
+            if let Some(why) = why_markdown_is_left(notebook, &entry.path, moving, from, to) {
+                let (path, relative) = if moving {
+                    (to.to_path_buf(), relative_in(notebook, to))
+                } else {
+                    (entry.path.clone(), entry.relative.clone())
+                };
+                plan.left.push(Left {
+                    path,
+                    relative,
+                    why,
+                });
+            }
+            continue;
+        }
+        let on_screen = open
+            .filter(|(path, _)| same_file(path, &entry.path))
+            .map(|(_, document)| document);
+        let read;
+        let document = match on_screen {
+            Some(document) => document,
+            None => {
+                let Some((document, _)) = read_document(&entry.path) else {
+                    continue;
+                };
+                read = document;
+                &read
+            }
+        };
+        let mut targets: BTreeSet<String> = links_leading_to(notebook, document, &entry.path, from)
+            .into_iter()
+            .collect();
+        let versions = versions_in_logs(&entry.path);
+        for version in &versions {
+            targets.extend(links_leading_to(notebook, version, &entry.path, from));
+        }
+        // Merging after the rewrite could bring an old link back from what hadn't arrived, so a
+        // document to be rewritten first comes together with its logs. This is for any
+        // difference, and not only a link its database lacks, as another use of the same link
+        // would be missed. If it fails, the rewrite is left to fail for the same reason, and say so.
+        let behind = versions.iter().any(|version| version != document);
+        if !targets.is_empty()
+            && behind
+            && on_screen.is_none()
+            && edit_closed(&entry.path, device, now, |_| Ok(())).is_ok()
+        {
+            if let Some((synced, _)) = read_document(&entry.path) {
+                targets.extend(links_leading_to(notebook, &synced, &entry.path, from));
+            }
+        }
+        let base_after = if moving { to } else { entry.path.as_path() };
+        let rewrites: HashMap<String, String> = targets
+            .into_iter()
+            .map(|old| {
+                let new = moved_target(&old, to, base_after);
+                (old, new)
+            })
+            .collect();
+        if moving {
+            // All of them, even one staying as it is, since carrying out takes a link that
+            // isn't here for one leading elsewhere, and says it again from the new folder.
+            plan.rewrites.push((from.to_path_buf(), rewrites));
+        } else if rewrites.iter().any(|(old, new)| old != new) {
+            plan.rewrites.push((entry.path.clone(), rewrites));
+        }
+    }
+    plan
+}
+
+/// Where a file belonging to the document at `from` goes when the document goes to `to`, with the
+/// new name in place of the old.
+fn belonging_file_after(file: &Path, from: &Path, to: &Path) -> PathBuf {
+    let text = |name: Option<&std::ffi::OsStr>| {
+        name.map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let (name, old, new) = (
+        text(file.file_name()),
+        text(from.file_stem()),
+        text(to.file_stem()),
+    );
+    let renamed = match name.strip_prefix(&old) {
+        Some(rest) => format!("{new}{rest}"),
+        None => {
+            let rest = name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_prefix(&old))
+                .unwrap_or_default();
+            format!(".{new}{rest}")
+        }
+    };
+    to.with_file_name(renamed)
+}
+
+/// A retired database going to `.X.retired.kame`, or a numbered one, takes the next number if
+/// that's taken, since it's never put over another. Any other path is as it was.
+fn free_retired_name(new: PathBuf, old: &Path) -> PathBuf {
+    let name = new
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let is_free = |path: &Path| path.symlink_metadata().is_err() || same_file(path, old);
+    let Some((before, _)) = name.rsplit_once(".retired") else {
+        return new;
+    };
+    if !name.starts_with('.') || !name.ends_with(".kame") || is_free(&new) {
+        return new;
+    }
+    (2..)
+        .map(|number| new.with_file_name(format!("{before}.retired-{number}.kame")))
+        .find(|path| is_free(path))
+        .unwrap_or(new)
+}
+
+/// Moves the document's files, or leaves them all where they were and says why. Nothing is put
+/// over anything already there, not even what SQLite left beside a file now gone, since it could
+/// be read as the log of the file arriving.
+fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String> {
+    let mut moves = vec![(from.to_path_buf(), to.to_path_buf())];
+    if is_database(from) {
+        moves.extend(sqlite_files(from).into_iter().zip(sqlite_files(to)));
+        moves.push((log_folder(from), log_folder(to)));
+        for file in belonging_files(from) {
+            let after = belonging_file_after(&file, from, to);
+            moves.push((file, after));
+        }
+    }
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (old, new) in moves {
+        if old.symlink_metadata().is_err() {
+            continue;
+        }
+        let new = free_retired_name(new, &old);
+        let failed = if new.symlink_metadata().is_ok() && !same_file(&new, &old) {
+            Some(format!(
+                "something is already at {}; delete it first",
+                relative_in(notebook, &new)
+            ))
+        } else {
+            std::fs::rename(&old, &new).err().map(|err| {
+                format!(
+                    "could not move {} to {}: {err}",
+                    relative_in(notebook, &old),
+                    relative_in(notebook, &new)
+                )
+            })
+        };
+        if let Some(mut why) = failed {
+            for (old, new) in moved.iter().rev() {
+                if let Err(err) = std::fs::rename(new, old) {
+                    why.push_str(&format!(
+                        ", and {} couldn't go back: {err}",
+                        relative_in(notebook, new)
+                    ));
+                }
+            }
+            return Err(why);
+        }
+        moved.push((old, new));
+    }
+    if moved.is_empty() {
+        return Err(format!(
+            "there's nothing at {}",
+            relative_in(notebook, from)
+        ));
+    }
+    Ok(())
+}
+
+/// Moves a document and changes the links to it. If its files can't move, this is `Err`, with all
+/// of them where they were and no document changed. Whatever can't be changed after that goes in
+/// the report, and the others still change. `open` is the session on the screen, which mustn't
+/// be on the moving document, since no connection may be open across the rename. A change to it
+/// is saved here, and reaches its logs when the app next syncs it.
+pub fn carry_out(
+    notebook: &Notebook,
+    plan: MovePlan,
+    mut open: Option<&mut Session>,
+    device: &str,
+    now: i64,
+) -> Result<MoveReport, String> {
+    let MovePlan {
+        from,
+        to,
+        rewrites,
+        left,
+    } = plan;
+    let mut report = MoveReport {
+        changed: Vec::new(),
+        left,
+    };
+    if open
+        .as_deref()
+        .and_then(Session::path)
+        .is_some_and(|path| same_file(path, &from))
+    {
+        return Err("a document has to be left before it moves".to_string());
+    }
+    if from == to {
+        return Ok(report);
+    }
+    move_files(notebook, &from, &to)?;
+
+    let mut own = HashMap::new();
+    for (path, links) in rewrites {
+        if path == from {
+            own = links;
+            continue;
+        }
+        let rewrite =
+            |session: &mut Session| session.rewrite_links(|link| links.get(link).cloned());
+        let on_screen = open
+            .as_deref_mut()
+            .filter(|session| session.path().is_some_and(|open| same_file(open, &path)));
+        let result = match on_screen {
+            Some(session) => rewrite(session),
+            None => edit_closed(&path, device, now, rewrite),
+        };
+        let relative = relative_in(notebook, &path);
+        match result {
+            Ok(0) => {}
+            Ok(_) => report.changed.push(relative),
+            Err(why) => report.left.push(Left {
+                path,
+                relative,
+                why,
+            }),
+        }
+    }
+
+    if !is_database(&to) {
+        return Ok(report);
+    }
+    let result = edit_closed(&to, device, now, |session| {
+        let history = session.history();
+        session.rewrite_links(|link| {
+            Some(
+                own.get(link)
+                    .cloned()
+                    .unwrap_or_else(|| own_target_after_move(link, &from, &to)),
+            )
+        })?;
+        if !same_folder(&from, &to) {
+            session.rehome_images(Some(&from), Some(&notebook.root));
+        }
+        let changed = session.history() != history;
+        if let (Some(old), Some(new)) = (from.file_stem(), to.file_stem()) {
+            if old != new {
+                session.follow_rename(&old.to_string_lossy(), &new.to_string_lossy());
+            }
+        }
+        Ok(changed)
+    });
+    let relative = relative_in(notebook, &to);
+    match result {
+        Ok(false) => {}
+        Ok(true) => report.changed.push(relative),
+        Err(why) => report.left.push(Left {
+            path: to,
+            relative,
+            why,
+        }),
+    }
+    Ok(report)
 }

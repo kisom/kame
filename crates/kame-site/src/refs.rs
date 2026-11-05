@@ -1,6 +1,6 @@
 //! Where a document's references to other things end up on the site.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use kame_core::links::{find_document, split_document_target};
@@ -44,6 +44,8 @@ impl SiteIndex {
 pub struct Images {
     copies: Vec<(String, PathBuf)>,
     named: HashMap<String, String>,
+    /// The paths with no file, which publish as nothing.
+    missing: HashSet<String>,
 }
 
 impl SiteIndex {
@@ -89,6 +91,7 @@ impl Images {
         let base = source.path.parent().unwrap_or(Path::new(""));
         let mut copies: Vec<(String, PathBuf)> = Vec::new();
         let mut named = HashMap::new();
+        let mut missing = HashSet::new();
         for block in &source.doc.blocks {
             let BlockKind::Image { path, .. } = &block.kind else {
                 continue;
@@ -110,18 +113,15 @@ impl Images {
                 continue;
             }
             let file = base.join(path);
-            let Ok(file) = file.canonicalize() else {
-                problems
-                    .warnings
-                    .push(format!("\"{}\": no image at {path}", source.slug));
+            let file = file.canonicalize().ok().filter(|file| file.is_file());
+            let Some(file) = file else {
+                if missing.insert(path.clone()) {
+                    problems
+                        .warnings
+                        .push(format!("\"{}\": no image at {path}", source.slug));
+                }
                 continue;
             };
-            if !file.is_file() {
-                problems
-                    .warnings
-                    .push(format!("\"{}\": no image at {path}", source.slug));
-                continue;
-            }
             if let Some((name, _)) = copies.iter().find(|(_, existing)| *existing == file) {
                 named.insert(path.clone(), name.clone());
                 continue;
@@ -130,7 +130,11 @@ impl Images {
             named.insert(path.clone(), name.clone());
             copies.push((name, file));
         }
-        Images { copies, named }
+        Images {
+            copies,
+            named,
+            missing,
+        }
     }
 
     /// Each file to copy beside the page, as its name there and where it comes from.
@@ -138,21 +142,27 @@ impl Images {
         &self.copies
     }
 
-    /// The image's URL from the page beside it.
-    pub fn relative(&self, path: &str) -> String {
-        match self.named.get(path) {
+    /// The image's URL from the page beside it, or `None` if there is no file to lead to.
+    pub fn relative(&self, path: &str) -> Option<String> {
+        if self.missing.contains(path) {
+            return None;
+        }
+        Some(match self.named.get(path) {
             Some(name) => percent_encode(name),
             None => path.to_string(),
-        }
+        })
     }
 
-    /// The image's URL from anywhere, as a feed needs.
-    pub fn absolute(&self, path: &str, site_url: &str, doc_url: &str) -> String {
-        match self.named.get(path) {
+    /// The image's URL from anywhere, as a feed needs, or `None` if there is no file to lead to.
+    pub fn absolute(&self, path: &str, site_url: &str, doc_url: &str) -> Option<String> {
+        if self.missing.contains(path) {
+            return None;
+        }
+        Some(match self.named.get(path) {
             Some(name) => format!("{site_url}{doc_url}{}", percent_encode(name)),
             None if path.starts_with('/') => format!("{site_url}{path}"),
             None => path.to_string(),
-        }
+        })
     }
 }
 
@@ -332,10 +342,12 @@ mod tests {
         let images = Images::resolve(&source, &dir, &mut problems);
         let file = dir.join("a.png").canonicalize().unwrap();
         assert_eq!(images.copies(), [("a.png".to_string(), file)]);
-        assert_eq!(images.relative("a.png"), "a.png");
+        assert_eq!(images.relative("a.png").as_deref(), Some("a.png"));
         assert_eq!(
-            images.absolute("a.png", "https://e.com", "/k/doc/"),
-            "https://e.com/k/doc/a.png"
+            images
+                .absolute("a.png", "https://e.com", "/k/doc/")
+                .as_deref(),
+            Some("https://e.com/k/doc/a.png")
         );
         assert!(problems.warnings.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
@@ -349,8 +361,11 @@ mod tests {
         let mut problems = Problems::default();
         let images = Images::resolve(&source, &dir, &mut problems);
         assert!(images.copies().is_empty());
-        assert_eq!(images.relative(url), url);
-        assert_eq!(images.absolute(url, "https://x.com", "/k/doc/"), url);
+        assert_eq!(images.relative(url).as_deref(), Some(url));
+        assert_eq!(
+            images.absolute(url, "https://x.com", "/k/doc/").as_deref(),
+            Some(url)
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -363,23 +378,32 @@ mod tests {
         let mut problems = Problems::default();
         let images = Images::resolve(&source, &dir, &mut problems);
         assert!(images.copies().is_empty());
-        assert_eq!(images.relative("/files/a.png"), "/files/a.png");
         assert_eq!(
-            images.absolute("/files/a.png", "https://e.com", "/k/doc/"),
-            "https://e.com/files/a.png"
+            images.relative("/files/a.png").as_deref(),
+            Some("/files/a.png")
+        );
+        assert_eq!(
+            images
+                .absolute("/files/a.png", "https://e.com", "/k/doc/")
+                .as_deref(),
+            Some("https://e.com/files/a.png")
         );
         assert!(problems.warnings.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn a_missing_image_warns_and_stays_as_written() {
+    fn a_missing_image_warns_and_publishes_nothing() {
         let dir = temp_dir("missing");
         let source = make(&dir, "doc", false, with_images(&["gone.png"]));
         let mut problems = Problems::default();
         let images = Images::resolve(&source, &dir, &mut problems);
         assert!(images.copies().is_empty());
-        assert_eq!(images.relative("gone.png"), "gone.png");
+        assert_eq!(images.relative("gone.png"), None);
+        assert_eq!(
+            images.absolute("gone.png", "https://e.com", "/k/doc/"),
+            None
+        );
         assert!(problems.errors.is_empty());
         assert!(problems.warnings[0].contains("gone.png"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -401,8 +425,8 @@ mod tests {
         );
         let mut problems = Problems::default();
         let images = Images::resolve(&source, &dir, &mut problems);
-        assert_eq!(images.relative("x/a.png"), "a.png");
-        assert_eq!(images.relative("y/a.png"), "a-2.png");
+        assert_eq!(images.relative("x/a.png").as_deref(), Some("a.png"));
+        assert_eq!(images.relative("y/a.png").as_deref(), Some("a-2.png"));
         assert_eq!(images.copies().len(), 2, "one file used twice is one copy");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -423,8 +447,8 @@ mod tests {
         let images = Images::resolve(&source, &dir, &mut problems);
         assert_eq!(images.copies()[0].0, "my photo été.png");
         assert_eq!(
-            images.relative("sub/../sub/my photo été.png"),
-            "my%20photo%20%C3%A9t%C3%A9.png"
+            images.relative("sub/../sub/my photo été.png").as_deref(),
+            Some("my%20photo%20%C3%A9t%C3%A9.png")
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

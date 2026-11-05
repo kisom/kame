@@ -325,8 +325,8 @@ pub fn to_html(doc: &Document) -> String {
 pub struct Publish<'a> {
     /// The URL for a document link's target, or `None` to publish it as its text.
     pub document_link: &'a dyn Fn(&str) -> Option<String>,
-    /// The URL for an image's path.
-    pub image: &'a dyn Fn(&str) -> String,
+    /// The URL for an image's path, or `None` to publish nothing for it, as when there is no file.
+    pub image: &'a dyn Fn(&str) -> Option<String>,
     /// The references a citation can name. A document citing any of them ends with a
     /// References section.
     pub references: &'a References,
@@ -338,7 +338,7 @@ impl Publish<'_> {
     pub fn plain() -> Publish<'static> {
         Publish {
             document_link: &|_| None,
-            image: &|path| path.to_string(),
+            image: &|path| Some(path.to_string()),
             references: &NO_REFERENCES,
         }
     }
@@ -434,9 +434,12 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
                 ImageAlign::Center => "image image-center",
                 ImageAlign::Right => "image image-right",
             };
+            let Some(src) = (publish.image)(path) else {
+                continue;
+            };
             let image = format!(
                 "<img class=\"{class}\" src=\"{}\" alt=\"\">",
-                escape_attribute(&(publish.image)(path))
+                escape_attribute(&src)
             );
             match link.as_deref().filter(|url| !is_script_url(url)) {
                 Some(url) => body.push_str(&format!(
@@ -2051,7 +2054,7 @@ mod tests {
     fn a_document_link_publishes_where_the_hook_says() {
         let publish = Publish {
             document_link: &|target| (target == "a.kame#Intro").then(|| "/k/a/".to_string()),
-            image: &|path| path.to_string(),
+            image: &|path| Some(path.to_string()),
             references: &References::new(),
         };
         assert_eq!(
@@ -2064,7 +2067,7 @@ mod tests {
     fn a_document_link_the_hook_doesnt_know_publishes_as_its_text() {
         let publish = Publish {
             document_link: &|_| None,
-            image: &|path| path.to_string(),
+            image: &|path| Some(path.to_string()),
             references: &References::new(),
         };
         assert_eq!(
@@ -2086,7 +2089,7 @@ mod tests {
         )];
         let publish = Publish {
             document_link: &|_| None,
-            image: &|path| format!("/k/s/{}\"", path.rsplit('/').next().unwrap()),
+            image: &|path| Some(format!("/k/s/{}\"", path.rsplit('/').next().unwrap())),
             references: &References::new(),
         };
         assert!(
@@ -2094,6 +2097,26 @@ mod tests {
             "{}",
             html_body(&doc, &publish)
         );
+    }
+
+    #[test]
+    fn an_image_the_hook_has_no_url_for_publishes_nothing() {
+        let mut doc = Document::new("t");
+        let image = block(
+            BlockKind::Image {
+                path: "gone.png".to_string(),
+                link: Some("https://e.com/".to_string()),
+                align: Default::default(),
+            },
+            "",
+        );
+        doc.blocks = vec![block(BlockKind::Paragraph, "Before."), image];
+        let publish = Publish {
+            document_link: &|_| None,
+            image: &|_| None,
+            references: &References::new(),
+        };
+        assert_eq!(html_body(&doc, &publish), "<p>Before.</p>\n");
     }
 
     fn rule_for<'a>(selector: &str, style: &'a str) -> &'a str {

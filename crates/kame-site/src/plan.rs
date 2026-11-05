@@ -628,6 +628,30 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_image_warns_and_leaves_its_path_off_the_page() {
+        let site = Site::new("planmissing");
+        std::fs::create_dir_all(site.dir.join("docs")).unwrap();
+        let path = site.dir.join("docs/a.kame");
+        let mut doc = Document::new("D");
+        doc.blocks = vec![crate::testing::block(
+            kame_core::model::BlockKind::Image {
+                path: "/home/you/notes/images/gone.png".to_string(),
+                link: None,
+                align: Default::default(),
+            },
+            "",
+        )];
+        write_kame(&path, &doc, Some(&metadata("A", "2026-01-01", &[])));
+        site.config(&[("a", &path)], &[]);
+        let mut problems = Problems::default();
+        let plan = build_plan(&site.dir, false, &mut problems).unwrap();
+        let page = text(&plan, "k/a/index.html");
+        assert!(!page.contains("gone.png"), "{page}");
+        assert!(!page.contains("<img"), "{page}");
+        assert!(problems.warnings.iter().any(|w| w.contains("gone.png")));
+    }
+
+    #[test]
     fn an_aligned_image_is_aligned_on_the_site() {
         let site = Site::new("planalign");
         std::fs::create_dir_all(site.dir.join("docs")).unwrap();

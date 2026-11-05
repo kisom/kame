@@ -14,12 +14,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   them now, but folders already turned on won't have been told.
 - [ ] **A footnote or note added right after punctuation** has no word to anchor to, so it sits at one point and its mark moves along as you keep typing there.
 
-## Site
-
-- [ ] **A missing image publishes its local path.** A published page's `src` gets the path on this
-  machine, such as `/home/you/notes/images/gone.png`, though the build does warn that it's missing. It
-  should publish as nothing, or as its words.
-
 ## Annotations
 
 - [ ] **A key for adding a marginal.** Notes and footnotes have one, and a marginal is only on the

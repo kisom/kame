@@ -64,8 +64,8 @@ keystroke in the page, a little more for a long paragraph, and nothing yet is cl
 - [ ] **Memory on Linux hasn't been measured.** On macOS, Metal keeps about 450 MB of buffers in use while frames come every second
   or so and lets them go a moment after they stop; a bare eframe window does the same. An idle window wakes every 3 seconds, so
   it lets them go, and holds about 255 MB with a 3,000-word document.
-- [ ] **A keystroke redraws its whole paragraph's image, then converts it for upload.** Drawing straight into egui's premultiplied
-  form would save a pass, about a sixth of a keystroke on a Retina screen. Drawing only the lines that changed would save more.
+- [ ] **A keystroke redraws its whole paragraph's image.** Drawing only the lines that changed would save most of it in a long
+  paragraph.
 - [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs
   far from the screen would make opening independent of length.
 

@@ -14,7 +14,6 @@ use egui::{
     ColorImage, Context, Event, FontData, FontFamily, Key, Modifiers, Pos2, Rect, TextureHandle,
     TextureOptions, Vec2,
 };
-use image::RgbaImage;
 pub use kame_core::text::{next_boundary, next_word, prev_boundary, prev_word, word_at};
 
 use crate::layout::{layout_block_marked, layout_block_with_align, BlockLayout, LayoutConfig};
@@ -135,7 +134,7 @@ pub fn install_fonts(ctx: &Context) {
 const RASTERIZES_PER_CACHE_CLEAR: u32 = 512;
 
 /// A block's uploaded glyph texture plus the ink offset returned by
-/// [`GlyphAtlas::rasterize`].
+/// [`GlyphAtlas::rasterize_premultiplied`].
 ///
 /// The image is cropped to the glyph ink, so it must be drawn at
 /// `block_origin + (left, top)` — never at the block origin itself. The image
@@ -230,9 +229,7 @@ impl TextureCache {
     /// as large as its block is on the screen.
     ///
     /// `blocks` and `layouts` are parallel, as produced by
-    /// [`GlyphRenderer::layout`]. Uploads use
-    /// [`ColorImage::from_rgba_unmultiplied`] because the rasterizer emits
-    /// straight (unpremultiplied) alpha, and [`TextureOptions::NEAREST`] because
+    /// [`GlyphRenderer::layout`]. Uploads use [`TextureOptions::NEAREST`] because
     /// [`BlockTexture::rect`] maps each texel onto exactly one screen pixel.
     ///
     /// The scale is part of what makes a texture current: a window's first frame
@@ -272,11 +269,9 @@ impl TextureCache {
 
             let (image, left, top) =
                 renderer.rasterize(layout, ink, background, block_highlights, scale);
-            let size = [image.width() as usize, image.height() as usize];
-            let color_image = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
             let texture = ctx.load_texture(
                 format!("kame-block-{}", block.id),
-                color_image,
+                image,
                 TextureOptions::NEAREST,
             );
             self.entries.insert(
@@ -499,15 +494,13 @@ impl AnnotationTextureCache {
         let layout = renderer.layout_in_column(&block, width, size);
         let body_height = layout.height;
         let (image, left, top) = renderer.rasterize(&layout, color, background, &[], scale);
-        let size_px = [image.width() as usize, image.height() as usize];
-        if size_px[0] == 0 || size_px[1] == 0 {
+        if image.size[0] == 0 || image.size[1] == 0 {
             self.entries.remove(&annotation_id);
             return;
         }
-        let color_image = ColorImage::from_rgba_unmultiplied(size_px, image.as_raw());
         let texture = ctx.load_texture(
             format!("kame-annotation-{annotation_id}"),
-            color_image,
+            image,
             TextureOptions::NEAREST,
         );
         self.entries.insert(
@@ -668,7 +661,7 @@ impl GlyphRenderer {
         self.layout_calls
     }
 
-    /// Paints `layout` into an ink-cropped RGBA image and returns it with its
+    /// Paints `layout` into an ink-cropped image for egui and returns it with its
     /// block-relative `(left, top)` offset, in physical pixels. `ink` is the text
     /// colour, `background` the paper it is baked against for subpixel
     /// antialiasing, `highlights` the note washes whose ranges get a different
@@ -680,13 +673,13 @@ impl GlyphRenderer {
         background: [u8; 3],
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
-    ) -> (RgbaImage, i32, i32) {
+    ) -> (ColorImage, i32, i32) {
         self.rasterizes_since_clear += 1;
         if self.rasterizes_since_clear >= RASTERIZES_PER_CACHE_CLEAR {
             self.atlas.clear_cache();
             self.rasterizes_since_clear = 0;
         }
-        self.atlas.rasterize(
+        self.atlas.rasterize_premultiplied(
             &mut self.font_system,
             layout,
             ink,

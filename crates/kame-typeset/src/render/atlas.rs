@@ -1,4 +1,4 @@
-//! Glyph rasterization: cosmic-text runs painted into an RGBA bitmap with swash.
+//! Glyph rasterization: cosmic-text runs painted with swash into egui's premultiplied image.
 
 use std::collections::HashMap;
 
@@ -6,6 +6,8 @@ use crate::layout::BlockLayout;
 use cosmic_text::{
     CacheKey, CacheKeyFlags, FontSystem, LayoutGlyph, PhysicalGlyph, SwashContent, SwashImage,
 };
+use egui::{Color32, ColorImage};
+#[cfg(test)]
 use image::RgbaImage;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform, Vector};
@@ -77,8 +79,8 @@ impl GlyphAtlas {
             .as_ref()
     }
 
-    /// Rasterize `layout` into an `RgbaImage`, returning the image together
-    /// with its block-relative offset `(left, top)`.
+    /// Rasterize `layout` into an image for egui, with premultiplied alpha, returning the image
+    /// together with its block-relative offset `(left, top)`.
     ///
     /// Glyphs are painted in `ink` over `background` (the paper colour). LCD
     /// coverage is composited per-channel so the colour fringing is correct; a
@@ -99,6 +101,35 @@ impl GlyphAtlas {
     /// row and column doubles and the stems come out uneven.
     ///
     /// Glyph positions come from [`place_glyph`].
+    ///
+    /// Glyphs are composited with straight alpha, as each needs what's under it, and each pixel
+    /// painted is written to the image in egui's form as it is, so the image needs no pass of its
+    /// own to convert.
+    pub fn rasterize_premultiplied(
+        &mut self,
+        fs: &mut FontSystem,
+        layout: &BlockLayout,
+        ink: [u8; 3],
+        background: [u8; 3],
+        highlights: &[(usize, usize, [u8; 3])],
+        scale: f32,
+    ) -> (ColorImage, i32, i32) {
+        match self.rasterize_into(
+            fs,
+            layout,
+            ink,
+            background,
+            highlights,
+            scale,
+            Premultiplied::new,
+        ) {
+            Some((canvas, left, top)) => (canvas.image, left, top),
+            None => (ColorImage::filled([1, 1], Color32::TRANSPARENT), 0, 0),
+        }
+    }
+
+    /// [`GlyphAtlas::rasterize_premultiplied`] with straight alpha, the image it converts.
+    #[cfg(test)]
     pub fn rasterize(
         &mut self,
         fs: &mut FontSystem,
@@ -108,13 +139,37 @@ impl GlyphAtlas {
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
     ) -> (RgbaImage, i32, i32) {
-        let Some((min_x, min_y, max_x, max_y)) = self.ink_bounds(fs, layout, scale) else {
-            return (RgbaImage::new(1, 1), 0, 0);
-        };
+        self.rasterize_into(
+            fs,
+            layout,
+            ink,
+            background,
+            highlights,
+            scale,
+            RgbaImage::new,
+        )
+        .unwrap_or_else(|| (RgbaImage::new(1, 1), 0, 0))
+    }
+
+    /// Paints `layout` into a canvas `make` makes at the size of its ink, or `None` if it has no
+    /// ink.
+    // What it takes to draw is simply this many things; a struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
+    fn rasterize_into<C: Canvas>(
+        &mut self,
+        fs: &mut FontSystem,
+        layout: &BlockLayout,
+        ink: [u8; 3],
+        background: [u8; 3],
+        highlights: &[(usize, usize, [u8; 3])],
+        scale: f32,
+        make: impl FnOnce(u32, u32) -> C,
+    ) -> Option<(C, i32, i32)> {
+        let (min_x, min_y, max_x, max_y) = self.ink_bounds(fs, layout, scale)?;
 
         let width = (max_x - min_x).max(1) as u32;
         let height = (max_y - min_y).max(1) as u32;
-        let mut canvas = RgbaImage::new(width, height);
+        let mut canvas = make(width, height);
         self.blit(
             fs,
             layout,
@@ -126,7 +181,7 @@ impl GlyphAtlas {
             scale,
         );
 
-        (canvas, min_x, min_y)
+        Some((canvas, min_x, min_y))
     }
 
     /// Bounding box of every rasterized glyph mask, in block-relative physical
@@ -176,15 +231,15 @@ impl GlyphAtlas {
         &mut self,
         fs: &mut FontSystem,
         layout: &BlockLayout,
-        canvas: &mut RgbaImage,
+        canvas: &mut impl Canvas,
         (origin_x, origin_y): (i32, i32),
         ink: [u8; 3],
         background: [u8; 3],
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
     ) {
-        let canvas_w = canvas.width() as i32;
-        let canvas_h = canvas.height() as i32;
+        let (canvas_w, canvas_h) = canvas.size();
+        let (canvas_w, canvas_h) = (canvas_w as i32, canvas_h as i32);
 
         for run in &layout.runs {
             // `glyph.y` is line-relative: the run's baseline is the anchor.
@@ -235,8 +290,7 @@ impl GlyphAtlas {
                         if alpha == 0 {
                             continue;
                         }
-                        let dst = canvas.get_pixel_mut(x as u32, y as u32);
-                        blend(dst, src, alpha);
+                        canvas.paint(x as u32, y as u32, src, alpha);
                     }
                 }
             }
@@ -355,8 +409,61 @@ fn rasterize_mask(
     .render(&mut scaler, cache_key.glyph_id)
 }
 
+/// What glyphs are painted into.
+trait Canvas {
+    /// Its width and height, in pixels.
+    fn size(&self) -> (u32, u32);
+
+    /// Composites straight-alpha `src` at `alpha` over the pixel at `(x, y)`.
+    fn paint(&mut self, x: u32, y: u32, src: [u8; 3], alpha: u8);
+}
+
+#[cfg(test)]
+impl Canvas for RgbaImage {
+    fn size(&self) -> (u32, u32) {
+        self.dimensions()
+    }
+
+    fn paint(&mut self, x: u32, y: u32, src: [u8; 3], alpha: u8) {
+        blend(&mut self.get_pixel_mut(x, y).0, src, alpha);
+    }
+}
+
+/// egui's premultiplied image, and the straight colour of each pixel that the next glyph over it
+/// is composited with.
+struct Premultiplied {
+    width: u32,
+    straight: Vec<[u8; 4]>,
+    image: ColorImage,
+}
+
+impl Premultiplied {
+    fn new(width: u32, height: u32) -> Premultiplied {
+        let size = [width as usize, height as usize];
+        Premultiplied {
+            width,
+            straight: vec![[0; 4]; size[0] * size[1]],
+            image: ColorImage::filled(size, Color32::TRANSPARENT),
+        }
+    }
+}
+
+impl Canvas for Premultiplied {
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.image.size[1] as u32)
+    }
+
+    fn paint(&mut self, x: u32, y: u32, src: [u8; 3], alpha: u8) {
+        let index = y as usize * self.width as usize + x as usize;
+        let straight = &mut self.straight[index];
+        blend(straight, src, alpha);
+        let [r, g, b, a] = *straight;
+        self.image.pixels[index] = Color32::from_rgba_unmultiplied(r, g, b, a);
+    }
+}
+
 /// Source-over composite a straight-alpha `src`/`alpha` onto `dst`.
-fn blend(dst: &mut image::Rgba<u8>, src: [u8; 3], alpha: u8) {
+fn blend(dst: &mut [u8; 4], src: [u8; 3], alpha: u8) {
     if alpha == 0 {
         return;
     }
@@ -377,7 +484,7 @@ fn blend(dst: &mut image::Rgba<u8>, src: [u8; 3], alpha: u8) {
 mod tests {
     use super::*;
     use crate::layout::{layout_block, LayoutConfig};
-    use crate::model::{Block, BlockKind};
+    use crate::model::{Block, BlockKind, Span, SpanStyle};
     use image::Pixel;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -751,6 +858,87 @@ dance, on a page, of pen, eye and hand.";
                 "wrong antialiasing at scale {scale}"
             );
         }
+    }
+
+    /// The image egui is given, drawn premultiplied, is the one drawn with straight alpha and then
+    /// converted, pixel for pixel: plain text, a link in its own colour, an italic whose glyphs
+    /// overlap, and a note's wash, at every density, over the paper and over a coloured ground.
+    #[test]
+    fn drawing_premultiplied_gives_what_converting_the_straight_image_did() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut block = paragraph(
+            "Plain words, then a link to follow, then an italic flourish fff, and a noted \
+             phrase that runs on long enough to wrap onto a second line of the measure.",
+        );
+        let link = block.text.find("a link").unwrap();
+        let italic = block.text.find("an italic").unwrap();
+        let noted = block.text.find("a noted").unwrap();
+        block.spans = vec![
+            Span {
+                start: link,
+                end: link + "a link".len(),
+                style: SpanStyle::Link {
+                    url: "https://example.com".to_string(),
+                },
+            },
+            Span {
+                start: italic,
+                end: italic + "an italic flourish fff".len(),
+                style: SpanStyle::Italic,
+            },
+        ];
+        let layout = layout_block(&mut fs, &block, &config());
+        assert!(
+            layout
+                .runs
+                .iter()
+                .flat_map(|run| &run.glyphs)
+                .any(|glyph| glyph.color_opt.is_some()),
+            "the link has a colour of its own"
+        );
+        let wash = [(noted, noted + "a noted phrase".len(), [250, 226, 140])];
+        let mut atlas = GlyphAtlas::new();
+        for scale in [1.0, 1.5, 2.0] {
+            for (ink, background) in [
+                ([17, 17, 17], [255, 255, 255]),
+                ([230, 225, 210], [40, 60, 90]),
+            ] {
+                let (straight, left, top) =
+                    atlas.rasterize(&mut fs, &layout, ink, background, &wash, scale);
+                let (premultiplied, new_left, new_top) =
+                    atlas.rasterize_premultiplied(&mut fs, &layout, ink, background, &wash, scale);
+                let converted = egui::ColorImage::from_rgba_unmultiplied(
+                    [straight.width() as usize, straight.height() as usize],
+                    straight.as_raw(),
+                );
+                assert_eq!((new_left, new_top), (left, top));
+                assert_eq!(premultiplied.size, converted.size);
+                assert!(
+                    premultiplied.pixels == converted.pixels,
+                    "at scale {scale} over {background:?}"
+                );
+                if scale < GRAYSCALE_MIN_SCALE {
+                    assert!(coloured_pixels(&straight) > 0, "subpixel coverage is drawn");
+                }
+                let partial = straight
+                    .pixels()
+                    .filter(|pixel| (1..255).contains(&pixel[3]))
+                    .count();
+                assert!(partial > 0, "some pixels are partly covered");
+            }
+        }
+
+        // Nothing to draw is the same too.
+        let empty = layout_block(&mut fs, &paragraph(""), &config());
+        let (straight, ..) = atlas.rasterize(&mut fs, &empty, [0; 3], [255; 3], &[], 2.0);
+        let (premultiplied, ..) =
+            atlas.rasterize_premultiplied(&mut fs, &empty, [0; 3], [255; 3], &[], 2.0);
+        assert_eq!(premultiplied.size, [1, 1]);
+        assert_eq!(
+            premultiplied.pixels,
+            egui::ColorImage::from_rgba_unmultiplied([1, 1], straight.as_raw()).pixels
+        );
     }
 
     /// 16 units at 2x and 32 units at 1x reach the same physical size, so they

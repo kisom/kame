@@ -8,9 +8,9 @@ kame-core = { path = "../kame-core" }
 egui = "0.37"
 cosmic-text = { version = "0.19", features = ["swash"] }
 swash = "0.2"
-image = "0.25"
 unicode-linebreak = "0.1.5"
 hypher = { version = "0.1.8", default-features = false, features = ["alloc", "english"] }
 
 [dev-dependencies]
+image = "0.25"
 uuid = { version = "1", features = ["v4", "serde"] }

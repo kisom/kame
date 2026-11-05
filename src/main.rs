@@ -6,6 +6,7 @@
 //! commands; every command is persisted through the durable op log so history
 //! survives a restart.
 
+mod commands;
 mod external;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -426,6 +427,10 @@ const HELP_CHROME: f32 = 72.0;
 /// What the help dialog lists, as keys and what they do, in the order shown.
 const HELP_ROWS: &[(&str, &str)] = &[
     ("F1", "this help"),
+    (
+        "Ctrl-P",
+        "the command palette: run any menu command by name",
+    ),
     (
         "type / click / drag",
         "type to write · click to place the caret · drag to select",
@@ -1608,14 +1613,10 @@ enum MenuAction {
     ToggleCheck,
     Mode(ModeCommand),
     Help,
+    Commands,
 }
 
 /// A menu entry showing its shortcut, if it has one. Clicking closes the menu.
-fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: Option<&str>, selected: bool) -> bool {
-    menu_entry(ui, label, shortcut, selected).clicked()
-}
-
-/// [`menu_item`], returning the response so a caller can add a hover.
 fn menu_entry(
     ui: &mut egui::Ui,
     label: &str,
@@ -3794,63 +3795,13 @@ impl KameApp {
         let mut action: Option<MenuAction> = None;
         let pending_menu = self.pending_menu.take();
 
+        let commands = self.commands();
+        let in_menu = |menu: BarMenu| commands.iter().filter(move |command| command.menu == menu);
         egui::Panel::top("kame-status").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 let file_menu = ui.menu_button("File", |ui| {
                     ui.set_min_width(260.0);
-                    if menu_item(ui, "New", Some("Ctrl-N"), false) {
-                        action = Some(MenuAction::New);
-                    }
-                    if menu_item(ui, "New Notebook…", None, false) {
-                        action = Some(MenuAction::NewNotebook);
-                    }
-                    if menu_item(ui, "Open…", Some("Ctrl-O"), false) {
-                        action = Some(MenuAction::Open);
-                    }
-                    if menu_item(ui, "Open Path…", None, false) {
-                        action = Some(MenuAction::OpenPath);
-                    }
-                    if menu_item(ui, "Save", Some("Ctrl-S"), false) {
-                        action = Some(MenuAction::Save);
-                    }
-                    if menu_item(ui, "Save As…", None, false) {
-                        action = Some(MenuAction::SaveAs);
-                    }
-                    ui.separator();
-                    if !self.conflict_copies.is_empty()
-                        && menu_item(ui, "Merge Conflict Copies", None, false)
-                    {
-                        action = Some(MenuAction::MergeConflictCopies);
-                    }
-                    if menu_item(ui, "Compact History", None, false) {
-                        action = Some(MenuAction::CompactHistory);
-                    }
-                    if menu_item(ui, "Back", Some("Ctrl-["), false) {
-                        action = Some(MenuAction::Back);
-                    }
-                    if menu_item(ui, "Link to Document…", None, false) {
-                        action = Some(MenuAction::LinkDocument);
-                    }
-                    if menu_item(ui, "Import Markdown…", None, false) {
-                        action = Some(MenuAction::ImportMarkdown);
-                    }
-                    if menu_item(ui, "Export Markdown…", Some("Ctrl-Shift-E"), false) {
-                        action = Some(MenuAction::File(FileCommand::ExportMarkdown));
-                    }
-                    if menu_item(ui, "Export HTML…", Some("Ctrl-Shift-B"), false) {
-                        action = Some(MenuAction::File(FileCommand::ExportHtml));
-                    }
-                    ui.separator();
-                    if menu_item(ui, "Snapshot Now…", Some("Ctrl-Shift-S"), false) {
-                        action = Some(MenuAction::File(FileCommand::SnapshotNow));
-                    }
-                    if menu_item(ui, "Restore Snapshot…", Some("Ctrl-Shift-R"), false) {
-                        action = Some(MenuAction::File(FileCommand::RestoreSnapshot));
-                    }
-                    ui.separator();
-                    if menu_item(ui, "Document Properties…", None, false) {
-                        action = Some(MenuAction::Properties);
-                    }
+                    commands::command_rows(ui, in_menu(BarMenu::File), &mut action);
                     ui.separator();
                     let plural = |n: usize| if n == 1 { "" } else { "s" };
                     ui.label(
@@ -3865,112 +3816,40 @@ impl KameApp {
                 });
                 let annotate_menu = ui.menu_button("Annotate", |ui| {
                     ui.set_min_width(200.0);
-                    for (label, kind, shortcut) in [
-                        ("Note", AnnotationKind::Note, Some("Ctrl-Shift-N")),
-                        ("Marginal", AnnotationKind::Marginal, Some("Ctrl-Shift-M")),
-                        ("Footnote", AnnotationKind::Footnote, Some("Ctrl-Shift-F")),
-                    ] {
-                        if menu_item(ui, label, shortcut, false) {
-                            action = Some(MenuAction::Annotate(kind));
-                        }
-                    }
-                    ui.separator();
-                    let in_notebook = self.nb.notebook.is_some();
-                    let cite = ui.add_enabled_ui(in_notebook, |ui| {
-                        menu_entry(ui, "Cite…", Some("Ctrl-Shift-C"), false)
-                            .on_disabled_hover_text("Citing needs a notebook.")
-                    });
-                    if cite.inner.clicked() {
-                        action = Some(MenuAction::Cite);
-                    }
-                    if in_notebook && menu_item(ui, "References…", None, false) {
-                        action = Some(MenuAction::References);
-                    }
+                    commands::command_rows(ui, in_menu(BarMenu::Annotate), &mut action);
                 });
+                let is_size = |command: &&commands::MenuCommand| {
+                    matches!(command.action, MenuAction::TypeSize(_))
+                };
                 let view_menu = ui.menu_button("View", |ui| {
                     ui.set_min_width(240.0);
                     ui.horizontal(|ui| {
                         ui.label(format!("Type size {:.0}", self.body_size));
                         // These stay open, so the size can be walked to taste.
-                        if ui.small_button("−").on_hover_text("smaller").clicked() {
-                            action = Some(MenuAction::TypeSize(-FONT_SIZE_STEP));
-                        }
-                        if ui.small_button("+").on_hover_text("larger").clicked() {
-                            action = Some(MenuAction::TypeSize(FONT_SIZE_STEP));
+                        for command in in_menu(BarMenu::View).filter(is_size) {
+                            let MenuAction::TypeSize(step) = command.action else {
+                                continue;
+                            };
+                            let sign = if step < 0.0 { "−" } else { "+" };
+                            if ui.small_button(sign).on_hover_text(command.label).clicked() {
+                                action = Some(command.action);
+                            }
                         }
                     });
-                    if menu_item(ui, "Dark mode", Some("Ctrl-Shift-D"), self.dark) {
-                        action = Some(MenuAction::ToggleDark);
-                    }
-                    if menu_item(ui, "Hyphenate", None, self.hyphenate) {
-                        action = Some(MenuAction::ToggleHyphenate);
-                    }
-                    if self.nb.notebook.is_some() {
-                        if menu_item(ui, "Notebook browser", Some("Ctrl-Shift-O"), self.nb.browser_open) {
-                            action = Some(MenuAction::ToggleBrowser);
-                        }
-                        if menu_item(ui, "Notebook contents", Some("Ctrl-Shift-L"), false) {
-                            action = Some(MenuAction::NotebookHome);
-                        }
-                        if menu_item(ui, "Jump to document", Some("Ctrl-L"), false) {
-                            action = Some(MenuAction::Jump);
-                        }
-                        if menu_item(ui, "Search this notebook", Some("Ctrl-R"), false) {
-                            action = Some(MenuAction::SearchNotebook);
-                        }
-                        ui.separator();
-                    }
-                    if menu_item(ui, "Jump to heading", Some("Ctrl-J"), false) {
-                        action = Some(MenuAction::JumpToHeading);
-                    }
-                    ui.separator();
-                    if menu_item(ui, "Check spelling", None, self.check_spelling) {
-                        action = Some(MenuAction::ToggleCheck);
-                    }
-                    ui.separator();
-                    for (label, mode, shortcut) in [
-                        ("Fullscreen", ModeCommand::Fullscreen, "F11"),
-                        ("Hide chrome", ModeCommand::HideChrome, "Ctrl-Shift-H"),
-                        ("Hide margin", ModeCommand::HideMargin, "Ctrl-Shift-G"),
-                        ("Paragraph focus", ModeCommand::ParagraphFocus, "Ctrl-Shift-P"),
-                        ("Typewriter", ModeCommand::Typewriter, "Ctrl-Shift-T"),
-                    ] {
-                        if menu_item(ui, label, Some(shortcut), self.modes.is_on(mode)) {
-                            action = Some(MenuAction::Mode(mode));
-                        }
-                    }
+                    let rest = in_menu(BarMenu::View).filter(|command| !is_size(command));
+                    commands::command_rows(ui, rest, &mut action);
                 });
                 let mut site_menu = None;
-                if let Some(notebook) = &self.nb.notebook {
-                    let working = self.publishing.working();
-                    let has_remote = notebook
-                        .settings
-                        .remote
-                        .as_deref()
-                        .is_some_and(|remote| !remote.trim().is_empty());
+                if in_menu(BarMenu::Site).next().is_some() {
                     let menu = ui.menu_button("Site", |ui| {
                         ui.set_min_width(160.0);
-                        let build = ui.add_enabled_ui(!working, |ui| {
-                            menu_item(ui, "Build", None, false)
-                        });
-                        if build.inner {
-                            action = Some(MenuAction::SiteBuild);
-                        }
-                        let sync = ui.add_enabled_ui(!working && has_remote, |ui| {
-                            menu_entry(ui, "Sync", None, false)
-                                .on_disabled_hover_text("Set remote in notebook.yaml to send the site")
-                        });
-                        if sync.inner.clicked() {
-                            action = Some(MenuAction::SiteSync);
-                        }
+                        commands::command_rows(ui, in_menu(BarMenu::Site), &mut action);
                     });
                     site_menu = Some(menu.response);
                 }
                 let help_menu = ui.menu_button("Help", |ui| {
                     ui.set_min_width(160.0);
-                    if menu_item(ui, "Help", Some("F1"), false) {
-                        action = Some(MenuAction::Help);
-                    }
+                    commands::command_rows(ui, in_menu(BarMenu::Help), &mut action);
                 });
                 for (menu, response) in [
                     (BarMenu::File, &file_menu.response),
@@ -4086,6 +3965,7 @@ impl KameApp {
             }
             MenuAction::Mode(mode) => self.apply_mode(ctx, mode),
             MenuAction::Help => self.show_help = true,
+            MenuAction::Commands => self.toggle_commands(),
             MenuAction::SiteBuild => self.start_site_job(ctx, publish::SiteJob::Build),
             MenuAction::SiteSync => {
                 let ask = kame_site::notebook::GoAhead::Ask;

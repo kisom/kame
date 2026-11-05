@@ -23,6 +23,7 @@ use kame_notebook::search::{search, Hit};
 use kame_notebook::stranded::{apply, decide, find_stranded, Done, Healthy, Steps, Unsettled};
 use kame_notebook::Notebook;
 
+use super::commands::CommandList;
 use super::references::{draw_browser_references, BrowserReference, BROWSER_SECTION};
 use super::{follow_move, now_unix, same_document, same_place, BackStop, KameApp};
 
@@ -166,6 +167,8 @@ pub(crate) struct NotebookUi {
     pub(crate) jump: Option<JumpList>,
     pub(crate) headings: Option<HeadingList>,
     pub(crate) search: Option<SearchList>,
+    /// The command palette, which is a list as these are.
+    pub(crate) commands: Option<CommandList>,
     pub(crate) browser_open: bool,
     pub(crate) browser_folders: HashSet<String>,
     recent: Vec<PathBuf>,
@@ -195,13 +198,17 @@ impl NotebookUi {
     }
 
     pub(crate) fn list_open(&self) -> bool {
-        self.jump.is_some() || self.headings.is_some() || self.search.is_some()
+        self.jump.is_some()
+            || self.headings.is_some()
+            || self.search.is_some()
+            || self.commands.is_some()
     }
 
     pub(crate) fn close_lists(&mut self) -> bool {
         let open = self.list_open();
         self.jump = None;
         self.headings = None;
+        self.commands = None;
         if let Some(search) = self.search.take() {
             if let Some(running) = search.running {
                 running.cancel.store(true, Ordering::Relaxed);
@@ -718,7 +725,8 @@ impl KameApp {
         });
     }
 
-    /// Ctrl-L, Ctrl-R and Ctrl-Shift-O, which do something only in a notebook.
+    /// Ctrl-J and Ctrl-P, the open document's headings and the command palette, and Ctrl-L, Ctrl-R
+    /// and Ctrl-Shift-O, which do something only in a notebook.
     pub(crate) fn handle_notebook_keys(&mut self, ctx: &egui::Context) {
         let pressed = |key: egui::Key, shift: bool| {
             ctx.input(|input| {
@@ -741,6 +749,9 @@ impl KameApp {
         let in_a_note = ctx.memory(|memory| memory.has_focus(super::note_body_edit_id()));
         if pressed(egui::Key::J, false) && !self.close_flow.prompting && !in_a_note {
             self.toggle_headings();
+        }
+        if pressed(egui::Key::P, false) && !self.close_flow.prompting && !in_a_note {
+            self.toggle_commands();
         }
         let (jump, home, find, browser) = (
             pressed(egui::Key::L, false),
@@ -1078,6 +1089,7 @@ impl KameApp {
         self.show_jump_list(ctx);
         self.show_heading_list(ctx);
         self.show_search_list(ctx);
+        self.show_command_list(ctx);
     }
 
     fn show_jump_list(&mut self, ctx: &egui::Context) {

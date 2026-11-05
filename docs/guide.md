@@ -104,6 +104,8 @@ Adding one opens a small box for its words, and Escape closes that box. Click a 
 
 ## Getting around and keeping focus
 
+Ctrl-P lists every menu command with its key. Type a few letters of one, such as "exp ht" for Export HTML, and press Enter to run it.
+
 Ctrl-F finds text in the document, with Enter for the next match and Shift-Enter for the one before. Ctrl-Left and Ctrl-Right move by word, and adding Shift selects as you go. Ctrl-A selects the block, and again the whole document. Esc then `<` or `>` goes to the very start or end.
 
 When you want less on the screen, each of these is a toggle, and none of them changes the document:
@@ -326,6 +328,7 @@ kame's settings are in `config.json`, at `~/.config/kame/` on Linux and `~/Libra
 - Ctrl-J: jump to a heading in this document
 - Ctrl-Shift-S: snapshot
 - Ctrl-Shift-E and Ctrl-Shift-B: export Markdown and HTML
+- Ctrl-P: every menu command, by name
 - F1: help
 
 The full list, with every detail, is in `docs/keybindings.md` in kame's source.

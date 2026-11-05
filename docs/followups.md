@@ -37,7 +37,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
   document after something is renamed to `b.kame`.
 - [ ] **A move into a new folder shadowing a link.** A folder is looked at before a document of the same name, so moving
   something to `b/a.kame`, which makes the folder `b/`, leaves a link `b` that led to `b.kame` offering to create `b/Notebook.kame`.
-- [ ] **A command palette.**
 
 ## References
 

@@ -29,6 +29,7 @@ macOS (`Modifiers::command`).
 | drag, shift-click, Shift-arrows | select / extend the selection |
 | Escape | close the find bar, a dialog, or the note popover |
 | F1 | toggle the help dialog: every command in columns as wide as the window allows, scrolling when the window is short |
+| Ctrl-P | the command palette: every menu command that can be run here, with its key, narrowed by typing |
 
 ## Selecting
 
@@ -306,6 +307,13 @@ On Linux, Alt-F, Alt-A, Alt-V, Alt-S (in a notebook) and Alt-H open those menus;
 choose an item, and Escape closes it. There are no such chords on macOS, where
 Option plus a letter types a character. The document takes no keystrokes while a
 menu is open.
+
+Ctrl-P, or Help > Commands…, opens the command palette, which lists the menus' commands as
+"File: Save" with each one's key. It's the same list the menus are drawn from, leaving out what's greyed
+out there, such as Cite… outside a notebook. The letters you type only have to appear in order, in the
+command or its menu, and the arrows, Enter and Escape work as they do in the other lists. Enter or a
+click runs the command as its menu would. Like those lists, it waits while another dialog is up, a
+note's box has the keyboard, or the close prompt is asking, and it takes the place of another list.
 
 The status row below it shows the document's title (hover for its path), `not
 saved yet` if it has no file, any mode badges, and the word count.

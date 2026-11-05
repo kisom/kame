@@ -230,28 +230,42 @@ pub fn own_target_after_save_as(target: &str, from: &Path, to: &Path) -> String 
 }
 
 /// Whether a link, written in the document at `document`, names something that's there: a file or
-/// folder, or a document with its extension left off. It says nothing of a link with no path.
+/// folder, a document with its extension left off, or the document itself, even once its file has
+/// gone. It says nothing of a link with no path.
 pub fn names_something(target: &str, document: &Path) -> bool {
     let (path, _) = split_document_target(target);
     !path.is_empty()
-        && (resolve_open_path(path, document).exists() || find_document(path, document).is_some())
+        && (resolve_open_path(path, document).exists()
+            || find_document(path, document).is_some()
+            || names_document(path, document))
 }
 
 /// Whether a link's path, written in the document at `document`, leads to that document. `www.`
-/// starts a web address, as it does in a document's text.
+/// starts a web address, as it does in a document's text. If the document's file has gone, what
+/// the link names is compared with where it was, by what the paths say.
 fn names_document(path: &str, document: &Path) -> bool {
     if path.is_empty() || path.starts_with("www.") {
         return false;
     }
     let named = resolve_open_path(path, document);
+    let real = |file: &Path| file.canonicalize().ok();
+    let Some(real_document) = real(document) else {
+        let named = tidied(&named);
+        let document = tidied(document);
+        if named.is_dir() || path.ends_with('/') {
+            return named.join(FOLDER_INDEX) == document;
+        }
+        let mut with_extension = named.clone().into_os_string();
+        with_extension.push(".kame");
+        return named == document || PathBuf::from(with_extension) == document;
+    };
     let file = if named.is_dir() {
         Some(named.join(FOLDER_INDEX))
     } else {
         find_document(path, document)
     };
-    let real = |file: &Path| file.canonicalize().ok();
     file.and_then(|file| real(&file))
-        .is_some_and(|file| real(document) == Some(file))
+        .is_some_and(|file| file == real_document)
 }
 
 /// A document link's target as its path and the heading it names, if any.

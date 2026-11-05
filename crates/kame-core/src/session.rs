@@ -4037,6 +4037,48 @@ mod tests {
     }
 
     #[test]
+    fn saving_as_keeps_a_link_to_itself_once_its_file_has_gone() {
+        let root = scratch_dir("rehomeselfgone").canonicalize().unwrap();
+        let from = root.join("one/a.kame");
+        let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
+        std::fs::remove_file(&from).unwrap();
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        session.save_as(&root.join("three/deep/a.kame")).unwrap();
+        session.rehome_links(Some(&from));
+        assert_eq!(
+            link_targets(&session),
+            [
+                "a.kame",
+                "a.kame#Part",
+                "a.kame",
+                "a.kame#Part",
+                "a.kame",
+                "a.kame",
+                "a.kame#Part",
+                "#Part",
+            ]
+        );
+        // Under another name, a link of either kind follows it.
+        let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
+        std::fs::remove_file(&from).unwrap();
+        session.save_as(&root.join("one/b.kame")).unwrap();
+        session.rehome_links(Some(&from));
+        assert_eq!(
+            link_targets(&session)[..7],
+            [
+                "b.kame",
+                "b.kame#Part",
+                "b.kame",
+                "b.kame#Part",
+                "b.kame",
+                "b.kame",
+                "b.kame#Part"
+            ]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn saving_as_another_name_keeps_a_link_to_itself_leading_to_itself() {
         let root = scratch_dir("rehomeselfname").canonicalize().unwrap();
         let from = root.join("one/a.kame");

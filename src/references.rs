@@ -938,7 +938,7 @@ impl KameApp {
             });
         }
         self.follow_caret = true;
-        if !self.session.insert(&format!("[{key}]")) {
+        if !self.session.insert_as_step(&format!("[{key}]")) {
             let why = self.session.last_error.take();
             self.session.last_error = Some(format!(
                 "could not cite {key} here — {}",
@@ -3880,6 +3880,43 @@ mod tests {
         let said = page.app.session.last_error.as_deref().unwrap();
         assert!(said.contains("knuth1981"), "{said}");
         assert!(said.contains("the disk is full"), "{said}");
+    }
+
+    #[test]
+    fn typing_after_a_cited_key_is_an_undo_step_of_its_own() {
+        let command = egui::Modifiers {
+            command: true,
+            ..egui::Modifiers::NONE
+        };
+        let command_shift = egui::Modifiers {
+            shift: true,
+            ..command
+        };
+        let mut page = page_in_notebook("hello ");
+        cite_chord(&mut page);
+        press_key(&mut page, egui::Key::Enter);
+        assert_eq!(only_text(&page), "hello [knuth1981]");
+
+        type_into(&mut page, ", xy");
+        assert_eq!(only_text(&page), "hello [knuth1981], xy");
+
+        // The typing is a word and the spaces after it, and then the next word.
+        key(&mut page, egui::Key::Z, command);
+        assert_eq!(only_text(&page), "hello [knuth1981], ");
+        key(&mut page, egui::Key::Z, command);
+        assert_eq!(only_text(&page), "hello [knuth1981]");
+        assert_eq!(page.app.session.caret.offset, "hello [knuth1981]".len());
+        key(&mut page, egui::Key::Z, command);
+        assert_eq!(only_text(&page), "hello ");
+        assert_eq!(page.app.session.caret.offset, "hello ".len());
+
+        key(&mut page, egui::Key::Z, command_shift);
+        assert_eq!(only_text(&page), "hello [knuth1981]");
+        assert_eq!(page.app.session.caret.offset, "hello [knuth1981]".len());
+        key(&mut page, egui::Key::Z, command_shift);
+        assert_eq!(only_text(&page), "hello [knuth1981], ");
+        key(&mut page, egui::Key::Z, command_shift);
+        assert_eq!(only_text(&page), "hello [knuth1981], xy");
     }
 
     #[test]

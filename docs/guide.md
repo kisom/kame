@@ -180,7 +180,7 @@ When you close a `[key]` that has no reference, the status row says "No referenc
 
 - In or just after a `[key]` with no reference: the new reference window, with that key filled in. Saving leaves the text alone, and it becomes a citation.
 - In or just after a known `[key]`: that reference, for editing.
-- Anywhere else: a search over keys, authors and titles, ignoring case. Choosing one inserts `[key]` at the caret, as one undo step. If nothing matches, the last row is a new reference.
+- Anywhere else: a search over keys, authors and titles, ignoring case. Choosing one inserts `[key]` at the caret, as an undo step of its own, apart from anything typed after it. If nothing matches, the last row is a new reference.
 
 Outside a notebook it says "Citing needs a notebook."
 

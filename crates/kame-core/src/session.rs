@@ -1196,11 +1196,31 @@ impl Session {
     // --- editing commands --------------------------------------------------
 
     pub fn insert(&mut self, text: &str) -> bool {
-        self.insert_styled(text, &[])
+        self.insert_with(text, |editor, caret| editor.insert_text(caret, text))
+    }
+
+    /// [`Session::insert`], as a step of its own in the history. Typing straight after it starts
+    /// another step, where it would otherwise join on as the same word.
+    pub fn insert_as_step(&mut self, text: &str) -> bool {
+        self.insert_with(text, |editor, caret| editor.insert_as_step(caret, text))
     }
 
     /// [`Session::insert`], with `spans` on the words, their offsets being within `text`.
     fn insert_styled(&mut self, text: &str, spans: &[Span]) -> bool {
+        if spans.is_empty() {
+            return self.insert(text);
+        }
+        self.insert_with(text, |editor, caret| {
+            editor.insert_styled(caret, text, spans)
+        })
+    }
+
+    /// Puts `text` at the caret by way of `edit`, which makes it one edit there.
+    fn insert_with(
+        &mut self,
+        text: &str,
+        edit: impl FnOnce(&mut Editor, &Cursor) -> Result<Op, EditError>,
+    ) -> bool {
         if self.save_failed {
             return false;
         }
@@ -1220,12 +1240,7 @@ impl Session {
             return false;
         }
         let caret = self.valid_caret();
-        let inserted = if spans.is_empty() {
-            self.editor.insert_text(&caret, text)
-        } else {
-            self.editor.insert_styled(&caret, text, spans)
-        };
-        match inserted {
+        match edit(&mut self.editor, &caret) {
             Ok(op) => {
                 let saved = self.record(&op);
                 self.caret = Cursor {
@@ -4130,6 +4145,63 @@ mod tests {
         assert_eq!(session.document().blocks.len(), 1);
         assert_eq!(session.caret.block_id, first_block_id(&session));
         assert_eq!(session.caret.offset, 0);
+    }
+
+    #[test]
+    fn typing_after_an_inserted_step_stays_a_step_apart() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("see ");
+        assert!(session.insert_as_step("[é]"));
+        for typed in ["n", "o", "w"] {
+            assert!(session.insert(typed));
+        }
+        assert_eq!(session.document().blocks[0].text, "see [é]now");
+        assert_eq!(session.history(), (3, 0));
+
+        // Neither a reopen nor compacting the history joins them, as both work from the log.
+        drop(session);
+        let mut session = open(&path);
+        assert_eq!(session.history(), (3, 0));
+        assert_eq!(session.compact_history(), Ok((3, 3)));
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].text, "see [é]");
+        assert_eq!(session.caret.offset, "see [é]".len());
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].text, "see ");
+        assert_eq!(session.caret.offset, "see ".len());
+        assert!(session.redo());
+        assert_eq!(session.document().blocks[0].text, "see [é]");
+        assert_eq!(session.caret.offset, "see [é]".len());
+        assert!(session.redo());
+        assert_eq!(session.document().blocks[0].text, "see [é]now");
+        assert_eq!(session.caret.offset, "see [é]now".len());
+    }
+
+    #[test]
+    fn an_inserted_step_widens_a_note_it_lands_inside() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two");
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 2,
+        });
+        session.add_annotation(AnnotationKind::Note).unwrap();
+        let before = session.document().clone();
+        let (start, end) = before.annotations[0].anchor.byte_range().unwrap();
+        assert_eq!((start, end), (0, 3));
+        session.set_caret(Cursor {
+            block_id,
+            offset: 2,
+        });
+        assert!(session.insert_as_step("[k]"));
+        assert_eq!(
+            session.document().annotations[0].anchor.byte_range(),
+            Some((0, 6))
+        );
+        assert!(session.undo());
+        assert_eq!(session.document(), &before);
     }
 
     /// FIX 1: undo/redo derive the caret from the op they applied, so typing

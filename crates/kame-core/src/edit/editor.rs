@@ -284,6 +284,20 @@ impl Editor {
         Ok(self.apply_edit(op))
     }
 
+    /// Inserts `text` at `cursor` as a step that typing can't join on to: only a plain insert
+    /// coalesces, and a batch isn't one, even of a single op. Being in the op itself, this holds
+    /// through a reopen and a compacted history.
+    pub fn insert_as_step(&mut self, cursor: &Cursor, text: &str) -> Result<Op, EditError> {
+        self.check_cursor(*cursor)?;
+        Ok(self.apply_edit(Op::Batch {
+            ops: vec![Op::InsertText {
+                block_id: cursor.block_id,
+                offset: cursor.offset,
+                text: text.to_string(),
+            }],
+        }))
+    }
+
     /// Inserts `text` at `cursor` with `spans`, whose offsets are within `text`, as one step. Code
     /// is literal, so it takes only the words. Words inserted inside a link are part of that link
     /// already, and two links can't share them, so a link in `spans` that would overlap one is left out.

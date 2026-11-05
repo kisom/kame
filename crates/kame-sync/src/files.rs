@@ -147,9 +147,9 @@ fn same_document(path: &Path, id: uuid::Uuid) -> bool {
         .is_ok_and(|doc| doc.id == id)
 }
 
-/// Which of `files` hold the document at `path`, by id. If that document's id can't be read, or a
-/// file can't be, it's none of them or not that one, since these are for taking along with it or
-/// removing with it, and a file taken by mistake may be another document's only copy.
+/// Which of `files` hold the document at `path`, by id. None do if that document's id can't be read,
+/// and one that can't be read itself doesn't, since a file taken for a copy by mistake may be
+/// another document's only one.
 pub fn copies_of(path: &Path, mut files: Vec<PathBuf>) -> Vec<PathBuf> {
     if files.is_empty() {
         return files;

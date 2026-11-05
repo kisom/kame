@@ -232,7 +232,7 @@ impl NotebookUi {
 /// look, it's `STRANDED_RECHECK`, so that the pass acting on it comes soon after its time is up.
 /// Otherwise that look could have acted on all there is, and what it left has no reason to change
 /// soon. A pass still comes every `STRANDED_WAIT`, as a log folder deleted by a sync doesn't change
-/// the listing, and the clock on it should start when it goes, rather than when something else does.
+/// the listing, and the clock on it should start about when it goes.
 fn pass_interval(seen: &HashMap<PathBuf, Instant>, checked: Instant) -> Duration {
     let still_waiting = seen
         .values()
@@ -365,6 +365,12 @@ pub(crate) fn path_selection(relative: &str, rename: bool) -> Range<usize> {
     let start = characters(relative) - characters(name);
     let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
     start..start + characters(stem)
+}
+
+/// What the Move dialog adds for a document at the root. It has no folders to select, so what's typed
+/// goes in front of its name, and without a `/` that's a rename.
+fn move_hint(rename: bool, from: &Path, root: Option<&Path>) -> Option<&'static str> {
+    (!rename && from.parent() == root).then_some("type a folder and / before the name")
 }
 
 /// What a delete says. Logs left behind keep the document's row in the browser, so without a word
@@ -1370,6 +1376,8 @@ impl KameApp {
                 let mut cancel = false;
                 let selection = focus.then(|| path_selection(&field, rename));
                 let error = self.palette.error_ink;
+                let root = self.nb.notebook.as_ref().map(|nb| nb.root.as_path());
+                let hint = move_hint(rename, &from, root);
                 egui::Window::new(if rename { "Rename" } else { "Move" })
                     .id(egui::Id::unique("kame-file-op-path-dialog"))
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -1381,6 +1389,9 @@ impl KameApp {
                         let edit = path_field(ui, &mut field, selection);
                         if edit.changed() {
                             refusal = None;
+                        }
+                        if let Some(hint) = hint {
+                            ui.weak(hint);
                         }
                         if let Some(refusal) = &refusal {
                             ui.colored_label(error, refusal);
@@ -2009,6 +2020,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn moving_a_document_at_the_root_says_how() {
+        let root = Path::new("/n");
+        let hint = Some("type a folder and / before the name");
+        assert_eq!(move_hint(false, Path::new("/n/a.kame"), Some(root)), hint);
+        assert_eq!(move_hint(true, Path::new("/n/a.kame"), Some(root)), None);
+        assert_eq!(move_hint(false, Path::new("/n/x/a.kame"), Some(root)), None);
+        assert_eq!(move_hint(false, Path::new("/n/a.kame"), None), None);
+    }
+
     /// A map with one database in it, first seen stranded at `first`.
     fn seen_at(first: Instant) -> HashMap<PathBuf, Instant> {
         HashMap::from([(PathBuf::from("/n/a.kame"), first)])
@@ -2079,12 +2100,7 @@ mod tests {
             Some(looked),
             looked + STRANDED_RECHECK
         ));
-        assert!(pass_due(
-            false,
-            &seen,
-            Some(looked),
-            looked + STRANDED_WAIT
-        ));
+        assert!(pass_due(false, &seen, Some(looked), looked + STRANDED_WAIT));
     }
 
     #[test]

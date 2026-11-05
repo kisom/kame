@@ -545,8 +545,8 @@ fn those_coming_back(notebook: &Notebook, set_aside: &[PathBuf], logs: &[Logs]) 
     wanting
 }
 
-/// What each stranded database remembers, going by logs that have already been read. Logs that
-/// aren't among them aren't a folder this could read, so they don't hold the revision.
+/// What each stranded database remembers, going by logs that have already been read. A database
+/// with no logs among them has none that hold its revision.
 fn revisions_of_stranded(notebook: &Notebook, logs: &[Logs]) -> Vec<String> {
     notebook
         .documents()

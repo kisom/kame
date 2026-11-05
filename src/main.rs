@@ -6035,6 +6035,7 @@ impl KameApp {
                 Ok(outcome) => {
                     if outcome.stranded && !self.stranded_mentioned {
                         self.stranded_mentioned = true;
+                        self.notice_tracker.announced();
                         self.notice = Some(
                             "this document was moved or deleted on another machine, and isn't \
                              syncing"

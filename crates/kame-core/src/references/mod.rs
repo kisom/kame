@@ -73,32 +73,11 @@ impl Kind {
     }
 }
 
-/// Reads a string, or a number as the string of its digits, since YAML reads `year: 1981`
-/// as a number.
-fn string_or_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    struct Visitor;
-    impl serde::de::Visitor<'_> for Visitor {
-        type Value = String;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a string or a number")
-        }
-        fn visit_str<E>(self, v: &str) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_string<E>(self, v: String) -> Result<String, E> {
-            Ok(v)
-        }
-        fn visit_u64<E>(self, v: u64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_i64<E>(self, v: i64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_f64<E>(self, v: f64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-    }
-    deserializer.deserialize_any(Visitor)
+/// Reads a field as the text it was written as. A format that has scalars of other types, as
+/// YAML does, hands over a number's own digits, so `2.10` stays `2.10` and `year: 1981` is
+/// `1981`. A format that tells a number from a string, as JSON does, refuses a number.
+fn text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    String::deserialize(deserializer)
 }
 
 /// One flat struct, so switching kinds in the form keeps what was typed.
@@ -113,103 +92,103 @@ pub struct Reference {
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub title: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub chapter: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub published_in: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub location: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub edition: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub place: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub publisher: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub site: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub volume: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub number: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub pages: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub month: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub year: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub doi: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub url: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub accessed: String,
     #[serde(
         default,
         skip_serializing_if = "String::is_empty",
-        deserialize_with = "string_or_number"
+        deserialize_with = "text"
     )]
     pub text: String,
 }
@@ -908,11 +887,10 @@ mod tests {
     }
 
     #[test]
-    fn a_number_reads_as_a_string() {
-        let json = r#"{"kind":"article","title":"T","year":1981,"volume":11.5,"pages":"1–2"}"#;
+    fn a_field_reads_as_a_string() {
+        let json = r#"{"kind":"article","title":"T","year":"1981","pages":"1–2"}"#;
         let reference: Reference = serde_json::from_str(json).unwrap();
         assert_eq!(reference.year, "1981");
-        assert_eq!(reference.volume, "11.5");
         assert_eq!(reference.pages, "1–2");
         assert!(serde_json::from_str::<Reference>(r#"{"kind":"article","bad":1}"#).is_err());
         let written = serde_json::to_string(&reference).unwrap();

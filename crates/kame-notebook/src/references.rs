@@ -398,6 +398,23 @@ mod tests {
     }
 
     #[test]
+    fn an_unquoted_number_keeps_the_digits_typed() {
+        let notebook = notebook("ref-digits");
+        put(
+            &notebook,
+            "knuth1981.yaml",
+            "kind: article\ntitle: x\nvolume: 2.10\nnumber: 007\npages: 1e3\nyear: 1981\n",
+        );
+        let loaded = load(&notebook);
+        assert_eq!(loaded.problems, Vec::<String>::new());
+        let reference = loaded.references.get("knuth1981").unwrap();
+        assert_eq!(reference.volume, "2.10");
+        assert_eq!(reference.number, "007");
+        assert_eq!(reference.pages, "1e3");
+        assert_eq!(reference.year, "1981");
+    }
+
+    #[test]
     fn a_damaged_file_is_reported_and_the_others_load() {
         let notebook = notebook("ref-damaged");
         save(&notebook, "good", &article()).unwrap();

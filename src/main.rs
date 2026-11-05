@@ -1836,6 +1836,16 @@ impl Default for KameConfig {
 /// The directory kame keeps its config in: `$XDG_CONFIG_HOME/kame` (or
 /// `~/.config/kame`) on Unix, `~/Library/Application Support/kame` on macOS.
 fn config_dir() -> Option<PathBuf> {
+    // A test run never reads or writes the settings of the person running it: those hold the
+    // name this machine syncs under.
+    #[cfg(test)]
+    return Some(test_temp_dir().join("settings").join("kame"));
+    #[cfg(not(test))]
+    persons_config_dir()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn persons_config_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let base = if cfg!(target_os = "macos") {
         home.join("Library").join("Application Support")
@@ -10744,6 +10754,12 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             "far behind, and let go"
         );
         assert!(page.app.textures.len() < 60);
+    }
+
+    #[test]
+    fn tests_keep_their_settings_out_of_the_persons() {
+        let path = config_path().unwrap();
+        assert!(path.starts_with(test_temp_dir()), "{}", path.display());
     }
 
     // --- the help dialog -------------------------------------------------------

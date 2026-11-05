@@ -521,6 +521,29 @@ mod tests {
     }
 
     #[test]
+    fn another_document_in_the_notebook_closes_the_entry() {
+        let mut page = page_in_notebook("[knuth1981] says so");
+        page.click(near_the_start(&page));
+        assert!(page.app.refs.shown.is_some());
+        let root = page.app.nb.notebook.clone().unwrap().root;
+
+        let other = Session::open(&root.join("other.kame")).unwrap();
+        page.app.adopt_session(other);
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.refs.shown, None);
+        assert!(!page.app.dialog_open());
+        assert_eq!(
+            page.app.nb.notebook.as_ref().map(|nb| &nb.root),
+            Some(&root)
+        );
+        assert!(page.app.refs.list.contains("knuth1981"), "the same list");
+        // The keyboard is the new document's.
+        type_into(&mut page, "x");
+        assert_eq!(page.app.session.document().blocks[0].text, "x");
+    }
+
+    #[test]
     fn an_entry_whose_reference_is_gone_closes() {
         let mut page = page_in_notebook("[knuth1981] says so");
         page.click(near_the_start(&page));

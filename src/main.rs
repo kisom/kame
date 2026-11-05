@@ -2825,6 +2825,7 @@ impl KameApp {
         self.open_note_body = String::new();
         self.open_note_focus = false;
         self.find = None;
+        self.refs.shown = None;
         self.typewriter_anchor = None;
         // The scroll area remembers its offset, which belonged to the old document.
         self.pending_scroll = Some(0.0);
@@ -9380,6 +9381,9 @@ extraordinarily disproportionate considerations, as in [internationalization] an
 misunderstandings about organization while straightforward arrangements occasionally demonstrate \
 remarkably counterintuitive properties, whatever anybody happens to believe about them afterwards.";
 
+    /// A line after the key, which starts somewhere else once the key is a link.
+    const CHECKED_LINE: usize = 3;
+
     fn page_with_breaks_around_key() -> Headless {
         let path = temp_db_path();
         std::fs::write(path.with_file_name("notebook.yaml"), "").unwrap();
@@ -9433,10 +9437,16 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
 
         page.app.refs.list = known_key();
         let as_link = caret_lines(&mut page);
-        assert_ne!(as_text, as_link, "the key has to change where lines break");
+        assert_ne!(
+            as_text[CHECKED_LINE], as_link[CHECKED_LINE],
+            "the key has to move the line checked"
+        );
 
         page.frame(Vec::new());
-        assert_eq!(painted_line_start(&mut page, 3), as_link[3]);
+        assert_eq!(
+            painted_line_start(&mut page, CHECKED_LINE),
+            as_link[CHECKED_LINE]
+        );
     }
 
     #[test]
@@ -9444,16 +9454,29 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         let mut page = page_with_breaks_around_key();
         let as_text = caret_lines(&mut page);
         page.frame(Vec::new());
-        assert_eq!(painted_line_start(&mut page, 3), as_text[3]);
+        assert_eq!(
+            painted_line_start(&mut page, CHECKED_LINE),
+            as_text[CHECKED_LINE]
+        );
 
         page.app.refs.list = known_key();
         let as_link = caret_lines(&mut page);
+        assert_ne!(
+            as_text[CHECKED_LINE], as_link[CHECKED_LINE],
+            "the key has to move the line checked"
+        );
         page.frame(Vec::new());
-        assert_eq!(painted_line_start(&mut page, 3), as_link[3]);
+        assert_eq!(
+            painted_line_start(&mut page, CHECKED_LINE),
+            as_link[CHECKED_LINE]
+        );
 
         page.app.refs.list = kame_core::references::References::new();
         page.frame(Vec::new());
-        assert_eq!(painted_line_start(&mut page, 3), as_text[3]);
+        assert_eq!(
+            painted_line_start(&mut page, CHECKED_LINE),
+            as_text[CHECKED_LINE]
+        );
     }
 
     #[test]

@@ -2,6 +2,31 @@
 
 Open work, most pressing first. Delete items as they land.
 
+## Bugs
+
+Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
+
+- [ ] **Undo can crash the app.** A note that has changed shape through a delete and undo can come to
+  lie inside an earlier insert, and undoing that insert panics. `document-format.md`, section 8.
+- [ ] **A merge can hang the app.** If a merge's revision is in the logs but a block it needs hasn't
+  arrived, the sync loop never ends, on the interface thread. `merging.md`, section 9.
+- [ ] **An unusable last revision.** If the revision a document last settled on is in the logs but can't
+  be used, reading it panics, or the page follows another version. `merging.md`, section 9.
+- [ ] **A torn last line swallows the next revision.** Appending to a log doesn't check that it ends
+  in a line feed. `merging.md`, section 9.
+- [ ] **A dangling symbolic link can lead out of a notebook.** Following a link to one creates a file at
+  its target. `notebook.md`, section 9.
+- [ ] **Typing on an image stores text in it.** `document-format.md`, section 8.
+- [ ] **`kame-sync enable` prints too little.** It leaves out `*.kame-wal` and `*.kame-shm`. Also,
+  check `.stignore` on each machine. `merging.md`, section 6.1.
+- [ ] **New fields stop older builds reading logs, with no message.** A centered or right-aligned image
+  now does this, and any new field or kind will. Needs a decision on how logs handle versions.
+  `merging.md`, section 9.
+- [ ] **Smaller ones in the specs' weak points:** a logs-only document without `.kame-logs` opens blank,
+  a folder's index with only logs is overwritten when followed, `.markdown` files are unread outside
+  Open, links that publish private names, read-only opens not checking `user_version`, and two
+  programs writing one file.
+
 ## Site
 
 - [ ] **A missing image publishes its local path.** A published page's `src` gets the path on this

@@ -816,3 +816,13 @@ fn a_folders_index_with_only_logs_is_there_already() {
     let followed = notebook(&root).follow("folder/", &root.join("a.kame"));
     assert_eq!(followed, Follow::Open(index));
 }
+
+#[test]
+fn a_document_named_markdown_is_read_as_markdown() {
+    let root = folder("dot-markdown");
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    let file = root.join("old.markdown");
+    std::fs::write(&file, "# A title\n\nThe words.\n").unwrap();
+    let (doc, _) = kame_notebook::read_document(&file).unwrap();
+    assert!(doc.blocks.iter().any(|block| block.text == "The words."));
+}

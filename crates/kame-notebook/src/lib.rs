@@ -144,10 +144,7 @@ pub fn read_document(
     path: &Path,
 ) -> Option<(kame_core::model::Document, kame_core::model::Metadata)> {
     if path.is_file() {
-        if path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        {
+        if kame_core::session::is_markdown_path(path) {
             let source = std::fs::read_to_string(path).ok()?;
             let stem = path.file_stem()?.to_string_lossy();
             let imported = kame_core::import::markdown::from_markdown(

@@ -86,11 +86,11 @@ Reading a document for a list, a search or a site must change nothing:
 
 | The path holds | Read it |
 |---|---|
-| A file ending in `.md`, in any case | Import the Markdown in memory, using the document's folder as the base and its stem as the fallback title |
+| A file ending in `.md` or `.markdown`, in any case | Import the Markdown in memory, using the document's folder as the base and its stem as the fallback title |
 | Any other file | As a read-only `.kame` ([document format, section 1.2](document-format.md)) |
 | No file, but a log folder | From the logs: the document and metadata of the first head, in sorted order ([merging](merging.md)) |
 
-A document that can't be read stays in the list under its file name. Search and the links list skip it with no message, and publishing skips it with a warning. A `.markdown` file falls into this case: see section 9.
+A document that can't be read stays in the list under its file name. Search and the links list skip it with no message, and publishing skips it with a warning.
 
 Search reads what's on the screen in place of the file for the open document, since that can be ahead of the disk. The links list reads files only, and is worked out when a document opens, not as it's edited.
 
@@ -125,7 +125,7 @@ The rules, in order:
 4. If it's a folder, or `PATH` ends in `/`, look at its `Notebook.kame`: **Open** if it's there or has a log folder, **Create** if it's in the documents area, otherwise **Rotted**.
 5. If it's a file: **Open** if it's in the documents area and ends in `.kame`, `.md` or `.markdown`, otherwise **View**.
 6. If nothing is there and it isn't in the documents area, it has **Rotted**.
-7. Try adding `.kame`, then `.md`: **Open** if that file exists.
+7. Try adding `.kame`, then `.md`: **Open** if that file exists. `.markdown` isn't tried, so a link to one has to name it.
 8. If it has no extension, add `.kame`. If its extension is `.kame` in any case, keep it. With any other extension it has **Rotted**, so a missing `paper.pdf` never makes `paper.pdf.kame`.
 9. **Open** if that document has a log folder, since it exists and only needs building, which requires a `.kame-logs` above it (section 8). Otherwise **Create**.
 
@@ -272,7 +272,6 @@ Moving a document by hand keeps its new place, and links to the old path don't f
 These describe the code as it stands, and aren't rules to copy.
 
 - **A logs-only document without `.kame-logs` opens blank.** Listing and reading don't check for the file, but building needs it. So opening such a document creates a blank database at that path, beside its logs.
-- **`.markdown` files aren't read outside the app's Open.** They're listed and open as an import, but `read_document` only treats `.md` as Markdown and reads the rest as databases. So search and the links list skip them silently, they're listed under their file names, and they're never published, with a warning. Link following treats one as a document, but tries only `.kame` and `.md` when no extension is given.
 - **Some untouched documents aren't removed.** Only one newly created document is remembered at a time, so following a link from one untouched new document to create another keeps the first, and it may then write logs. Cancelling the prompt about losing work also keeps it.
 - **Links can publish what they shouldn't, or nothing useful.** A link to an existing private folder publishes its name (`/papers/`) with no warning. A link to `static/.secret.pdf` publishes a dead link naming a hidden file, also with no warning. A link to `./` in a root with no index publishes `href="//"`.
 - **A notebook inside a notebook isn't separated.** Finding one stops at the nearest `notebook.yaml`, but walking down from the outer root doesn't stop at an inner one. The outer notebook lists and publishes the inner one's documents, and its `notebook.yaml` shows up as a file.

@@ -19,6 +19,7 @@ garden/
 │   └── .materialism.kame.sync/   its revision logs, if logs are on
 ├── papers/              private files, unless a published document shows one as an image
 ├── images/              pictures, private until a published document shows them
+├── references/          the sources documents cite, one KEY.yaml each
 ├── static/              public: all of it publishes
 ├── theme/               changes to how the site looks
 └── output/              the built site
@@ -66,6 +67,7 @@ Each entry is either a **document**, which kame opens and search reads, or a **f
 - Anything ending in `-wal`, `-shm`, `.merged`, `.retired` or `.building`.
 - Anything containing `.sync-conflict-`.
 - `notebook.yaml` in the root.
+- A `.yaml` file directly in `references/` in the root. It is a reference (section 2.1), not an entry. Anything else there, including documents, files and deeper folders, is an ordinary entry, and a `references/` folder elsewhere is an ordinary folder.
 
 **Skip these folders:**
 
@@ -79,6 +81,36 @@ Each entry is either a **document**, which kame opens and search reads, or a **f
 Folders aren't entries. A browser derives them from the entries' paths, so an empty folder never appears.
 
 **Folders holding no documents.** Under `static`, `images` and `theme` in the root, everything is a file, whatever its name. That applies only in the root. A `static` folder deeper down is an ordinary folder.
+
+### 2.1 References
+
+A notebook keeps one file per reference, `references/KEY.yaml` under its root. The key is the file name and isn't repeated inside the file, so the two can't disagree. A key is ASCII letters, digits, `-` and `_`, starting with a letter, at most 64 bytes. A document cites a reference by typing `[KEY]`.
+
+```yaml
+kind: article
+authors: [D. E. Knuth, M. F. Plass]
+title: Breaking paragraphs into lines
+published_in: "Softw.: Pract. Exper."
+volume: "11"
+number: "11"
+pages: 1119–1184
+month: Nov.
+year: "1981"
+```
+
+| `kind` | Fields |
+|---|---|
+| `article` | `authors`, `title`, `published_in`, `volume`, `number`, `pages`, `month`, `year`, `doi`, `url` |
+| `conference` | `authors`, `title`, `published_in`, `location`, `month`, `year`, `pages`, `doi`, `url` |
+| `book` | `authors`, `editors`, `chapter`, `title`, `edition`, `place`, `publisher`, `year`, `pages`, `url` |
+| `web` | `authors`, `title`, `site`, `accessed`, `url` |
+| `freeform` | `text` |
+
+All are optional except `title` (or `text`). All are strings, or lists of strings for names; a bare number is read as text. References have no field for private remarks, so nothing private can publish along with one.
+
+An unknown field or kind is refused rather than ignored, as in `notebook.yaml`. A file that can't be read is reported by name, the others keep working, and kame doesn't overwrite or remove it. Of two files whose keys differ only in case, the first by name is used and the other is reported, and a key that differs only in case from an existing one can't be saved. Hidden files, conflict copies, `.building` files and symbolic links in the folder are skipped.
+
+Writes go to a hidden temporary file and are renamed into place. Reference edits aren't undo steps, the same as a document's metadata. Nothing derived is stored: how many documents cite a reference is worked out by reading them.
 
 ## 3. Reading documents
 
@@ -190,6 +222,7 @@ Each notebook is its own site, built by `kame-site`. A folder holding both `note
 | An image under `images/` | Publishes at `/static/images/…` only if a published document shows it |
 | Any other file in the notebook that a published image block shows | Publishes beside that page, including from `papers/` or `static/` |
 | Files under `theme/static/` | Publish to the site's root |
+| A reference in `references/` | Only as an entry in the References section of a published document citing it, never as a file |
 | The site's own pages | Archive and tag pages, and a feed when `url` is set, generated from what publishes |
 
 Hidden files, hidden folders, conflict copies and symbolic links under `static/` don't publish.

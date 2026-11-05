@@ -102,6 +102,12 @@ impl Notebook {
                 if name == crate::SETTINGS && folder == self.root {
                     continue;
                 }
+                // A reference is part of how the notebook cites, not a file to open.
+                if crate::references::is_reference_name(&name)
+                    && folder == self.root.join(crate::references::FOLDER)
+                {
+                    continue;
+                }
                 let kind = if documents_here && is_document_name(&name) {
                     Kind::Document
                 } else {

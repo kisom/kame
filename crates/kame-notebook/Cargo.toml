@@ -13,3 +13,4 @@ yaml_serde = "0.10"
 [dev-dependencies]
 kame-test-dir = { path = "../kame-test-dir" }
 rusqlite = "0.41"
+uuid = { version = "1", features = ["v4", "serde"] }

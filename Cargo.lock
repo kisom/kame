@@ -4159,6 +4159,7 @@ dependencies = [
  "kame-test-dir",
  "rusqlite",
  "serde",
+ "uuid",
  "yaml_serde",
 ]
 

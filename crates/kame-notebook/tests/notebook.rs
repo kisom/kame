@@ -826,3 +826,34 @@ fn a_document_named_markdown_is_read_as_markdown() {
     let (doc, _) = kame_notebook::read_document(&file).unwrap();
     assert!(doc.blocks.iter().any(|block| block.text == "The words."));
 }
+
+#[test]
+fn a_yaml_file_directly_in_the_root_references_folder_is_not_an_entry() {
+    let root = folder("references-list");
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    std::fs::create_dir_all(root.join("references/deep")).unwrap();
+    std::fs::create_dir_all(root.join("sub/references")).unwrap();
+    std::fs::write(
+        root.join("references/knuth1981.yaml"),
+        "kind: freeform\ntext: x\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("references/deep/x.yaml"), "x").unwrap();
+    std::fs::write(root.join("references/paper.pdf"), "x").unwrap();
+    std::fs::write(root.join("sub/references/x.yaml"), "x").unwrap();
+    document(&root.join("references/essay.kame"), "Words.");
+    let listed: Vec<String> = notebook(&root)
+        .entries()
+        .into_iter()
+        .map(|entry| entry.relative)
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            "references/deep/x.yaml",
+            "references/essay.kame",
+            "references/paper.pdf",
+            "sub/references/x.yaml",
+        ]
+    );
+}

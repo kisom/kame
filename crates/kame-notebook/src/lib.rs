@@ -9,11 +9,13 @@
 //! - [`images`] brings an image from outside into the notebook
 //! - [`manage`] checks where a document may go, and moves or deletes one
 //! - [`stranded`] settles a database whose document was moved or deleted on another machine
+//! - [`references`] keeps the sources its documents cite
 
 pub mod images;
 pub mod links;
 pub mod list;
 pub mod manage;
+pub mod references;
 pub mod search;
 pub mod stranded;
 

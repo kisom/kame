@@ -588,6 +588,55 @@ fn deleting_a_document_with_only_logs_removes_them() {
     assert!(!log_folder(&a).exists());
 }
 
+/// Every file in a folder, with what's in it.
+fn files_in(folder: &Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), std::fs::read(entry.path()).unwrap())
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn deleting_a_stale_copy_leaves_the_logs_of_the_document_now_at_its_path() {
+    let (root, _nb) = logged_notebook("delete-stale-copy");
+    let a = root.join("a.kame");
+    document(&a, "Old words, deleted on another machine.");
+    sync(&a);
+    // What this machine still holds, from before a new document was made at that path elsewhere.
+    let stale = root.join("stale");
+    std::fs::rename(&a, &stale).unwrap();
+    std::fs::remove_dir_all(log_folder(&a)).unwrap();
+    document(&a, "A new document.");
+    sync(&a);
+    std::fs::remove_file(&a).unwrap();
+    std::fs::rename(&stale, &a).unwrap();
+    std::fs::write(root.join(".a.retired.kame"), "").unwrap();
+    let logs = files_in(&log_folder(&a));
+    assert!(!logs.is_empty());
+
+    delete_document(&a).unwrap();
+
+    assert!(!a.exists());
+    assert!(!root.join(".a.retired.kame").exists());
+    assert_eq!(files_in(&log_folder(&a)), logs);
+}
+
+#[test]
+fn deleting_a_document_in_step_with_its_logs_removes_them() {
+    let (root, _nb) = logged_notebook("delete-in-step");
+    let a = root.join("a.kame");
+    document(&a, "The words.");
+    sync(&a);
+    delete_document(&a).unwrap();
+    assert!(!a.exists());
+    assert!(!log_folder(&a).exists());
+}
+
 #[test]
 fn deleting_what_isnt_there_says_so() {
     let (root, _nb) = logged_notebook("delete-nothing");

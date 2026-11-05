@@ -160,11 +160,11 @@ the system's viewer. Today, kame would try to open it as a document.
 click opens one. It isn't part of the document, so it never reaches exports or the site, and it isn't shown when
 empty. It comes from a background read of the notebook when a document opens, so it can take a moment to appear.
 
-**Moving a document.** Placement is fixed for now. kame offers no way to move a document, and one moved by hand keeps
-its new place while links to the old one go stale. In a folder with logs, section 10 says what a moved document leaves behind. Following such a link would make a new, empty document at the old
-path, which is removed again if left unwritten. Moving and renaming read the notebook for every document
-linking to the old path, rewriting those links as ordinary edits at the moment of the move. See
-`2026-11-04-notebook-file-operations-design.md`.
+**Moving a document.** The browser's right-click menu renames, moves and deletes a document. Moving and renaming read
+the notebook for every document linking to the old path, rewriting those links as ordinary edits at the moment of the
+move. See `2026-11-04-notebook-file-operations-design.md`. A document moved by hand keeps its new place while links to
+the old one go stale, and following such a link would make a new, empty document at the old path, which is removed again
+if left unwritten. In a folder with logs, section 10 says what a moved document leaves behind.
 
 ## 9. Publishing
 

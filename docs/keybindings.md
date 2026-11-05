@@ -345,6 +345,8 @@ that couldn't be changed, are named in a report when it's done.
 
 Delete asks once, and it's permanent. It takes the document, its logs, and any conflict or retired copies named for it. Links to it stay,
 and following one offers to create it again. If it was open, you land on the contents page, or a new document if it was the contents page.
+Deleting a stale copy, one left behind when its document was moved or deleted on another machine, leaves any logs at its path, since those
+belong to whatever document is there now.
 
 In a folder with revision logs, each of these reaches the other machines through the logs. A machine's own database doesn't travel, so on
 another machine the stale one is dealt with once kame has seen it stranded for 10 minutes: it's renamed to join its document if that moved.

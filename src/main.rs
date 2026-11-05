@@ -339,10 +339,8 @@ impl BackStack {
 
     /// Stops in a document that has moved now lead to where it went.
     fn moved(&mut self, from: &Path, to: &Path) {
-        for stop in &mut self.stops {
-            if stop.path.as_deref().is_some_and(|at| same_place(at, from)) {
-                stop.path = Some(to.to_path_buf());
-            }
+        for path in self.stops.iter_mut().filter_map(|stop| stop.path.as_mut()) {
+            follow_move(path, from, to);
         }
     }
 
@@ -396,6 +394,13 @@ fn same_document(a: Option<&Path>, b: Option<&Path>) -> bool {
 fn same_place(a: &Path, b: &Path) -> bool {
     let place = |path: &Path| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?));
     same_document(Some(a), Some(b)) || place(a).is_some_and(|place_a| Some(place_a) == place(b))
+}
+
+/// A path naming what has moved now names where it went.
+fn follow_move(path: &mut PathBuf, from: &Path, to: &Path) {
+    if same_place(path, from) {
+        *path = to.to_path_buf();
+    }
 }
 
 /// Ctrl-[, or Cmd-[ on a Mac, as browsers on a Mac use.
@@ -5261,6 +5266,10 @@ impl KameApp {
                             ("Ctrl-Shift-L", "a notebook's contents page"),
                             ("Ctrl-R", "search a notebook"),
                             ("Ctrl-Shift-O", "a notebook's browser"),
+                            (
+                                "right-click in the browser",
+                                "rename, move or delete a document",
+                            ),
                             ("Ctrl-Shift-N", "note (highlight) on the selection or word"),
                             ("Ctrl-Shift-F", "footnote on the selection or word"),
                             ("Ctrl-Shift-1/2/3", "heading level 1 / 2 / 3"),
@@ -9086,12 +9095,14 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         back.push(stop(1.0));
         back.push(at("/n/a.kame"));
         back.moved(Path::new("/n/a.kame"), Path::new("/n/x/c.kame"));
-        back.pop();
-        back.pop();
         assert_eq!(
             back.stops,
-            [at("/n/x/c.kame"), at("/n/b.kame")],
-            "the matching stops changed and the others didn't"
+            [
+                at("/n/x/c.kame"),
+                at("/n/b.kame"),
+                stop(1.0),
+                at("/n/x/c.kame")
+            ],
         );
     }
 
@@ -9113,6 +9124,26 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         );
         back.forget(&root.join("sub/./here.kame"));
         assert!(back.stops.is_empty());
+    }
+
+    #[test]
+    fn an_open_import_follows_its_file_when_it_moves() {
+        let root = kame_test_dir::folder("app-import-moves")
+            .canonicalize()
+            .unwrap();
+        let (from, to) = (root.join("a.md"), root.join("sub/b.md"));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(&from, "# A\n").unwrap();
+        let (mut session, _) = Session::import(&from).unwrap();
+        std::fs::rename(&from, &to).unwrap();
+
+        let source = session.source_path.as_mut().unwrap();
+        follow_move(source, &root.join("other.md"), &to);
+        assert_eq!(session.link_base(), from, "that's a different document");
+
+        let source = session.source_path.as_mut().unwrap();
+        follow_move(source, &from, &to);
+        assert_eq!(session.link_base(), to);
     }
 
     #[test]

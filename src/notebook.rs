@@ -21,7 +21,7 @@ use kame_notebook::search::{search, Hit};
 use kame_notebook::stranded::{apply, decide, find_stranded, Done, Steps};
 use kame_notebook::Notebook;
 
-use super::{now_unix, same_document, same_place, BackStop, KameApp};
+use super::{follow_move, now_unix, same_document, same_place, BackStop, KameApp};
 
 /// How wide the browser is.
 const BROWSER_WIDTH: f32 = 200.0;
@@ -331,6 +331,12 @@ fn why_not_move(save_failed: bool, newer: bool) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Whether there's a document at `path` to open again, building it if it has only logs. Opening a
+/// path with nothing there would make an empty document, which could be taken for this one.
+fn there_to_open(path: &Path) -> bool {
+    kame_sync::logs::build_from_logs(path).is_ok() && path.exists()
 }
 
 fn path_field_id() -> egui::Id {
@@ -1182,10 +1188,11 @@ impl KameApp {
         self.nb.refresh_listing();
     }
 
-    /// Puts up a dialog chosen from a document's right-click menu, in place of any other. Something
-    /// that can't be moved says so now, rather than after a path has been typed for it.
+    /// Puts up a dialog chosen from a document's right-click menu, unless another is up, which may
+    /// hold something typed, and would be drawn in the same place. Something that can't be moved
+    /// says so now, rather than after a path has been typed for it.
     fn start_file_op(&mut self, op: FileOp) {
-        if self.close_flow.prompting {
+        if self.close_flow.prompting || self.dialog_open() {
             return;
         }
         if let FileOp::Path { from, .. } = &op {
@@ -1193,7 +1200,6 @@ impl KameApp {
                 return;
             }
         }
-        self.dismiss_dialog();
         self.nb.file_op = Some(op);
     }
 
@@ -1367,12 +1373,16 @@ impl KameApp {
         if moving_open {
             // Only now, since carry_out has changed the file's links and title for it to read.
             let back_to = if result.is_ok() { to } else { from };
-            self.pending_heading = None;
-            self.open_document(back_to.display().to_string());
-            if same_document(self.session.path(), Some(back_to)) {
-                self.session.set_caret(caret);
-                self.session.restored_scroll = None;
-                self.pending_scroll = Some(scroll);
+            if there_to_open(back_to) {
+                self.pending_heading = None;
+                self.open_document(back_to.display().to_string());
+                if same_document(self.session.path(), Some(back_to)) {
+                    self.session.set_caret(caret);
+                    self.session.restored_scroll = None;
+                    self.pending_scroll = Some(scroll);
+                }
+            } else {
+                self.session.last_error = Some(format!("{} is no longer there", back_to.display()));
             }
         }
         let report = match result {
@@ -1384,9 +1394,11 @@ impl KameApp {
         };
         self.back.moved(from, to);
         for recent in &mut self.nb.recent {
-            if same_place(recent, from) {
-                *recent = to.to_path_buf();
-            }
+            follow_move(recent, from, to);
+        }
+        // An import has no file of its own, and its links and images are read from where this is.
+        if let Some(source) = &mut self.session.source_path {
+            follow_move(source, from, to);
         }
         if self.last_document.moved(from, to) {
             self.persist();
@@ -1465,13 +1477,21 @@ impl KameApp {
             .as_ref()
             .and_then(Notebook::index)
             .filter(|index| !same_document(Some(index), Some(path)));
+        let mut why_not_index = None;
         if let Some(index) = index {
             self.pending_heading = None;
             self.open_document(index.display().to_string());
+            if same_document(self.session.path(), Some(path)) {
+                why_not_index = self.session.last_error.clone();
+            }
         }
         if same_document(self.session.path(), Some(path)) {
             match Session::anonymous() {
-                Ok(session) => self.adopt_session(session),
+                Ok(session) => {
+                    self.adopt_session(session);
+                    // It was said on the session just left, and would go with it.
+                    self.session.last_error = why_not_index;
+                }
                 Err(err) => {
                     self.session.last_error = Some(format!("could not leave it — {err}"));
                     return false;
@@ -1538,6 +1558,44 @@ mod tests {
     fn a_name_with_dots_in_it_keeps_all_but_its_extension_selected() {
         assert_eq!(path_selection("a/v1.2.kame", true), 2..6);
         assert_eq!(path_selection("a/plain", true), 2..7);
+    }
+
+    #[test]
+    fn nothing_is_there_to_open_again_if_it_has_gone() {
+        let root = kame_test_dir::folder("app-reopen-nothing");
+        let gone = root.join("gone.kame");
+        assert!(!there_to_open(&gone));
+        assert!(!gone.exists(), "and asking made nothing");
+    }
+
+    #[test]
+    fn empty_logs_are_nothing_to_open_again() {
+        let root = kame_test_dir::folder("app-reopen-empty-logs");
+        let path = root.join("a.kame");
+        std::fs::create_dir_all(kame_notebook::log_folder(&path)).unwrap();
+        assert!(!there_to_open(&path));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_file_or_logs_that_can_build_one_are_there_to_open_again() {
+        use kame_sync::logs::{Logged, MARKER};
+
+        let root = kame_test_dir::folder("app-reopen-there");
+        std::fs::write(root.join(MARKER), "").unwrap();
+        let path = root.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("Words.");
+        Logged::open(&session, "titan-bbbb")
+            .unwrap()
+            .sync(&mut session, 100)
+            .unwrap();
+        drop(session);
+        assert!(there_to_open(&path));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(there_to_open(&path));
+        assert!(path.exists(), "built from its logs");
     }
 
     #[test]

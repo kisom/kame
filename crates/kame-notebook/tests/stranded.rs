@@ -1933,6 +1933,8 @@ fn a_place_that_cannot_be_written_on_arrival_does_not_stop_the_move() {
             to: b.clone()
         }]
     );
+    let side_files = [with_suffix(&b, "-wal"), with_suffix(&b, "-shm")];
+    assert!(!side_files.iter().any(|side| side.exists()));
     set_mode(&b, 0o644);
     assert_eq!(place_in(&b), place_of(&a));
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
@@ -2747,11 +2749,95 @@ fn a_stamp_that_cannot_be_written_is_no_trouble() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     as_an_older_kame_left_it(&a);
+    let names = names_in(&root);
     set_mode(&a, 0o444);
-    let done = reconcile(&nb, &[], None);
+    let steps = decide(&nb, &[]);
+    assert!(format!("{steps:?}").contains("stamping: []"), "not asked");
+    let done = apply(&nb, steps, None);
     set_mode(&a, 0o644);
     assert!(done.is_empty());
+    assert_eq!(names_in(&root), names, "and nothing left beside it");
     assert_eq!(place_in(&a), None);
+}
+
+/// Another machine's `-wal`, carried here by a sync tool lacking the ignore lines, beside a closed
+/// database with words only here. Opening for writing would fold it in, with nobody looking.
+#[test]
+fn a_stamp_leaves_alone_a_database_with_another_machines_wal_beside_it() {
+    let (root, nb) = logged_notebook("stamp-carried-wal");
+    let (there_root, _) = logged_notebook("stamp-carried-wal-there");
+    let (a, there) = (root.join("a.kame"), there_root.join("a.kame"));
+    synced(&a, "Shared.");
+    std::fs::copy(&a, &there).unwrap();
+    copy_logs(&a, &there);
+    Session::open(&a)
+        .unwrap()
+        .insert(" Only here, never synced.");
+    as_an_older_kame_left_it(&a);
+    {
+        let mut session = Session::open(&there).unwrap();
+        session.insert(" From there.");
+        sync(&mut session);
+    }
+    copy_logs(&there, &a);
+    as_an_older_kame_left_it(&there);
+    crash_with_words_in_the_wal(&there, " Live there.");
+    let wal = with_suffix(&a, "-wal");
+    std::fs::copy(with_suffix(&there, "-wal"), &wal).unwrap();
+    let (file, carried) = (std::fs::read(&a).unwrap(), std::fs::read(&wal).unwrap());
+
+    let steps = decide(&nb, &[]);
+    assert!(format!("{steps:?}").contains("stamping: []"), "not asked");
+    assert!(apply(&nb, steps, None).is_empty());
+
+    assert_eq!(std::fs::read(&a).unwrap(), file);
+    assert_eq!(std::fs::read(&wal).unwrap(), carried);
+}
+
+/// As a second running kame has it. Its side files are all that can be seen of that.
+#[test]
+fn a_stamp_leaves_alone_a_document_open_in_another_process() {
+    let (root, nb) = logged_notebook("stamp-live");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+    let mut session = Session::open(&a).unwrap();
+    session.insert(" Live.");
+    let (wal, side) = (
+        with_suffix(&a, "-wal"),
+        std::fs::read(with_suffix(&a, "-wal")).unwrap(),
+    );
+
+    assert!(reconcile(&nb, &[], None).is_empty());
+
+    assert_eq!(std::fs::read(&wal).unwrap(), side);
+    assert_eq!(session.sync_place(), None);
+    assert!(session.insert(" More."));
+    assert!(!session.save_failed);
+}
+
+/// It's as likely to be anyone's as its own, so it waits for the document to be opened, and then a
+/// later pass finds nothing beside it. Meanwhile nothing has been said, and nothing is waiting.
+#[test]
+fn a_stamp_waits_for_a_crash_wal_to_go() {
+    let (root, nb) = logged_notebook("stamp-crash-wal");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+    crash_with_words_in_the_wal(&a, " Only in the wal.");
+    let file = std::fs::read(&a).unwrap();
+
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty(), "nothing waits");
+    assert!(reconcile(&nb, &[], None).is_empty(), "nothing is said");
+    assert!(with_suffix(&a, "-wal").exists());
+    assert_eq!(std::fs::read(&a).unwrap(), file);
+
+    drop(Session::open(&a).unwrap());
+    assert!(!with_suffix(&a, "-wal").exists());
+    assert!(reconcile(&nb, &[], None).is_empty());
+    assert_eq!(place_in(&a), place_of(&a));
+    assert!(text_of(&a).contains("Only in the wal."));
 }
 
 /// That can't say it's the moved document, so this doesn't take it for that having been opened.

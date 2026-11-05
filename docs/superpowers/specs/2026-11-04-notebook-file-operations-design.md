@@ -182,6 +182,10 @@ A database from before places were recorded gets one from a pass. If it has a sy
 beside it, that shows it synced there, so `decide` lists it, and `apply` records the place on the main thread, with the same looks
 again as any other step, never for the open document, and ignoring a failure. Having a place is what stops it being asked again. A
 hand copy with no logs beside it isn't stamped, nor is a database whose revision isn't beside it, whose logs are then read on each pass.
+A stamp changes the file's modified time once, which a machine lacking the `**.kame` ignore line would carry, once per document. It waits
+while a `-wal` or `-shm` is beside the database, as opening it for writing would fold in a `-wal` that may be another machine's, with nobody
+looking, and it may be open in another process. Such a database is just asked again on the next pass, which keeps no recheck alive, as
+nothing is waiting on it. A read-only file isn't asked, and nothing is left beside it.
 
 The place follows the moves kame makes itself. `carry_out` syncs a moved document afterwards. `apply` records the new place as
 each database arrives at a home, by opening it for writing on the main thread and ignoring a failure, so that a second move
@@ -304,6 +308,8 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   old ones stay as a document with only its logs.
 - A copy put at the same path in another notebook whose root's folder has the same name, with no logs, can't be told from a database
   whose logs have left, and it's taken for stale.
+- A move goes ahead whatever else can't be read, so an unreadable or corrupt folder can hide a second home, and a move can then reach a
+  copy, such as one holding the same revision, rather than the document's real home. Nothing is deleted, and it's recoverable by hand.
 - A hand copy of a document unedited since its first sync reproduces the original's revision when it writes its history, so its logs
   can count as a second home for a stale database of that document, which is then left alone. One more edit ends it.
 - A database that has never synced merges its words into what's at its path on its first sync, even another document's logs. Documents

@@ -3,9 +3,9 @@
 //! finds out only by its logs having gone. See "The other machines" in
 //! `docs/superpowers/specs/2026-11-04-notebook-file-operations-design.md`.
 //!
-//! This runs with nobody looking, so it only ever renames, never over anything, and doesn't retire
-//! a database as having no home if some logs that might be its home can't be read, and says so.
-//! What it doesn't settle on one pass, it sees again on the next.
+//! This runs with nobody looking, so all it does to a database is rename it, never over anything, and
+//! write down where it is. It doesn't retire a database as having no home if some logs that might be
+//! its home can't be read, and says so. What it doesn't settle on one pass, it sees again on the next.
 //!
 //! It comes in two parts, since reading every log is slow, and a rename mustn't be on another thread
 //! from whatever opens documents. [`decide`] only reads, and can be on any thread. [`apply`] does
@@ -285,7 +285,7 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
         }
     }
     for (path, last) in steps.stamping {
-        if as_it_was(&path, &last) {
+        if as_it_was(&path, &last) && can_be_stamped(&path) {
             record_place(&path);
         }
     }
@@ -329,14 +329,15 @@ fn last_sync(path: &Path) -> Option<LastSync> {
 /// Databases from before places were recorded, with their revision in the logs beside them, which
 /// shows they synced where they are, so that they can say so. A copy made by hand, with no logs beside
 /// it, doesn't show that. Once one has a place it isn't asked about again, so this reads logs for a
-/// database only until then, and on every pass only for one whose revision isn't beside it.
+/// database only until then, and on every pass only for one whose revision isn't beside it. One that
+/// can't be stamped yet is passed over before any of that, and is just asked again next time.
 fn those_to_stamp(notebook: &Notebook) -> Vec<(PathBuf, LastSync)> {
     notebook
         .documents()
         .into_iter()
         .map(|entry| entry.path)
         .filter(|path| is_database(path) && path.is_file() && log_folder(path).is_dir())
-        .filter(|path| logging_root(path).is_some())
+        .filter(|path| logging_root(path).is_some() && can_be_stamped(path))
         .filter_map(|path| {
             let last = last_sync(&path)?;
             let shows_it = last.place.is_none()
@@ -347,9 +348,30 @@ fn those_to_stamp(notebook: &Notebook) -> Vec<(PathBuf, LastSync)> {
         .collect()
 }
 
+/// Whether a database can have its place written with nothing else happening to it. Opening it for
+/// writing folds in any `-wal` beside it, which may be another machine's, carried here by a sync tool,
+/// and it may be open in another process. So it waits until nothing is beside it. A file that can't be
+/// written would only leave side files behind.
+fn can_be_stamped(path: &Path) -> bool {
+    can_be_written(path)
+        && sqlite_files(path).iter().all(|side| {
+            matches!(side.symlink_metadata(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+        })
+}
+
+/// Whether a file is there and can be written, from trying to open it, which creates nothing.
+fn can_be_written(path: &Path) -> bool {
+    std::fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
 /// Says where a database is, so that it's recognised if its logs move on before it's next opened. If
-/// this fails, it's left saying somewhere else or nothing, and is merely not stranded.
+/// this fails, it's left saying somewhere else or nothing, and is merely not stranded. It's looked at
+/// first since `Db::open` makes a file that's gone, and leaves side files beside one it can't write.
 fn record_place(path: &Path) {
+    if !can_be_written(path) {
+        return;
+    }
     if let (Some(place), Ok(mut db)) = (place_of(path), Db::open(path)) {
         let _ = db.save_sync_place(&place);
     }
@@ -750,6 +772,16 @@ fn rename_all(moves: Vec<(PathBuf, PathBuf)>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Db::open` would make a blank one, if a delete from another process landed just before it.
+    #[test]
+    fn a_place_is_not_recorded_where_the_file_has_gone() {
+        let root = kame_test_dir::folder("stranded-record-gone");
+        std::fs::write(root.join(kame_sync::logs::MARKER), "").unwrap();
+        let gone = root.join("gone.kame");
+        record_place(&gone);
+        assert!(!gone.exists());
+    }
 
     #[test]
     fn a_database_that_has_gone_is_not_renamed_and_its_side_files_stay() {

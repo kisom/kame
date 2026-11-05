@@ -63,6 +63,18 @@ pub struct Store {
     read: HashMap<PathBuf, (u64, u64)>,
     /// Whether a line came from a newer version of kame, holding something this build can't read.
     newer: bool,
+    /// What has been written here and may not have reached the disk yet.
+    unflushed: Unflushed,
+}
+
+/// What [`Replica::flush`] has to do.
+#[derive(Debug, Default)]
+struct Unflushed {
+    log: bool,
+    /// The log is new, so the folder has to be flushed for it to have a name.
+    folder: bool,
+    /// The folder is new, so its parent does, likewise.
+    parent: bool,
 }
 
 /// Whether a parsed line lost something on the way in, so that it came from a newer version.
@@ -78,6 +90,12 @@ fn drops_something(raw: &[u8], line: &Line) -> bool {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn has_unflushed(&self) -> bool {
+        let unflushed = &self.unflushed;
+        unflushed.log || unflushed.folder || unflushed.parent
+    }
+
     /// Reads every log, skipping what cannot be read yet: a line still being written, or one
     /// whose bytes do not match its id.
     pub fn load(folder: &Path) -> Result<Store> {
@@ -353,6 +371,22 @@ fn ends_mid_line(log: &mut std::fs::File) -> std::io::Result<bool> {
     Ok(last[0] != b'\n')
 }
 
+/// Flushes a folder, for the names in it. Some filesystems can't do this for a folder, and say so,
+/// which shouldn't stop a document syncing there for good.
+fn flush_folder(folder: &Path) -> std::io::Result<()> {
+    match std::fs::File::open(folder)?.sync_all() {
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+            ) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 /// One machine's end of it.
 pub struct Replica {
     pub folder: PathBuf,
@@ -392,7 +426,9 @@ impl Replica {
         if store.contains(&id) && fresh.is_empty() {
             return Ok((id, false));
         }
+        let new_folder = !self.folder.exists();
         std::fs::create_dir_all(&self.folder)?;
+        let new_log = !self.log_path().exists();
         let line = Line {
             id: id.clone(),
             revision: revision.clone(),
@@ -410,6 +446,9 @@ impl Replica {
             bytes.insert(0, b'\n');
         }
         log.write_all(&bytes)?;
+        store.unflushed.log = true;
+        store.unflushed.folder |= new_log;
+        store.unflushed.parent |= new_folder;
         // Having been read already, this machine's own line isn't news.
         let (read, seen) = store.read.entry(self.log_path()).or_insert((0, 0));
         if read == seen {
@@ -440,6 +479,26 @@ impl Replica {
             order: doc.blocks.iter().map(block_digest).collect(),
             annotations: doc.annotations.clone(),
         }
+    }
+
+    /// Puts what has been written to this machine's log since the last call on the disk, whether
+    /// that was one line or many. Whatever fails is still to do at the next call.
+    pub fn flush(&self, store: &mut Store) -> Result<()> {
+        if store.unflushed.log {
+            std::fs::File::open(self.log_path())?.sync_data()?;
+            store.unflushed.log = false;
+        }
+        if store.unflushed.folder {
+            flush_folder(&self.folder)?;
+            store.unflushed.folder = false;
+        }
+        if store.unflushed.parent {
+            if let Some(parent) = self.folder.parent() {
+                flush_folder(parent)?;
+            }
+            store.unflushed.parent = false;
+        }
+        Ok(())
     }
 
     /// Writes a point in this document's past. It has no device in it, so every machine sharing
@@ -770,6 +829,32 @@ mod tests {
         );
         assert!(everything.contains("Typed here."), "{everything}");
         assert!(everything.contains("From elsewhere."), "{everything}");
+    }
+
+    #[test]
+    fn what_was_written_is_flushed_once_and_a_failure_is_tried_again() {
+        let folder = kame_test_dir::folder("revlog-flush").join("logs");
+        let mut store = Store::default();
+        let here = replica(&folder, "here-0000");
+        here.write_checkpoint(&mut store, &document_saying("Words."), None, 1)
+            .unwrap();
+        here.write_checkpoint(&mut store, &document_saying("More."), None, 2)
+            .unwrap();
+        assert!(store.has_unflushed());
+
+        let log = here.log_path();
+        let held = folder.with_file_name("held.log");
+        std::fs::rename(&log, &held).unwrap();
+        assert!(here.flush(&mut store).is_err());
+        assert!(store.has_unflushed());
+
+        std::fs::rename(&held, &log).unwrap();
+        here.flush(&mut store).unwrap();
+        assert!(!store.has_unflushed());
+
+        // With nothing written since, there's nothing to do, so the log isn't even looked at.
+        std::fs::remove_file(&log).unwrap();
+        here.flush(&mut store).unwrap();
     }
 
     /// A crash can leave half a line at the end of this machine's own log.

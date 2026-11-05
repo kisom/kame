@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use kame_core::session::Session;
-use kame_notebook::stranded::{find_stranded, reconcile, Done};
+use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done};
 use kame_notebook::Notebook;
 use kame_sync::logs::{build_from_logs, log_folder, Logged, MARKER};
 use kame_sync::revlog::Store;
@@ -247,7 +247,8 @@ fn a_deleted_document_is_retired_and_stays_gone() {
         [Done::Retired {
             from: a.clone(),
             to: retired.clone(),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
     assert!(!a.exists());
@@ -274,7 +275,8 @@ fn a_second_retirement_gets_a_number() {
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired-2.kame"),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
     assert!(text_of(&root.join(".a.retired.kame")).contains("First."));
@@ -296,7 +298,8 @@ fn a_reused_path_retires_the_old_database_and_keeps_the_new_logs_clean() {
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
     assert!(!words_in_logs(&log_folder(&a)).contains("Old words"));
@@ -443,7 +446,8 @@ fn a_retirement_frees_its_name_for_a_move_in_the_same_pass() {
             Done::Retired {
                 from: b.clone(),
                 to: root.join(".b.retired.kame"),
-                opened_there: false
+                opened_there: false,
+                unsynced: true,
             },
             Done::Moved {
                 from: a.clone(),
@@ -468,7 +472,8 @@ fn when_the_moved_document_is_already_open_there_the_old_one_retires() {
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
-            opened_there: true
+            opened_there: true,
+            unsynced: false,
         }]
     );
     assert!(b.is_file());
@@ -658,7 +663,8 @@ fn a_save_as_copy_is_never_mistaken() {
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
     assert_eq!(std::fs::read(&c).unwrap(), copy);
@@ -849,7 +855,8 @@ fn a_retired_name_with_a_stale_side_file_is_passed_over() {
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired-2.kame"),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
     assert_eq!(std::fs::read(&stale).unwrap(), b"stale");
@@ -866,7 +873,8 @@ fn a_name_with_dots_is_retired_under_its_whole_name() {
         [Done::Retired {
             from: a.clone(),
             to: root.join("sub/.v1.2.retired.kame"),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
 }
@@ -901,7 +909,8 @@ fn logs_where_no_document_can_be_are_no_home() {
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
     assert!(!b.exists());
@@ -920,7 +929,8 @@ fn old_logs_kept_by_the_sync_tool_are_no_home() {
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
-            opened_there: false
+            opened_there: false,
+            unsynced: true,
         }]
     );
 }
@@ -1088,5 +1098,262 @@ fn a_database_that_cannot_be_renamed_is_not_reported() {
     let done = reconcile(&nb, just(&a), None);
     set_mode(&shut, 0o755);
     assert!(done.is_empty());
+    assert!(a.is_file());
+}
+
+#[test]
+fn a_retired_database_with_words_that_never_synced_says_so() {
+    let (root, nb) = logged_notebook("stranded-unsynced-words");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    Session::open(&a)
+        .unwrap()
+        .insert(" Typed while it could not sync.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+
+    assert_eq!(
+        reconcile(&nb, just(&a), None),
+        [Done::Retired {
+            from: a.clone(),
+            to: root.join(".a.retired.kame"),
+            opened_there: true,
+            unsynced: true,
+        }]
+    );
+    assert!(text_of(&root.join(".a.retired.kame")).contains("Typed while it could not sync."));
+    assert!(!text_of(&b).contains("Typed while it could not sync."));
+}
+
+#[test]
+fn a_retired_database_holding_nothing_beyond_its_logs_says_so() {
+    let (root, nb) = logged_notebook("stranded-nothing-unsynced");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    assert_eq!(
+        reconcile(&nb, just(&a), None),
+        [Done::Retired {
+            from: a.clone(),
+            to: root.join(".a.retired.kame"),
+            opened_there: true,
+            unsynced: false,
+        }]
+    );
+}
+
+#[test]
+fn a_retired_database_with_only_a_new_title_counts_as_unsynced() {
+    let (root, nb) = logged_notebook("stranded-unsynced-title");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    {
+        let mut session = Session::open(&a).unwrap();
+        let metadata = kame_core::model::Metadata {
+            title: "A title of its own".to_string(),
+            ..session.metadata.clone()
+        };
+        session.set_metadata(metadata);
+    }
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    assert_eq!(
+        reconcile(&nb, just(&a), None),
+        [Done::Retired {
+            from: a.clone(),
+            to: root.join(".a.retired.kame"),
+            opened_there: true,
+            unsynced: true,
+        }]
+    );
+}
+
+fn assert_no_temporary_names(root: &Path) {
+    let left = names_in(root);
+    assert!(
+        !left.iter().any(|name| name.contains(".moving-")),
+        "{left:?}"
+    );
+}
+
+#[test]
+fn a_step_is_skipped_if_what_it_found_has_changed() {
+    // The stranded database has been opened since.
+    let (root, nb) = logged_notebook("stranded-changed-opened");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    let steps = decide(&nb, just(&a));
+    let mut session = Session::open(&a).unwrap();
+    assert!(apply(&nb, steps, Some(&a)).is_empty());
+    assert!(a.is_file());
+    assert!(!b.exists());
+    assert_no_temporary_names(&root);
+    assert!(session.insert(" Still editable."));
+    assert!(!session.save_failed);
+    drop(session);
+    assert!(text_of(&a).contains("Still editable."));
+
+    // A database has been built at the target since. This is what would otherwise destroy one.
+    let (root, nb) = logged_notebook("stranded-changed-target");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    let steps = decide(&nb, just(&a));
+    assert!(build_from_logs(&b).unwrap());
+    let built = std::fs::read(&b).unwrap();
+    assert!(apply(&nb, steps, None).is_empty());
+    assert_eq!(std::fs::read(&b).unwrap(), built);
+    assert!(a.is_file());
+    assert_no_temporary_names(&root);
+    assert!(matches!(
+        reconcile(&nb, just(&a), None)[..],
+        [Done::Retired {
+            opened_there: true,
+            ..
+        }]
+    ));
+
+    // The source has gone.
+    let (root, nb) = logged_notebook("stranded-changed-source");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    let steps = decide(&nb, just(&a));
+    std::fs::remove_file(&a).unwrap();
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(!b.exists());
+    assert_no_temporary_names(&root);
+
+    // It remembers something else now, so it isn't what was looked at.
+    let (root, nb) = logged_notebook("stranded-changed-state");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    let steps = decide(&nb, just(&a));
+    Session::open(&a).unwrap().set_sync_state("something else");
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(a.is_file());
+    assert!(!b.exists());
+    assert_no_temporary_names(&root);
+}
+
+#[test]
+fn a_retirement_is_skipped_if_what_it_found_has_changed() {
+    let (root, nb) = logged_notebook("stranded-changed-retire");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+
+    let steps = decide(&nb, just(&a));
+    let session = Session::open(&a).unwrap();
+    assert!(apply(&nb, steps, Some(&a)).is_empty());
+    drop(session);
+    assert!(a.is_file());
+
+    let steps = decide(&nb, just(&a));
+    Session::open(&a).unwrap().set_sync_state("something else");
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(a.is_file());
+
+    let steps = decide(&nb, just(&a));
+    std::fs::remove_file(&a).unwrap();
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(!root.join(".a.retired.kame").exists());
+}
+
+#[test]
+fn a_return_is_skipped_if_what_it_found_has_changed() {
+    let (root, nb) = logged_notebook("stranded-changed-return");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    let retired = root.join(".a.retired.kame");
+    std::fs::rename(&a, &retired).unwrap();
+    move_logs(&a, &b);
+
+    // The retired file is opened by hand, and then the path it would go to is.
+    let steps = decide(&nb, &[]);
+    assert!(apply(&nb, steps, Some(&retired)).is_empty());
+    assert!(retired.is_file());
+    let steps = decide(&nb, &[]);
+    assert!(apply(&nb, steps, Some(&b)).is_empty());
+    assert!(retired.is_file());
+
+    // A database has been built there.
+    let steps = decide(&nb, &[]);
+    assert!(build_from_logs(&b).unwrap());
+    let built = std::fs::read(&b).unwrap();
+    assert!(apply(&nb, steps, None).is_empty());
+    assert_eq!(std::fs::read(&b).unwrap(), built);
+    assert!(retired.is_file());
+}
+
+/// The app reads on a thread, and renames on the one that opens documents.
+#[test]
+fn deciding_on_another_thread_changes_nothing_until_it_is_applied() {
+    let (root, nb) = logged_notebook("stranded-decide-only");
+    let (a, b, c, d, e) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("c.kame"),
+        root.join("d.kame"),
+        root.join("e.kame"),
+    );
+    synced(&a, "Moves.");
+    synced(&b, "Retires.");
+    synced(&c, "Returns.");
+    let retired = root.join(".c.retired.kame");
+    std::fs::rename(&c, &retired).unwrap();
+    move_logs(&c, &d);
+    move_logs(&a, &e);
+    remove_logs(&b);
+    let everything = |root: &Path| -> Vec<(String, Option<Vec<u8>>)> {
+        names_in(root)
+            .into_iter()
+            .map(|name| {
+                let bytes = std::fs::read(root.join(&name)).ok();
+                (name, bytes)
+            })
+            .collect()
+    };
+    let before = everything(&root);
+
+    let thread_notebook = nb.clone();
+    let may_act_on = vec![a.clone(), b.clone()];
+    let steps = std::thread::spawn(move || decide(&thread_notebook, &may_act_on))
+        .join()
+        .unwrap();
+    assert_eq!(everything(&root), before);
+
+    assert_eq!(
+        apply(&nb, steps, None),
+        [
+            Done::Retired {
+                from: b.clone(),
+                to: root.join(".b.retired.kame"),
+                opened_there: false,
+                unsynced: true,
+            },
+            Done::Moved {
+                from: a.clone(),
+                to: e.clone(),
+            },
+            Done::Returned {
+                from: retired,
+                to: d.clone(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn steps_are_applied_only_to_the_notebook_they_were_found_in() {
+    let (root, nb) = logged_notebook("stranded-other-notebook");
+    let (_, other) = logged_notebook("stranded-other-notebook-2");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    assert!(apply(&other, decide(&nb, just(&a)), None).is_empty());
     assert!(a.is_file());
 }

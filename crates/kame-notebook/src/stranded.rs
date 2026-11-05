@@ -6,11 +6,18 @@
 //! This runs with nobody looking, so it only ever renames, never over anything, and does nothing
 //! at all if some logs that might change the answer can't be read. What it doesn't settle on one
 //! pass, it sees again on the next.
+//!
+//! It comes in two parts, since reading every log is slow, and a rename mustn't be on another thread
+//! from whatever opens documents. [`decide`] only reads, and can be on any thread. [`apply`] does
+//! the renames, on the thread that opens documents: `build_from_logs` puts a database in place over
+//! whatever has got there since it looked, so a rename landing there would be lost, and a document
+//! opened during one would be moved out from under its session.
 
 use std::path::{Path, PathBuf};
 
 use kame_core::storage::Db;
 use kame_sync::logs::log_folder;
+use kame_sync::merge::document_digest;
 use kame_sync::revlog::Store;
 
 use crate::list::{NOT_DOCUMENTS, OUTPUT};
@@ -25,16 +32,44 @@ pub enum Done {
         from: PathBuf,
         to: PathBuf,
     },
-    /// `opened_there` if the moved document already had a database, and it isn't lost words.
     Retired {
         from: PathBuf,
         to: PathBuf,
+        /// The moved document already has a database at its new home.
         opened_there: bool,
+        /// The retired file may hold what the logs don't, or there's no way to tell, as there
+        /// isn't for a deleted document. False only if it holds nothing beyond them.
+        unsynced: bool,
     },
     Returned {
         from: PathBuf,
         to: PathBuf,
     },
+}
+
+/// What a pass found to do. It's worked out from reading only, so this can come from any thread.
+#[derive(Debug)]
+pub struct Steps {
+    root: PathBuf,
+    retiring: Vec<Retiring>,
+    moving: Vec<Going>,
+    returning: Vec<Going>,
+}
+
+#[derive(Debug)]
+struct Retiring {
+    path: PathBuf,
+    revision: String,
+    opened_there: bool,
+    unsynced: bool,
+}
+
+/// A database with a home to go to, and the revision it had when that was worked out.
+#[derive(Debug)]
+struct Going {
+    path: PathBuf,
+    revision: String,
+    home: PathBuf,
 }
 
 /// How many numbered names to try for a retired or moving database before leaving it for now.
@@ -50,58 +85,117 @@ pub fn find_stranded(notebook: &Notebook) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Settles the databases in `may_act_on`, each of which is looked at again first, and brings back
-/// any retired database whose logs have appeared. There's no clock here: the caller says what has
-/// waited long enough. Nothing at `open` is touched or put there. This returns what was done, and
-/// anything that failed is left to be seen again by the next pass.
-pub fn reconcile(notebook: &Notebook, may_act_on: &[PathBuf], open: Option<&Path>) -> Vec<Done> {
-    let is_open = |path: &Path| open.is_some_and(|open| same_file(open, path));
+/// What to do about the databases in `may_act_on`, each of which is looked at again first, and any
+/// retired database whose logs have appeared. There's no clock here: the caller says what has
+/// waited long enough. This changes nothing.
+pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
+    let mut steps = Steps {
+        root: notebook.root.clone(),
+        retiring: Vec::new(),
+        moving: Vec::new(),
+        returning: Vec::new(),
+    };
     let mut to_settle = may_act_on.to_vec();
     to_settle.sort();
     to_settle.dedup();
-    to_settle.retain(|path| !is_open(path) && is_still_stranded(notebook, path));
+    to_settle.retain(|path| is_still_stranded(notebook, path));
 
     let mut walked = Walked::default();
     walk(notebook, &notebook.root, &mut walked);
     if to_settle.is_empty() && walked.set_aside.is_empty() {
-        return Vec::new();
+        return steps;
     }
     // A home in what can't be read can't be ruled out, and that would make a retirement a guess.
     if !walked.whole {
-        return Vec::new();
+        return steps;
     }
     let Some(logs) = log_folders(&walked.documents) else {
-        return Vec::new();
+        return steps;
     };
 
-    let mut done = Vec::new();
-    let mut movers = Vec::new();
     for path in to_settle {
         let Some(revision) = recorded_revision(&path) else {
             continue;
         };
         match what_to_do(&path, &revision, &logs) {
-            Some(Verdict::Retire { opened_there }) => {
-                if let Some(to) = retired_name(&path) {
-                    if leave(&path, &to) {
-                        done.push(Done::Retired {
-                            from: path,
-                            to,
-                            opened_there,
-                        });
-                    }
-                }
-            }
-            Some(Verdict::Move { home }) => movers.push(Mover { path, home }),
+            Some(Verdict::Retire {
+                opened_there,
+                unsynced,
+            }) => steps.retiring.push(Retiring {
+                path,
+                revision,
+                opened_there,
+                unsynced,
+            }),
+            Some(Verdict::Move { home }) => steps.moving.push(Going {
+                path,
+                revision,
+                home,
+            }),
             None => {}
         }
     }
+    steps.returning = those_coming_back(notebook, &walked.set_aside, &logs);
+    steps
+}
+
+/// Does what was found, on the thread that opens documents, so that nothing can be built or opened
+/// in the middle of a rename. `open` is what's open now, not when `decide` began. Time has passed
+/// since then, so each step is looked at again just before it's taken, with no more reading than
+/// that takes: it's skipped if the database has gone, is open, or remembers something else now, or
+/// if something has arrived where it's going. This returns what was done, and what's skipped or
+/// fails is left to be seen again by the next pass.
+pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done> {
+    if steps.root != notebook.root {
+        return Vec::new();
+    }
+    let is_open = |path: &Path| open.is_some_and(|open| same_file(open, path));
+    let as_it_was = |path: &Path, revision: &str| {
+        !is_open(path) && recorded_revision(path).as_deref() == Some(revision)
+    };
+
+    let mut done = Vec::new();
+    for step in steps.retiring {
+        if !as_it_was(&step.path, &step.revision) {
+            continue;
+        }
+        if let Some(to) = retired_name(&step.path) {
+            if leave(&step.path, &to) {
+                done.push(Done::Retired {
+                    from: step.path,
+                    to,
+                    opened_there: step.opened_there,
+                    unsynced: step.unsynced,
+                });
+            }
+        }
+    }
     // After the retirements, which may have freed a name that a mover is going to.
+    let movers = steps
+        .moving
+        .into_iter()
+        .filter(|mover| as_it_was(&mover.path, &mover.revision))
+        .collect();
     done.extend(carry_out_moves(movers, &is_open));
     // After the moves, since a database moving is the document as it is now, and a retired one
-    // isn't. Retired ones found by this walk don't include those retired just now.
-    done.extend(bring_back(notebook, &walked.set_aside, &logs, &is_open));
+    // isn't.
+    for step in steps.returning {
+        if as_it_was(&step.path, &step.revision)
+            && !is_open(&step.home)
+            && arrive(&step.path, &step.home)
+        {
+            done.push(Done::Returned {
+                from: step.path,
+                to: step.home,
+            });
+        }
+    }
     done
+}
+
+/// Both, for callers with nothing else going on.
+pub fn reconcile(notebook: &Notebook, may_act_on: &[PathBuf], open: Option<&Path>) -> Vec<Done> {
+    apply(notebook, decide(notebook, may_act_on), open)
 }
 
 /// Whether a path is a database of this notebook that's stranded right now. `is_stranded` takes a
@@ -238,7 +332,7 @@ fn homes_of<'a>(revision: &str, logs: &'a [Logs]) -> Vec<&'a Path> {
 }
 
 enum Verdict {
-    Retire { opened_there: bool },
+    Retire { opened_there: bool, unsynced: bool },
     Move { home: PathBuf },
 }
 
@@ -250,6 +344,7 @@ fn what_to_do(path: &Path, revision: &str, logs: &[Logs]) -> Option<Verdict> {
         [] => {
             return Some(Verdict::Retire {
                 opened_there: false,
+                unsynced: true,
             })
         }
         [home] if home != path => home,
@@ -265,24 +360,37 @@ fn what_to_do(path: &Path, revision: &str, logs: &[Logs]) -> Option<Verdict> {
                 // It may be leaving too, and if it isn't, this waits for it.
                 Some(moves_in)
             } else {
-                Some(Verdict::Retire { opened_there: true })
+                Some(Verdict::Retire {
+                    opened_there: true,
+                    unsynced: !holds_only_what_logs_do(path, revision, logs),
+                })
             }
         }
         _ => None,
     }
 }
 
-/// A stranded database that has a home to go to.
-struct Mover {
-    path: PathBuf,
-    home: PathBuf,
+/// Whether a database's document and properties are just what the logs hold at its revision, the
+/// same test a sync makes for whether there's anything to write. If that can't be read, it's no.
+fn holds_only_what_logs_do(path: &Path, revision: &str, logs: &[Logs]) -> bool {
+    let Some(logs) = logs.iter().find(|logs| logs.store.is_usable(revision)) else {
+        return false;
+    };
+    let Ok(db) = Db::open_read_only(path) else {
+        return false;
+    };
+    let (Ok(document), Ok(Some(metadata))) = (db.load_document(), db.load_metadata()) else {
+        return false;
+    };
+    document_digest(&document) == document_digest(&logs.store.document(revision))
+        && metadata == logs.store.metadata(revision)
 }
 
 /// Those that can go, which isn't all of them. A mover needs its home empty, or holding only
 /// another mover, which then takes everything there along with it. Two wanting one home can't both
 /// have it, and which it should be isn't known. Dropping a mover can leave another without a home
 /// to go to, so this repeats until none drop. A swap stays in, since each makes room for the other.
-fn those_that_can_go(mut movers: Vec<Mover>, is_open: &impl Fn(&Path) -> bool) -> Vec<Mover> {
+fn those_that_can_go(mut movers: Vec<Going>, is_open: &impl Fn(&Path) -> bool) -> Vec<Going> {
     loop {
         let can_go: Vec<bool> = movers
             .iter()
@@ -303,7 +411,7 @@ fn those_that_can_go(mut movers: Vec<Mover>, is_open: &impl Fn(&Path) -> bool) -
 /// Moves in two rounds, each first to a temporary name and then to its home, so that a name freed
 /// by one is free for another. One that can't reach its home goes back. If that's been taken by
 /// now, it stays in the temporary name, and a later pass treats it as retired.
-fn carry_out_moves(movers: Vec<Mover>, is_open: &impl Fn(&Path) -> bool) -> Vec<Done> {
+fn carry_out_moves(movers: Vec<Going>, is_open: &impl Fn(&Path) -> bool) -> Vec<Done> {
     let mut parked = Vec::new();
     for mover in those_that_can_go(movers, is_open) {
         if let Some(temporary) = temporary_name(&mover.path) {
@@ -326,54 +434,45 @@ fn carry_out_moves(movers: Vec<Mover>, is_open: &impl Fn(&Path) -> bool) -> Vec<
     done
 }
 
-/// Renames retired databases to join logs that hold their revision, at a path with no database.
-/// A database with the same home that's still stranded, waiting its turn or on the screen, is
-/// further on than the retired one, so that home is its to take. Each of several retired ones
-/// wanting one home stays as it is, as with movers.
-fn bring_back(
-    notebook: &Notebook,
-    set_aside: &[PathBuf],
-    logs: &[Logs],
-    is_open: &impl Fn(&Path) -> bool,
-) -> Vec<Done> {
-    let mut wanting: Vec<(&PathBuf, &Path)> = Vec::new();
-    for path in set_aside.iter().filter(|path| !is_open(path)) {
+/// The retired databases to join logs that hold their revision, at a path with no database. A
+/// database with the same home that's still stranded, waiting its turn or on the screen, is further
+/// on than the retired one, so that home is its to take. Each of several retired ones wanting one
+/// home stays as it is, as with movers.
+fn those_coming_back(notebook: &Notebook, set_aside: &[PathBuf], logs: &[Logs]) -> Vec<Going> {
+    let mut wanting: Vec<Going> = Vec::new();
+    for path in set_aside {
         let Some(revision) = recorded_revision(path) else {
             continue;
         };
         if let [home] = homes_of(&revision, logs)[..] {
-            wanting.push((path, home));
+            wanting.push(Going {
+                path: path.clone(),
+                revision,
+                home: home.to_path_buf(),
+            });
         }
     }
-    let alone = |home: &Path| wanting.iter().filter(|(_, other)| *other == home).count() == 1;
-    let mut coming_back: Vec<(&PathBuf, &Path)> = wanting
+    let alone = |home: &Path| wanting.iter().filter(|other| other.home == home).count() == 1;
+    let is_coming_back: Vec<bool> = wanting
         .iter()
-        .copied()
-        .filter(|(_, home)| alone(home) && !is_open(home) && is_free(home))
+        .map(|going| alone(&going.home) && is_free(&going.home))
         .collect();
-    if coming_back.is_empty() {
-        return Vec::new();
+    let mut is_coming_back = is_coming_back.into_iter();
+    wanting.retain(|_| is_coming_back.next().unwrap_or(false));
+    if wanting.is_empty() {
+        return wanting;
     }
     let spoken_for: Vec<String> = find_stranded(notebook)
         .iter()
         .filter_map(|path| recorded_revision(path))
         .collect();
-    coming_back.retain(|(_, home)| {
+    wanting.retain(|going| {
         !spoken_for
             .iter()
-            .any(|revision| homes_of(revision, logs).contains(home))
+            .any(|revision| homes_of(revision, logs).contains(&going.home.as_path()))
     });
-    coming_back.sort();
-    let mut done = Vec::new();
-    for (path, home) in coming_back {
-        if arrive(path, home) {
-            done.push(Done::Returned {
-                from: path.clone(),
-                to: home.to_path_buf(),
-            });
-        }
-    }
-    done
+    wanting.sort_by(|one, other| one.path.cmp(&other.path));
+    wanting
 }
 
 fn stem_of(path: &Path) -> String {

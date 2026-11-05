@@ -204,6 +204,11 @@ impl Logged {
             self.last.as_deref(),
             now,
         )?;
+        // Before the sync state is saved, which SQLite puts on the disk itself. Were the state to
+        // get there ahead of the revision it names, a power cut would leave a database remembering
+        // a revision its logs don't hold, which reads as the logs having left, and the clean-up
+        // would retire a healthy document.
+        self.replica.flush(&mut self.store)?;
 
         let mut outcome = Outcome {
             written: synced.written,
@@ -497,6 +502,31 @@ mod tests {
         let heads = store.heads();
         assert_eq!(heads.len(), 1);
         assert_eq!(store.document(&heads[0]).blocks[0].text, "Typed here.");
+    }
+
+    /// A sync state on the disk ahead of its revision would, after a power cut, read as logs that
+    /// have left, and retire a healthy document. A power cut can't be had in a test, so this
+    /// checks that nothing is waiting to be flushed by the time the state has been saved.
+    #[test]
+    fn a_sync_records_its_state_with_its_log_already_flushed() {
+        let root = kame_test_dir::folder("logs-flushed");
+        std::fs::write(root.join(MARKER), "").unwrap();
+        let path = root.join("essay.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("Typed here.");
+        let mut logged = Logged::open(&session, "here-0000").unwrap();
+        logged.sync(&mut session, 100).unwrap();
+
+        assert!(!logged.store.has_unflushed());
+        let state = session.sync_state().expect("it records where it got to");
+        assert!(Store::load(&log_folder(&path)).unwrap().contains(&state));
+
+        session.insert(" More.");
+        logged.sync(&mut session, 101).unwrap();
+        assert!(!logged.store.has_unflushed());
+        let later = session.sync_state().unwrap();
+        assert_ne!(later, state);
+        assert!(Store::load(&log_folder(&path)).unwrap().contains(&later));
     }
 
     /// A file whose history can't be rewound still syncs, starting from the text it has.

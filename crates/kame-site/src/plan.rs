@@ -255,6 +255,7 @@ pub fn plan_site(
                 document_link: &document_link,
                 image: &image,
                 references,
+                page: "",
             },
         );
         let url = source.url();

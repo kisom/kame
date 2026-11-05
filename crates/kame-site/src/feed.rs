@@ -65,15 +65,16 @@ pub fn render(
                 .map(|url| format!("{site}{url}"))
         };
         let image = |path: &str| images.absolute(path, site, &doc_url);
+        let url = format!("{site}{doc_url}");
         let body = html_body(
             &source.doc,
             &Publish {
                 document_link: &document_link,
                 image: &image,
                 references,
+                page: &url,
             },
         );
-        let url = format!("{site}{doc_url}");
         out.push_str("<item>\n");
         out.push_str(&format!("<title>{}</title>\n", escape(&source.title)));
         out.push_str(&format!("<link>{}</link>\n", escape(&url)));
@@ -317,6 +318,49 @@ mod tests {
             xml.contains("src=&quot;https://e.com/k/a/a.png&quot;"),
             "{xml}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn footnotes_and_citations_link_to_their_page() {
+        use kame_core::model::{Anchor, Annotation, AnnotationKind};
+        use kame_core::references::Reference;
+        let dir = temp_dir("feedfragments");
+        let mut doc = plain("See [knuth1981].");
+        let block = doc.blocks[0].id;
+        doc.annotations.push(Annotation {
+            id: uuid::Uuid::new_v4(),
+            kind: AnnotationKind::Footnote,
+            anchor: Anchor::Range {
+                block_id: block,
+                start: 0,
+                end: 3,
+            },
+            body: "Also [knuth1981].".to_string(),
+        });
+        let mut references = References::new();
+        references.insert(
+            "knuth1981".to_string(),
+            Reference {
+                title: "Breaking paragraphs into lines".to_string(),
+                ..Reference::default()
+            },
+        );
+        let sources = vec![make(&dir, "a", "2026-01-02", false, doc)];
+        let xml = render(
+            &config(),
+            &sources,
+            &SiteIndex::new(&sources),
+            &dir,
+            &references,
+        );
+        for href in ["#fn1", "#fnref1", "#ref-knuth1981"] {
+            assert!(
+                xml.contains(&format!("href=&quot;https://e.com/k/a/{href}&quot;")),
+                "{href}: {xml}"
+            );
+        }
+        assert!(!xml.contains("href=&quot;#"), "{xml}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

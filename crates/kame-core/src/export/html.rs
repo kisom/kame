@@ -20,7 +20,7 @@ use crate::model::{
     ListPosition, SpanStyle,
 };
 use crate::references::{
-    self, citation_ranges, citation_url, key_of, Reference, References, Run, RunStyle,
+    self, citation_ranges, citation_url, cited_key, key_of, Reference, References, Run, RunStyle,
 };
 use std::collections::HashMap;
 
@@ -334,6 +334,10 @@ pub struct Publish<'a> {
     /// The references a citation can name. A document citing any of them ends with a
     /// References section.
     pub references: &'a References,
+    /// The page's own URL, put before a link to a place on it, such as a footnote or a
+    /// citation's entry, for markup read away from the page, as in a feed. Empty on the page
+    /// itself, where those links are a fragment alone.
+    pub page: &'a str,
 }
 
 static NO_REFERENCES: References = References::new();
@@ -344,6 +348,7 @@ impl Publish<'_> {
             document_link: &|_| None,
             image: &|path| Some(path.to_string()),
             references: &NO_REFERENCES,
+            page: "",
         }
     }
 }
@@ -496,7 +501,7 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
             kind if kind.is_verbatim() => inner.to_string(),
             _ => inner.replace('\n', "<br>\n"),
         };
-        let after = render_apparatus(apparatus, publish.references);
+        let after = render_apparatus(apparatus, publish);
         match block.kind {
             BlockKind::Heading { level, centered } => {
                 close_list(&mut body, &mut open_list);
@@ -568,18 +573,19 @@ fn render_body(doc: &Document, publish: &Publish, author: Option<&str>) -> Strin
     // Margin notes whose anchor block no longer exists: the anchor is gone, the
     // authored text is not.
     for marginal in &collected.unanchored_marginalia {
-        body.push_str(&marginalia_aside(marginal, publish.references));
+        body.push_str(&marginalia_aside(marginal, publish));
     }
 
     if !collected.footnotes.is_empty() {
         body.push_str("<ol class=\"footnotes\">\n");
         for footnote in &collected.footnotes {
             let number = footnote.number;
-            let text = escape_with_citations(&footnote.body, publish.references);
+            let text = escape_with_citations(&footnote.body, publish);
             if footnote.anchored {
+                let page = escape_attribute(publish.page);
                 body.push_str(&format!(
                     "<li id=\"fn{number}\">{text} <a class=\"footnote-backref\" \
-                     href=\"#fnref{number}\">&#8617;</a></li>\n"
+                     href=\"{page}#fnref{number}\">&#8617;</a></li>\n"
                 ));
             } else {
                 // No marker in the text to return to.
@@ -807,35 +813,36 @@ fn collect_apparatus(doc: &Document) -> Collected {
 
 /// Render the apparatus that follows a block: marginalia asides. Footnotes are
 /// collected at the foot of the document instead.
-fn render_apparatus(apparatus: &BlockApparatus, references: &References) -> String {
+fn render_apparatus(apparatus: &BlockApparatus, publish: &Publish) -> String {
     apparatus
         .marginalia
         .iter()
-        .map(|body| marginalia_aside(body, references))
+        .map(|body| marginalia_aside(body, publish))
         .collect()
 }
 
 /// The margin note's body. The `<aside>` is where a marginal is read, whether
 /// it kept its block or lost it.
-fn marginalia_aside(body: &str, references: &References) -> String {
+fn marginalia_aside(body: &str, publish: &Publish) -> String {
     format!(
         "<aside class=\"marginalia\"><p>{}</p></aside>\n",
-        escape_with_citations(body, references).replace('\n', "<br>\n")
+        escape_with_citations(body, publish).replace('\n', "<br>\n")
     )
 }
 
 /// `text` escaped, with each citation of a known reference linked to its entry.
-fn escape_with_citations(text: &str, references: &References) -> String {
+fn escape_with_citations(text: &str, publish: &Publish) -> String {
     let mut out = String::with_capacity(text.len());
     let mut done = 0;
     for range in citation_ranges(text) {
         let key = key_of(text, range);
-        if !references.contains(key) {
+        if !publish.references.contains(key) {
             continue;
         }
         out.push_str(&escape(&text[done..range.0]));
         out.push_str(&format!(
-            "<a href=\"{}\">{}</a>",
+            "<a href=\"{}{}\">{}</a>",
+            escape_attribute(publish.page),
             escape_attribute(&citation_url(key)),
             escape(&text[range.0..range.1])
         ));
@@ -929,6 +936,9 @@ fn render_inline(
             let style = match &span.style {
                 SpanStyle::DocumentLink { target } => SpanStyle::Link {
                     url: (publish.document_link)(target)?,
+                },
+                SpanStyle::Link { url } if cited_key(url).is_some() => SpanStyle::Link {
+                    url: format!("{}{url}", publish.page),
                 },
                 style => style.clone(),
             };
@@ -1039,7 +1049,7 @@ fn render_inline(
         // A marker at a tag boundary belongs after the closing and before the
         // opening tags, where the superscript visually sits.
         for (_, number) in footnotes.iter().filter(|(offset, _)| *offset == start) {
-            out.push_str(&footnote_marker(*number));
+            out.push_str(&footnote_marker(*number, publish.page));
         }
         for tag in &target[keep..] {
             out.push_str(&tag.open());
@@ -1052,15 +1062,16 @@ fn render_inline(
     }
     // Markers past the last glyph have no segment of their own to sit in.
     for (_, number) in footnotes.iter().filter(|(offset, _)| *offset == text.len()) {
-        out.push_str(&footnote_marker(*number));
+        out.push_str(&footnote_marker(*number, publish.page));
     }
     out
 }
 
-/// The inline superscript marker, linked to the footnote list.
-fn footnote_marker(number: usize) -> String {
+/// The inline superscript marker, linked to the footnote list on `page`.
+fn footnote_marker(number: usize, page: &str) -> String {
+    let page = escape_attribute(page);
     format!(
-        "<sup class=\"footnote-ref\" id=\"fnref{number}\"><a href=\"#fn{number}\">{number}</a></sup>"
+        "<sup class=\"footnote-ref\" id=\"fnref{number}\"><a href=\"{page}#fn{number}\">{number}</a></sup>"
     )
 }
 
@@ -2147,6 +2158,7 @@ mod tests {
             document_link: &|target| (target == "a.kame#Intro").then(|| "/k/a/".to_string()),
             image: &|path| Some(path.to_string()),
             references: &References::new(),
+            page: "",
         };
         assert_eq!(
             html_body(&linking_to("a.kame#Intro"), &publish),
@@ -2160,6 +2172,7 @@ mod tests {
             document_link: &|_| None,
             image: &|path| Some(path.to_string()),
             references: &References::new(),
+            page: "",
         };
         assert_eq!(
             html_body(&linking_to("gone.kame"), &publish),
@@ -2182,6 +2195,7 @@ mod tests {
             document_link: &|_| None,
             image: &|path| Some(format!("/k/s/{}\"", path.rsplit('/').next().unwrap())),
             references: &References::new(),
+            page: "",
         };
         assert!(
             html_body(&doc, &publish).contains("src=\"/k/s/a.png&quot;\""),
@@ -2206,6 +2220,7 @@ mod tests {
             document_link: &|_| None,
             image: &|_| None,
             references: &References::new(),
+            page: "",
         };
         assert_eq!(html_body(&doc, &publish), "<p>Before.</p>\n");
     }
@@ -2239,6 +2254,7 @@ mod tests {
             document_link: &|_| None,
             image: &|path| (path != "gone.png").then(|| path.to_string()),
             references: &References::new(),
+            page: "",
         };
         html_body(&doc, &publish)
     }

@@ -862,6 +862,36 @@ mod tests {
     }
 
     #[test]
+    fn a_link_to_a_document_by_a_url_stays_a_link() {
+        let doc = import("[x](a.kame) and [y](notes/b.kame#Part)\n").document;
+        let styles: Vec<&SpanStyle> = doc.blocks[0].spans.iter().map(|span| &span.style).collect();
+        assert_eq!(
+            styles,
+            [
+                &SpanStyle::Link {
+                    url: "a.kame".to_string()
+                },
+                &SpanStyle::Link {
+                    url: "notes/b.kame#Part".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_heading_covers_its_words_and_no_others() {
+        let doc = import("See [the été](<#The Intro>) and [here](#Plain) now.\n").document;
+        let block = &doc.blocks[0];
+        assert_eq!(block.text, "See the été and here now.");
+        let words: Vec<&str> = block
+            .spans
+            .iter()
+            .map(|span| &block.text[span.start..span.end])
+            .collect();
+        assert_eq!(words, ["the été", "here"]);
+    }
+
+    #[test]
     fn a_percent_encoded_link_to_a_heading_names_the_heading() {
         for (source, target) in [
             ("[y](#The%20Intro)", "#The Intro"),

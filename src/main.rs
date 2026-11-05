@@ -5989,6 +5989,12 @@ impl KameApp {
         let Some(path) = pick_document_link_path(directory.as_deref()) else {
             return;
         };
+        self.link_to_picked_document(&path);
+    }
+
+    /// Links the selection or the word at the caret to the document at `path`, by the way from
+    /// this one if both are in the notebook.
+    fn link_to_picked_document(&mut self, path: &Path) {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let document = self.session.path().map(Path::to_path_buf);
         let root = self
@@ -5997,8 +6003,8 @@ impl KameApp {
             .as_ref()
             .map(|notebook| notebook.root.clone());
         let target =
-            document_link_target(&path, home.as_deref(), document.as_deref(), root.as_deref());
-        let title = document_title(&path);
+            document_link_target(path, home.as_deref(), document.as_deref(), root.as_deref());
+        let title = document_title(path);
         if let Err(refusal) = self.session.link_to_document(target, &title) {
             self.notice = Some(refusal.to_string());
         }
@@ -6957,6 +6963,8 @@ pub(crate) struct Headless {
     time: f64,
     /// What the last frame drew, as a screen reader is told it, for finding a window's buttons.
     drawn: Option<egui::accesskit::TreeUpdate>,
+    /// How wide the window is. It is `WIDTH` unless a test narrows it.
+    width: f32,
     /// How tall the window is. It is `HEIGHT` unless a test shrinks it.
     height: f32,
 }
@@ -6976,6 +6984,7 @@ impl Headless {
             ctx,
             time: 0.0,
             drawn: None,
+            width: Self::WIDTH,
             height: Self::HEIGHT,
         }
     }
@@ -6986,7 +6995,7 @@ impl Headless {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
-                Vec2::new(Self::WIDTH, self.height),
+                Vec2::new(self.width, self.height),
             )),
             time: Some(self.time),
             events,
@@ -7154,7 +7163,7 @@ impl Headless {
 
     /// Where the text starts across the page.
     pub(crate) fn body_left(&self) -> f32 {
-        page_geometry(self.app.renderer.config(), Self::WIDTH).body_left
+        page_geometry(self.app.renderer.config(), self.width).body_left
     }
 }
 
@@ -9145,6 +9154,33 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     }
 
     #[test]
+    fn file_link_to_document_goes_by_the_notebooks_root() {
+        let root = kame_test_dir::folder("app-link-call-site")
+            .canonicalize()
+            .unwrap();
+        kame_notebook::init(&root).unwrap();
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        let picked = root.join("two/d.kame");
+        drop(open(&picked));
+        let mut session = open(&root.join("one/a.kame"));
+        session.insert("word");
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        assert!(page.app.nb.notebook.is_some());
+
+        page.app.link_to_picked_document(&picked);
+
+        let spans = &page.app.session.document().blocks[0].spans;
+        assert_eq!(
+            spans[0].style,
+            SpanStyle::DocumentLink {
+                target: "../two/d.kame".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn a_picked_document_in_the_notebook_links_by_the_way_from_the_document() {
         let root = kame_test_dir::folder("app-link-within")
             .canonicalize()
@@ -10360,7 +10396,7 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
     }
 
     #[test]
-    fn the_help_scrolls_to_any_row_in_the_smallest_window() {
+    fn the_help_scrolls_to_any_row_in_a_short_window() {
         let mut page = Headless::new(Session::anonymous().unwrap());
         page.height = 220.0;
         page.ctx.set_zoom_factor(1.0);
@@ -10400,6 +10436,78 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             top >= window.top() && bottom <= window.bottom(),
             "the last row is at {top}..{bottom} in {window:?}"
         );
+    }
+
+    /// The help at a window of `width` by `height`, once it has settled.
+    fn help_page_at(width: f32, height: f32) -> Headless {
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.width = width;
+        page.height = height;
+        page.frame(Vec::new());
+        page.frame(vec![egui::Event::Key {
+            key: egui::Key::F1,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for _ in 0..12 {
+            page.frame(Vec::new());
+        }
+        page
+    }
+
+    /// How many columns the help is in as drawn, going by where its rows' keys start.
+    fn help_columns(page: &Headless) -> usize {
+        let mut lefts: Vec<i64> = HELP_ROWS
+            .iter()
+            .filter_map(|(keys, _)| {
+                page.drawn
+                    .iter()
+                    .flat_map(|tree| &tree.nodes)
+                    .find_map(|(_, node)| node.bounds().filter(|_| node.value() == Some(*keys)))
+                    .map(|bounds| bounds.x0.round() as i64)
+            })
+            .collect();
+        lefts.sort_unstable();
+        lefts.dedup();
+        lefts.len()
+    }
+
+    #[test]
+    fn the_help_stays_on_screen_at_the_smallest_window_in_one_column() {
+        let (width, height) = (560.0, 360.0);
+        let mut page = help_page_at(width, height);
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, height));
+        let window = help_window(&page);
+        assert!(
+            screen.contains_rect(window),
+            "{window:?} is not on {screen:?}"
+        );
+        assert_eq!(help_columns(&page), 1);
+
+        let last = HELP_ROWS.last().unwrap().1;
+        page.frame(vec![egui::Event::PointerMoved(window.center())]);
+        for _ in 0..80 {
+            page.frame(vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+                delta: Vec2::new(0.0, -5.0),
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        let (top, bottom) = help_row(&page, last).expect("it was scrolled to");
+        assert!(
+            top >= window.top() && bottom <= window.bottom(),
+            "the last row is at {top}..{bottom} in {window:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_is_in_as_many_columns_as_the_window_has_room_for() {
+        assert_eq!(help_columns(&help_page_at(800.0, 800.0)), 2);
+        assert_eq!(help_columns(&help_page_at(1100.0, 860.0)), 3);
     }
 
     #[test]

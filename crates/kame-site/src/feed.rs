@@ -320,6 +320,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn a_missing_image_leaves_its_local_path_out_of_the_feed() {
+        let dir = temp_dir("feedmissing");
+        let mut doc = Document::new("D");
+        doc.blocks = vec![
+            paragraph("Words."),
+            block(
+                BlockKind::Image {
+                    path: "/home/you/notes/images/gone.png".to_string(),
+                    link: None,
+                    align: Default::default(),
+                },
+                "",
+            ),
+        ];
+        let xml = feed(&dir, &[make(&dir, "a", "2026-01-02", false, doc)]);
+        assert!(xml.contains("Words."), "{xml}");
+        assert!(!xml.contains("gone.png"), "{xml}");
+        assert!(!xml.contains("/home/you"), "{xml}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Review focus: pasted text mustn't break the feed.
     #[test]
     fn awkward_text_still_makes_a_well_formed_feed() {

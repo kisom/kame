@@ -261,7 +261,7 @@ Skip the sync if the session can't save, or if its file has been replaced. Somet
 
 ### 6.6 Building from logs
 
-A document with logs and no database, in a logged folder, can be built: write to `NAME.building` beside it, with the first head's document and metadata and `sync` set to that head, then remove any `-wal` and `-shm` and rename into place. If the logs hold no whole document, write nothing. Other heads merge once it's open.
+A document with logs and no database can be built, even with no `.kame-logs` above it, since it would otherwise open blank where the logs have the text: write to `NAME.building` beside it, with the first head's document and metadata and `sync` set to that head, then remove any `-wal` and `-shm` and rename into place. If the logs hold no whole document, write nothing. Other heads merge once it's open.
 
 ### 6.7 Timing
 

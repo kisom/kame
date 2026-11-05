@@ -11,10 +11,8 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **New fields stop older builds reading logs, with no message.** A centered or right-aligned image
   now does this, and any new field or kind will. Needs a decision on how logs handle versions.
   `merging.md`, section 9.
-- [ ] **Smaller ones in the specs' weak points:** a logs-only document without `.kame-logs` opens blank,
-  a folder's index with only logs is overwritten when followed, `.markdown` files are unread outside
-  Open, links that publish private names, read-only opens not checking `user_version`, and two
-  programs writing one file.
+- [ ] **Smaller ones in the specs' weak points:** links that publish private names (a private folder, a
+  hidden file in `static/`), and two programs writing one file.
 
 ## Site
 

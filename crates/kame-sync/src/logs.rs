@@ -353,9 +353,11 @@ pub fn find_or_build(path: &str, base: &Path) -> Result<Option<PathBuf>> {
 }
 
 /// Builds the database of a document that has logs and no file yet, as on a fresh machine,
-/// returning whether it did. Nothing is written unless the logs hold a whole document.
+/// returning whether it did. Nothing is written unless the logs hold a whole document. This doesn't
+/// need the folder's marker: without it the document won't sync, and says so, but opening it would
+/// otherwise make a blank one where the logs have the text.
 pub fn build_from_logs(path: &Path) -> Result<bool> {
-    if path.exists() || logging_root(path).is_none() {
+    if path.exists() {
         return Ok(false);
     }
     let store = Store::load(&log_folder(path))?;
@@ -408,6 +410,25 @@ mod tests {
         let at_root = enable(&root).unwrap().unwrap();
         assert_eq!(at_root[0], "**.kame");
         assert_eq!(at_root.len(), 3);
+    }
+
+    /// The marker going astray stops the syncing, and there's a warning for that. It shouldn't also
+    /// leave a blank document where the logs have the text.
+    #[test]
+    fn a_document_with_logs_and_no_marker_is_built_from_them() {
+        let root = kame_test_dir::folder("logs-no-marker");
+        let path = root.join("essay.kame");
+        let mut doc = Document::new("t");
+        doc.blocks[0].text = "The words.".to_string();
+        Replica {
+            folder: log_folder(&path),
+            device: "elsewhere-0000".to_string(),
+        }
+        .sync(&doc, None, 1)
+        .unwrap();
+        assert!(build_from_logs(&path).unwrap());
+        let session = Session::open(&path).unwrap();
+        assert_eq!(session.document().blocks[0].text, "The words.");
     }
 
     /// A file whose history can't be rewound still syncs, starting from the text it has.

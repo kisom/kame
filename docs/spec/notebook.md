@@ -127,7 +127,7 @@ The rules, in order:
 6. If nothing is there and it isn't in the documents area, it has **Rotted**.
 7. Try adding `.kame`, then `.md`: **Open** if that file exists. `.markdown` isn't tried, so a link to one has to name it.
 8. If it has no extension, add `.kame`. If its extension is `.kame` in any case, keep it. With any other extension it has **Rotted**, so a missing `paper.pdf` never makes `paper.pdf.kame`.
-9. **Open** if that document has a log folder, since it exists and only needs building, which requires a `.kame-logs` above it (section 8). Otherwise **Create**.
+9. **Open** if that document has a log folder, since it exists and only needs building. Otherwise **Create**.
 
 **The documents area** is everything inside the notebook except what's under `static`, `images`, `theme` or `output` in the root, and anything with a part starting with `.`.
 
@@ -261,7 +261,7 @@ A notebook doesn't need syncing, and syncing doesn't need a notebook. `.kame-log
 
 kame only syncs the open document. A closed one can be behind what another machine wrote until it's next opened, and search, the links list and `kame-site` all read what this machine has.
 
-A document with only logs is read from them. Its database is built when it's opened, if `.kame-logs` is above it.
+A document with only logs is read from them, and its database is built when it's opened.
 
 To delete a document in a logged folder, remove both `X.kame` and `.X.kame.sync/`. Removing only the database gets it rebuilt from its logs.
 
@@ -271,7 +271,6 @@ Moving a document by hand keeps its new place, and links to the old path don't f
 
 These describe the code as it stands, and aren't rules to copy.
 
-- **A logs-only document without `.kame-logs` opens blank.** Listing and reading don't check for the file, but building needs it. So opening such a document creates a blank database at that path, beside its logs.
 - **Some untouched documents aren't removed.** Only one newly created document is remembered at a time, so following a link from one untouched new document to create another keeps the first, and it may then write logs. Cancelling the prompt about losing work also keeps it.
 - **Links can publish what they shouldn't, or nothing useful.** A link to an existing private folder publishes its name (`/papers/`) with no warning. A link to `static/.secret.pdf` publishes a dead link naming a hidden file, also with no warning. A link to `./` in a root with no index publishes `href="//"`.
 - **A notebook inside a notebook isn't separated.** Finding one stops at the nearest `notebook.yaml`, but walking down from the outer root doesn't stop at an inner one. The outer notebook lists and publishes the inner one's documents, and its `notebook.yaml` shows up as a file.

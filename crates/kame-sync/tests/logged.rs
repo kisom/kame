@@ -452,10 +452,10 @@ fn a_fresh_machine_builds_the_document_from_its_logs_with_nothing_lost() {
 }
 
 #[test]
-fn nothing_is_built_without_logs_a_marker_or_a_free_path() {
+fn nothing_is_built_without_logs_or_a_free_path() {
     let root = common::test_folder("build");
     let file = root.join("essay.kame");
-    assert!(!build_from_logs(&file).unwrap(), "no logs and no marker");
+    assert!(!build_from_logs(&file).unwrap(), "no logs");
     std::fs::write(root.join(MARKER), "").unwrap();
     assert!(!build_from_logs(&file).unwrap(), "no logs");
     assert!(!file.exists());

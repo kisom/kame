@@ -79,7 +79,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **Feed citations use fragment-only links,** as its footnotes do, so they lead nowhere off the page.
 - [ ] **`page_blocks` clones the blocks every frame** when one holds a citation. It hasn't been measured.
 - [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
-- [ ] **`cite` says it couldn't** when the key went in and only the write failed (`src/references.rs`).
 - [ ] **The browser panel and File > Open** close a form and lose what's typed in it.
 - [ ] **A note opened over a form:** Escape closes the form first.
 - [ ] **Clicking a form under a link prompt** puts it on top, and Enter still applies the prompt.

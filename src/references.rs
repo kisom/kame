@@ -940,10 +940,14 @@ impl KameApp {
         self.follow_caret = true;
         if !self.session.insert_as_step(&format!("[{key}]")) {
             let why = self.session.last_error.take();
-            self.session.last_error = Some(format!(
-                "could not cite {key} here — {}",
-                why.as_deref().unwrap_or("this document can't be changed")
-            ));
+            let why = why.as_deref().unwrap_or("this document can't be changed");
+            // The caret goes past the key once it's in the document, whether or not the write
+            // that follows lands. The error strip's retry saves it, as for anything typed.
+            self.session.last_error = Some(if self.session.caret.offset > at {
+                format!("{key} is in the document but couldn't be saved — {why}")
+            } else {
+                format!("could not cite {key} here — {why}")
+            });
         }
     }
 
@@ -3917,6 +3921,28 @@ mod tests {
         assert_eq!(only_text(&page), "hello [knuth1981], ");
         key(&mut page, egui::Key::Z, command_shift);
         assert_eq!(only_text(&page), "hello [knuth1981], xy");
+    }
+
+    #[test]
+    fn a_key_that_went_in_but_couldnt_be_saved_says_that() {
+        let mut page = page_in_notebook("hello ");
+        // Something else takes the file's place, which is noticed when the key is written.
+        let path = root_of(&page).join("doc.kame");
+        let beside = root_of(&page).join("replacement");
+        std::fs::write(&beside, b"another file").unwrap();
+        std::fs::rename(&beside, &path).unwrap();
+
+        page.app.cite("knuth1981");
+
+        assert_eq!(only_text(&page), "hello [knuth1981]");
+        assert!(page.app.session.save_failed);
+        let said = page.app.session.last_error.as_deref().unwrap();
+        assert!(!said.contains("could not cite"), "{said}");
+        assert!(
+            said.contains("knuth1981 is in the document but couldn't be saved"),
+            "{said}"
+        );
+        assert!(said.contains("doc.kame changed on disk"), "{said}");
     }
 
     #[test]

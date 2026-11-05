@@ -515,6 +515,7 @@ pub(crate) fn page_left_beside_browser(
 }
 
 /// Opens a file that isn't a document in the system's viewer.
+#[cfg(not(test))]
 fn open_in_system_viewer(path: &Path) -> std::io::Result<()> {
     let program = if cfg!(target_os = "macos") {
         "open"
@@ -525,6 +526,25 @@ fn open_in_system_viewer(path: &Path) -> std::io::Result<()> {
         .arg(path)
         .spawn()
         .map(|_| ())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What this test would have put in front of whoever is at the machine.
+    static OPENED_IN_VIEWER: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Notes the file, since a test shouldn't launch a viewer on the desktop.
+#[cfg(test)]
+fn open_in_system_viewer(path: &Path) -> std::io::Result<()> {
+    OPENED_IN_VIEWER.with(|opened| opened.borrow_mut().push(path.to_path_buf()));
+    Ok(())
+}
+
+/// What this test has asked the system's viewer to open.
+#[cfg(test)]
+pub(crate) fn opened_in_system_viewer() -> Vec<PathBuf> {
+    OPENED_IN_VIEWER.with(|opened| opened.borrow().clone())
 }
 
 /// Whether a link's target is a path rather than a web address or the like.
@@ -1013,9 +1033,6 @@ impl KameApp {
         }
         if let Some(chosen) = reference {
             self.browser_reference(chosen);
-        }
-        if choose.is_some() && self.say_if_reference_form_up() {
-            choose = None;
         }
         match choose {
             Some((path, Kind::Document)) => self.open_from_notebook(path, None),

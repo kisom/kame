@@ -4564,6 +4564,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_paper_opens_in_the_system_viewer_with_a_form_up() {
+        let (mut page, opened) = page_with_form();
+        let paper = root_of(&page).join("paper.pdf");
+        std::fs::write(&paper, "").unwrap();
+        page.app.nb.refresh_listing();
+        page.press("paper.pdf");
+
+        assert_eq!(
+            crate::notebook::opened_in_system_viewer(),
+            vec![paper.clone()]
+        );
+        assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
+        assert_eq!(page.app.refs.form.as_ref().unwrap().form.key, "lamport1994");
+        assert_eq!(page.app.notice, None);
+    }
+
     /// A form with something typed in it, up over the document in a notebook.
     fn page_with_form() -> (Headless, Option<PathBuf>) {
         let mut page = page_with_browser("");

@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 
 use cosmic_text::{fontdb, FontSystem};
 use egui::{
@@ -177,6 +178,25 @@ fn pixel_aligned_quad(origin: Pos2, (left, top): (i32, i32), size: [usize; 2], s
 /// A byte range of a block and the colour behind it.
 pub type Highlight = (usize, usize, [u8; 3]);
 
+/// Which blocks [`TextureCache::sync`] draws, and which of those it has drawn it keeps, by index
+/// into the blocks given. The blocks run down the page, so each is one stretch of them, and a
+/// block drawn counts as kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wanted {
+    pub draw: Range<usize>,
+    pub keep: Range<usize>,
+}
+
+impl Wanted {
+    /// Every one of `blocks` blocks.
+    pub fn all(blocks: usize) -> Wanted {
+        Wanted {
+            draw: 0..blocks,
+            keep: 0..blocks,
+        }
+    }
+}
+
 /// Per-block texture cache, rebuilt only when a block's content changes.
 ///
 /// The key is a hash of the block kind, text, and spans: any edit invalidates
@@ -204,8 +224,10 @@ impl TextureCache {
         }
     }
 
-    /// Rasterizes and uploads every block whose content or display scale
-    /// changed, and drops textures of blocks no longer present.
+    /// Rasterizes and uploads every block `wanted` draws whose content or display scale
+    /// changed, and drops the textures of blocks no longer present or too far to keep.
+    /// A long document holds images only of what's near the screen, as each is
+    /// as large as its block is on the screen.
     ///
     /// `blocks` and `layouts` are parallel, as produced by
     /// [`GlyphRenderer::layout`]. Uploads use
@@ -227,11 +249,18 @@ impl TextureCache {
         ink: [u8; 3],
         background: [u8; 3],
         highlights: &HashMap<BlockId, Vec<Highlight>>,
+        wanted: &Wanted,
     ) {
         let scale = ctx.pixels_per_point();
-        let mut live = HashSet::with_capacity(blocks.len());
-        for (block, layout) in blocks.iter().zip(layouts.iter().copied()) {
-            live.insert(block.id);
+        let mut live = HashSet::with_capacity(wanted.keep.len());
+        for (at, (block, layout)) in blocks.iter().zip(layouts.iter().copied()).enumerate() {
+            let draw = wanted.draw.contains(&at);
+            if draw || wanted.keep.contains(&at) {
+                live.insert(block.id);
+            }
+            if !draw {
+                continue;
+            }
             let block_highlights = highlights.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
             let fingerprint = block_fingerprint(block, block_highlights);
             let up_to_date = self.entries.get(&block.id).is_some_and(|cached| {
@@ -270,15 +299,19 @@ impl TextureCache {
         self.entries.get(&block_id).map(|cached| &cached.block)
     }
 
+    /// How many blocks it holds an image of.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Drops every cached texture, so the next `sync` re-rasterizes against the
     /// current metrics. Used when the measure changes with the window.
     pub fn clear(&mut self) {
         self.entries.clear();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 
@@ -1263,6 +1296,7 @@ mod tests {
             [10, 10, 10],
             [255, 255, 255],
             &HashMap::new(),
+            &Wanted::all(blocks.len()),
         );
         assert_eq!(cache.len(), 2);
 
@@ -1333,6 +1367,7 @@ mod tests {
                 [10, 10, 10],
                 [255, 255, 255],
                 &HashMap::new(),
+                &Wanted::all(blocks.len()),
             )
         };
 
@@ -1411,6 +1446,7 @@ mod tests {
             [0, 0, 0],
             [255, 255, 255],
             &HashMap::new(),
+            &Wanted::all(blocks.len()),
         );
         let first_size = cache.get(blocks[0].id).unwrap().texture.size();
 
@@ -1425,6 +1461,7 @@ mod tests {
             [0, 0, 0],
             [255, 255, 255],
             &HashMap::new(),
+            &Wanted::all(blocks.len()),
         );
         assert_ne!(
             cache.get(blocks[0].id).unwrap().texture.size(),
@@ -1443,8 +1480,49 @@ mod tests {
             [0, 0, 0],
             [255, 255, 255],
             &HashMap::new(),
+            &Wanted::all(blocks.len()),
         );
         assert_eq!(cache.len(), 1, "the removed block's texture is dropped");
+    }
+
+    #[test]
+    fn texture_cache_draws_only_the_blocks_wanted_and_keeps_only_those_near() {
+        let ctx = Context::default();
+        let mut renderer = GlyphRenderer::new(config());
+        let blocks: Vec<Block> = (0..6).map(|n| paragraph(&format!("Block {n}"))).collect();
+        let layouts: Vec<BlockLayout> = blocks.iter().map(|b| renderer.layout(b)).collect();
+        let refs: Vec<&BlockLayout> = layouts.iter().collect();
+        let mut cache = TextureCache::new();
+        let mut sync = |cache: &mut TextureCache, draw, keep| {
+            cache.sync(
+                &ctx,
+                &mut renderer,
+                &blocks,
+                &refs,
+                [0, 0, 0],
+                [255, 255, 255],
+                &HashMap::new(),
+                &Wanted { draw, keep },
+            );
+        };
+        let held = |cache: &TextureCache| -> Vec<usize> {
+            (0..blocks.len())
+                .filter(|at| cache.get(blocks[*at].id).is_some())
+                .collect()
+        };
+
+        sync(&mut cache, 2..4, 1..5);
+        assert_eq!(held(&cache), [2, 3]);
+
+        sync(&mut cache, 4..6, 3..6);
+        assert_eq!(
+            held(&cache),
+            [3, 4, 5],
+            "2 has gone too far, and 3 is still near"
+        );
+
+        sync(&mut cache, 0..1, 0..6);
+        assert_eq!(held(&cache), [0, 3, 4, 5]);
     }
 
     /// FIX 3: shaping is cached by content fingerprint, so a repaint with no

@@ -2234,6 +2234,18 @@ pub(crate) fn opened_in_browser() -> Vec<String> {
 /// The space below a block of kind `block` when `next` follows it. A heading sits
 /// close to what it introduces and far from what it ends, more so the larger it
 /// is, and a quote is set off from the prose around it.
+/// The blocks, by index, any part of which lies between `from` and `to` down the page. Blocks run
+/// down the page in order, so they are one stretch.
+fn blocks_within(tops: &[f32], heights: &[f32], from: f32, to: f32) -> std::ops::Range<usize> {
+    let start = tops
+        .iter()
+        .zip(heights)
+        .position(|(top, height)| top + height > from)
+        .unwrap_or(tops.len());
+    let end = tops.iter().position(|top| *top >= to).unwrap_or(tops.len());
+    start..end.max(start)
+}
+
 fn gap_after(block: &BlockKind, next: &BlockKind) -> f32 {
     let set_off = |kind: &BlockKind| {
         matches!(
@@ -4224,15 +4236,6 @@ impl KameApp {
             self.palette.background.b(),
         ];
         let highlights = highlight_map(self.session.document(), &self.palette);
-        self.textures.sync(
-            ui.ctx(),
-            &mut self.renderer,
-            &page,
-            &layouts,
-            self.palette.body_ink,
-            paper,
-            &highlights,
-        );
 
         let document = self.session.document();
         let blocks: &[Block] = &page;
@@ -4266,6 +4269,34 @@ impl KameApp {
                 .get(index + 1)
                 .map_or(0.0, |next| gap_after(&blocks[index].kind, &next.kind))
         };
+
+        // Only blocks on or near the screen are drawn, a screen ahead and behind so that
+        // scrolling finds them ready, and images further than three screens away are let go.
+        let mut page_tops = Vec::with_capacity(blocks.len());
+        let mut down = PAGE_PADDING;
+        for (index, height) in heights.iter().enumerate() {
+            page_tops.push(down);
+            down += height + gap_below(index);
+        }
+        // The page is drawn from here, so the screen shows this stretch of it.
+        let page_top = ui.cursor().top();
+        let shown = ui.clip_rect();
+        let (from, to) = (shown.top() - page_top, shown.bottom() - page_top);
+        let screen = shown.height().max(1.0);
+        let wanted = render::egui_render::Wanted {
+            draw: blocks_within(&page_tops, &heights, from - screen, to + screen),
+            keep: blocks_within(&page_tops, &heights, from - 3.0 * screen, to + 3.0 * screen),
+        };
+        self.textures.sync(
+            ui.ctx(),
+            &mut self.renderer,
+            blocks,
+            &layouts,
+            self.palette.body_ink,
+            paper,
+            &highlights,
+            &wanted,
+        );
         let body_bottom = PAGE_PADDING
             + heights.iter().sum::<f32>()
             + (0..blocks.len()).map(gap_below).sum::<f32>();
@@ -10635,6 +10666,80 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         page.frame(Vec::new());
         type_letters(&mut page, " Two.");
         assert_eq!(page.app.session.document().annotations[0].body, "One. Two.");
+    }
+
+    #[test]
+    fn the_blocks_within_a_stretch_of_the_page_are_found() {
+        let tops = [0.0, 100.0, 200.0, 300.0];
+        let heights = [90.0; 4];
+        assert_eq!(blocks_within(&tops, &heights, 150.0, 250.0), 1..3);
+        assert_eq!(
+            blocks_within(&tops, &heights, 95.0, 99.0),
+            1..1,
+            "a gap between"
+        );
+        assert_eq!(blocks_within(&tops, &heights, -50.0, 10.0), 0..1);
+        assert_eq!(blocks_within(&tops, &heights, 500.0, 900.0), 4..4);
+        assert_eq!(blocks_within(&[], &[], 0.0, 10.0), 0..0);
+    }
+
+    /// A page of `paragraphs` paragraphs, each a few lines long.
+    fn long_page(paragraphs: usize) -> Headless {
+        let mut session = Session::anonymous().unwrap();
+        let mut document = Document::new("long");
+        document.blocks = (0..paragraphs)
+            .map(|n| Block {
+                id: uuid::Uuid::new_v4(),
+                kind: BlockKind::Paragraph,
+                text: format!("Paragraph {n}. ").repeat(30),
+                spans: Vec::new(),
+            })
+            .collect();
+        assert!(session.replace_document(document));
+        let first = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page
+    }
+
+    #[test]
+    fn a_long_document_draws_only_what_is_near_the_screen() {
+        let page = long_page(300);
+        let blocks = &page.app.session.document().blocks;
+        assert!(
+            page.app.textures.get(blocks[0].id).is_some(),
+            "what's showing is drawn"
+        );
+        assert!(page.app.textures.get(blocks[299].id).is_none());
+        assert!(
+            page.app.textures.len() < 60,
+            "{} of 300 drawn",
+            page.app.textures.len()
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_long_document_is_drawn_once_it_is_scrolled_to() {
+        let mut page = long_page(300);
+        let last = page.app.session.document().blocks[299].id;
+        page.app.go_to_cursor(Cursor {
+            block_id: last,
+            offset: 0,
+        });
+        for _ in 0..3 {
+            page.frame(Vec::new());
+        }
+        let blocks = &page.app.session.document().blocks;
+        assert!(page.app.textures.get(blocks[299].id).is_some());
+        assert!(
+            page.app.textures.get(blocks[0].id).is_none(),
+            "far behind, and let go"
+        );
+        assert!(page.app.textures.len() < 60);
     }
 
     // --- the help dialog -------------------------------------------------------

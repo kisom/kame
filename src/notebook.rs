@@ -732,6 +732,9 @@ impl KameApp {
 
     /// File > New Notebook: makes a chosen folder a notebook, and opens its contents page.
     pub(crate) fn new_notebook(&mut self) {
+        if self.say_if_reference_form_up() {
+            return;
+        }
         let Some(folder) = super::pick_notebook_folder(self.session.dialog_directory().as_deref())
         else {
             return;
@@ -791,12 +794,17 @@ impl KameApp {
 
     /// Opens a document from a list, at a place in it if there is one, with Ctrl-[ coming back.
     pub(crate) fn open_from_notebook(&mut self, path: PathBuf, place: Option<(BlockId, usize)>) {
+        let elsewhere = !same_document(self.session.path(), Some(&path));
+        // Refused before a stop is left that leads back from nowhere.
+        if elsewhere && self.say_if_reference_form_up() {
+            return;
+        }
         self.nb.close_lists();
         if self.nb.page_hidden {
             self.nb.browser_open = false;
             self.persist();
         }
-        if same_document(self.session.path(), Some(&path)) {
+        if !elsewhere {
             self.nb.pending_place = place;
             self.apply_pending_place();
             return;

@@ -4564,6 +4564,136 @@ mod tests {
         );
     }
 
+    /// A form with something typed in it, up over the document in a notebook.
+    fn page_with_form() -> (Headless, Option<PathBuf>) {
+        let mut page = page_with_browser("");
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+        let opened = page.app.session.path().map(Path::to_path_buf);
+        (page, opened)
+    }
+
+    /// That the form is still there, the document hasn't changed, and it was said why.
+    fn assert_form_kept(page: &Headless, opened: &Option<PathBuf>) {
+        assert_eq!(&page.app.session.path().map(Path::to_path_buf), opened);
+        let form = &page.app.refs.form.as_ref().expect("still up").form;
+        assert_eq!(form.key, "lamport1994");
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("finish or close the open dialog first")
+        );
+    }
+
+    #[test]
+    fn opening_a_document_by_any_way_doesnt_take_away_a_form() {
+        let (mut page, opened) = page_with_form();
+        let other = other_document(&page, "other.kame", "elsewhere");
+        page.app.open_picked(other.clone());
+        assert_form_kept(&page, &opened);
+        page.app.pending_heading = Some("Part".to_string());
+        page.app.open_or_confirm(other);
+        assert_form_kept(&page, &opened);
+        assert_eq!(page.app.pending_heading, None);
+    }
+
+    #[test]
+    fn a_new_document_doesnt_take_away_a_form() {
+        let (mut page, opened) = page_with_form();
+        page.app.request_new();
+        assert_form_kept(&page, &opened);
+        assert!(!page.app.close_flow.prompting);
+    }
+
+    #[test]
+    fn going_back_to_another_document_doesnt_take_away_a_form_or_its_stop() {
+        let (mut page, opened) = page_with_form();
+        let other = other_document(&page, "other.kame", "elsewhere");
+        let caret = page.app.session.caret;
+        page.app.back.push(crate::BackStop {
+            path: Some(other),
+            caret,
+            scroll: 0.0,
+        });
+        page.app.go_back();
+        assert_form_kept(&page, &opened);
+        assert_eq!(page.app.back.stops.len(), 1);
+    }
+
+    #[test]
+    fn going_back_within_the_document_leaves_a_form_up() {
+        let (mut page, opened) = page_with_form();
+        let caret = page.app.session.caret;
+        page.app.back.push(crate::BackStop {
+            path: opened.clone(),
+            caret,
+            scroll: 0.0,
+        });
+        page.app.go_back();
+        assert!(page.app.refs.form.is_some());
+        assert!(page.app.back.stops.is_empty());
+    }
+
+    #[test]
+    fn the_notebooks_home_doesnt_take_away_a_form_or_leave_a_stop() {
+        let (mut page, opened) = page_with_form();
+        let index = root_of(&page).join(kame_notebook::INDEX);
+        drop(Session::open(&index).unwrap());
+        let stops = page.app.back.stops.len();
+        page.app.go_home();
+        assert_form_kept(&page, &opened);
+        assert_eq!(page.app.back.stops.len(), stops);
+    }
+
+    #[test]
+    fn asking_to_import_or_start_a_notebook_doesnt_take_away_a_form() {
+        // Each would put up the system's file browser, which a test isn't allowed to.
+        let (mut page, opened) = page_with_form();
+        page.app.import_markdown();
+        assert_form_kept(&page, &opened);
+        page.app.new_notebook();
+        assert_form_kept(&page, &opened);
+    }
+
+    #[test]
+    fn a_document_the_os_asks_for_opens_once_the_form_closes() {
+        let (mut page, opened) = page_with_form();
+        let other = other_document(&page, "other.kame", "elsewhere");
+
+        page.app.request_open(other.clone());
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path().map(Path::to_path_buf), opened);
+        assert_eq!(page.app.refs.form.as_ref().unwrap().form.key, "lamport1994");
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("other.kame opens once the open dialog is closed")
+        );
+
+        page.app.refs.form = None;
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path(), Some(other.as_path()));
+    }
+
+    #[test]
+    fn the_latest_document_the_os_asks_for_is_the_one_that_waits() {
+        let (mut page, _) = page_with_form();
+        let first = other_document(&page, "first.kame", "one");
+        let second = other_document(&page, "second.kame", "two");
+        page.app.request_open(first);
+        page.app.request_open(second.clone());
+        page.app.refs.form = None;
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path(), Some(second.as_path()));
+    }
+
+    #[test]
+    fn a_document_the_os_asks_for_opens_at_once_with_no_form() {
+        let mut page = page_in_notebook("");
+        let other = other_document(&page, "other.kame", "elsewhere");
+        page.app.request_open(other.clone());
+        assert_eq!(page.app.session.path(), Some(other.as_path()));
+    }
+
     #[test]
     fn opening_a_path_doesnt_take_away_a_search_being_typed_in() {
         let mut page = page_with_browser("");

@@ -830,6 +830,7 @@ struct OpenPrompt {
 
 /// A native file dialog starting in `directory`, if there is one.
 fn file_dialog(title: &str, directory: Option<&Path>) -> rfd::FileDialog {
+    assert!(!cfg!(test), "a test asked for the file browser: {title}");
     let dialog = rfd::FileDialog::new().set_title(title);
     match directory {
         Some(directory) => dialog.set_directory(directory),
@@ -2367,6 +2368,8 @@ struct KameApp {
     /// Decoded image textures for `BlockKind::Image` blocks, keyed by path.
     image_textures: HashMap<String, egui::TextureHandle>,
     /// The note whose popover is open, and where its marker was painted.
+    /// A document the OS asked for while a form was up, to open once it closes.
+    held_open: Option<PathBuf>,
     open_note: Option<AnnotationId>,
     open_note_pos: Option<Pos2>,
     /// The open note's body while the popover's field holds it. Seeded from the
@@ -2521,6 +2524,7 @@ impl KameApp {
             textures: TextureCache::new(),
             annotation_textures: AnnotationTextureCache::new(),
             image_textures: HashMap::new(),
+            held_open: None,
             open_note: None,
             open_note_pos: None,
             open_note_body: String::new(),
@@ -2885,6 +2889,9 @@ impl KameApp {
 
     /// Ctrl-N: asks about unsaved work if there is any, then starts an empty document.
     fn request_new(&mut self) {
+        if self.say_if_reference_form_up() {
+            return;
+        }
         // The text in a document that could not be written is only in this window.
         if self.session.save_failed && !self.session.newer {
             self.notice = Some("the last save failed, so retry it first".to_string());
@@ -5864,6 +5871,9 @@ impl KameApp {
 
     /// File > Import Markdown: asks for a Markdown file and opens it.
     fn import_markdown(&mut self) {
+        if self.say_if_reference_form_up() {
+            return;
+        }
         let directory = self.session.dialog_directory();
         if let Some(path) = pick_markdown_path(directory.as_deref()) {
             self.open_picked(path);
@@ -5985,7 +5995,7 @@ impl KameApp {
             return;
         }
         // Refused before a stop is left that leads back from nowhere.
-        if self.held_by_rename() {
+        if self.say_if_reference_form_up() || self.held_by_rename() {
             return;
         }
         // A document with no file has nowhere to come back to.
@@ -5999,6 +6009,15 @@ impl KameApp {
     /// Returns to where the last followed link was followed from. Another document reopens
     /// where it was left, since leaving it saved its place.
     fn go_back(&mut self) {
+        // Refused before the stop is used up.
+        let elsewhere = self
+            .back
+            .stops
+            .last()
+            .is_some_and(|stop| !same_document(stop.path.as_deref(), self.session.path()));
+        if elsewhere && self.say_if_reference_form_up() {
+            return;
+        }
         let Some(stop) = self.back.pop() else {
             self.notice = Some("no link to go back from".to_string());
             return;
@@ -6045,7 +6064,38 @@ impl KameApp {
         self.open_or_confirm(path);
     }
 
+    /// What the OS asked to open, which arrives only once, so a form that's up holds it rather
+    /// than turning it away. The latest asked for is the one that opens when the form closes.
+    fn request_open(&mut self, path: PathBuf) {
+        if !self.refs.typing_open() {
+            self.open_picked(path);
+            return;
+        }
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.display().to_string(),
+        );
+        self.notice_tracker.announced();
+        self.notice = Some(format!("{name} opens once the open dialog is closed"));
+        self.held_open = Some(path);
+    }
+
+    /// Opens what the OS asked for, if it was waiting and the form that held it has closed.
+    fn open_held(&mut self) {
+        if !self.refs.typing_open() {
+            if let Some(path) = self.held_open.take() {
+                self.open_picked(path);
+            }
+        }
+    }
+
+    /// Opens a document, unless a form or the Cite search is up, which would go with this one.
+    /// A heading waiting for the open goes with the refusal.
     fn open_or_confirm(&mut self, path: PathBuf) {
+        if self.say_if_reference_form_up() {
+            self.pending_heading = None;
+            return;
+        }
         let path = path.display().to_string();
         if self.session.would_lose_work() {
             self.open_prompt = Some(OpenPrompt {
@@ -6725,8 +6775,9 @@ impl eframe::App for KameApp {
         }
         // kame shows one document, so of several files opened at once the first wins.
         if let Some(path) = requests.open.into_iter().next() {
-            self.open_picked(path);
+            self.request_open(path);
         }
+        self.open_held();
         // Here because eframe skips `ui` while the window is hidden, and before it so that a key
         // pressed on coming back lands in text that's up to date.
         self.tick_logs(ctx);
@@ -6900,6 +6951,7 @@ impl Headless {
             ..Default::default()
         };
         let app = &mut self.app;
+        app.open_held();
         app.notebook_tick(&self.ctx);
         let mut output = self.ctx.run_ui(input, |ui| {
             app.handle_input(ui.ctx());

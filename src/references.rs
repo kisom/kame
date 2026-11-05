@@ -285,7 +285,7 @@ pub(crate) struct ReferenceForm {
     pub(crate) tab: Tab,
     pub(crate) key: String,
     pub(crate) reference: Reference,
-    /// The names as typed, comma-separated.
+    /// The names as typed, as `names` reads them.
     pub(crate) authors_text: String,
     pub(crate) editors_text: String,
     /// Whether the key is the person's, and not to be suggested over.
@@ -328,8 +328,8 @@ impl ReferenceForm {
                 },
                 ..reference.clone()
             },
-            authors_text: reference.authors.join(", "),
-            editors_text: reference.editors.join(", "),
+            authors_text: names_text(&reference.authors),
+            editors_text: names_text(&reference.editors),
             key_edited: true,
             editing: Some(key.to_string()),
         }
@@ -418,13 +418,27 @@ impl ReferenceForm {
     }
 }
 
-/// Comma-separated names, each as spelled.
+/// Names, each as spelled: split on semicolons if there are any, so that a name can hold a comma,
+/// and otherwise on commas.
 fn names(text: &str) -> Vec<String> {
-    text.split(',')
+    let separator = if text.contains(';') { ';' } else { ',' };
+    text.split(separator)
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// `names` as the form shows them, so that `names` reads them back the same. One name holding a
+/// comma needs a semicolon even with nothing to separate.
+fn names_text(names: &[String]) -> String {
+    if !names.iter().any(|name| name.contains(',')) {
+        return names.join(", ");
+    }
+    match names {
+        [only] => format!("{only};"),
+        names => names.join("; "),
+    }
 }
 
 /// The field `name` of a reference, if it's one that holds a string.
@@ -637,6 +651,15 @@ pub(crate) fn page_blocks<'a>(blocks: &'a [Block], references: &References) -> C
     Cow::Owned(cited.into_iter().map(Cow::into_owned).collect())
 }
 
+/// How the note about a key with no reference starts and ends, with the key between.
+const NOTE_STARTS: &str = "No reference called ";
+const NOTE_ENDS: &str = ". Ctrl-Shift-C adds it.";
+
+/// The key a notice is the note about, if it is one.
+fn key_in_note(notice: &str) -> Option<&str> {
+    notice.strip_prefix(NOTE_STARTS)?.strip_suffix(NOTE_ENDS)
+}
+
 /// What to say when the caret has just closed a key with no reference.
 pub(crate) fn just_closed_note(
     block: &Block,
@@ -647,7 +670,7 @@ pub(crate) fn just_closed_note(
         .into_iter()
         .find(|(_, end)| *end == caret)?;
     let key = key_of(&block.text, closed);
-    (!references.contains(key)).then(|| format!("No reference called {key}. Ctrl-Shift-C adds it."))
+    (!references.contains(key)).then(|| format!("{NOTE_STARTS}{key}{NOTE_ENDS}"))
 }
 
 /// What to add to an export's notice about keys that look lost. `marginals` is whether the format
@@ -787,12 +810,19 @@ impl KameApp {
         }
     }
 
-    /// Annotate > References…
+    /// Annotate > References… Over another dialog it says so, as a menu row that did nothing would
+    /// look broken.
     pub(crate) fn open_references(&mut self) {
-        if self.nb.notebook.is_some() && !self.dialog_open() && !self.close_flow.prompting {
-            self.refs.window = Some(ListWindow::default());
-            self.refs.recount = true;
+        if self.nb.notebook.is_none() || self.refs.window.is_some() {
+            return;
         }
+        if self.dialog_open() || self.close_flow.prompting {
+            self.notice_tracker.announced();
+            self.notice = Some("Close what's open, then choose References… again.".to_string());
+            return;
+        }
+        self.refs.window = Some(ListWindow::default());
+        self.refs.recount = true;
     }
 
     /// Reads the list after a change made here, so that it shows at once.
@@ -833,12 +863,12 @@ impl KameApp {
     }
 
     /// Whether the keyboard is with something over the windows for references, so that an Enter
-    /// is not for them: another dialog, the close prompt, help, or the find bar or a note's box
-    /// if it has the keys. Those two can stay up beside a window without having them.
+    /// is not for them: another dialog, the close prompt, or the find bar or a note's box if it
+    /// has the keys. Those two can stay up beside a window without having them, and help takes
+    /// no keys but F1 and Escape.
     fn keys_are_elsewhere(&self, ctx: &egui::Context) -> bool {
         self.other_dialog_open()
             || self.close_flow.prompting
-            || self.show_help
             || ctx.memory(|memory| {
                 memory.has_focus(super::find_query_id())
                     || memory.has_focus(super::note_body_edit_id())
@@ -856,8 +886,13 @@ impl KameApp {
         held
     }
 
-    /// Takes in what the background threads have finished.
+    /// Takes in what the background threads have finished, and drops the note about a key once
+    /// it has a reference, however it got one.
     pub(crate) fn references_tick(&mut self, ctx: &egui::Context) {
+        let noted = self.notice.as_deref().and_then(key_in_note);
+        if noted.is_some_and(|key| self.refs.list.contains(key)) {
+            self.notice = None;
+        }
         if let Some(coming) = &self.refs.counting {
             match coming.try_recv() {
                 Ok(found) => {
@@ -1233,7 +1268,7 @@ impl KameApp {
             Some(ListAction::AskToRename(key)) => {
                 window.said.clear();
                 window.confirming = Some(Confirming::Rename {
-                    new: key.clone(),
+                    new: String::new(),
                     key,
                     focus: true,
                 });
@@ -1327,7 +1362,7 @@ fn draw_form(ui: &mut egui::Ui, window: &mut FormWindow, focus: bool, references
                         .return_key(None)
                         .desired_width(360.0);
                     if matches!(*name, "authors" | "editors") {
-                        edit = edit.hint_text("separated by commas");
+                        edit = edit.hint_text("separated by commas, or ; if a name has a comma");
                     }
                     let field = ui.add(edit);
                     if focus && index == 0 {
@@ -1427,6 +1462,7 @@ fn draw_confirming(
                 ui.label("New key");
                 let field = ui.add(
                     egui::TextEdit::singleline(new)
+                        .hint_text(key)
                         .return_key(None)
                         .desired_width(200.0),
                 );
@@ -1440,10 +1476,10 @@ fn draw_confirming(
                     *action = Some(ListAction::Cancel);
                 }
             });
-            if !valid_key(new) {
-                ui.weak(NOT_A_KEY);
-            } else if new == key {
+            if new.is_empty() || new == key {
                 ui.weak("Type the new key.");
+            } else if !valid_key(new) {
+                ui.weak(NOT_A_KEY);
             }
         }
         _ => {}
@@ -1829,6 +1865,69 @@ mod tests {
         assert_eq!(page.app.notice, None);
     }
 
+    /// `[lamport1994]` typed so that its note is up, and the form for it open with a title.
+    fn noted_key_with_its_form() -> Headless {
+        let mut page = page_in_notebook("");
+        type_into(&mut page, "[lamport1994]");
+        assert!(page.app.notice.is_some());
+        cite_chord(&mut page);
+        let window = page.app.refs.form.as_mut().expect("the form opens");
+        window.form.reference.title = "How to write".to_string();
+        page
+    }
+
+    #[test]
+    fn the_note_about_a_key_goes_when_the_key_is_added() {
+        let mut page = noted_key_with_its_form();
+
+        press_key(&mut page, egui::Key::Enter);
+        page.frame(Vec::new());
+
+        assert!(page.app.refs.list.contains("lamport1994"));
+        assert_eq!(page.app.notice, None);
+    }
+
+    #[test]
+    fn the_note_about_a_key_goes_when_its_file_arrives_from_elsewhere() {
+        let mut page = page_in_notebook("");
+        type_into(&mut page, "[lamport1994]");
+        assert!(page.app.notice.is_some());
+
+        write_reference(&root_of(&page), "lamport1994", GOOD);
+        page.app.refs.checked = None;
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.notice, None);
+    }
+
+    #[test]
+    fn adding_a_key_leaves_a_notice_about_anything_else() {
+        let mut page = noted_key_with_its_form();
+        page.app.notice = Some("exported".to_string());
+
+        press_key(&mut page, egui::Key::Enter);
+        page.frame(Vec::new());
+
+        assert!(page.app.refs.list.contains("lamport1994"));
+        assert_eq!(page.app.notice.as_deref(), Some("exported"));
+    }
+
+    #[test]
+    fn adding_a_key_leaves_the_note_about_another_key() {
+        let mut page = page_in_notebook("");
+        type_into(&mut page, "[lamport1994]");
+
+        write_reference(&root_of(&page), "other2000", GOOD);
+        page.app.refs.checked = None;
+        page.frame(Vec::new());
+
+        assert!(page.app.refs.list.contains("other2000"));
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("No reference called lamport1994. Ctrl-Shift-C adds it.")
+        );
+    }
+
     #[test]
     fn typing_the_bracket_of_a_known_key_says_nothing() {
         let mut page = page_in_notebook("");
@@ -1985,6 +2084,42 @@ mod tests {
         assert_eq!(again.authors_text, "D. E. Knuth, M. F. Plass, van der Berg");
         assert_eq!(again.editors_text, "Ünal Çelik");
         assert_eq!(again.built(), built);
+    }
+
+    #[test]
+    fn a_name_holding_a_comma_comes_back_whole_from_the_form() {
+        let saved = |authors: &[&str], editors: &[&str]| Reference {
+            kind: Kind::Book,
+            title: "T".to_string(),
+            authors: authors.iter().map(|name| name.to_string()).collect(),
+            editors: editors.iter().map(|name| name.to_string()).collect(),
+            ..Reference::default()
+        };
+
+        let two = saved(&["M. L. King, Jr.", "J. Doe"], &["Doe, J."]);
+        let form = ReferenceForm::editing("k", &two);
+        assert_eq!(form.authors_text, "M. L. King, Jr.; J. Doe");
+        assert_eq!(form.built(), two);
+
+        // On its own a name still needs a semicolon, or its comma would split it.
+        let one = saved(&["M. L. King, Jr."], &[]);
+        let form = ReferenceForm::editing("k", &one);
+        assert_eq!(form.authors_text, "M. L. King, Jr.;");
+        assert_eq!(form.built(), one);
+
+        // Names with no comma look as they always did.
+        let plain_names = saved(&["D. E. Knuth", "M. F. Plass"], &[]);
+        let form = ReferenceForm::editing("k", &plain_names);
+        assert_eq!(form.authors_text, "D. E. Knuth, M. F. Plass");
+        assert_eq!(form.built(), plain_names);
+    }
+
+    #[test]
+    fn a_semicolon_in_the_names_is_what_splits_them() {
+        assert_eq!(names("King, M. L.; Doe, J."), ["King, M. L.", "Doe, J."]);
+        assert_eq!(names("King, Jr.;"), ["King, Jr."]);
+        assert_eq!(names(" ; ; A ;; "), ["A"]);
+        assert_eq!(names("A, B"), ["A", "B"]);
     }
 
     #[test]
@@ -2536,6 +2671,71 @@ mod tests {
     }
 
     #[test]
+    fn help_being_up_leaves_the_search_its_keys() {
+        let mut page = page_in_notebook("");
+        write_reference(&root_of(&page), "smith2020", GOOD);
+        page.app.reload_references();
+        cite_chord(&mut page);
+        page.app.show_help = true;
+        page.frame(Vec::new());
+
+        press_key(&mut page, egui::Key::ArrowDown);
+        press_key(&mut page, egui::Key::Enter);
+
+        assert_eq!(only_text(&page), "[smith2020]");
+    }
+
+    #[test]
+    fn help_being_up_leaves_the_form_its_enter() {
+        let mut page = noted_key_with_its_form();
+        page.app.show_help = true;
+        page.frame(Vec::new());
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.refs.form.is_none());
+        assert!(reference_file(&page, "lamport1994").exists());
+    }
+
+    #[test]
+    fn help_being_up_leaves_a_rename_its_enter() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        open_list(&mut page);
+        ask_to_rename(&mut page, "plass1981");
+        page.app.show_help = true;
+        page.frame(Vec::new());
+
+        press_key(&mut page, egui::Key::Enter);
+        wait_for_rename(&mut page);
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+    }
+
+    #[test]
+    fn the_references_window_says_why_it_wont_open_over_a_dialog() {
+        let mut page = page_in_notebook("hello");
+        page.app.toggle_jump();
+        page.frame(Vec::new());
+
+        page.app.open_references();
+
+        assert!(page.app.refs.window.is_none());
+        let notice = page.app.notice.clone().expect("it says so");
+        assert!(notice.contains("References"), "{notice}");
+
+        page.app.nb.close_lists();
+        page.frame(Vec::new());
+        page.app.notice = None;
+        page.app.open_references();
+        assert!(page.app.refs.window.is_some());
+        assert_eq!(page.app.notice, None);
+
+        // Asking again with it up is no complaint.
+        page.app.open_references();
+        assert_eq!(page.app.notice, None);
+    }
+
+    #[test]
     fn the_chord_is_ignored_over_a_dialog() {
         let mut page = page_in_notebook("hello");
         page.app.toggle_jump();
@@ -2735,12 +2935,6 @@ mod tests {
         page.press("Rename…");
         page.frame(Vec::new());
         page.frame(Vec::new());
-        if let Some(Confirming::Rename { new: field, .. }) =
-            &mut page.app.refs.window.as_mut().unwrap().confirming
-        {
-            field.clear();
-        }
-        page.frame(Vec::new());
         type_into(page, new);
         page.frame(Vec::new());
     }
@@ -2758,6 +2952,29 @@ mod tests {
         ask_to_rename(page, new);
         press_key(page, egui::Key::Enter);
         wait_for_rename(page);
+    }
+
+    #[test]
+    fn the_rename_field_starts_empty_and_holds_only_whats_typed() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        open_list(&mut page);
+        let field = |page: &Headless| match &page.app.refs.window.as_ref().unwrap().confirming {
+            Some(Confirming::Rename { new, .. }) => new.clone(),
+            _ => panic!("not asking to rename"),
+        };
+
+        page.press("Rename…");
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        assert_eq!(field(&page), "");
+        assert!(!page.can_press("Rename knuth1981"));
+        assert!(page.sees("Type the new key."));
+        assert!(!page.sees("A key is letters"), "nothing wrong's been typed");
+
+        type_into(&mut page, "plass1981");
+        page.frame(Vec::new());
+        assert_eq!(field(&page), "plass1981");
+        assert!(page.can_press("Rename knuth1981"));
     }
 
     #[test]

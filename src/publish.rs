@@ -233,6 +233,23 @@ mod tests {
     }
 
     #[test]
+    fn the_references_window_says_why_it_wont_open_over_a_report() {
+        let root = crate::test_temp_dir().join(format!("report-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let session = kame_core::session::Session::open(&root.join("doc.kame")).unwrap();
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+        page.app.publishing.report = Some(report(SiteJob::Build));
+
+        page.app.open_references();
+
+        assert!(!page.app.refs.window_open());
+        let notice = page.app.notice.clone().expect("it says so");
+        assert!(notice.contains("References"), "{notice}");
+    }
+
+    #[test]
     fn a_job_with_nothing_to_read_only_says_so_in_passing() {
         assert!(report(SiteJob::Build).in_passing().is_some());
         let mut warned = report(SiteJob::Build);

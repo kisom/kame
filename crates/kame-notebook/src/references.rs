@@ -444,6 +444,59 @@ mod tests {
     }
 
     #[test]
+    fn yaml_null_reads_as_empty_in_every_text_field() {
+        let notebook = notebook("ref-null");
+        for null in ["~", "null", "Null", "NULL", ""] {
+            let fields = [
+                "chapter",
+                "published_in",
+                "location",
+                "edition",
+                "place",
+                "publisher",
+                "site",
+                "volume",
+                "number",
+                "pages",
+                "month",
+                "year",
+                "doi",
+                "url",
+                "accessed",
+                "text",
+            ];
+            let nulls: String = fields.iter().map(|at| format!("{at}: {null}\n")).collect();
+            put(
+                &notebook,
+                "knuth1981.yaml",
+                &format!("kind: article\ntitle: x\n{nulls}"),
+            );
+            let loaded = load(&notebook);
+            assert_eq!(loaded.problems, Vec::<String>::new(), "{null:?}");
+            let reference = loaded.references.get("knuth1981").unwrap();
+            assert_eq!(reference.title, "x");
+            assert_eq!(reference.year, "", "{null:?}");
+            let saved = yaml_serde::to_string(reference).unwrap();
+            assert!(!saved.to_lowercase().contains("null"), "{saved}");
+            assert_eq!(saved, "kind: article\ntitle: x\n");
+        }
+    }
+
+    #[test]
+    fn a_quoted_null_is_the_words() {
+        let notebook = notebook("ref-null-quoted");
+        put(
+            &notebook,
+            "knuth1981.yaml",
+            "kind: article\ntitle: 'null'\nyear: \"~\"\n",
+        );
+        let loaded = load(&notebook);
+        let reference = loaded.references.get("knuth1981").unwrap();
+        assert_eq!(reference.title, "null");
+        assert_eq!(reference.year, "~");
+    }
+
+    #[test]
     fn an_unquoted_number_keeps_the_digits_typed() {
         let notebook = notebook("ref-digits");
         put(

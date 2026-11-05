@@ -75,9 +75,10 @@ impl Kind {
 
 /// Reads a field as the text it was written as. A format that has scalars of other types, as
 /// YAML does, hands over a number's own digits, so `2.10` stays `2.10` and `year: 1981` is
-/// `1981`. A format that tells a number from a string, as JSON does, refuses a number.
+/// `1981`. A format that tells a number from a string, as JSON does, refuses a number. A null,
+/// which in YAML is `~`, `null` or nothing at all, is no text.
 fn text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    String::deserialize(deserializer)
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// One flat struct, so switching kinds in the form keeps what was typed.

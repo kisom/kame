@@ -16,7 +16,7 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::edit::ops::{
-    anchor_wholly_inside, apply, apply_inverse, coalesce, invert, normalize, Op,
+    anchor_wholly_inside, apply, apply_inverse, coalesce, invert, normalize, with_clipped, Op,
 };
 use crate::model::{
     link_style, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
@@ -160,7 +160,7 @@ impl Editor {
     /// destroying the block's notes. A payload that is present but wrong is
     /// rejected by [`apply`], not silently overwritten.
     pub fn apply_edit(&mut self, op: Op) -> Op {
-        let op = normalize(&self.doc, op);
+        let op = with_clipped(&self.doc, normalize(&self.doc, op));
         apply(&mut self.doc, &op);
         // Never onto history a redo could still return to, since that history is going.
         let joined = if self.redo.is_empty() {
@@ -220,17 +220,8 @@ impl Editor {
     /// notes anchored in it; a `DeleteText` restores the deleted text and the
     /// notes that lay wholly inside the deleted range.
     ///
-    /// # Limitation: straddling notes
-    ///
-    /// A note whose anchor merely *overlaps* the deleted range (it starts
-    /// before the delete and ends inside or after it) has its surviving
-    /// endpoints remapped, so the note keeps pointing at the right text — but
-    /// its range is permanently shorter. Undo re-inserts the text and shifts
-    /// the note left/right with it; it cannot re-expand the range to the
-    /// original extent, because the collapsed anchor carries no record of how
-    /// far it used to reach. Such a note ends up anchored too short after
-    /// delete + undo. Snapshots remain the recovery path for that case; the
-    /// op log recovers every other deletion losslessly.
+    /// A note the deletion cut short gets back the range it had, which keeps undo and redo exact:
+    /// anything they check still matches.
     pub fn undo(&mut self) -> Option<Op> {
         let op = self.undo.pop()?;
         apply_inverse(&mut self.doc, &op);
@@ -1103,6 +1094,7 @@ fn strip_markup(doc: &Document, block_id: BlockId, deletions: Vec<Op>, spans: Ve
             text,
             removed,
             old_spans: None,
+            clipped: Vec::new(),
         },
         other => other,
     }));
@@ -1430,6 +1422,7 @@ mod tests {
                 text: "cd".into(),
                 removed: Vec::new(),
                 old_spans: None,
+                clipped: Vec::new(),
             }
         );
 
@@ -1631,6 +1624,7 @@ mod tests {
             text: String::new(),
             removed: Vec::new(),
             old_spans: None,
+            clipped: Vec::new(),
         });
         match &applied {
             Op::DeleteText { text, removed, .. } => {
@@ -2899,5 +2893,169 @@ mod tests {
         assert_eq!(reopened.document().blocks[0].text, "one two");
         reopened.redo().expect("and redoable");
         assert_eq!(reopened.document(), &edited);
+    }
+
+    fn delete_range(editor: &mut Editor, block_id: Uuid, start: usize, end: usize) {
+        editor
+            .delete_selection(&Selection {
+                start: Cursor {
+                    block_id,
+                    offset: start,
+                },
+                end: Cursor {
+                    block_id,
+                    offset: end,
+                },
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn undoing_a_delete_puts_a_note_it_cut_short_back_exactly() {
+        // The deleted range, and the note it cuts into.
+        for ((start, end), (from, to)) in [
+            ((3, 5), (2, 8)),
+            ((5, 10), (2, 8)),
+            ((2, 5), (3, 8)),
+            ((3, 5), (3, 8)),
+            ((5, 8), (2, 8)),
+        ] {
+            let doc = doc_with("0123456789");
+            let block = doc.blocks[0].id;
+            let mut editor = Editor::new(doc);
+            editor
+                .add_annotation(AnnotationKind::Note, Anchor::range(block, from, to), "n")
+                .unwrap();
+            delete_range(&mut editor, block, start, end);
+            editor.undo().unwrap();
+            assert_eq!(
+                editor.document().annotations[0].anchor,
+                Anchor::range(block, from, to),
+                "deleting {start}..{end}"
+            );
+        }
+    }
+
+    /// Undoing the delete used to leave the note inside the earlier insert, and undoing
+    /// that insert panicked.
+    #[test]
+    fn a_note_that_went_through_a_delete_and_undo_cannot_stop_an_earlier_undo() {
+        let doc = doc_with("0123456789");
+        let block = doc.blocks[0].id;
+        let mut editor = Editor::new(doc);
+        editor
+            .add_annotation(AnnotationKind::Note, Anchor::range(block, 4, 6), "n")
+            .unwrap();
+        let cursor = Cursor {
+            block_id: block,
+            offset: 5,
+        };
+        editor.insert_text(&cursor, "abc").unwrap();
+        delete_range(&mut editor, block, 8, 10);
+        editor.undo().unwrap();
+        delete_range(&mut editor, block, 3, 6);
+        editor.undo().unwrap();
+        editor.undo().unwrap();
+        assert_eq!(editor.document().blocks[0].text, "0123456789");
+        assert_eq!(
+            editor.document().annotations[0].anchor,
+            Anchor::range(block, 4, 6)
+        );
+    }
+
+    /// The second delete cuts into a note the first only moved, so what it says about that note is
+    /// in terms of the text after the first. Joined up, undo would put the note in the wrong place.
+    #[test]
+    fn a_keystroke_that_cuts_a_note_short_stays_its_own_undo_step() {
+        let doc = doc_with("0123456789");
+        let block = doc.blocks[0].id;
+        let mut editor = Editor::new(doc);
+        editor
+            .add_annotation(AnnotationKind::Note, Anchor::range(block, 6, 9), "n")
+            .unwrap();
+        delete_range(&mut editor, block, 5, 6);
+        delete_range(&mut editor, block, 5, 6);
+        while editor.history().0 > 1 {
+            editor.undo().unwrap();
+        }
+        assert_eq!(editor.document().blocks[0].text, "0123456789");
+        assert_eq!(
+            editor.document().annotations[0].anchor,
+            Anchor::range(block, 6, 9)
+        );
+    }
+
+    /// Blocks and notes, with notes in an order that doesn't depend on how they got there.
+    fn state(doc: &Document) -> Document {
+        let mut state = doc.clone();
+        state.annotations.sort_by_key(|annotation| annotation.id);
+        state
+    }
+
+    /// Whatever was typed, deleted, split and noted, undoing all of it reaches where it
+    /// started, and redoing all of it reaches where it ended.
+    #[test]
+    fn any_edits_undone_and_redone_come_back_exactly() {
+        for seed in 1..=2000u64 {
+            let mut random = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut pick = move |below: usize| {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                (random % below.max(1) as u64) as usize
+            };
+            let doc = doc_with("0123é56789");
+            let mut editor = Editor::new(doc);
+            let start = state(editor.document());
+            for _ in 0..30 {
+                let blocks = &editor.document().blocks;
+                let block = &blocks[pick(blocks.len())];
+                let block_id = block.id;
+                let offsets: Vec<usize> = block
+                    .text
+                    .char_indices()
+                    .map(|(at, _)| at)
+                    .chain([block.text.len()])
+                    .collect();
+                let (one, other) = (offsets[pick(offsets.len())], offsets[pick(offsets.len())]);
+                let (from, to) = (one.min(other), one.max(other));
+                let at = |offset| Cursor { block_id, offset };
+                let notes = editor.document().annotations.clone();
+                let _ = match pick(9) {
+                    0 | 1 => editor.insert_text(&at(from), ["abc", "é", " ", "x"][pick(4)]),
+                    2 | 3 => editor.delete_selection(&Selection {
+                        start: at(from),
+                        end: at(to),
+                    }),
+                    4 => editor.add_annotation(
+                        AnnotationKind::Note,
+                        Anchor::range(block_id, from, to),
+                        "n",
+                    ),
+                    5 => editor.add_annotation(
+                        AnnotationKind::Footnote,
+                        Anchor::range(block_id, to, to),
+                        "f",
+                    ),
+                    6 if !notes.is_empty() => editor.remove_annotation(notes[pick(notes.len())].id),
+                    7 => editor.split_paragraph(&at(from)),
+                    8 => editor.merge_with_next(&at(from)),
+                    _ => continue,
+                };
+                if pick(5) == 0 {
+                    editor.undo();
+                }
+            }
+            let end = state(editor.document());
+            let (depth, _) = editor.history();
+            for _ in 0..depth {
+                editor.undo().unwrap();
+            }
+            assert_eq!(state(editor.document()), start, "undone, seed {seed}");
+            for _ in 0..depth {
+                editor.redo().unwrap();
+            }
+            assert_eq!(state(editor.document()), end, "redone, seed {seed}");
+        }
     }
 }

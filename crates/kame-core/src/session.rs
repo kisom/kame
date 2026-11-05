@@ -4918,6 +4918,40 @@ mod tests {
     }
 
     #[test]
+    fn a_note_cut_short_is_put_back_by_an_undo_after_reopening() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("0123456789");
+        let block = session.document().blocks[0].id;
+        let at = |offset| Cursor {
+            block_id: block,
+            offset,
+        };
+        let op =
+            session
+                .editor
+                .add_annotation(AnnotationKind::Note, Anchor::range(block, 2, 8), "n");
+        session.commit(op);
+        let cut = session.editor.delete_selection(&Selection {
+            start: at(5),
+            end: at(10),
+        });
+        session.commit(cut);
+        assert_eq!(
+            session.document().annotations[0].anchor,
+            Anchor::range(block, 2, 5)
+        );
+        drop(session);
+
+        let mut reopened = open(&path);
+        assert!(reopened.undo());
+        assert_eq!(
+            reopened.document().annotations[0].anchor,
+            Anchor::range(block, 2, 8)
+        );
+    }
+
+    #[test]
     fn linking_a_document_at_the_caret_inserts_its_title_as_a_link() {
         let mut session = Session::anonymous().unwrap();
         type_marked(&mut session, "see  and *more*");

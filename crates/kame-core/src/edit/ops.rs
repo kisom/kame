@@ -54,6 +54,12 @@ pub enum Op {
         /// undo keeps whatever spans are left.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         old_spans: Option<Vec<Span>>,
+        /// Notes the delete cut short, as they were, which [`apply_inverse`] puts back: a cut
+        /// note keeps no record of how far it reached. [`crate::edit::Editor::apply_edit`] fills
+        /// this in. Rows written before this field existed have none, and undo leaves those
+        /// notes short, which can stop later steps of the history from applying.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        clipped: Vec<Annotation>,
     },
     InsertBlock {
         index: usize,
@@ -178,6 +184,7 @@ impl Op {
             text: block.text[start..end].to_string(),
             removed: annotations_wholly_inside(doc, block_id, start, end),
             old_spans: Some(block.spans.clone()),
+            clipped: Vec::new(),
         }
     }
 
@@ -257,6 +264,7 @@ pub fn coalesce(previous: &Op, next: &Op) -> Option<Op> {
                 text,
                 removed,
                 old_spans,
+                clipped,
             },
             Op::DeleteText {
                 block_id: next_block,
@@ -264,11 +272,14 @@ pub fn coalesce(previous: &Op, next: &Op) -> Option<Op> {
                 end: next_end,
                 text: next_text,
                 removed: next_removed,
+                clipped: next_clipped,
                 ..
             },
         ) if block_id == next_block
             && removed.is_empty()
             && next_removed.is_empty()
+            // What it says about a note is in terms of the text as it was by then.
+            && next_clipped.is_empty()
             && typed(next_text) =>
         {
             // Backspacing runs back from where it began, and deleting forward stays put.
@@ -292,6 +303,7 @@ pub fn coalesce(previous: &Op, next: &Op) -> Option<Op> {
                 text: joined,
                 removed: Vec::new(),
                 old_spans: old_spans.clone(),
+                clipped: clipped.clone(),
             })
         }
         (
@@ -357,6 +369,7 @@ pub fn invert(op: &Op) -> Op {
             // run: existing anchors at or after the offset move right with it.
             removed: Vec::new(),
             old_spans: None,
+            clipped: Vec::new(),
         },
         Op::DeleteText {
             block_id,
@@ -437,8 +450,6 @@ pub fn invert(op: &Op) -> Op {
 /// list can differ from before the delete. Annotation order carries no meaning
 /// (each note carries its own id and anchor), but a caller comparing whole
 /// documents after delete + undo should compare notes as a set.
-///
-/// Straddling notes are not fully restored — see [`crate::edit::Editor::undo`].
 pub fn apply_inverse(doc: &mut Document, op: &Op) {
     // A batch is undone member by member in reverse, each through
     // `apply_inverse`, so *every* removal payload is re-attached — flattening
@@ -470,6 +481,13 @@ pub fn apply_inverse(doc: &mut Document, op: &Op) {
                 annotation: annotation.clone(),
             },
         );
+    }
+    if let Op::DeleteText { clipped, .. } = op {
+        for was in clipped {
+            if let Some(annotation) = doc.annotations.iter_mut().find(|note| note.id == was.id) {
+                annotation.anchor = was.anchor.clone();
+            }
+        }
     }
 }
 
@@ -547,6 +565,7 @@ pub fn apply(doc: &mut Document, op: &Op) {
             text,
             removed,
             old_spans: _,
+            clipped: _,
         } => {
             {
                 let block = block_mut(doc, *block_id);
@@ -711,6 +730,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
             text,
             removed,
             old_spans,
+            clipped,
         } => {
             let Some(current) = doc.blocks.iter().find(|b| b.id == block_id) else {
                 return Op::DeleteText {
@@ -720,6 +740,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                     text,
                     removed,
                     old_spans,
+                    clipped,
                 };
             };
             let range_fits = start <= end
@@ -734,6 +755,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                     text,
                     removed,
                     old_spans,
+                    clipped,
                 };
             }
             let text = if text.is_empty() && start < end {
@@ -753,6 +775,7 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
                 text,
                 removed,
                 old_spans,
+                clipped,
             }
         }
         // An empty `old_body` is the only way a caller can say "I did not
@@ -788,6 +811,68 @@ pub(crate) fn normalize(doc: &Document, op: Op) -> Op {
         },
         other => other,
     }
+}
+
+/// `op` with what each delete in it cuts short written down, going by the document as it will be
+/// when that delete applies, which for a member of a batch isn't the document it was built from.
+pub(crate) fn with_clipped(doc: &Document, op: Op) -> Op {
+    match op {
+        Op::DeleteText {
+            block_id,
+            start,
+            end,
+            text,
+            removed,
+            old_spans,
+            ..
+        } => Op::DeleteText {
+            clipped: annotations_cut_short(doc, block_id, start, end),
+            block_id,
+            start,
+            end,
+            text,
+            removed,
+            old_spans,
+        },
+        Op::Batch { ops } => {
+            let mut staged = doc.clone();
+            let ops = ops
+                .into_iter()
+                .map(|member| {
+                    let member = with_clipped(&staged, member);
+                    apply(&mut staged, &member);
+                    member
+                })
+                .collect();
+            Op::Batch { ops }
+        }
+        other => other,
+    }
+}
+
+/// Every range-scoped note in `block_id` that deleting `start..end` cuts into without removing.
+fn annotations_cut_short(
+    doc: &Document,
+    block_id: BlockId,
+    start: usize,
+    end: usize,
+) -> Vec<Annotation> {
+    if start == end {
+        return Vec::new();
+    }
+    doc.annotations
+        .iter()
+        .filter(|annotation| {
+            let Some((anchor_start, anchor_end)) = annotation.anchor.byte_range() else {
+                return false;
+            };
+            annotation.anchor.block_id() == block_id
+                && anchor_start < end
+                && start < anchor_end
+                && !anchor_wholly_inside(anchor_start, anchor_end, start, end)
+        })
+        .cloned()
+        .collect()
 }
 
 fn block(doc: &Document, block_id: BlockId) -> &Block {
@@ -1040,6 +1125,7 @@ mod tests {
                 text: "hi".into(),
                 removed: Vec::new(),
                 old_spans: None,
+                clipped: Vec::new(),
             }
         );
     }
@@ -1694,6 +1780,7 @@ mod tests {
                 text: "wrong".into(),
                 removed: Vec::new(),
                 old_spans: None,
+                clipped: Vec::new(),
             },
         );
     }
@@ -1879,6 +1966,7 @@ mod tests {
             text: "abc".into(),
             removed: Vec::new(),
             old_spans: None,
+            clipped: Vec::new(),
         };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), op);
@@ -1923,6 +2011,7 @@ mod tests {
                 text: "é".into(),
                 removed: vec![annotation.clone()],
                 old_spans: None,
+                clipped: Vec::new(),
             },
             Op::InsertBlock {
                 index: 0,
@@ -2185,6 +2274,7 @@ mod tests {
             text: text.to_string(),
             removed: Vec::new(),
             old_spans: None,
+            clipped: Vec::new(),
         }
     }
 
@@ -2295,6 +2385,7 @@ mod tests {
             text: text.to_string(),
             removed: Vec::new(),
             old_spans: Some(spans),
+            clipped: Vec::new(),
         };
         let joined = coalesce(
             &with_spans(5, "c", vec![span.clone()]),
@@ -2323,6 +2414,7 @@ mod tests {
             text: "b".to_string(),
             removed: vec![note],
             old_spans: None,
+            clipped: Vec::new(),
         };
         assert_eq!(coalesce(&took_note, &removal(id, 3, "a")), None);
         assert_eq!(coalesce(&removal(id, 5, "c"), &took_note), None);

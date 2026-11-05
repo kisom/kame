@@ -266,7 +266,7 @@ A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payl
 | Operation | Fields |
 |---|---|
 | `InsertText` | `block_id`, `offset`, `text` |
-| `DeleteText` | `block_id`, `start`, `end`, `text`, `removed`, `old_spans` |
+| `DeleteText` | `block_id`, `start`, `end`, `text`, `removed`, `old_spans`, `clipped` |
 | `InsertBlock` | `index`, `block` |
 | `DeleteBlock` | `index`, `block`, `annotations` |
 | `SetBlockKind` | `block_id`, `old_kind`, `kind` |
@@ -285,7 +285,7 @@ A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payl
 {"Batch":{"ops":[{"SetTitle":{"old":"a","new":"b"}}]}}
 ```
 
-All fields are required except on `DeleteText`, where `removed` defaults to empty and `old_spans` may be absent. They're absent in rows from before they existed, where undo can't restore those notes or spans, and inside a `Batch` that restores spans itself. A row missing a required field makes the whole log unreadable (section 1.5). kame's own commands no longer emit `SetTitle`, but readers must still apply it.
+All fields are required except on `DeleteText`, where `removed` and `clipped` default to empty and `old_spans` may be absent. `clipped` is left out when empty, and holds the annotations this delete cut short, as they were before it, which is what lets undo restore them. These fields are absent in rows from before they existed, where undo can't restore those notes or spans. `old_spans` is also absent inside a `Batch` that restores spans itself. A row missing a required field makes the whole log unreadable (section 1.5). kame's own commands no longer emit `SetTitle`, but readers must still apply it.
 
 ### 4.1 Applying
 
@@ -303,7 +303,9 @@ So text inserted exactly at an anchor's start pushes it along, and text inserted
 3. If it overlaps the deletion (`a < end` and `b > start`), remap each end: an offset at or before `start` stays, one at or after `end` moves back by the deleted length, and one inside becomes `start`.
 4. If it lies wholly after, so its original `a >= end`, move both ends back by the deleted length.
 
-Spans follow the same steps, except that dropped spans aren't checked against any payload, and a span that ends up empty is dropped. `old_spans` isn't checked either.
+Spans follow the same steps, except that dropped spans aren't checked against any payload, and a span that ends up empty is dropped. `old_spans` and `clipped` aren't checked either.
+
+A writer must set `clipped` to every range anchor that step 3 changes, in terms of the document as it is when this delete applies. For a member of a `Batch`, that's after the members before it. kame fills it in once, for every edit, rather than leaving it to each command.
 
 **`InsertBlock`.** `index` must be at most the number of blocks.
 
@@ -337,13 +339,13 @@ The inverses are:
 
 Inverting isn't quite enough, so undo must also restore what the operation carried:
 
-- After undoing `DeleteText`, set the block's spans to `old_spans` if present, then append each annotation in `removed`.
+- After undoing `DeleteText`, set the block's spans to `old_spans` if present, append each annotation in `removed`, then give each annotation in `clipped` its old anchor, by id.
 - After undoing `DeleteBlock`, append each annotation in `annotations`.
 - Undo a `Batch` member by member in reverse, each by these rules. Don't invert it whole first, which would lose the payloads.
 
 Redo applies the original operation.
 
-**A note can change shape through delete and undo,** because its anchor keeps no record of its old extent. For a note `a..b` and a deletion `s..e`, after undo:
+**Undo and redo are exact,** for history with `clipped`, so anything they check still matches. In rows without it, a note cut short can stay changed after undo, because its anchor keeps no record of its old extent. For a note `a..b` and a deletion `s..e`, undo then gives:
 
 | The note | Becomes |
 |---|---|
@@ -351,7 +353,7 @@ Redo applies the original operation.
 | Starts before it and ends inside it or at its end | `a..s` |
 | Starts at or inside it and ends after it | `e..b` |
 
-Snapshots are the way back from that. **So an undo may not apply.** A note that has changed shape can come to lie wholly inside an earlier insert, and undoing that insert then fails the `removed` check. kame panics in that case (section 8). An implementation should undo on a copy and write nothing on failure.
+**So an undo of older history may not apply.** A note that has changed shape can come to lie wholly inside an earlier insert, and undoing that insert then fails the `removed` check, and redoing a delete can fail it the same way. An implementation should undo and redo on a copy and write nothing on failure.
 
 ### 4.3 Commands
 
@@ -374,11 +376,11 @@ Each of these is one transaction, because head, log and cursor must never disagr
 **Joining** is optional for a writer and means nothing to a reader, but without it history grows by about 1 KB per word. kame joins an edit onto the last one only when there's no redo tail. It joins:
 
 - A single inserted character (not a line feed) that continues the last insert, unless that insert ended in a line feed or this character starts a new word after whitespace.
-- A single deleted character (not a line feed) that continues the last delete in the same block, backward or forward, unless either delete removed annotations or it crosses into a new word.
+- A single deleted character (not a line feed) that continues the last delete in the same block, backward or forward, unless either delete removed annotations, this one cut a note short, or it crosses into a new word.
 - Successive changes to the same annotation's body, unless the current body ends in whitespace and the next doesn't continue it with more whitespace. Any other change joins, whatever its size.
 - Successive `ReplaceDocument` arrivals from another machine with no edit between them.
 
-Only a single character can join onto an insert or delete, but the earlier op can be any length. The joined `InsertText` keeps the first `offset`. The joined `DeleteText` extends `start`, `end` and `text`, keeps the first `old_spans`, and has `removed` empty. The joined `SetAnnotationBody` keeps the first `old_body`.
+Only a single character can join onto an insert or delete, but the earlier op can be any length. The joined `InsertText` keeps the first `offset`. The joined `DeleteText` extends `start`, `end` and `text`, keeps the first `old_spans` and `clipped`, and has `removed` empty. The joined `SetAnnotationBody` keeps the first `old_body`.
 
 **Compacting** applies the first three joins to an existing log, leaving the redo tail alone. kame first replays the undo part of the old and new logs and changes nothing unless they agree. It compares only block ids, kinds and text, and the set of note ids, so spans, anchors, note bodies and the title aren't compared.
 
@@ -395,7 +397,7 @@ Restoring isn't an edit. It starts a new history (section 5) and leaves metadata
 Version 1 has grown by adding things that older readers can skip:
 
 - `ops`, `snapshots` and `metadata` tables, added on open.
-- `depth`, `link`, `align`, `language`, `removed` and `old_spans`, all optional on reading and mostly left out when empty.
+- `depth`, `link`, `align`, `language`, `removed`, `old_spans` and `clipped`, all optional on reading and mostly left out when empty.
 - Range anchors on marginal notes, from before whole-block anchors.
 
 A change that older readers could misread must raise `user_version`. Older builds then refuse the file with a clear message when opening it to write. kame's read-only path doesn't check, so its site build, notebook listing and sync tools can misread such a file (section 1.2).
@@ -411,5 +413,5 @@ These describe the code as it stands, and aren't rules to copy.
 - **Ranges aren't checked on reading.** Nothing checks a span or anchor against its text when a document is read, so a damaged or hand-made file can hold offsets out of range or inside a character. Readers should clamp them for display, and must not assume they're valid.
 - **The rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
 - **Typing on an image block stores text in it.** `Session::insert` starts a new paragraph on a `Rule`, but has no such case for an `Image`. This is a bug to fix.
-- **An undo can panic.** The inverse of `InsertText` assumes no note can lie wholly inside the inserted text, but section 4.2 shows how one can come to. For example, with text `0123456789` and a note on 4..6: insert `abc` at 5, delete 8..10 and undo it, delete 3..6 and undo it, then undo the insert. This is a bug to fix. Undoing a `Batch` that fails partway also leaves the document half undone in memory.
+- **An undo of older history can panic.** History from before `clipped` can hold a note that has changed shape, and undo or redo then fails its check (section 4.2). This is a bug to fix. Undoing a `Batch` that fails partway also leaves the document half undone in memory.
 - **Paths aren't portable by themselves.** A whole image path or a `~/` link only works where it was made. Only relative forms hold on another machine.

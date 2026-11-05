@@ -282,7 +282,7 @@ The menu bar holds every command with its shortcut: File (open, save, import,
 export, snapshots, document properties, and the document's counts), Annotate, View (type size, dark
 mode, hyphenation, spelling, a notebook's commands and the view modes) and Help.
 
-On Linux, Alt-F, Alt-A, Alt-V and Alt-H open those menus; arrows and Enter then
+On Linux, Alt-F, Alt-A, Alt-V, Alt-S (in a notebook) and Alt-H open those menus; arrows and Enter then
 choose an item, and Escape closes it. There are no such chords on macOS, where
 Option plus a letter types a character. The document takes no keystrokes while a
 menu is open.
@@ -349,6 +349,8 @@ A file named `site` opens as `kame ./site`.
 `kame-site build FOLDER` builds it as its own site, in an `output/` folder in the notebook, which the browser and search leave out. In a
 synced folder, stop that syncing with `/path/to/notebook/output` and `/path/to/notebook/.output-*` in `.stignore`, or two machines' builds
 will conflict. A build won't replace an `output/` it didn't make.
+
+In a notebook, the Site menu has Build and Sync, which run in the background and list any warnings when they finish. Sync needs your key in an agent, since kame can't ask for a passphrase.
 
 `kame-site sync FOLDER` also sends it to `remote` with `rsync --delete`. A dry run comes first, and if that would delete more than 5 files
 from the remote, they're listed and nothing happens without `--yes`. Document Properties has a *Publish* tick, and in Markdown it's `publish: true` in the front matter. `Notebook.kame`

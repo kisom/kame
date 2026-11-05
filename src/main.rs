@@ -10,6 +10,7 @@ mod external;
 #[cfg(target_os = "macos")]
 mod macos;
 mod notebook;
+mod publish;
 
 use kame_core::links::{image_file, resolve_open_path, split_document_target, stored_image_path};
 use kame_core::session::{is_markdown_path, Session};
@@ -1332,6 +1333,7 @@ enum BarMenu {
     File,
     Annotate,
     View,
+    Site,
     Help,
 }
 
@@ -1361,6 +1363,7 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
             egui::Key::F => (BarMenu::File, "f"),
             egui::Key::A => (BarMenu::Annotate, "a"),
             egui::Key::V => (BarMenu::View, "v"),
+            egui::Key::S => (BarMenu::Site, "s"),
             egui::Key::H => (BarMenu::Help, "h"),
             _ => return None,
         };
@@ -1397,6 +1400,7 @@ enum MenuAction {
     Back,
     CompactHistory,
     LinkDocument,
+    Site(publish::SiteJob),
     New,
     Open,
     OpenPath,
@@ -2173,6 +2177,7 @@ struct KameApp {
     device: String,
     /// The notebook this document is in, and what's showing of it.
     nb: notebook::NotebookUi,
+    publishing: publish::Publishing,
     /// The open document's revision logs, if its folder has them turned on.
     logged: Option<kame_sync::logs::Logged>,
     /// The file `logged` is for, and whether a problem with its logs has been mentioned.
@@ -2330,6 +2335,7 @@ impl KameApp {
             rules_off,
             device,
             nb: notebook::NotebookUi::new(browser_open, browser_folders),
+            publishing: publish::Publishing::default(),
             logged: None,
             logged_path: None,
             orphan_mentioned: false,
@@ -2466,6 +2472,7 @@ impl KameApp {
             || self.restore_picker.is_some()
             || self.replaced_prompt
             || self.nb.list_open()
+            || self.publishing.report.is_some()
     }
 
     /// Closes whichever file dialog is open. Returns whether one was closed, so
@@ -2478,6 +2485,7 @@ impl KameApp {
         self.open_prompt = None;
         self.link_prompt = None;
         self.restore_picker = None;
+        self.publishing.report = None;
         open
     }
 
@@ -3505,6 +3513,34 @@ impl KameApp {
                         }
                     }
                 });
+                let mut site_menu = None;
+                if let Some(notebook) = &self.nb.notebook {
+                    let working = self.publishing.working();
+                    let has_remote = notebook
+                        .settings
+                        .remote
+                        .as_deref()
+                        .is_some_and(|remote| !remote.trim().is_empty());
+                    let menu = ui.menu_button("Site", |ui| {
+                        ui.set_min_width(160.0);
+                        let build = ui.add_enabled_ui(!working, |ui| {
+                            menu_item(ui, "Build", None, false)
+                        });
+                        if build.inner {
+                            action = Some(MenuAction::Site(publish::SiteJob::Build));
+                        }
+                        let sync = ui.add_enabled_ui(!working && has_remote, |ui| {
+                            menu_entry(ui, "Sync", None, false)
+                                .on_disabled_hover_text("Set remote in notebook.yaml to send the site")
+                        });
+                        if sync.inner.clicked() {
+                            action = Some(MenuAction::Site(publish::SiteJob::Send {
+                                go_ahead: false,
+                            }));
+                        }
+                    });
+                    site_menu = Some(menu.response);
+                }
                 let help_menu = ui.menu_button("Help", |ui| {
                     ui.set_min_width(160.0);
                     if menu_item(ui, "Help", Some("F1"), false) {
@@ -3516,7 +3552,10 @@ impl KameApp {
                     (BarMenu::Annotate, &annotate_menu.response),
                     (BarMenu::View, &view_menu.response),
                     (BarMenu::Help, &help_menu.response),
-                ] {
+                ]
+                .into_iter()
+                .chain(site_menu.as_ref().map(|response| (BarMenu::Site, response)))
+                {
                     if pending_menu == Some(menu) {
                         egui::Popup::toggle_id(ui.ctx(), egui::Popup::menu(response).get_id());
                         ui.ctx().request_repaint();
@@ -3615,6 +3654,7 @@ impl KameApp {
             }
             MenuAction::Mode(mode) => self.apply_mode(ctx, mode),
             MenuAction::Help => self.show_help = true,
+            MenuAction::Site(job) => self.start_site_job(ctx, job),
         }
     }
 
@@ -6385,6 +6425,7 @@ impl eframe::App for KameApp {
         self.show_notebook_lists(ui.ctx());
         self.open_pending_backlink();
         self.show_replaced_prompt(ui.ctx());
+        self.show_site_report(ui.ctx());
         self.remember_document();
         self.keep_position(ui.ctx());
     }

@@ -71,6 +71,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/notebook.rs` — the app's jump list, search, browser and what links here.
 
+`src/publish.rs` — the app's Site menu, on `kame-site`.
+
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.
 
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).

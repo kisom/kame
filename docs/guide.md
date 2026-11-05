@@ -233,13 +233,13 @@ Read what the build prints. It lists each link that became plain words because i
 
 **Make an About page.** The standard theme's navigation gains an About link once you make `about.kame` or `About.kame` in the notebook's root and mark it to publish. The site also gets an archive and a tags page, and a feed if you've set `url`.
 
-**To send it to your server**, set `remote` in `notebook.yaml`, then:
+**To send it to your server**, set `remote` in `notebook.yaml`, then use Site > Sync, or:
 
 ```sh
 kame-site sync ~/writing/garden
 ```
 
-This builds the site and sends it with `rsync --delete`, so `rsync` must be installed, and anything else in that folder on the server is removed. A dry run comes first, and if it would delete more than 5 files, it lists them and stops until you run it again with `--yes`.
+This builds the site and sends it with `rsync --delete`, so `rsync` must be installed, and anything else in that folder on the server is removed. A dry run comes first, and if it would delete more than 5 files, it lists them and stops until you say to send anyway, or run it again with `--yes`. kame can't ask for a passphrase, so for Site > Sync your key has to be in an agent.
 
 **To change the look**, copy a file from the standard theme into the notebook's `theme/` at the same path, and yours takes its place. The theme's files are in kame's source, under `crates/kame-site/theme/`, so the stylesheet goes at `theme/static/css/site.css` and the shared page layout at `theme/templates/base.html`.
 

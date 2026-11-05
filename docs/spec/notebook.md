@@ -253,7 +253,10 @@ In a synced folder, `output/` should be kept out of the sync, or two machines' b
 `kame-site sync` builds, then sends `output/` to `remote` with `rsync -az --delete`, leaving out the marker. Because `--delete` removes whatever else is at `remote`:
 
 - Refuse a `remote` that starts with `-`, whose host starts with `-`, or that holds whitespace or control characters. `notebook.yaml` can arrive from another machine, and rsync or ssh would obey an option found in it.
-- Do a dry run first. If it would delete more than 5 files, list up to 20 and stop, unless the person said `--yes`.
+- Do a dry run first. If it would delete more than 5 files, list up to 20 and stop, unless the person said to go ahead.
+- Put the source and destination last, after `--`. Given a flag after them, the `rsync` on macOS takes the current folder as the destination and empties it.
+
+The Site menu does the same in the app, in the background, on a notebook only. With no terminal for ssh to ask, it runs with `BatchMode=yes` and a 15 second connect timeout, so a key that isn't in an agent or a new host fails with a message. A job with nothing to report says so in the status row, and warnings, errors and a question about deletions open a window.
 
 ## 8. Syncing
 

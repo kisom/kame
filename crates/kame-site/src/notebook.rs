@@ -441,65 +441,144 @@ fn deletions(said: &str) -> Vec<&str> {
         .collect()
 }
 
-/// rsync with what every run of it needs. The source and destination follow a `--`.
-fn rsync() -> std::process::Command {
+/// Whether there's a person at a terminal for ssh to ask, as there isn't for the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asking {
+    Terminal,
+    Nobody,
+}
+
+/// An rsync from `source` to `remote`, with `flags`. Everything is set here, with the paths last,
+/// because this deletes: given a flag after the paths, rsync took the current folder as where to
+/// send them, and emptied it.
+fn rsync(asking: Asking, flags: &[&str], source: &str, remote: &str) -> std::process::Command {
     let mut command = std::process::Command::new("rsync");
     command
         .arg(format!("--exclude={MARKER}"))
-        .args(["-az", "--delete"]);
+        .args(["-az", "--delete"])
+        .args(flags);
+    if asking == Asking::Nobody {
+        // A passphrase prompt or a new host's question would wait forever, so it fails instead.
+        command
+            .args(["-e", "ssh -o BatchMode=yes -o ConnectTimeout=15"])
+            .stdin(std::process::Stdio::null());
+    }
+    command.arg("--").arg(source).arg(remote);
     command
+}
+
+/// How sending a notebook's site went.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Sent {
+    /// It went, from this folder.
+    Done(PathBuf),
+    /// Nothing went, since it would remove these from the remote, which is more than a few.
+    WouldDelete(Vec<String>),
+    /// Nothing went, or not all of it did, and `problems` says why.
+    Failed,
 }
 
 /// Builds the notebook at `dir` and sends it to its `remote`, as `make sync` does for a site. A
 /// dry run comes first, since `--delete` empties whatever `remote` names of everything else. If
 /// that would remove more than a few files they're listed, and nothing happens without `go_ahead`.
-pub fn sync(dir: &Path, go_ahead: bool, problems: &mut Problems) -> Option<PathBuf> {
+pub fn send(dir: &Path, go_ahead: bool, asking: Asking, problems: &mut Problems) -> Sent {
     let remote = match Notebook::open(dir) {
         Ok(notebook) => notebook.settings.remote,
         Err(err) => {
             problems.errors.push(err);
-            return None;
+            return Sent::Failed;
         }
     };
     let Some(remote) = remote.filter(|remote| !remote.trim().is_empty()) else {
         problems
             .errors
             .push("notebook.yaml has no remote to send this to".to_string());
-        return None;
+        return Sent::Failed;
     };
     // This file syncs from other machines, and rsync or ssh would obey an option found in it.
     if bad_remote(&remote) {
         problems
             .errors
             .push(format!("notebook.yaml has an odd remote, \"{remote}\""));
-        return None;
+        return Sent::Failed;
     }
-    let output = build(dir, problems)?;
+    let Some(output) = build(dir, problems) else {
+        return Sent::Failed;
+    };
+    // The trailing slash means what's in the folder, rather than the folder.
     let source = format!("{}/", output.display());
+    // What rsync says when it fails, with what can be done about it when there's nobody to ask.
+    let refused = |said: &[u8]| {
+        let said = String::from_utf8_lossy(said);
+        let said = said.trim();
+        if asking == Asking::Nobody && said.contains("Permission denied") {
+            format!("{said}. kame can't ask for a passphrase, so the key has to be in an agent")
+        } else {
+            said.to_string()
+        }
+    };
     if !go_ahead {
-        let dry = rsync()
-            .args(["--dry-run", "--itemize-changes", "--"])
-            .arg(&source)
-            .arg(&remote)
-            .output();
+        let dry = rsync(
+            asking,
+            &["--dry-run", "--itemize-changes"],
+            &source,
+            &remote,
+        )
+        .output();
         let dry = match dry {
             Ok(dry) if dry.status.success() => dry,
             Ok(dry) => {
-                problems.errors.push(format!(
-                    "rsync's dry run failed: {}",
-                    String::from_utf8_lossy(&dry.stderr).trim()
-                ));
-                return None;
+                problems
+                    .errors
+                    .push(format!("rsync's dry run failed: {}", refused(&dry.stderr)));
+                return Sent::Failed;
             }
             Err(err) => {
                 problems.errors.push(format!("could not run rsync: {err}"));
-                return None;
+                return Sent::Failed;
             }
         };
         let said = String::from_utf8_lossy(&dry.stdout);
         let doomed = deletions(&said);
         if doomed.len() > TOO_MANY_DELETIONS {
+            let mut doomed: Vec<String> = doomed.into_iter().map(str::to_string).collect();
+            doomed.sort();
+            return Sent::WouldDelete(doomed);
+        }
+    }
+    let failed = match asking {
+        Asking::Terminal => match rsync(asking, &["-v"], &source, &remote).status() {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("rsync failed: {status}")),
+            Err(err) => Some(format!("could not run rsync: {err}")),
+        },
+        Asking::Nobody => match rsync(asking, &[], &source, &remote).output() {
+            Ok(sent) if sent.status.success() => None,
+            Ok(sent) => Some(format!("rsync failed: {}", refused(&sent.stderr))),
+            Err(err) => Some(format!("could not run rsync: {err}")),
+        },
+    };
+    match failed {
+        None => Sent::Done(output),
+        Some(said) => {
+            problems.errors.push(said);
+            Sent::Failed
+        }
+    }
+}
+
+/// [`send`], for the command line, where a large deletion is reported as a problem to run again
+/// with `--yes`.
+pub fn sync(dir: &Path, go_ahead: bool, problems: &mut Problems) -> Option<PathBuf> {
+    match send(dir, go_ahead, Asking::Terminal, problems) {
+        Sent::Done(output) => Some(output),
+        Sent::Failed => None,
+        Sent::WouldDelete(doomed) => {
             const SHOWN: usize = 20;
+            let remote = Notebook::open(dir)
+                .ok()
+                .and_then(|notebook| notebook.settings.remote)
+                .unwrap_or_default();
             let mut message = format!(
                 "this would delete {} files from {remote}, so nothing was sent. If that's right, run sync with --yes:",
                 doomed.len()
@@ -512,23 +591,6 @@ pub fn sync(dir: &Path, go_ahead: bool, problems: &mut Problems) -> Option<PathB
                 message.push_str(&format!("\n  and {} more", doomed.len() - SHOWN));
             }
             problems.errors.push(message);
-            return None;
-        }
-    }
-    // The trailing slash means what's in the folder, rather than the folder.
-    let status = rsync()
-        .args(["-v", "--"])
-        .arg(&source)
-        .arg(&remote)
-        .status();
-    match status {
-        Ok(status) if status.success() => Some(output),
-        Ok(status) => {
-            problems.errors.push(format!("rsync failed: {status}"));
-            None
-        }
-        Err(err) => {
-            problems.errors.push(format!("could not run rsync: {err}"));
             None
         }
     }
@@ -1340,6 +1402,80 @@ mod tests {
         let said = ">f+++++++++ index.html\n*deleting   old/page.html\ncd+++++++++ new/\n*deleting   gone with space.txt\n";
         assert_eq!(deletions(said), ["old/page.html", "gone with space.txt"]);
         assert!(deletions("").is_empty());
+    }
+
+    /// Given a flag after the paths, this rsync empties the folder it's run from.
+    #[test]
+    fn rsyncs_paths_come_last_whatever_else_it_is_told() {
+        for asking in [Asking::Terminal, Asking::Nobody] {
+            for flags in [
+                &["-v"][..],
+                &["--dry-run", "--itemize-changes"][..],
+                &[][..],
+            ] {
+                let command = rsync(asking, flags, "from/", "host:/to/");
+                let args: Vec<_> = command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy())
+                    .collect();
+                assert_eq!(
+                    args[args.len() - 3..],
+                    ["--", "from/", "host:/to/"],
+                    "{args:?}"
+                );
+                assert_eq!(
+                    args.iter().filter(|arg| *arg == "--").count(),
+                    1,
+                    "{args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn with_nobody_to_ask_a_send_reports_what_it_would_delete_and_what_went_wrong() {
+        if !rsync_is_here() {
+            return;
+        }
+        let nb = made("nbasking", "");
+        let remote = nb.root.parent().unwrap().join("asking-remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        for at in 0..(TOO_MANY_DELETIONS + 1) {
+            std::fs::write(remote.join(format!("precious{at}.txt")), "keep").unwrap();
+        }
+        let settings = nb.root.join("notebook.yaml");
+        std::fs::write(&settings, format!("remote: {}/\n", remote.display())).unwrap();
+        nb.words("Notebook.kame", false, "Contents.");
+
+        let mut problems = Problems::default();
+        let Sent::WouldDelete(doomed) = send(&nb.root, false, Asking::Nobody, &mut problems) else {
+            panic!("it should stop: {:?}", problems.errors);
+        };
+        assert_eq!(doomed.len(), TOO_MANY_DELETIONS + 1);
+        assert!(problems.errors.is_empty(), "{:?}", problems.errors);
+        assert!(remote.join("precious0.txt").exists(), "nothing was touched");
+
+        let sent = send(&nb.root, true, Asking::Nobody, &mut problems);
+        assert_eq!(
+            sent,
+            Sent::Done(nb.root.canonicalize().unwrap().join("output"))
+        );
+        assert!(remote.join("index.html").exists());
+        assert!(!remote.join("precious0.txt").exists());
+
+        // A host that can't be reached says so, and doesn't wait for anyone.
+        std::fs::write(&settings, "remote: nobody@nowhere.invalid:/srv/site/\n").unwrap();
+        let mut problems = Problems::default();
+        assert_eq!(
+            send(&nb.root, false, Asking::Nobody, &mut problems),
+            Sent::Failed
+        );
+        assert_eq!(problems.errors.len(), 1, "{:?}", problems.errors);
+        assert!(
+            problems.errors[0].contains("dry run"),
+            "{:?}",
+            problems.errors
+        );
     }
 
     fn rsync_is_here() -> bool {

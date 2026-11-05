@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
+use kame_core::model::Metadata;
 use kame_core::storage::Db;
 use kame_sync::logs::log_folder;
 use kame_sync::merge::document_digest;
@@ -60,8 +61,18 @@ pub struct Steps {
 struct Retiring {
     path: PathBuf,
     revision: String,
+    /// What it held when `unsynced` was worked out. A stranded document stays editable and saves
+    /// no new revision, so its revision can't say whether this has changed.
+    contents: Option<Contents>,
     opened_there: bool,
     unsynced: bool,
+}
+
+/// A database's document, by its digest, and properties.
+#[derive(Debug, PartialEq)]
+struct Contents {
+    document: String,
+    metadata: Metadata,
 }
 
 /// A database with a home to go to, and the revision it had when that was worked out.
@@ -117,13 +128,15 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
         let Some(revision) = recorded_revision(&path) else {
             continue;
         };
-        match what_to_do(&path, &revision, &logs) {
+        let contents = contents_of(&path);
+        match what_to_do(&path, &revision, contents.as_ref(), &logs) {
             Some(Verdict::Retire {
                 opened_there,
                 unsynced,
             }) => steps.retiring.push(Retiring {
                 path,
                 revision,
+                contents,
                 opened_there,
                 unsynced,
             }),
@@ -143,8 +156,9 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
 /// in the middle of a rename. `open` is what's open now, not when `decide` began. Time has passed
 /// since then, so each step is looked at again just before it's taken, with no more reading than
 /// that takes: it's skipped if the database has gone, is open, or remembers something else now, or
-/// if something has arrived where it's going. This returns what was done, and what's skipped or
-/// fails is left to be seen again by the next pass.
+/// if something has arrived where it's going. A retirement is also skipped if what the database
+/// holds has changed, since what it reports about that would be out of date. This returns what was
+/// done, and what's skipped or fails is left to be seen again by the next pass.
 pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done> {
     if steps.root != notebook.root {
         return Vec::new();
@@ -156,7 +170,7 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
 
     let mut done = Vec::new();
     for step in steps.retiring {
-        if !as_it_was(&step.path, &step.revision) {
+        if !as_it_was(&step.path, &step.revision) || contents_of(&step.path) != step.contents {
             continue;
         }
         if let Some(to) = retired_name(&step.path) {
@@ -338,7 +352,12 @@ enum Verdict {
 
 /// What's to be done with a stranded database, or `None` to leave it alone: it has more than one
 /// home, its own logs have turned up since it was looked at, or what's at its home can't be read.
-fn what_to_do(path: &Path, revision: &str, logs: &[Logs]) -> Option<Verdict> {
+fn what_to_do(
+    path: &Path,
+    revision: &str,
+    contents: Option<&Contents>,
+    logs: &[Logs],
+) -> Option<Verdict> {
     let homes = homes_of(revision, logs);
     let home = match homes[..] {
         [] => {
@@ -362,7 +381,7 @@ fn what_to_do(path: &Path, revision: &str, logs: &[Logs]) -> Option<Verdict> {
             } else {
                 Some(Verdict::Retire {
                     opened_there: true,
-                    unsynced: !holds_only_what_logs_do(path, revision, logs),
+                    unsynced: !is_only_what_logs_hold(contents, revision, logs),
                 })
             }
         }
@@ -370,20 +389,26 @@ fn what_to_do(path: &Path, revision: &str, logs: &[Logs]) -> Option<Verdict> {
     }
 }
 
+/// What a database holds, if that can be read.
+fn contents_of(path: &Path) -> Option<Contents> {
+    let db = Db::open_read_only(path).ok()?;
+    Some(Contents {
+        document: document_digest(&db.load_document().ok()?),
+        metadata: db.load_metadata().ok()??,
+    })
+}
+
 /// Whether a database's document and properties are just what the logs hold at its revision, the
 /// same test a sync makes for whether there's anything to write. If that can't be read, it's no.
-fn holds_only_what_logs_do(path: &Path, revision: &str, logs: &[Logs]) -> bool {
-    let Some(logs) = logs.iter().find(|logs| logs.store.is_usable(revision)) else {
+fn is_only_what_logs_hold(contents: Option<&Contents>, revision: &str, logs: &[Logs]) -> bool {
+    let (Some(contents), Some(logs)) = (
+        contents,
+        logs.iter().find(|logs| logs.store.is_usable(revision)),
+    ) else {
         return false;
     };
-    let Ok(db) = Db::open_read_only(path) else {
-        return false;
-    };
-    let (Ok(document), Ok(Some(metadata))) = (db.load_document(), db.load_metadata()) else {
-        return false;
-    };
-    document_digest(&document) == document_digest(&logs.store.document(revision))
-        && metadata == logs.store.metadata(revision)
+    contents.document == document_digest(&logs.store.document(revision))
+        && contents.metadata == logs.store.metadata(revision)
 }
 
 /// Those that can go, which isn't all of them. A mover needs its home empty, or holding only

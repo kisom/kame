@@ -371,20 +371,36 @@ fn ends_mid_line(log: &mut std::fs::File) -> std::io::Result<bool> {
     Ok(last[0] != b'\n')
 }
 
-/// Flushes a folder, for the names in it. Some filesystems can't do this for a folder, and say so,
-/// which shouldn't stop a document syncing there for good.
-fn flush_folder(folder: &Path) -> std::io::Result<()> {
-    match std::fs::File::open(folder)?.sync_all() {
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
-            ) =>
-        {
-            Ok(())
-        }
+/// Whether a flush failed because the filesystem can't do it, rather than having tried. On macOS a
+/// flush is `F_FULLFSYNC`, which what's mounted may not support, as an SMB share doesn't. The
+/// numbers are for what `ErrorKind` can't tell from a disk failing: ENODEV and ENOTTY everywhere,
+/// and ENOTSUP on macOS, depending on the version of Rust.
+fn is_refusal(err: &std::io::Error) -> bool {
+    const ENODEV: i32 = 19;
+    const ENOTTY: i32 = 25;
+    const MACOS_ENOTSUP: i32 = 45;
+    let code = err.raw_os_error();
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+    ) || code == Some(ENODEV)
+        || code == Some(ENOTTY)
+        || (cfg!(target_vendor = "apple") && code == Some(MACOS_ENOTSUP))
+}
+
+/// Takes a flush that the filesystem refused as done, which shouldn't stop a document syncing
+/// there for good. Nothing has been flushed, so a power cut there can still lose the line. Anything
+/// else that goes wrong is still an error.
+fn unless_refused(flushed: std::io::Result<()>) -> std::io::Result<()> {
+    match flushed {
+        Err(err) if is_refusal(&err) => Ok(()),
         result => result,
     }
+}
+
+/// Flushes a folder, for the names in it.
+fn flush_folder(folder: &Path) -> std::io::Result<()> {
+    unless_refused(std::fs::File::open(folder)?.sync_all())
 }
 
 /// One machine's end of it.
@@ -485,7 +501,7 @@ impl Replica {
     /// that was one line or many. Whatever fails is still to do at the next call.
     pub fn flush(&self, store: &mut Store) -> Result<()> {
         if store.unflushed.log {
-            std::fs::File::open(self.log_path())?.sync_data()?;
+            unless_refused(std::fs::File::open(self.log_path())?.sync_data())?;
             store.unflushed.log = false;
         }
         if store.unflushed.folder {
@@ -829,6 +845,54 @@ mod tests {
         );
         assert!(everything.contains("Typed here."), "{everything}");
         assert!(everything.contains("From elsewhere."), "{everything}");
+    }
+
+    #[test]
+    fn a_filesystem_that_cannot_flush_is_told_from_one_that_failed() {
+        use std::io::{Error, ErrorKind};
+        // EINVAL and ENOTTY have these numbers on Linux and on macOS.
+        assert!(is_refusal(&Error::from_raw_os_error(22)));
+        assert!(is_refusal(&Error::from_raw_os_error(25)));
+        assert!(is_refusal(&Error::from(ErrorKind::Unsupported)));
+        if cfg!(target_vendor = "apple") {
+            // ENOTSUP, then ENOSYS and EOPNOTSUPP.
+            assert!(is_refusal(&Error::from_raw_os_error(45)));
+            assert!(is_refusal(&Error::from_raw_os_error(78)));
+            assert!(is_refusal(&Error::from_raw_os_error(102)));
+        } else {
+            // ENOSYS, then ENOTSUP and EOPNOTSUPP, which are one on Linux.
+            assert!(is_refusal(&Error::from_raw_os_error(38)));
+            assert!(is_refusal(&Error::from_raw_os_error(95)));
+        }
+        // EIO and ENOSPC, when the words really may not have got there.
+        assert!(!is_refusal(&Error::from_raw_os_error(5)));
+        assert!(!is_refusal(&Error::from_raw_os_error(28)));
+        assert!(!is_refusal(&Error::from(ErrorKind::NotFound)));
+    }
+
+    #[test]
+    fn a_refused_flush_counts_as_done_and_a_failed_one_does_not() {
+        use std::io::Error;
+        assert!(unless_refused(Ok(())).is_ok());
+        assert!(unless_refused(Err(Error::from_raw_os_error(25))).is_ok());
+        assert!(unless_refused(Err(Error::from_raw_os_error(5))).is_err());
+    }
+
+    /// `/dev/null` really does refuse a flush, on Linux and on macOS, each in its own words, so it
+    /// stands in for a filesystem that can't.
+    #[test]
+    fn a_log_on_something_that_refuses_a_flush_does_not_stop_a_sync() {
+        let folder = kame_test_dir::folder("revlog-refused-flush").join("logs");
+        let mut store = Store::default();
+        let here = replica(&folder, "here-0000");
+        here.write_checkpoint(&mut store, &document_saying("Words."), None, 1)
+            .unwrap();
+        let log = here.log_path();
+        std::fs::remove_file(&log).unwrap();
+        std::os::unix::fs::symlink("/dev/null", &log).unwrap();
+
+        here.flush(&mut store).unwrap();
+        assert!(!store.has_unflushed());
     }
 
     #[test]

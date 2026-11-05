@@ -1357,3 +1357,94 @@ fn steps_are_applied_only_to_the_notebook_they_were_found_in() {
     assert!(apply(&other, decide(&nb, just(&a)), None).is_empty());
     assert!(a.is_file());
 }
+
+/// A stranded document stays editable and saves no new revision, so its revision can't say whether
+/// it changed after `decide` said what it holds.
+#[test]
+fn a_retirement_is_left_for_the_next_pass_if_words_were_typed_after_it_was_decided() {
+    let (root, nb) = logged_notebook("stranded-typed-after-decide");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    let steps = decide(&nb, just(&a));
+    {
+        let mut session = Session::open(&a).unwrap();
+        session.insert(" Typed after decide.");
+        assert!(sync(&mut session).stranded);
+    }
+
+    assert!(apply(&nb, steps, Some(&b)).is_empty());
+    assert!(text_of(&a).contains("Typed after decide."));
+    assert_eq!(
+        reconcile(&nb, just(&a), None),
+        [Done::Retired {
+            from: a.clone(),
+            to: root.join(".a.retired.kame"),
+            opened_there: true,
+            unsynced: true,
+        }]
+    );
+}
+
+#[test]
+fn a_retirement_is_left_for_the_next_pass_if_words_were_typed_in_a_session_open_through_deciding() {
+    let (root, nb) = logged_notebook("stranded-open-through-decide");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    let mut session = Session::open(&a).unwrap();
+    let steps = decide(&nb, just(&a));
+    session.insert(" Typed while open.");
+    drop(session);
+
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(a.is_file());
+    assert!(matches!(
+        reconcile(&nb, just(&a), None)[..],
+        [Done::Retired { unsynced: true, .. }]
+    ));
+}
+
+#[test]
+fn a_retirement_is_left_for_the_next_pass_if_only_the_title_changed_after_it_was_decided() {
+    let (root, nb) = logged_notebook("stranded-title-after-decide");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    let steps = decide(&nb, just(&a));
+    {
+        let mut session = Session::open(&a).unwrap();
+        let metadata = kame_core::model::Metadata {
+            title: "A title of its own".to_string(),
+            ..session.metadata.clone()
+        };
+        session.set_metadata(metadata);
+    }
+
+    assert!(apply(&nb, steps, None).is_empty());
+    assert!(a.is_file());
+}
+
+/// Opening a document and leaving it unchanged is no reason to wait.
+#[test]
+fn a_retirement_goes_ahead_if_the_database_was_only_opened_after_it_was_decided() {
+    let (root, nb) = logged_notebook("stranded-opened-only");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    let steps = decide(&nb, just(&a));
+    drop(Session::open(&a).unwrap());
+
+    assert!(matches!(
+        apply(&nb, steps, None)[..],
+        [Done::Retired {
+            opened_there: true,
+            unsynced: false,
+            ..
+        }]
+    ));
+}

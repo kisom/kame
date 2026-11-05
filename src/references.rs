@@ -54,6 +54,8 @@ pub(crate) struct ReferencesUi {
     pub(crate) shown: Option<String>,
     /// Where the click that opened it was.
     shown_at: Pos2,
+    /// How far the page was scrolled when the entry was first drawn.
+    shown_scroll: Option<f32>,
     /// The search Ctrl-Shift-C opens.
     cite_search: Option<CiteSearch>,
     /// The new reference or edit window.
@@ -690,6 +692,7 @@ impl ReferencesUi {
     pub(crate) fn show(&mut self, key: &str, at: Pos2) {
         self.shown = Some(key.to_string());
         self.shown_at = at;
+        self.shown_scroll = None;
     }
 }
 
@@ -792,6 +795,12 @@ impl KameApp {
             return;
         };
         let at = self.refs.shown_at;
+        // The entry stays where the click was, so it goes when the page moves from under it.
+        let scrolled = *self.refs.shown_scroll.get_or_insert(self.page_scroll);
+        if (scrolled - self.page_scroll).abs() > 0.5 {
+            self.refs.shown = None;
+            return;
+        }
         let mut edit = None;
         let drawn = egui::Window::new(key)
             .id(Id::unique("kame-citation"))
@@ -1964,6 +1973,28 @@ mod tests {
         // line.
         page.click(Pos2::new(page.body_left() + 300.0, 600.0));
 
+        assert_eq!(page.app.refs.shown, None);
+    }
+
+    #[test]
+    fn scrolling_the_page_closes_the_entry() {
+        let mut page = page_in_notebook("[knuth1981] says so.");
+        for _ in 0..60 {
+            page.app.session.split();
+            page.app
+                .session
+                .insert("Another paragraph of words to fill the page.");
+        }
+        page.frame(Vec::new());
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        assert_eq!(page.app.refs.shown.as_deref(), Some("knuth1981"));
+
+        page.app.pending_scroll = Some(300.0);
+        page.frame(Vec::new());
+
+        assert!(page.app.page_scroll > 0.0, "the page moved");
         assert_eq!(page.app.refs.shown, None);
     }
 

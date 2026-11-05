@@ -6783,9 +6783,15 @@ impl Headless {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| app.draw_surface(ui));
+                    let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                    if let Some(offset) = app.pending_scroll.take() {
+                        scroll = scroll.vertical_scroll_offset(offset);
+                    }
+                    app.page_scroll = scroll
+                        .show(ui, |ui| app.draw_surface(ui))
+                        .state
+                        .clamped_offset()
+                        .y;
                 });
             app.show_reference_windows(ui.ctx());
             app.show_dialogs(ui.ctx());

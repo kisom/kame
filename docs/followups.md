@@ -81,7 +81,6 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
 - [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
 - [ ] **`stamp` and `load` run on the UI thread,** and a page's export works out `cited` twice.
 - [ ] **What's wrong with a reference file** can vanish from `last_error` or go stale there.
-- [ ] **A clicked citation's entry** stays where it opened while the page scrolls.
 - [ ] **A name holding a semicolon,** possible only by hand in its file, splits on Save from the form.
 - [ ] **With no file open, a rename can lose the old key** if the unsaved copy can't follow. It needs a failed write to the temporary database, and the reference survives under the new key.
 - [ ] **A new single name such as `King, Jr.`** splits on commas unless it's typed with a `;`.

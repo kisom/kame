@@ -1242,11 +1242,11 @@ impl KameApp {
         } else {
             "Edit reference"
         };
-        // Under another dialog, a click here would bring the form over it.
+        // Under another dialog, a click here would bring the form over it, and so it takes none.
         let covered = self.other_dialog_open();
         let references = &self.refs.list;
         let error_ink = self.palette.error_ink;
-        egui::Window::new(title)
+        let shown = egui::Window::new(title)
             .id(Id::unique("kame-reference-form"))
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
@@ -1280,6 +1280,18 @@ impl KameApp {
                     });
                 });
             });
+        // A window that takes no clicks lets them through to the page, unless this catches them
+        // there, under what's covering the form.
+        if let Some(shown) = shown.filter(|_| covered) {
+            let rect = shown.response.rect;
+            egui::Area::new(Id::unique("kame-reference-form-covered"))
+                .order(Order::Middle)
+                .fixed_pos(rect.min)
+                .constrain(false)
+                .show(ctx, |ui| {
+                    ui.allocate_response(rect.size(), egui::Sense::click_and_drag());
+                });
+        }
         if cancel {
             return;
         }
@@ -4147,6 +4159,32 @@ mod tests {
 
         assert_eq!(page.top_layer(), prompt);
         assert!(page.app.link_prompt.is_some());
+    }
+
+    #[test]
+    fn a_click_on_a_form_under_a_prompt_doesnt_reach_the_page() {
+        let mut page = typed_form_over_a_citation();
+        select(&mut page, 0, 3, 3);
+        ctrl_k(&mut page);
+        page.frame(Vec::new());
+        assert!(page.app.link_prompt.is_some());
+        let (caret, selection) = (page.app.session.caret, page.app.session.selection);
+        assert!(selection.is_some());
+        let centre = page.ctx.content_rect().center();
+
+        // Left of the prompt, where only the form is.
+        page.click(centre - Vec2::new(235.0, 0.0));
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.caret, caret);
+        assert_eq!(page.app.session.selection, selection);
+        assert_eq!(typed_authors(&page), "Typed Author");
+
+        // What covers it still takes clicks, and then the form does again.
+        page.press("Set link");
+        assert!(page.app.link_prompt.is_none());
+        page.press("Cancel");
+        assert!(page.app.refs.form.is_none());
     }
 
     #[test]

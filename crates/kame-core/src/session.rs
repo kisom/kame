@@ -1077,12 +1077,15 @@ impl Session {
         if self.selection.is_some() && !self.delete_selected() {
             return false;
         }
-        // A rule holds no text, so writing on one starts a paragraph after it.
+        // A rule or an image holds no text, so writing on one starts a paragraph after it.
         let caret = self.valid_caret();
-        let on_rule = self
-            .block_index(caret.block_id)
-            .is_some_and(|index| self.document().blocks[index].kind == BlockKind::Rule);
-        if on_rule && !self.split() {
+        let holds_no_text = self.block_index(caret.block_id).is_some_and(|index| {
+            matches!(
+                self.document().blocks[index].kind,
+                BlockKind::Rule | BlockKind::Image { .. }
+            )
+        });
+        if holds_no_text && !self.split() {
             return false;
         }
         let caret = self.valid_caret();
@@ -4928,6 +4931,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn on_an_image() -> Session {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        assert!(session.insert_image("plate.png".to_string()));
+        let image = session
+            .document()
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::Image { .. }))
+            .unwrap()
+            .id;
+        session.set_caret(Cursor {
+            block_id: image,
+            offset: 0,
+        });
+        session
+    }
+
+    fn kinds_and_words(session: &Session) -> Vec<(bool, String)> {
+        session
+            .document()
+            .blocks
+            .iter()
+            .map(|block| {
+                (
+                    matches!(block.kind, BlockKind::Image { .. }),
+                    block.text.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn writing_on_an_image_starts_a_paragraph_after_it() {
+        let mut session = on_an_image();
+        let images = |session: &Session| {
+            kinds_and_words(session)
+                .iter()
+                .filter(|(image, _)| *image)
+                .count()
+        };
+        assert!(session.insert("typed"));
+        assert_eq!(images(&session), 1);
+        let blocks = kinds_and_words(&session);
+        let at = blocks.iter().position(|(image, _)| *image).unwrap();
+        assert_eq!(blocks[at], (true, String::new()), "the image holds no text");
+        assert_eq!(blocks[at + 1], (false, "typed".to_string()));
+        assert_eq!(session.caret.offset, "typed".len());
+    }
+
+    #[test]
+    fn pressing_enter_on_an_image_does_not_make_another() {
+        let mut session = on_an_image();
+        let before = kinds_and_words(&session)
+            .iter()
+            .filter(|(image, _)| *image)
+            .count();
+        assert!(session.split());
+        let after = kinds_and_words(&session)
+            .iter()
+            .filter(|(image, _)| *image)
+            .count();
+        assert_eq!(after, before);
     }
 
     #[test]

@@ -1185,7 +1185,9 @@ fn fence_language(line: &str) -> Option<Option<String>> {
 
 fn split_kind(kind: &BlockKind) -> BlockKind {
     match kind {
-        BlockKind::Heading { .. } | BlockKind::Rule => BlockKind::Paragraph,
+        BlockKind::Heading { .. } | BlockKind::Rule | BlockKind::Image { .. } => {
+            BlockKind::Paragraph
+        }
         other => other.clone(),
     }
 }

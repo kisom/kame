@@ -167,7 +167,7 @@ A kind with no fields is written as a string. A kind with fields is written as a
 | `{"Heading":{"level":2}}` | A heading. Typing makes levels 1 to 3, and importing Markdown 1 to 6 | Prose |
 | `{"ListItem":{"ordered":true,"depth":1}}` | A list item. `depth` is left out when 0 | Prose |
 | `"BlockQuote"` | A quotation | Prose |
-| `{"Image":{"path":"images/plate.jpg","link":"https://…","align":"Center"}}` | An image. `link` is left out when absent. `align` is `Left`, `Center` or `Right`, and is left out when `Left` | Empty (see section 8) |
+| `{"Image":{"path":"images/plate.jpg","link":"https://…","align":"Center"}}` | An image. `link` is left out when absent. `align` is `Left`, `Center` or `Right`, and is left out when `Left` | Empty |
 | `"Rule"` | A horizontal rule | Empty |
 | `{"Code":{"language":"rust"}}`, `{"Code":{}}` | Code. `language` is left out when absent | Verbatim |
 | `"Prose"` | Text quoted exactly, in the serif | Verbatim |
@@ -412,5 +412,5 @@ These describe the code as it stands, and aren't rules to copy.
 - **Unknown kinds and styles aren't skipped.** One unknown block kind, style or annotation kind makes the head unreadable, so the document won't open. One in the log makes the history unreadable, and opening then discards it (section 1.5). A new variant must raise `user_version`.
 - **Ranges aren't checked on reading.** Nothing checks a span or anchor against its text when a document is read, so a damaged or hand-made file can hold offsets out of range or inside a character. Readers should clamp them for display, and must not assume they're valid.
 - **The rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
-- **Typing on an image block stores text in it.** `Session::insert` starts a new paragraph on a `Rule`, but has no such case for an `Image`. This is a bug to fix.
+- **Older files can hold text in an image block,** from before typing on one started a new paragraph. It isn't shown, and nothing removes it.
 - **Paths aren't portable by themselves.** A whole image path or a `~/` link only works where it was made. Only relative forms hold on another machine.

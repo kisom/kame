@@ -6,7 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **Typing on an image stores text in it.** `document-format.md`, section 8.
 - [ ] **`kame-sync enable` prints too little.** It leaves out `*.kame-wal` and `*.kame-shm`. Also,
   check `.stignore` on each machine. `merging.md`, section 6.1.
 - [ ] **New fields stop older builds reading logs, with no message.** A centered or right-aligned image

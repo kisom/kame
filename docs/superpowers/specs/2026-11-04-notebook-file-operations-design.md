@@ -156,18 +156,54 @@ gets the same protection, since its databases arrive the same way. (`~/data/.sti
 `/writing/**.kame` while this was being written. The other machines' files weren't checked.)
 
 **Telling what happened.** A database in a folder with logs is *stranded* if it has a recorded sync state
-(`Db::load_sync_state`) and the logs beside it, if there are any, don't contain that revision (`Store::contains`). Those
-logs may be missing, or may belong to a different document after a path is reused, as with deleting X and making a new X,
-or swapping two names. Without this, the old database's history would be written into the new document's logs and merged
-with it (`sync_in`, with no usable `last`), bringing deleted words into an unrelated document. A database that has never
-synced has no state and is left alone, as is anything with no `.kame-logs` above it.
+(`Db::load_sync_state`), it's at the place it last synced (`Db::load_sync_place`), and the logs beside it, if there are any,
+don't contain that revision (`Store::contains`). Those logs may be missing, or may belong to a different document after a path
+is reused, as with deleting X and making a new X, or swapping two names. Without this, the old database's history would be
+written into the new document's logs and merged with it (`sync_in`, with no usable `last`), bringing deleted words into an
+unrelated document. A database that has never synced has no state and is left alone, as is anything with no `.kame-logs` above
+it.
+
+**The place.** A sync records where it happened, beside the sync state: the document's path from its logging root, with `/`
+between folders. It's what separates the logs having left a database from a database having been copied here, and a sync state
+alone can't. The case that found this was in the real notebook: `essays/Politics/CommandingHeights.kame`, a byte-identical copy
+made by hand of `../../CommandingHeights.kame`, with the original's sync state and no logs of its own, which would have been
+retired ten minutes after first launch, with a false notice that it had been moved or deleted on another machine. So a place
+that's missing or differs is not stranded, whatever the logs say. Being wrong that way is what kame did before this work. Being
+wrong the other way hides someone's document.
+
+A database that isn't stranded for this reason does what any database does. `Logged` writes its history as new logs, and it
+records its new place, so that the document has its own logs from then on. Nothing retires it, and it lists as an ordinary
+document. It's relative to the logging root so that a database carried to a machine where the notebook is somewhere else is
+still in its place. An older kame ignores the row, as it reads `meta` only by key, so there's no migration. An older kame's Save As
+copies the place and leaves it there, which only makes that copy not stranded.
+
+The place follows the moves kame makes itself. `carry_out` syncs a moved document afterwards. `apply` records the new place as
+each database arrives at a home, by opening it for writing on the main thread and ignoring a failure, so that a second move
+before it's next opened is still recognised. If that fails, it's merely not stranded. A retired file keeps what it had, and is
+found by its revision, whatever its place. Under a name it never synced at, it's a document of its own, which is how to get one back
+by hand. Under the name it left it's stale again. Under its retired name it's not a document: opened there, it's held off as
+stranded, whatever its place, since logs for it would go to every machine and be taken there for a home.
+
+**Logs that are another document's.** A database that isn't stranded can still have another document's logs beside it, if a copy
+is put at a path that has logs, or a database with no place was left behind when its path was reused. If those logs don't
+hold its revision, and every revision in them is of another document, by `Document::id`, `Logged` writes nothing, as its history
+would otherwise reach another document's logs on every machine. `Outcome::others_logs` says so, and the app says this one isn't
+syncing and that Save As gives it logs of its own. A delete leaves those logs, and a move is refused, as for a stranded database. A
+pass leaves it alone, and doesn't take a copy like this at a stranded database's new home for the moved document having been
+opened there.
+
+**Lines that can't be read.** `Store` remembers dropping a whole line it couldn't check: one whose id doesn't match, or that doesn't
+parse, other than the unterminated last line still being written. The missing revision may be in one, so that's "can't be told",
+and not stranded, unless the revision is found in another line. This matters because `Revision::id()` hashes the re-serialized
+struct, and a line written before a `Metadata` field was added no longer checks. Any document last synced in that format
+would otherwise read as stranded, refuse to sync, and be retired. Instead it heals on its first sync, by writing its history again.
+For the same reason, a pass stops if any log has such a line, as it does for one that can't be read, since no home can be ruled out.
 
 The two places that write a sync state (`Logged::write_and_merge` and `build_from_logs`) both write a revision from the
 logs at that path, so a database in its right place always passes. The state is saved only once the log it names has been
 flushed to disk, as a power cut between the two would otherwise leave a healthy database naming a revision its logs lack, which
-would look stranded. For this to be reliable, `Session::save_as` must clear
-the sync state in the copy, since a copy would otherwise carry one from somewhere else, and be taken for a stale copy of the
-original. A copy made before that change still does (see the limits below).
+would look stranded. The place is saved after the state, so that a crash between them leaves a database that merely isn't
+stranded. `Session::save_as` clears both in the copy.
 
 **What's done with a stranded database,** by a new `kame_notebook` function, for everything but the open document. Its
 *new home* is the one log folder elsewhere in the notebook containing its recorded revision.
@@ -207,7 +243,7 @@ something else; a due pass waits for the next tick.
 
 Logs are read only for a stranded database, since a pass runs with nobody looking, on a laptop. Each pass remembers which
 databases it found healthy (`Healthy`, which goes to the pass's thread and comes back with it, as the times first seen do),
-with what that rested on: the revision the database remembers, and each log's name and size, from `stat` and no reading. If
+with what that rested on: the revision and the place the database remembers, and each log's name and size, from `stat` and no reading. If
 those are unchanged on the next pass, it's still healthy. Only not being stranded is remembered, and not a verdict that couldn't
 be reached, so a change can only cause another read. Within a pass, every log folder is read only if something has waited long
 enough to be acted on, or a retired or temporary database has logs with no database at their path to come back to, and that
@@ -235,11 +271,18 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   tool's delete and reaches A as a logs-only X with no usable head. B's X isn't stranded, since its own partial log holds its
   revision, so B's edits never reach Y, and X can come back on A as an empty document. It's divergence and not loss: the words
   are in B's database and B's log.
-- A copy made before `save_as` cleared the state, and not opened since, still carries the original's revision. It says "moved
-  or deleted on another machine", and the pass finds that revision in the original's logs with a healthy original there, and
-  retires it with `opened_there`. On disk it can't be told from a real stale copy. Nothing is lost, since its words are in
-  `.Z.retired.kame`, and `docs/keybindings.md` says how to get it back: open that and use Save As, which gives the copy logs of
-  its own. Renaming the file isn't enough, as it would still carry the revision and be retired again.
+- A database last synced before places were recorded has none, so it isn't recognised as stale until it's next synced. Opening
+  one on another machine after a delete can bring the document back, as it did before this work. After a path is reused, its
+  history stays out of the new document's logs (see above), and it just doesn't sync.
+- A move made by hand, with its logs, simply carries on. Without them it's treated like a copy: it starts logs of its own, and the
+  old ones stay as a document with only its logs.
+- A copy put at the same path from the logging root in another notebook, with no logs, can't be told from a database whose logs
+  have left, as a path from the root is all that's recorded, and it's taken for stale.
+- A Save As copy shares its original's document id, so a hand copy of one, put on the other's logs, isn't told from its own and
+  merges with them.
+- While a line that can't be checked exists anywhere in the notebook, a pass does nothing, and silently. Logs are only added to, so
+  one like that stays there unless it's removed by hand, and that includes every line written before a `Metadata` field was
+  added, and a line torn by a crash that another was then written after.
 - Deliberately deleting a document's `.sync` folder while keeping the marker now retires its database. The docs only ever
   told people to remove both.
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a

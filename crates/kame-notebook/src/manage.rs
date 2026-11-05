@@ -158,7 +158,7 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     // Found first, since which copies are this document's is told by reading it.
     let belonging = belonging_files(path);
     // Before the file goes, since it's the file that says.
-    let not_its_own = !logs_are_its_own(path);
+    let its_own = logs_are_its_own(path);
     // A document this machine hasn't opened yet has only its logs.
     match std::fs::remove_file(path) {
         Err(err) if err.kind() != std::io::ErrorKind::NotFound || !log_folder(path).is_dir() => {
@@ -176,10 +176,10 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     if !logs.is_dir() {
         return Ok(false);
     }
-    if !not_its_own {
+    if its_own {
         std::fs::remove_dir_all(&logs)?;
     }
-    Ok(not_its_own)
+    Ok(!its_own)
 }
 
 /// A document a move couldn't change, and why.

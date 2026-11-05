@@ -40,16 +40,20 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
-- [ ] **A clean-up pass stops without a word** on any log it can't read or one from a newer kame, since either
-  could hold the revision being looked for. The user is told nothing, and stranded databases stay until it's fixed.
-- [ ] **An old copy retired by mistake.** A copy made before `save_as` cleared the sync state, and not opened since, carries
-  the original's revision and is retired as stale. Nothing is lost, and `docs/keybindings.md` says how to get it back, but it
-  can't be told apart on disk.
+- [ ] **A clean-up pass stops without a word** on any log it can't read, one from a newer kame, or one with a whole line
+  that can't be checked, since any of those could hold the revision being looked for. The user is told nothing, and stranded
+  databases stay until it's fixed. Such a line stays for good, as logs are only added to: every line written before a `Metadata`
+  field was added, and a line torn by a crash that another was then written after. So a notebook with one has no clean-up at all
+  until something rewrites or removes it.
+- [ ] **A stale database from before places were recorded.** It has no place, so it isn't recognised as stale until it's next
+  synced, and opening one on another machine after a delete can bring the document back, as it did before. Once every
+  machine has synced its documents, there are none.
 - [ ] **A partial log folder after a move.** If a machine edits X offline while another renames X to Y, its surviving
   `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
   X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.
-- [ ] **A stranded document open on another document's logs reads them on every sync check,** since logs replaced while it's
-  open always look like news to it.
+- [ ] **A stranded document open on another document's logs reads them on every sync check,** on the main thread, since logs
+  replaced while it's open always look like news to it, and a document *opened* stranded on them never has a first sync, so it
+  runs a full `Store::load` at each check. A document held off with `others_logs` reads what's new at each check too.
 - [ ] **News for a healthy open document reads its logs on the main thread,** in `is_stranded`. It's only when there's news,
   and fine for small logs.
 - [ ] **`.X.moving-N.kame` doesn't go with its document.** A temporary name left by a crash isn't in `belonging_files`, so a

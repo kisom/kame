@@ -190,8 +190,8 @@ the main thread does what was decided (`apply`) when the result arrives, with th
 again just before taking it. That happens each time a pass finishes, even when nothing has waited long enough, since a retired
 database coming back needs no wait. Passes never overlap, since a temporary name seen by a second pass would be taken for
 something else; a due pass waits for the next tick. The cheap test (is there a log folder?) runs first, and logs are read only
-for a stranded database. Afterwards the listing refreshes, and a notice says what was done, naming the first and counting
-the others.
+for a stranded database. Afterwards the listing refreshes, and a notice says what happened to each of the first three, retirements first, with where the file is and what it holds, and
+counting any more.
 
 **The wait.** Nothing is moved or retired the first time it's seen stranded. The app remembers when it first saw each one,
 in memory, and acts only if it's still stranded on a pass at least 10 minutes later. The notebook spec has a sentence

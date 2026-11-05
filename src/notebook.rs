@@ -161,6 +161,28 @@ impl NotebookUi {
     }
 }
 
+/// Whether a clean-up pass should start: it was asked for, or something is waiting out its time and
+/// `STRANDED_RECHECK` has gone since the last look.
+fn pass_due(asked: bool, seen_empty: bool, checked: Option<Instant>, now: Instant) -> bool {
+    asked
+        || (!seen_empty
+            && checked
+                .is_none_or(|checked| now.saturating_duration_since(checked) >= STRANDED_RECHECK))
+}
+
+/// What a pass reads: what's stranded, when each was first seen so, and what to do about those that
+/// have waited long enough. It changes nothing, so it can be on any thread.
+fn read_pass(
+    notebook: &Notebook,
+    mut seen: HashMap<PathBuf, Instant>,
+    now: Instant,
+) -> StrandedPass {
+    let found = find_stranded(notebook);
+    let ready = stranded_ready(&mut seen, &found, now);
+    let steps = decide(notebook, &ready);
+    (seen, steps)
+}
+
 /// Notes when each of `found` was first seen stranded, forgetting any that no longer are, and
 /// returns those seen so for at least `STRANDED_WAIT`.
 pub(crate) fn stranded_ready(
@@ -186,24 +208,34 @@ fn file_name(path: &Path) -> String {
     )
 }
 
-/// What a clean-up did, in a notice: the first thing that was done, retirements ahead of the rest
-/// since they're what a person may want to look for, and how many others there were.
+/// How many things a notice describes before counting the rest.
+const NOTICE_NAMES: usize = 3;
+
+/// What a clean-up did, in a notice: a sentence for each of the first few things done, retirements
+/// ahead of the rest since they're what a person may need to go and look at, and a count of any more.
 pub(crate) fn stranded_notice(done: &[Done]) -> String {
-    let first = done
+    let mut ordered: Vec<&Done> = done.iter().collect();
+    ordered.sort_by_key(|one| !matches!(one, Done::Retired { .. }));
+    let mut parts: Vec<String> = ordered
         .iter()
-        .find(|one| matches!(one, Done::Retired { .. }))
-        .or(done.first());
-    let Some(first) = first else {
-        return String::new();
-    };
-    let mut text = match first {
+        .take(NOTICE_NAMES)
+        .map(|one| what_was_done(one))
+        .collect();
+    if ordered.len() > NOTICE_NAMES {
+        parts.push(format!("and {} more.", ordered.len() - NOTICE_NAMES));
+    }
+    parts.join(" ")
+}
+
+fn what_was_done(done: &Done) -> String {
+    match done {
         Done::Moved { from, to } => format!(
-            "{} was moved to {}, to follow its document, which was moved on another machine",
+            "{} was moved to {}, to follow its document, which was moved on another machine.",
             file_name(from),
             to.display()
         ),
         Done::Returned { from, to } => format!(
-            "{} was moved back to {}, since its document's logs have arrived there",
+            "{} was moved back to {}, since its document's logs have arrived there.",
             file_name(from),
             to.display()
         ),
@@ -230,16 +262,7 @@ pub(crate) fn stranded_notice(done: &[Done]) -> String {
             text.push('.');
             text
         }
-    };
-    let others = done.len() - 1;
-    if others > 0 {
-        text.push_str(&format!(
-            " {others} other database{} {} also tidied up.",
-            if others == 1 { "" } else { "s" },
-            if others == 1 { "was" } else { "were" }
-        ));
     }
-    text
 }
 
 /// Where the text starts, within the room right of the browser: where it would be anyway if
@@ -302,7 +325,7 @@ impl KameApp {
         if let Some(coming) = &self.nb.listing_coming {
             match coming.try_recv() {
                 Ok(listing) => {
-                    if self.nb.listing != listing {
+                    if !self.nb.listing.is_empty() && self.nb.listing != listing {
                         self.nb.stranded_due = true;
                     }
                     self.nb.listing = listing;
@@ -377,25 +400,26 @@ impl KameApp {
         let Some(notebook) = self.nb.notebook.clone() else {
             return;
         };
-        let recheck = !self.nb.stranded_seen.is_empty()
-            && self
-                .nb
-                .stranded_checked
-                .is_none_or(|checked| checked.elapsed() >= STRANDED_RECHECK);
-        if !self.nb.stranded_due && !recheck {
+        let waiting = !self.nb.stranded_seen.is_empty();
+        if waiting {
+            ctx.request_repaint_after(STRANDED_RECHECK);
+        }
+        if !pass_due(
+            self.nb.stranded_due,
+            !waiting,
+            self.nb.stranded_checked,
+            Instant::now(),
+        ) {
             return;
         }
         self.nb.stranded_due = false;
         self.nb.stranded_checked = Some(Instant::now());
-        let mut seen = self.nb.stranded_seen.clone();
+        let seen = self.nb.stranded_seen.clone();
         let (send, coming) = channel();
         let reading = notebook.clone();
         self.nb.stranded_coming = Some((notebook, coming));
         std::thread::spawn(move || {
-            let found = find_stranded(&reading);
-            let ready = stranded_ready(&mut seen, &found, Instant::now());
-            let steps = decide(&reading, &ready);
-            let _ = send.send((seen, steps));
+            let _ = send.send(read_pass(&reading, seen, Instant::now()));
         });
     }
 
@@ -1097,28 +1121,100 @@ mod tests {
         );
     }
 
+    fn retired(name: &str, unsynced: bool) -> Done {
+        Done::Retired {
+            from: PathBuf::from(format!("/n/{name}.kame")),
+            to: PathBuf::from(format!("/n/.{name}.retired.kame")),
+            opened_there: false,
+            unsynced,
+        }
+    }
+
     #[test]
-    fn the_notice_for_several_names_one_and_counts_the_rest() {
+    fn the_notice_for_several_says_each_with_retirements_first() {
         let text = stranded_notice(&[
             Done::Moved {
                 from: PathBuf::from("/n/a.kame"),
                 to: PathBuf::from("/n/b.kame"),
             },
-            Done::Retired {
-                from: PathBuf::from("/n/c.kame"),
-                to: PathBuf::from("/n/.c.retired.kame"),
-                opened_there: false,
-                unsynced: false,
-            },
-            Done::Returned {
-                from: PathBuf::from("/n/.d.retired.kame"),
-                to: PathBuf::from("/n/d.kame"),
-            },
+            retired("c", true),
+            retired("e", false),
         ]);
-        assert!(text.starts_with("c.kame was retired"), "{text}");
-        assert!(
-            text.contains("2 other databases were also tidied up"),
-            "{text}"
+        let (c, e, a) = (
+            text.find("/n/.c.retired.kame").expect(&text),
+            text.find("/n/.e.retired.kame").expect(&text),
+            text.find("/n/b.kame").expect(&text),
+        );
+        assert!(c < e && e < a, "{text}");
+        assert!(text.contains("words that never synced"), "{text}");
+        assert!(text.contains("only a copy"), "{text}");
+        assert!(!text.contains("more"), "{text}");
+    }
+
+    #[test]
+    fn the_notice_past_three_counts_the_rest() {
+        let done: Vec<Done> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|name| retired(name, true))
+            .collect();
+        let text = stranded_notice(&done);
+        assert!(text.contains("/n/.c.retired.kame"), "{text}");
+        assert!(!text.contains("/n/.d.retired.kame"), "{text}");
+        assert!(text.ends_with("and 2 more."), "{text}");
+    }
+
+    #[test]
+    fn a_pass_is_due_when_asked_or_when_something_waits_and_a_minute_has_passed() {
+        let now = Instant::now();
+        let long_ago = now.checked_sub(STRANDED_RECHECK).unwrap();
+        let just_now = now.checked_sub(STRANDED_RECHECK / 2).unwrap();
+        assert!(pass_due(true, true, Some(now), now));
+        assert!(!pass_due(false, true, None, now), "nothing waits");
+        assert!(!pass_due(false, true, Some(long_ago), now), "nothing waits");
+        assert!(pass_due(false, false, None, now), "never checked");
+        assert!(!pass_due(false, false, Some(just_now), now), "too soon");
+        assert!(pass_due(false, false, Some(long_ago), now));
+    }
+
+    #[test]
+    fn a_retired_database_comes_back_on_a_pass_where_nothing_is_ready() {
+        use kame_core::session::Session;
+        use kame_sync::logs::{log_folder, Logged, MARKER};
+
+        let root = kame_test_dir::folder("app-stranded-return")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        std::fs::write(root.join(MARKER), "").unwrap();
+        let notebook = Notebook::open(&root).unwrap();
+        let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+        let mut session = Session::open(&a).unwrap();
+        session.insert("Words.");
+        Logged::open(&session, "titan-bbbb")
+            .unwrap()
+            .sync(&mut session, 100)
+            .unwrap();
+        drop(session);
+        let carried = root.join(".carried");
+        std::fs::rename(log_folder(&a), &carried).unwrap();
+
+        let start = Instant::now();
+        let (seen, steps) = read_pass(&notebook, HashMap::new(), start);
+        assert!(apply(&notebook, steps, None).is_empty(), "first sighting");
+        let (seen, steps) = read_pass(&notebook, seen, start + STRANDED_WAIT);
+        assert_eq!(apply(&notebook, steps, None).len(), 1);
+        let retired = root.join(".a.retired.kame");
+        assert!(retired.is_file());
+
+        std::fs::rename(&carried, log_folder(&b)).unwrap();
+        let (seen, steps) = read_pass(&notebook, seen, start + STRANDED_WAIT);
+        assert!(seen.is_empty());
+        assert_eq!(
+            apply(&notebook, steps, None),
+            [Done::Returned {
+                from: retired,
+                to: b
+            }]
         );
     }
 

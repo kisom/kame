@@ -12,8 +12,10 @@ pub fn next_boundary(text: &str, offset: usize) -> Option<usize> {
     text[offset..].chars().next().map(|c| offset + c.len_utf8())
 }
 
-/// The byte index of the first character of the next word at or after `offset`,
-/// or `None` when no word follows. A word is a maximal run of [`is_word_char`]
+/// Where moving right by a word from `offset` lands: the first character of the
+/// next word, or with no word ahead, after the last thing in `text` that isn't
+/// a space, so the end of a sentence is one stop and not two. `None` when
+/// that's behind `offset` too. A word is a maximal run of [`is_word_char`]
 /// characters; the current run (word or not) is skipped first, so moving right
 /// lands on the next word rather than the next character.
 pub fn next_word(text: &str, offset: usize) -> Option<usize> {
@@ -36,7 +38,11 @@ pub fn next_word(text: &str, offset: usize) -> Option<usize> {
     while k < n && !is_word_char(chars[k].1) {
         k += 1;
     }
-    (k < n).then(|| chars[k].0)
+    if let Some((next, _)) = chars.get(k) {
+        return Some(*next);
+    }
+    let end = text.trim_end().len();
+    (end > offset).then_some(end)
 }
 
 /// The byte index of the first character of the previous word before `offset`,

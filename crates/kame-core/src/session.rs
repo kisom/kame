@@ -2262,7 +2262,8 @@ impl Session {
     }
 
     /// Ctrl-arrow: move right by a whole word, landing on the next word's
-    /// start. At the end of a block the caret moves to the start of the next.
+    /// start, or after the block's last word and any punctuation behind it. From
+    /// there the caret moves to the start of the next block.
     pub fn move_right_word(&mut self, select: bool) {
         if !select {
             if let Some((_, end)) = self.ordered_selection() {
@@ -4835,6 +4836,72 @@ mod tests {
         let mut session = Session::anonymous().unwrap();
         session.paste("one\ntwo");
         assert_eq!(session.document().blocks.len(), 2);
+    }
+
+    /// Two blocks, with the caret at `offset` in the first.
+    fn caret_in_first_of_two(first: &str, offset: usize) -> (Session, BlockId, BlockId) {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(first);
+        session.split();
+        session.insert("next");
+        let (one, two) = (
+            session.document().blocks[0].id,
+            session.document().blocks[1].id,
+        );
+        session.caret = Cursor {
+            block_id: one,
+            offset,
+        };
+        (session, one, two)
+    }
+
+    #[test]
+    fn moving_right_stops_at_the_end_of_a_blocks_last_word() {
+        for from in [4, 6] {
+            let (mut session, one, two) = caret_in_first_of_two("one two", from);
+            session.move_right_word(false);
+            assert_eq!((session.caret.block_id, session.caret.offset), (one, 7));
+            session.move_right_word(false);
+            assert_eq!((session.caret.block_id, session.caret.offset), (two, 0));
+        }
+    }
+
+    #[test]
+    fn moving_right_takes_a_sentences_end_in_one_stop() {
+        let (mut session, one, two) = caret_in_first_of_two("one two.”", 4);
+        let end = "one two.”".len();
+        session.move_right_word(false);
+        assert_eq!((session.caret.block_id, session.caret.offset), (one, end));
+        session.move_right_word(false);
+        assert_eq!((session.caret.block_id, session.caret.offset), (two, 0));
+    }
+
+    #[test]
+    fn moving_right_reaches_the_end_of_the_last_word_of_the_document() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two");
+        session.caret.offset = 4;
+        session.move_right_word(false);
+        assert_eq!(session.caret.offset, 7);
+        session.move_right_word(false);
+        assert_eq!(session.caret.offset, 7, "there is nowhere further to go");
+    }
+
+    #[test]
+    fn selecting_right_takes_just_the_last_word() {
+        let (mut session, _, _) = caret_in_first_of_two("one two", 4);
+        session.move_right_word(true);
+        assert_eq!(session.selected_text().as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn moving_right_to_a_last_words_end_counts_bytes() {
+        let (mut session, one, _) = caret_in_first_of_two("un été", 3);
+        session.move_right_word(false);
+        assert_eq!(
+            (session.caret.block_id, session.caret.offset),
+            (one, "un été".len())
+        );
     }
 
     #[test]

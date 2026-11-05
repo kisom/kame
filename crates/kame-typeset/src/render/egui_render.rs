@@ -1699,6 +1699,20 @@ while straightforward arrangements occasionally demonstrate remarkably counterin
         assert_eq!(next_word(text, 2), Some(4), "inside a word, skip to next");
         assert_eq!(next_word(text, 4), Some(10));
         assert_eq!(next_word(text, 10), Some(16));
+        // In the last word there's no next one to land on, so it's that word's end,
+        // past any punctuation and short of any spaces.
+        assert_eq!(next_word(text, 16), Some(19));
+        assert_eq!(next_word(text, 17), Some(19));
+        assert_eq!(next_word("fox.", 0), Some(4), "it goes past the period");
+        assert_eq!(next_word("fox.", 3), Some(4), "and from just before it");
+        assert_eq!(next_word("fox.", 4), None);
+        assert_eq!(
+            next_word("fox. \u{a0}", 0),
+            Some(4),
+            "it stops short of spaces"
+        );
+        assert_eq!(next_word("fox. ", 4), None);
+        assert_eq!(next_word("  ", 0), None, "only spaces is nowhere to stop");
         assert_eq!(next_word(text, 19), None);
 
         // prev_word: inside a word -> its start; between words -> previous.

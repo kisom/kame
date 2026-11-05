@@ -41,6 +41,8 @@ whole words. Drag or Shift-click to select a range by character.
 | Alt-Backspace or Esc then Backspace | delete the word before the caret |
 | Esc then `<` / Esc then `>` | go to the very start / the very end of the document |
 
+Moving right stops after a block's last word and any punctuation behind it, and the next move goes on to the next block.
+
 Esc counts as a prefix when it has nothing to close, and for two seconds.
 
 ## Nested lists

@@ -8,7 +8,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
-- [ ] **A link to a hidden file in `static/`** publishes a dead link naming the file, with no warning.
 
 ## Site
 

@@ -104,11 +104,13 @@ fn published_link(
         }
         Follow::View(file) => {
             let relative = relative_to(notebook, &file)?;
-            if relative.starts_with("static/") {
+            // Hidden files in static/ don't publish, so a link would be dead and name the file.
+            let hidden = relative.split('/').any(|part| part.starts_with('.'));
+            if relative.starts_with("static/") && !hidden {
                 return Some(format!("/{}", url_path(&relative)));
             }
             problems.warnings.push(format!(
-                "\"{slug}\": the link to {target} publishes as its text: only static/ is public"
+                "\"{slug}\": the link to {target} publishes as its text: only what's in static/, and not hidden, is public"
             ));
             None
         }
@@ -660,6 +662,34 @@ mod tests {
         nb.words("a.kame", true, "Words.");
         let (plan, _) = nb.plan();
         assert!(page(&plan, "index.html").contains("/a/"));
+    }
+
+    #[test]
+    fn a_link_to_a_hidden_file_in_static_publishes_as_its_words() {
+        let nb = made("nbhidden", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("static/.secret.pdf", "not for anyone");
+        let mut doc = Document::new("Linking");
+        doc.blocks[0].text = "See this.".to_string();
+        doc.blocks[0].spans.push(kame_core::model::Span {
+            start: 0,
+            end: 3,
+            style: SpanStyle::Link {
+                url: "static/.secret.pdf".to_string(),
+            },
+        });
+        nb.document("linking.kame", true, &doc);
+        let (plan, problems) = nb.plan();
+        let page_text = page(&plan, "linking/index.html");
+        assert!(!page_text.contains("secret"), "{page_text}");
+        assert!(
+            problems
+                .warnings
+                .iter()
+                .any(|said| said.contains(".secret")),
+            "{:?}",
+            problems.warnings
+        );
     }
 
     #[test]

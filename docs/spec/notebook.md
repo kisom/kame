@@ -225,7 +225,7 @@ Which links this covers depends on the span:
 |---|---|
 | **Open**, on a published document | That document's address |
 | **Open**, on an unpublished one | Its words, with a warning, so nothing private leaks and no link goes dead |
-| **View**, under `static/` | That file's address |
+| **View**, under `static/` with no hidden part | That file's address |
 | **View**, anywhere else | Its words, with a warning |
 | **Create**, of a folder's index | The folder's address, for the web server to answer |
 | **Create**, of anything else | Its words, with a warning |
@@ -272,7 +272,7 @@ Moving a document by hand keeps its new place, and links to the old path don't f
 These describe the code as it stands, and aren't rules to copy.
 
 - **Some untouched documents aren't removed.** Only one newly created document is remembered at a time, so following a link from one untouched new document to create another keeps the first, and it may then write logs. Cancelling the prompt about losing work also keeps it.
-- **Links can publish what they shouldn't, or nothing useful.** A link to an existing private folder publishes its name (`/papers/`) with no warning. A link to `static/.secret.pdf` publishes a dead link naming a hidden file, also with no warning. A link to `./` in a root with no index publishes `href="//"`.
+- **Links can publish what they shouldn't, or nothing useful.** A link to an existing private folder publishes its name (`/papers/`) with no warning. A link to `./` in a root with no index publishes `href="//"`.
 - **A notebook inside a notebook isn't separated.** Finding one stops at the nearest `notebook.yaml`, but walking down from the outer root doesn't stop at an inner one. The outer notebook lists and publishes the inner one's documents, and its `notebook.yaml` shows up as a file.
 - **Moved documents leave old databases.** With logs on, moving a document on one machine leaves another machine with its old database at the old path and the logs at the new path, so both get listed. The design for detecting this is in section 10 of the notebook design, and isn't built.
 - **There's no Move command.** One would need to rewrite links to the old path as ordinary edits, in every document that has them.

@@ -632,6 +632,33 @@ impl Db {
         Ok(())
     }
 
+    /// Replaces the head document, the whole op log and the cursor in one transaction, for a
+    /// history said again throughout, so that a crash leaves all of it as it was or all of it new.
+    pub fn replace_history(
+        &mut self,
+        doc: &Document,
+        ops: &[Op],
+        cursor: usize,
+    ) -> Result<(), DbError> {
+        let json = serde_json::to_string(doc)?;
+        let rows = ops
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<String>, _>>()?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO documents (id, json) VALUES (1, ?1)",
+            params![json],
+        )?;
+        tx.execute("DELETE FROM ops", [])?;
+        for row in &rows {
+            tx.execute("INSERT INTO ops (json) VALUES (?1)", params![row])?;
+        }
+        write_cursor(&tx, cursor)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Persists a head document and its cursor atomically, changing no ops.
     ///
     /// The write path for undo/redo: the op log is untouched, the cursor moves,

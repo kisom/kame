@@ -176,8 +176,9 @@ Open and Save As use the system's file browser. File > Open Path takes a typed p
 instead, with `~` expanded and relative paths resolved beside the current document.
 Save As carries the history, snapshots and properties to the new file and continues
 there, leaving the old file as it was. Images and relative links are said again from
-the new folder, so they lead where they did. Saving over an existing file replaces it
-whole.
+the new folder, so they lead where they did, all through the history: it isn't an undo
+step, and what Redo could bring back is still there. Snapshots stay as they were taken.
+Saving over an existing file replaces it whole.
 
 A snapshot is a complete copy of the document stored in the `.kame` file,
 outside the undo history. Restoring one is the only command here that changes

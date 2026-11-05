@@ -6533,12 +6533,11 @@ impl KameApp {
         match self.session.save_as(path) {
             Ok(()) => {
                 let notebook = kame_notebook::Notebook::find(path).ok().flatten();
-                self.session.rehome_images(
+                self.session.rehome(
                     from.as_deref(),
                     notebook.as_ref().map(|nb| nb.root.as_path()),
+                    kame_sync::logs::names_logs_only,
                 );
-                self.session
-                    .rehome_links(from.as_deref(), kame_sync::logs::names_logs_only);
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
                     self.finish_close(ctx);

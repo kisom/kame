@@ -11,7 +11,7 @@ use crate::links::{
     image_file, names_something, own_target_after_save_as, retargeted, stored_image_path,
 };
 use crate::model::{
-    bare_link_ranges, Anchor, AnnotationId, AnnotationKind, BlockId, BlockKind, Document,
+    bare_link_ranges, Anchor, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
     ImageAlign, Metadata, Span, SpanStyle,
 };
 use crate::references::{
@@ -979,28 +979,18 @@ impl Session {
         }
         let mut document = self.editor.document().clone();
         let mut changed = 0;
-        let mut apply = |link: &mut String, to_document: bool| match rewrite(link, to_document) {
-            Some(new) if new != *link => {
-                *link = new;
-                changed += 1;
-            }
-            _ => {}
-        };
-        for block in &mut document.blocks {
-            for span in &mut block.spans {
-                match &mut span.style {
-                    SpanStyle::Link { url } => apply(url, false),
-                    SpanStyle::DocumentLink { target } => apply(target, true),
-                    _ => {}
+        places_in_document(&mut document, &mut |place| {
+            let Place::Link(link, to_document) = place else {
+                return;
+            };
+            match rewrite(link, to_document) {
+                Some(new) if new != *link => {
+                    *link = new;
+                    changed += 1;
                 }
+                _ => {}
             }
-            if let BlockKind::Image {
-                link: Some(link), ..
-            } = &mut block.kind
-            {
-                apply(link, false);
-            }
-        }
+        });
         if changed > 0 && !self.replace_document(document) {
             return Err("could not save the changed links".into());
         }
@@ -1732,9 +1722,9 @@ impl Session {
         self.set_block_kind(block_id, BlockKind::Image { path, link, align })
     }
 
-    /// After a save as, says each image's path again for where the document is now, having been
-    /// at `from` until then. `root` is the notebook it's in now, if any. An image that can't be
-    /// found keeps what it has, since there's nothing to say about it.
+    /// After a move, says each image's path again for where the document is now, having been at
+    /// `from` until then, each as an edit. `root` is the notebook it's in now, if any. An image
+    /// that can't be found keeps what it has, since there's nothing to say about it.
     pub fn rehome_images(&mut self, from: Option<&Path>, root: Option<&Path>) {
         let Some(document) = self.path.clone() else {
             return;
@@ -1751,45 +1741,105 @@ impl Session {
             })
             .collect();
         for (id, stored, link, align) in images {
-            let file = if Path::new(&stored).is_absolute() {
-                PathBuf::from(&stored)
-            } else {
-                match whole_image_path(&stored, from) {
-                    Some(file) => file,
-                    None => continue,
+            match rehomed_image(&stored, from, &document, root) {
+                Some(path) if path != stored => {
+                    let kind = BlockKind::Image { path, link, align };
+                    let result = self.editor.set_block_kind(id, kind);
+                    self.commit(result);
                 }
-            };
-            if !file.exists() {
-                continue;
-            }
-            let path = stored_image_path(&file, &document, root);
-            if path != stored {
-                let kind = BlockKind::Image { path, link, align };
-                let result = self.editor.set_block_kind(id, kind);
-                self.commit(result);
+                _ => {}
             }
         }
     }
 
-    /// After a save as, says each relative link again for where the document is now, having been
-    /// at `from` until then, as one undo step. A link to the document itself goes on leading to
-    /// it. A web link or `#Heading` depends on nothing of the kind and stays, and a document that
-    /// had no file has no way to say where one led. A link to anything at all is only taken for a
-    /// path if what it names was there, as what looks like a path may be an address someone
-    /// wrote, while a link to a document always names one, or one to come. What's on disk is
-    /// there, and so is anything `there` says a link, written in the document at `from`, names.
-    pub fn rehome_links(&mut self, from: Option<&Path>, there: impl Fn(&str, &Path) -> bool) {
-        let (Some(from), Some(to)) = (from, self.path.clone()) else {
+    /// After a save as, says each image's path and each relative link again for where the document
+    /// is now, having been at `from` until then. `root` is the notebook it's in now, if any. This
+    /// is part of saving it elsewhere rather than an edit, so the whole history is said again the
+    /// same way, and the new file starts out saying them from where it is: undo and redo go on as
+    /// they were, and none of it is a step of its own. Snapshots are kept as they were taken.
+    ///
+    /// An image is said again as [`Session::rehome_images`] has it. A link to the document itself
+    /// goes on leading to it. A web link or `#Heading` depends on nothing of the kind and stays,
+    /// and a document that had no file has no way to say where one led. A link to anything at all
+    /// is only taken for a path if what it names was there, as what looks like a path may be an
+    /// address someone wrote, while a link to a document always names one, or one to come. What's
+    /// on disk is there, and so is anything `there` says a link, written in the document at
+    /// `from`, names.
+    pub fn rehome(
+        &mut self,
+        from: Option<&Path>,
+        root: Option<&Path>,
+        there: impl Fn(&str, &Path) -> bool,
+    ) {
+        let Some(to) = self.path.clone() else {
             return;
         };
-        let selection = self.selection;
-        let rewritten = self.rewrite_links_by_kind(|link, to_document| {
-            (to_document || names_something(link, from) || there(link, from))
-                .then(|| own_target_after_save_as(link, from, &to, to_document))
-        });
-        match rewritten {
-            Ok(_) => self.selection = selection,
-            Err(err) => self.last_error = Some(err),
+        if self.newer || self.save_failed {
+            return;
+        }
+        let failed =
+            |err: DbError| format!("could not say links and images again from here — {err}");
+        let history = self
+            .db
+            .load_ops()
+            .and_then(|ops| Ok((ops, self.db.cursor()?)));
+        let (ops, cursor) = match history {
+            Ok(history) => history,
+            Err(err) => {
+                self.last_error = Some(failed(err));
+                return;
+            }
+        };
+        let mut ops: Vec<Op> = ops.into_iter().map(|(_, op)| op).collect();
+        let cursor = cursor.min(ops.len());
+        // Worked out once for each, so that every state in the history says it the same way.
+        let mut links: HashMap<(String, bool), String> = HashMap::new();
+        let mut images: HashMap<String, String> = HashMap::new();
+        let mut changed = false;
+        let mut visit = |place: Place| {
+            let (written, new) = match place {
+                Place::Link(link, to_document) => {
+                    let Some(from) = from else {
+                        return;
+                    };
+                    let new = links
+                        .entry((link.clone(), to_document))
+                        .or_insert_with(|| {
+                            if to_document || names_something(link, from) || there(link, from) {
+                                own_target_after_save_as(link, from, &to, to_document)
+                            } else {
+                                link.clone()
+                            }
+                        })
+                        .clone();
+                    (link, new)
+                }
+                Place::Image(path) => {
+                    let new = images
+                        .entry(path.clone())
+                        .or_insert_with(|| {
+                            rehomed_image(path, from, &to, root).unwrap_or_else(|| path.clone())
+                        })
+                        .clone();
+                    (path, new)
+                }
+            };
+            if *written != new {
+                *written = new;
+                changed = true;
+            }
+        };
+        let mut document = self.editor.document().clone();
+        places_in_document(&mut document, &mut visit);
+        for op in &mut ops {
+            places_in_op(op, &mut visit);
+        }
+        if !changed {
+            return;
+        }
+        match self.db.replace_history(&document, &ops, cursor) {
+            Ok(()) => self.editor = Editor::with_cursor(document, ops, cursor),
+            Err(err) => self.last_error = Some(failed(err)),
         }
     }
 
@@ -2926,6 +2976,100 @@ fn whole_image_path(stored: &str, document: Option<&Path>) -> Option<PathBuf> {
     Some(file.canonicalize().unwrap_or(file))
 }
 
+/// What an image block that stores `stored`, in the document that was at `from`, should store
+/// as the document at `document` in the notebook at `root`, if anything. An image that can't be
+/// found has nothing to say about it.
+fn rehomed_image(
+    stored: &str,
+    from: Option<&Path>,
+    document: &Path,
+    root: Option<&Path>,
+) -> Option<String> {
+    let file = if Path::new(stored).is_absolute() {
+        PathBuf::from(stored)
+    } else {
+        whole_image_path(stored, from)?
+    };
+    file.exists()
+        .then(|| stored_image_path(&file, document, root))
+}
+
+/// Something in a document that says where a thing is.
+enum Place<'a> {
+    /// A link, and whether it's one to a document, as a `DocumentLink` is.
+    Link(&'a mut String, bool),
+    /// The path an image block stores.
+    Image(&'a mut String),
+}
+
+fn places_in_spans(spans: &mut [Span], visit: &mut dyn FnMut(Place)) {
+    for span in spans {
+        match &mut span.style {
+            SpanStyle::Link { url } => visit(Place::Link(url, false)),
+            SpanStyle::DocumentLink { target } => visit(Place::Link(target, true)),
+            _ => {}
+        }
+    }
+}
+
+fn places_in_kind(kind: &mut BlockKind, visit: &mut dyn FnMut(Place)) {
+    if let BlockKind::Image { path, link, .. } = kind {
+        visit(Place::Image(path));
+        if let Some(link) = link {
+            visit(Place::Link(link, false));
+        }
+    }
+}
+
+fn places_in_block(block: &mut Block, visit: &mut dyn FnMut(Place)) {
+    places_in_spans(&mut block.spans, visit);
+    places_in_kind(&mut block.kind, visit);
+}
+
+fn places_in_document(document: &mut Document, visit: &mut dyn FnMut(Place)) {
+    for block in &mut document.blocks {
+        places_in_block(block, visit);
+    }
+}
+
+/// Every place in `op`, in each block, kind, set of spans and document it carries.
+fn places_in_op(op: &mut Op, visit: &mut dyn FnMut(Place)) {
+    match op {
+        Op::DeleteText {
+            old_spans: Some(spans),
+            ..
+        } => places_in_spans(spans, visit),
+        Op::InsertBlock { block, .. } | Op::DeleteBlock { block, .. } => {
+            places_in_block(block, visit)
+        }
+        Op::SetBlockKind { old_kind, kind, .. } => {
+            places_in_kind(old_kind, visit);
+            places_in_kind(kind, visit);
+        }
+        Op::SetSpans {
+            old_spans, spans, ..
+        } => {
+            places_in_spans(old_spans, visit);
+            places_in_spans(spans, visit);
+        }
+        Op::ReplaceDocument { old, new } => {
+            places_in_document(old, visit);
+            places_in_document(new, visit);
+        }
+        Op::Batch { ops } => {
+            for op in ops {
+                places_in_op(op, visit);
+            }
+        }
+        Op::InsertText { .. }
+        | Op::DeleteText { .. }
+        | Op::AddAnnotation { .. }
+        | Op::RemoveAnnotation { .. }
+        | Op::SetAnnotationBody { .. }
+        | Op::SetTitle { .. } => {}
+    }
+}
+
 pub fn missing_images(document: &Document) -> usize {
     document
         .blocks
@@ -3962,7 +4106,7 @@ mod tests {
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         let to = root.join("three/deep/a.kame");
         session.save_as(&to).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         let expected = [
             "../../two/d.kame",
             "../../two/d.kame#Part",
@@ -3975,12 +4119,65 @@ mod tests {
             "../../two/d.kame",
         ];
         assert_eq!(link_targets(&session), expected);
-        // It reached the disk, and is one step that goes back to what it was.
         drop(session);
-        let mut reopened = Session::open(&to).unwrap();
+        let reopened = Session::open(&to).unwrap();
         assert_eq!(link_targets(&reopened), expected);
-        assert!(reopened.undo());
-        assert_eq!(link_targets(&reopened)[0], "../two/d.kame");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_as_says_links_and_images_again_with_no_step_of_its_own() {
+        let root = scratch_dir("rehomehistory").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("static")).unwrap();
+        std::fs::write(root.join("static/plate.png"), "a plate").unwrap();
+        let from = root.join("one/a.kame");
+        let mut session = document_with_each_link(&root);
+        session.insert_image("../static/plate.png".to_string());
+        let first = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        session.insert("z");
+        assert!(session.undo());
+        let history = session.history();
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        let to = root.join("three/deep/a.kame");
+        session.save_as(&to).unwrap();
+        session.rehome(Some(&from), Some(&root), |_, _| false);
+        let expected = [
+            "../../two/d.kame",
+            "../../two/d.kame#Part",
+            "../../notes.md",
+            "#Heading",
+            "#Heading",
+            "https://example.com/a#b",
+            "mailto:a@example.com",
+            "www.example.com/x",
+            "../../two/d.kame",
+        ];
+        assert_eq!(link_targets(&session), expected);
+        assert_eq!(image_paths(&session)[1], "../../static/plate.png");
+        // Nothing is added to the history, and what a redo could return to is still there.
+        assert_eq!(session.history(), history);
+        assert!(session.redo());
+        assert_eq!(session.document().blocks[0].text.chars().next(), Some('z'));
+        // Earlier steps say them from here too, going back and forth.
+        assert!(session.undo());
+        assert!(session.undo());
+        assert_eq!(image_paths(&session).len(), 1);
+        assert!(session.undo());
+        assert_eq!(link_targets(&session), expected[..8]);
+        assert!(session.redo());
+        assert!(session.redo());
+        assert_eq!(link_targets(&session), expected);
+        assert_eq!(image_paths(&session)[1], "../../static/plate.png");
+        // As it is on the disk.
+        let history = session.history();
+        drop(session);
+        let reopened = Session::open(&to).unwrap();
+        assert_eq!(link_targets(&reopened), expected);
+        assert_eq!(reopened.history(), history);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3992,10 +4189,10 @@ mod tests {
         let before = link_targets(&session);
         let history = session.history();
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(link_targets(&session), before);
         assert_eq!(session.history(), history);
-        session.rehome_links(None, |_, _| false);
+        session.rehome(None, None, |_, _| false);
         assert_eq!(link_targets(&session), before);
         assert_eq!(session.history(), history);
         std::fs::remove_dir_all(&root).unwrap();
@@ -4020,7 +4217,7 @@ mod tests {
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         session.save_as(&root.join("three/deep/a.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4045,7 +4242,7 @@ mod tests {
         std::fs::remove_file(&from).unwrap();
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         session.save_as(&root.join("three/deep/a.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4063,7 +4260,7 @@ mod tests {
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         std::fs::remove_file(&from).unwrap();
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(
             link_targets(&session)[..7],
             [
@@ -4085,7 +4282,7 @@ mod tests {
         let from = root.join("one/a.kame");
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4119,7 +4316,7 @@ mod tests {
         }];
         session.replace_document(document);
         session.save_as(&root.join("one/b.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(link_targets(&session), ["b.kame#Part"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -4131,7 +4328,7 @@ mod tests {
         let mut session = document_with_links(&root, &LINKS_TO_ITSELF);
         let (before, history) = (link_targets(&session), session.history());
         session.save_as(&from).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(link_targets(&session), before);
         assert_eq!(session.history(), history);
         std::fs::remove_dir_all(&root).unwrap();
@@ -4171,7 +4368,7 @@ mod tests {
         );
         std::fs::create_dir_all(root.join("three/deep")).unwrap();
         session.save_as(&root.join("three/deep/a.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(
             link_targets(&session),
             [
@@ -4209,7 +4406,7 @@ mod tests {
         assert!(selection.is_some());
         std::fs::create_dir_all(root.join("three")).unwrap();
         session.save_as(&root.join("three/a.kame")).unwrap();
-        session.rehome_links(Some(&from), |_, _| false);
+        session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(session.selection, selection);
         std::fs::remove_dir_all(&root).unwrap();
     }

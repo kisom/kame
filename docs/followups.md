@@ -13,8 +13,9 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
 - [ ] **A footnote or note added right after punctuation** has no word to anchor to, so it sits at one point and its mark moves along as you keep typing there.
-- [ ] **Save As's rewrite of links and images is an invisible undo step, and it ends the redo tail.** Undoing it changes nothing on the
-  screen, and leaves a link that's wrong from the new folder until it's redone, and anything waiting for a redo can't come back once it's run.
+- [ ] **A snapshot taken before a Save As to another folder still says its links and images from the old one.** Save As says them
+  again through the history, but leaves snapshots as they were taken, so restoring one brings back paths that lead from where the
+  document was.
 
 - [ ] **Save As tells a saved document what exists on this machine (accepted for now).** A relative `Link` is rewritten only if what it names is there, and
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its

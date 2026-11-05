@@ -746,3 +746,48 @@ mod starting {
         assert!(init(&root.join("taken")).is_err());
     }
 }
+
+/// A link that points nowhere yet would be written through, leaving the notebook.
+#[test]
+fn a_dangling_symbolic_link_cannot_lead_out() {
+    use kame_notebook::links::Follow;
+    let root = folder("dangling");
+    let outside = folder("dangling-outside");
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    let from = root.join("a.kame");
+    let link = |name: &str, target: &str| {
+        std::os::unix::fs::symlink(outside.join(target), root.join(name)).unwrap();
+    };
+    let nb = notebook(&root);
+
+    link("named.kame", "named.kame");
+    assert_eq!(nb.follow("named.kame", &from), Follow::Rotted);
+
+    // Named without its extension, which goes on after the first look.
+    link("bare.kame", "bare.kame");
+    assert_eq!(nb.follow("bare", &from), Follow::Rotted);
+
+    // A folder's index.
+    std::fs::create_dir(root.join("folder")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.join("index.kame"),
+        root.join("folder/Notebook.kame"),
+    )
+    .unwrap();
+    assert_eq!(nb.follow("folder/", &from), Follow::Rotted);
+
+    assert_eq!(
+        std::fs::read_dir(&outside).unwrap().count(),
+        0,
+        "nothing was made outside"
+    );
+
+    // The same goes for links to something that's there.
+    let there = outside.join("there.kame");
+    document(&there, "Outside.");
+    std::os::unix::fs::symlink(&there, root.join("here.kame")).unwrap();
+    assert_eq!(nb.follow("here", &from), Follow::Rotted);
+    std::fs::create_dir(root.join("other")).unwrap();
+    std::os::unix::fs::symlink(&there, root.join("other/Notebook.kame")).unwrap();
+    assert_eq!(nb.follow("other/", &from), Follow::Rotted);
+}

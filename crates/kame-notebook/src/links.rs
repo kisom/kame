@@ -75,13 +75,14 @@ fn tidied(path: &Path) -> PathBuf {
 
 impl Notebook {
     /// Whether `path` is inside the notebook, going by the real location of as much of it as exists,
-    /// so that a symbolic link can't lead out.
+    /// so that a symbolic link can't lead out. A link pointing at nothing counts as existing, and
+    /// has no real location, so that writing to it can't lead out either.
     pub fn holds(&self, path: &Path) -> bool {
         if !path.starts_with(&self.root) {
             return false;
         }
         path.ancestors()
-            .find(|above| above.exists())
+            .find(|above| above.symlink_metadata().is_ok())
             .and_then(|above| above.canonicalize().ok())
             .is_some_and(|real| real.starts_with(&self.root))
     }
@@ -117,6 +118,9 @@ impl Notebook {
         }
         if named.is_dir() || is_folder {
             let index = named.join(INDEX);
+            if !self.holds(&index) {
+                return Follow::Rotted;
+            }
             return if index.is_file() {
                 Follow::Open(index)
             } else if self.in_documents_area(&index) {
@@ -144,6 +148,9 @@ impl Notebook {
             let mut candidate = named.clone().into_os_string();
             candidate.push(extension);
             let candidate = PathBuf::from(candidate);
+            if !self.holds(&candidate) {
+                return Follow::Rotted;
+            }
             if candidate.is_file() {
                 return Follow::Open(candidate);
             }

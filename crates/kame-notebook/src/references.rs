@@ -142,8 +142,41 @@ fn check_writable(notebook: &Notebook, key: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// How old a leftover temporary file has to be before a save removes it, so that no other kame
+/// can still be writing it.
+const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Removes the temporary files an interrupted save left in `folder`: hidden files with
+/// `.saving-` in their names, not touched for a day. A symbolic link or anything that isn't a
+/// plain file is left alone, and a file that can't be removed is left for next time.
+fn clear_stale_temporaries(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') || !name.contains(&format!("{EXTENSION}.saving-")) {
+            continue;
+        }
+        let stale = entry
+            .path()
+            .symlink_metadata()
+            .ok()
+            .filter(|metadata| metadata.file_type().is_file())
+            .and_then(|metadata| metadata.modified().ok())
+            .is_some_and(|modified| {
+                now.duration_since(modified)
+                    .is_ok_and(|age| age >= STALE_AFTER)
+            });
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Writes `reference` as `key`, through a temporary file renamed into place so that an interrupted
-/// save leaves the old one. A damaged file for `key` is refused and left as it was.
+/// save leaves the old one, and a save clears the temporary files an earlier crash left. A damaged file for `key` is refused and left as it was.
 pub fn save(notebook: &Notebook, key: &str, reference: &Reference) -> Result<(), String> {
     reference.check()?;
     let path = check_writable(notebook, key)?;
@@ -152,6 +185,7 @@ pub fn save(notebook: &Notebook, key: &str, reference: &Reference) -> Result<(),
     // `check_writable` found the folder absent or a real one, so this never goes through a link.
     std::fs::create_dir_all(&folder)
         .map_err(|err| format!("could not make {}: {err}", folder.display()))?;
+    clear_stale_temporaries(&folder);
     // A name nobody can have planted, made new and never followed, and hidden so that listing
     // skips it.
     let temporary = folder.join(format!(".{key}{EXTENSION}.saving-{}", uuid::Uuid::new_v4()));
@@ -422,6 +456,46 @@ mod tests {
         assert_eq!(err, "there is no reference \"missing\"");
         let err = rename(&notebook, "old", "OLD", None).unwrap_err();
         assert_eq!(err, "\"OLD\" is already a reference");
+    }
+
+    fn aged(path: &Path, age: std::time::Duration) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - age).unwrap();
+    }
+
+    #[test]
+    fn a_save_removes_old_leftover_temporary_files_and_no_others() {
+        let notebook = notebook("ref-stale");
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let old = put(&notebook, ".a.yaml.saving-1", "x");
+        aged(&old, day * 2);
+        let young = put(&notebook, ".b.yaml.saving-2", "x");
+        aged(&young, day / 2);
+        let ordinary = put(&notebook, ".c.yaml", "x");
+        aged(&ordinary, day * 2);
+        let visible = put(&notebook, "d.yaml.saving-3", "x");
+        aged(&visible, day * 2);
+        let target = notebook.root.join("outside.txt");
+        std::fs::write(&target, "x").unwrap();
+        aged(&target, day * 2);
+        #[cfg(unix)]
+        let link = {
+            let link = folder(&notebook).join(".e.yaml.saving-4");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            link
+        };
+        let folder_path = folder(&notebook);
+        std::fs::create_dir(folder_path.join(".f.yaml.saving-5")).unwrap();
+
+        save(&notebook, "knuth1981", &article()).unwrap();
+
+        assert!(!old.exists(), "an old temporary file stays");
+        assert!(young.exists(), "a young one goes");
+        assert!(ordinary.exists() && visible.exists() && target.exists());
+        #[cfg(unix)]
+        assert!(link.symlink_metadata().is_ok(), "a link goes");
+        assert!(folder_path.join(".f.yaml.saving-5").is_dir());
+        assert!(folder_path.join("knuth1981.yaml").is_file());
     }
 
     #[test]

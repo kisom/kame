@@ -74,7 +74,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 
 Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-04-references-design.md`.
 
-- [ ] **Stale `.saving-` files** left by a crash are never cleaned up (`crates/kame-notebook/src/references.rs:157`).
 - [ ] **The form's preview isn't italic.** It shows the entry as plain text, unlike an export.
 - [ ] **A capitalised `References/` on macOS** is both listed as entries and loaded as references.
 - [ ] **Citations a rename can't see.** One only in another log head or unmerged logs stays `[old]`.

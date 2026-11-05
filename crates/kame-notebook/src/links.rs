@@ -59,7 +59,7 @@ pub fn is_relative(link: &str) -> bool {
 }
 
 /// Takes out `.` and `..` by what they say, since what's named may not exist yet.
-fn tidied(path: &Path) -> PathBuf {
+pub(crate) fn tidied(path: &Path) -> PathBuf {
     let mut tidy = PathBuf::new();
     for part in path.components() {
         match part {
@@ -88,7 +88,7 @@ impl Notebook {
     }
 
     /// Whether what's at `path`, inside the notebook, could be a document, going by where it is.
-    fn in_documents_area(&self, path: &Path) -> bool {
+    pub(crate) fn in_documents_area(&self, path: &Path) -> bool {
         let Ok(inside) = path.strip_prefix(&self.root) else {
             return false;
         };
@@ -209,7 +209,7 @@ pub fn create_document(path: &Path, heading: Option<&str>) -> std::io::Result<Ma
 
 /// Removes a document made by [`create_document`] and left unwritten, with what SQLite keeps beside
 /// it, and the folders made for it if nothing else has gone in them. The caller vouches that it
-/// was created this session and never edited, as this is the only thing in kame that deletes one.
+/// was created this session and never edited, so that nothing the person wrote is lost.
 pub fn remove_untouched(path: &Path, made: &Made) {
     let _ = std::fs::remove_file(path);
     for suffix in ["-wal", "-shm"] {

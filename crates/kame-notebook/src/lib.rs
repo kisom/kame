@@ -1,16 +1,18 @@
 //! A notebook: a folder of documents with a `notebook.yaml` in it, to move through, search and
 //! publish. Nothing derived is stored, so documents are read as needed, one at a time, and this
-//! only ever reads them. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
+//! reads them and, when asked, renames, moves and deletes them. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 //!
 //! - [`Notebook`] finds a notebook and reads its settings
 //! - [`list`] says what's in one
 //! - [`search`] finds text across its documents
 //! - [`links`] works out what links where, and where a link can create a document
 //! - [`images`] brings an image from outside into the notebook
+//! - [`manage`] checks where a document may go, and deletes one
 
 pub mod images;
 pub mod links;
 pub mod list;
+pub mod manage;
 pub mod search;
 
 pub use kame_sync::logs::log_folder;

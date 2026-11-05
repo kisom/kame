@@ -6164,6 +6164,7 @@ impl KameApp {
     /// one that opens when the dialog closes.
     fn request_open(&mut self, path: PathBuf) {
         if !self.dialog_open() {
+            self.held_open = None;
             self.open_picked(path);
             return;
         }

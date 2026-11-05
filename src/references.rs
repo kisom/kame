@@ -4863,6 +4863,20 @@ mod tests {
     }
 
     #[test]
+    fn a_later_request_from_the_os_beats_one_held_on_the_frame_the_form_closes() {
+        let (mut page, _) = page_with_form();
+        let held = other_document(&page, "held.kame", "one");
+        let later = other_document(&page, "later.kame", "two");
+        page.app.request_open(held);
+        page.app.refs.form = None;
+
+        page.app.request_open(later.clone());
+        page.app.open_held();
+
+        assert_eq!(page.app.session.path(), Some(later.as_path()));
+    }
+
+    #[test]
     fn a_document_the_os_asks_for_opens_at_once_with_no_form() {
         let mut page = page_in_notebook("");
         let other = other_document(&page, "other.kame", "elsewhere");

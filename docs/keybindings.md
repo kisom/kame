@@ -412,7 +412,7 @@ kame writes a revision on a pause in typing, on losing focus and on leaving a do
 a pause or on coming back to the window, never mid-word, and the status row says where it came from. A copy left open follows along,
 with everything that arrives between your own edits as one undo step. Sentences both machines changed keep the later
 version in the text and the other in a note, after a snapshot. A document with only logs, as on a new machine, is built when opened.
-If another machine writes with a newer version of kame, this one says so and the document goes read-only until kame is updated here.
+If a document's logs can't be read, it doesn't sync, and a notice says why, once. If another machine writes with a newer version of kame, this one says so and the document goes read-only until kame is updated here.
 
 Snapshots and undo history stay on the machine that made them. To go back, remove the folder's `.stignore` line, then delete `.kame-logs` and the
 hidden `.sync` folders.

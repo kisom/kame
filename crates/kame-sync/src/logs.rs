@@ -240,11 +240,16 @@ pub struct Logged {
 impl Logged {
     /// `None` unless `session` is a document in a marked folder, and one whose logs can be read.
     pub fn open(session: &Session, device: &str) -> Option<Logged> {
-        let path = session.path()?;
-        let here = place_of(path)?;
+        Logged::try_open(session, device).ok()
+    }
+
+    /// [`Logged::open`], saying why when it can't.
+    pub fn try_open(session: &Session, device: &str) -> Result<Logged> {
+        let path = session.path().ok_or("it has no file")?;
+        let here = place_of(path).ok_or("its place in the folder can't be told")?;
         let folder = log_folder(path);
-        let store = Store::load(&folder).ok()?;
-        Some(Logged {
+        let store = Store::load(&folder)?;
+        Ok(Logged {
             replica: Replica {
                 folder,
                 device: device.to_string(),

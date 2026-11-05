@@ -34,8 +34,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
 - [ ] **A stale database from before places were recorded,** whose logs left before a pass first saw it, has no place, so it isn't
   recognised as stale until it's next synced, and opening one on another machine after a delete can bring the document back, as it
   did before. A pass stamps every other one.
-- [ ] **A document with logs that can't be read never syncs and doesn't say why.** `src/main.rs` leaves `logged` as `None` when
-  `Logged::open` fails, with no notice. Not new.
 - [ ] **A partial log folder after a move.** If a machine edits X offline while another renames X to Y, its surviving
   `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
   X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.

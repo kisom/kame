@@ -2326,6 +2326,7 @@ struct KameApp {
     logged_path: Option<PathBuf>,
     orphan_mentioned: bool,
     stranded_mentioned: bool,
+    unreadable_mentioned: bool,
     next_log_check: std::time::Instant,
     last_typed: std::time::Instant,
     was_focused: bool,
@@ -2491,6 +2492,7 @@ impl KameApp {
             logged_path: None,
             orphan_mentioned: false,
             stranded_mentioned: false,
+            unreadable_mentioned: false,
             next_log_check: std::time::Instant::now(),
             last_typed: std::time::Instant::now(),
             was_focused: true,
@@ -2922,6 +2924,7 @@ impl KameApp {
         self.logged_path = None;
         self.orphan_mentioned = false;
         self.stranded_mentioned = false;
+        self.unreadable_mentioned = false;
         self.session = session;
         self.clear_left_fresh(left_untouched);
         self.conflict_copies.clear();
@@ -6214,7 +6217,18 @@ impl KameApp {
             self.logged = None;
             if kame_sync::logs::logging_root(&path).is_some() {
                 self.ensure_device();
-                self.logged = kame_sync::logs::Logged::open(&self.session, &self.device);
+                match kame_sync::logs::Logged::try_open(&self.session, &self.device) {
+                    Ok(logged) => self.logged = Some(logged),
+                    Err(err) if !self.unreadable_mentioned => {
+                        self.unreadable_mentioned = true;
+                        self.notice_tracker.announced();
+                        self.notice = Some(format!(
+                            "this document's revision logs can't be read, so it isn't syncing: \
+                             {err}"
+                        ));
+                    }
+                    Err(_) => {}
+                }
             }
             self.logged_path = Some(path);
         }
@@ -9910,6 +9924,34 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             top >= window.top() && bottom <= window.bottom(),
             "the last row is at {top}..{bottom} in {window:?}"
         );
+    }
+
+    #[test]
+    fn logs_that_cant_be_read_are_said_once() {
+        let root = kame_test_dir::folder("app-unreadable-logs")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        std::fs::write(root.join(kame_sync::logs::MARKER), "").unwrap();
+        let path = root.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("Words.");
+        // A log that is a folder can't be read.
+        std::fs::create_dir_all(kame_sync::logs::log_folder(&path).join("other.log")).unwrap();
+        let mut page = Headless::new(session);
+        page.app.device = "titan-bbbb".to_string();
+
+        page.app.sync_logs();
+        let notice = page
+            .app
+            .notice
+            .take()
+            .expect("it says why it isn't syncing");
+        assert!(notice.contains("revision logs"), "{notice}");
+        assert!(notice.contains("isn't syncing"), "{notice}");
+
+        page.app.sync_logs();
+        assert_eq!(page.app.notice, None, "once is enough");
     }
 
     #[test]

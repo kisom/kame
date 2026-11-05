@@ -72,7 +72,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/notebook.rs` — the app's jump list, search, browser and what links here.
 
-`src/references.rs` — the app's side of references: Cite, the new reference and edit windows, the References… window with rename and delete, the notice for a key with no reference, and which keys are drawn as citations.
+`src/references.rs` — the app's side of references: Cite, the new reference and edit windows, the References… window with rename and delete, the browser's section for them, the notice for a key with no reference, and which keys are drawn as citations.
 
 `src/publish.rs` — the app's Site menu, on `kame-site`.
 

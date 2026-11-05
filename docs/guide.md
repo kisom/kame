@@ -160,7 +160,7 @@ Getting around takes four keys, also in the View menu:
 - **Ctrl-L** jumps to a document by title or path. The letters you type only have to appear in order. If nothing matches, the last row offers to create it.
 - **Ctrl-Shift-L** goes to `Notebook.kame`, the contents page. kame doesn't write this page for you: it's a document like any other, and you fill it with whatever links and words suit you.
 - **Ctrl-R** searches every document, including margin notes, footnotes and private notes, and lists every match.
-- **Ctrl-Shift-O** opens the browser, a folder tree on the left. If the page doesn't fit beside it, the page hides until you choose something or close it.
+- **Ctrl-Shift-O** opens the browser, a folder tree on the left, with the notebook's references below it. If the page doesn't fit beside it, the page hides until you choose something or close it.
 
 Links are how a notebook grows. Following a link to a document that isn't there creates it, with any folders it needs, and if you leave it unwritten it's removed again. So you can type `[[maritain/materialism]]`, click it and start writing. A link to a folder opens or creates that folder's own `Notebook.kame`. Links can only create documents inside the notebook.
 
@@ -184,9 +184,11 @@ When you close a `[key]` that has no reference, the status row says "No referenc
 
 Outside a notebook it says "Citing needs a notebook."
 
-**The new reference window** has two tabs. Structured takes a kind (Article, Conference, Book or Web) and its fields, with the names separated by commas, and shows the IEEE entry as you fill it in. If a name holds a comma, as "King, Jr." does, separate them with semicolons instead, and end a single such name with one. Freeform takes a key and a box of text, which goes into the References section exactly as typed, for anything the form doesn't fit. The key is suggested from the first author's last name and the year, and you can change it. The button is "Add and cite" for a new reference and "Save" when editing, and a key that's taken, badly formed or missing, or an entry with no title, is refused. The key of an existing reference can't be changed there.
+**The new reference window** has two tabs. Structured takes a kind (Article, Conference, Book or Web) and its fields, with the names separated by commas, and shows the IEEE entry as you fill it in. If a name holds a comma, as "King, Jr." does, separate them with semicolons instead, and end a single such name with one. Freeform takes a key and a box of text, which goes into the References section exactly as typed, for anything the form doesn't fit. The key is suggested from the first author's last name and the year, and you can change it. The button is "Add and cite" when you came from citing, "Add" when you came from the browser or the References… window, which leaves the document alone, and "Save" when editing. A key that's taken, badly formed or missing, or an entry with no title, is refused. The key of an existing reference can't be changed there.
 
-**Annotate > References…** lists every reference, with how many documents cite it, and each row has Edit, Rename… and Delete….
+**The browser** (Ctrl-Shift-O) has a References row below its folders, which opens as a folder does. Click a key to edit it, right-click one to rename or delete it, and choose New reference… to add one without citing it. These lead to the same windows as Annotate > References…, and with another window up they ask you to close it first, so nothing you've typed is lost.
+
+**Annotate > References…** lists every reference, with how many documents cite it. Each row has Edit, Rename… and Delete…, and New reference… adds one without citing it.
 
 - Delete… says how many documents cite the reference first. Those documents then hold plain `[key]` text.
 - Rename… rewrites `[old]` to `[new]` in each citing document, in prose, footnotes and marginals but not notes, as an ordinary edit there with its own undo step. The window then lists what it did. A document that can't be rewritten, or can't be read to see whether it cites the key, is named with the reason, and the old key is kept, so `[old]` still resolves. A Markdown document is one of those, and if it's imported and open it stays as its file is. Run the rename again once the problem is fixed to finish it.

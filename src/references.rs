@@ -20,7 +20,7 @@ use kame_core::references::{
 use kame_notebook::references::{citing, load, remove, rename, save, stamp, Renamed};
 use kame_notebook::Notebook;
 
-use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window};
+use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window, BROWSER_INDENT};
 use super::KameApp;
 
 /// How long to go without looking for a change to the reference files, since the page asks every
@@ -84,12 +84,16 @@ struct FormWindow {
     failed: Option<String>,
     /// Set for the frame a field should take the keyboard on.
     focus: bool,
+    /// Whether a new reference is cited as it's added, or only added.
+    cites: bool,
 }
 
 /// What the References… window is asking and has to say.
 #[derive(Default)]
 struct ListWindow {
     confirming: Option<Confirming>,
+    /// Whether what's being asked has yet to be scrolled to, having been asked from elsewhere.
+    reveal: bool,
     /// How the last delete or rename went.
     said: Vec<String>,
 }
@@ -106,6 +110,15 @@ enum Confirming {
     },
 }
 
+impl Confirming {
+    /// The key it's about.
+    fn key(&self) -> &str {
+        match self {
+            Confirming::Delete { key } | Confirming::Rename { key, .. } => key,
+        }
+    }
+}
+
 /// A rename a background thread is doing, leaving the open document for when it's done.
 struct Renaming {
     coming: Receiver<Result<Renamed, String>>,
@@ -117,9 +130,23 @@ struct Renaming {
     new: String,
 }
 
+/// The browser's row for the references, kept open or closed along with its folders. A folder's
+/// name is relative to the notebook, so none can be this.
+pub(crate) const BROWSER_SECTION: &str = "/references";
+
+/// What choosing something among the browser's references asks for.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BrowserReference {
+    New,
+    Edit(String),
+    Rename(String),
+    Delete(String),
+}
+
 /// What pressing something in the References… window asks for.
 enum ListAction {
     Close,
+    New,
     Edit(String),
     AskToDelete(String),
     AskToRename(String),
@@ -625,7 +652,16 @@ impl ReferencesUi {
             form,
             failed: None,
             focus: true,
+            cites: true,
         });
+    }
+
+    /// Opens the form for a new reference that's only added, with nothing put in the document.
+    fn open_form_to_add(&mut self) {
+        self.open_form(ReferenceForm::new(None));
+        if let Some(window) = &mut self.form {
+            window.cites = false;
+        }
     }
 
     /// Opens `key`'s entry, for a click at `at`.
@@ -823,6 +859,49 @@ impl KameApp {
         }
         self.refs.window = Some(ListWindow::default());
         self.refs.recount = true;
+    }
+
+    /// What was chosen among the browser's references. The browser can be clicked past a dialog,
+    /// so this leaves one alone and says so, as what's typed in a form would be lost. Over the
+    /// References… window it does what that window's own buttons do.
+    pub(crate) fn browser_reference(&mut self, chosen: BrowserReference) {
+        if self.other_dialog_open()
+            || self.close_flow.prompting
+            || self.refs.form.is_some()
+            || self.refs.cite_search.is_some()
+            || self.refs.renaming.is_some()
+        {
+            self.notice_tracker.announced();
+            self.notice = Some("Close what's open, then choose that again.".to_string());
+            return;
+        }
+        self.refs.shown = None;
+        match chosen {
+            BrowserReference::New => self.refs.open_form_to_add(),
+            BrowserReference::Edit(key) => {
+                if let Some(reference) = self.refs.list.get(&key) {
+                    let form = ReferenceForm::editing(&key, reference);
+                    self.refs.open_form(form);
+                }
+            }
+            BrowserReference::Rename(key) => self.ask_in_references(Confirming::Rename {
+                key,
+                new: String::new(),
+                focus: true,
+            }),
+            BrowserReference::Delete(key) => self.ask_in_references(Confirming::Delete { key }),
+        }
+    }
+
+    /// Asks in the References… window, opening it if it isn't up.
+    fn ask_in_references(&mut self, confirming: Confirming) {
+        if self.refs.window.is_none() {
+            self.refs.recount = true;
+        }
+        let window = self.refs.window.get_or_insert_with(ListWindow::default);
+        window.said.clear();
+        window.confirming = Some(confirming);
+        window.reveal = true;
     }
 
     /// Reads the list after a change made here, so that it shows at once.
@@ -1122,6 +1201,7 @@ impl KameApp {
             enter_pressed(ctx) && !focus && !in_text_box && !self.keys_are_elsewhere(ctx);
         let mut cancel = false;
         let is_new = window.form.is_new();
+        let cites = window.cites;
         let title = if is_new {
             "New reference"
         } else {
@@ -1146,7 +1226,11 @@ impl KameApp {
                     ui.colored_label(error_ink, failed);
                 }
                 ui.horizontal(|ui| {
-                    let save_button = if is_new { "Add and cite" } else { "Save" };
+                    let save_button = match (is_new, cites) {
+                        (true, true) => "Add and cite",
+                        (true, false) => "Add",
+                        (false, _) => "Save",
+                    };
                     let button = egui::Button::new(save_button);
                     if ui.add_enabled(problem.is_none(), button).clicked() {
                         submit = true;
@@ -1173,7 +1257,7 @@ impl KameApp {
             return;
         }
         self.reload_references();
-        if is_new {
+        if is_new && cites {
             self.cite(&key);
         }
     }
@@ -1207,7 +1291,7 @@ impl KameApp {
                     ui.colored_label(error_ink, problem);
                 }
                 if references.is_empty() && in_notebook {
-                    ui.weak("No references yet. Close this and press Ctrl-Shift-C to add one.");
+                    ui.weak("No references yet.");
                 }
                 ui.add_enabled_ui(!busy, |ui| {
                     egui::ScrollArea::vertical()
@@ -1232,6 +1316,17 @@ impl KameApp {
                                         enter,
                                         &mut action,
                                     );
+                                    // A window's first frame only measures it, and scrolls nothing.
+                                    if window.reveal
+                                        && confirming.key() == key
+                                        && !ui.is_sizing_pass()
+                                    {
+                                        ui.scroll_to_cursor_animation(
+                                            Some(egui::Align::BOTTOM),
+                                            egui::style::ScrollAnimation::none(),
+                                        );
+                                        window.reveal = false;
+                                    }
                                 }
                                 ui.separator();
                             }
@@ -1246,14 +1341,25 @@ impl KameApp {
                 for line in &window.said {
                     ui.label(line);
                 }
-                ui.add_enabled_ui(!renaming, |ui| {
-                    if ui.button("Close").clicked() {
-                        action = Some(ListAction::Close);
-                    }
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!renaming, |ui| {
+                        if ui.button("Close").clicked() {
+                            action = Some(ListAction::Close);
+                        }
+                    });
+                    ui.add_enabled_ui(!busy, |ui| {
+                        if ui.button("New reference…").clicked() {
+                            action = Some(ListAction::New);
+                        }
+                    });
                 });
             });
         match action {
             Some(ListAction::Close) => return,
+            Some(ListAction::New) => {
+                window.confirming = None;
+                self.refs.open_form_to_add();
+            }
             Some(ListAction::Edit(key)) => {
                 window.confirming = None;
                 if let Some(reference) = self.refs.list.get(&key) {
@@ -1394,6 +1500,51 @@ fn draw_form(ui: &mut egui::Ui, window: &mut FormWindow, focus: bool, references
             }
         }
     }
+}
+
+/// The browser's section for the references, below its folders: a row that opens as a folder does,
+/// with a row for each key and one for adding another. Returns whether that row was clicked, and
+/// what was chosen from the rest.
+pub(crate) fn draw_browser_references(
+    ui: &mut egui::Ui,
+    references: &References,
+    open: bool,
+) -> (bool, Option<BrowserReference>) {
+    let mark = if open { "▾" } else { "▸" };
+    let toggled = ui
+        .selectable_label(false, format!("{mark} References"))
+        .clicked();
+    if !open {
+        return (toggled, None);
+    }
+    let mut chosen = None;
+    let indented = |ui: &mut egui::Ui, label: &str| {
+        ui.horizontal(|ui| {
+            ui.add_space(BROWSER_INDENT);
+            ui.selectable_label(false, label)
+        })
+        .inner
+    };
+    for (key, _) in references.sorted() {
+        let row = indented(ui, key);
+        if row.clicked() {
+            chosen = Some(BrowserReference::Edit(key.to_string()));
+        }
+        row.context_menu(|ui| {
+            ui.set_min_width(120.0);
+            if ui.button("Rename…").clicked() {
+                chosen = Some(BrowserReference::Rename(key.to_string()));
+                ui.close();
+            } else if ui.button("Delete…").clicked() {
+                chosen = Some(BrowserReference::Delete(key.to_string()));
+                ui.close();
+            }
+        });
+    }
+    if indented(ui, "New reference…").clicked() {
+        chosen = Some(BrowserReference::New);
+    }
+    (toggled, chosen)
 }
 
 /// A reference in the References… window.
@@ -3767,16 +3918,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_list_doesnt_offer_a_chord_that_it_ignores() {
-        let mut page = page_in_notebook("hello");
-        std::fs::remove_file(reference_file(&page, "knuth1981")).unwrap();
-        page.app.reload_references();
-        open_list(&mut page);
-
-        assert!(page.sees("Close this"), "says how to go about it");
-    }
-
-    #[test]
     fn a_rename_says_why_its_button_is_off() {
         let mut page = page_in_notebook("[knuth1981]");
         open_list(&mut page);
@@ -3836,5 +3977,354 @@ mod tests {
         assert!(page.can_press("Delete knuth1981"));
         page.press("Delete knuth1981");
         assert!(!reference_file(&page, "knuth1981").exists());
+    }
+
+    /// A page with the browser up and its references showing.
+    fn page_with_browser(text: &str) -> Headless {
+        let mut page = page_in_notebook(text);
+        page.app.nb.browser_open = true;
+        page.frame(Vec::new());
+        page.press("▸ References");
+        page.frame(Vec::new());
+        page
+    }
+
+    /// A reference typed into the form that's up.
+    fn fill_form(page: &mut Headless, key: &str) {
+        page.frame(Vec::new());
+        let form = &mut page.app.refs.form.as_mut().unwrap().form;
+        form.key = key.to_string();
+        form.key_edited = true;
+        form.reference.title = "How to write".to_string();
+        page.frame(Vec::new());
+    }
+
+    #[test]
+    fn the_browser_keeps_its_references_under_a_row_that_opens() {
+        let mut page = page_in_notebook("");
+        page.app.nb.browser_open = true;
+        page.frame(Vec::new());
+        assert!(page.can_press("▸ References"));
+        assert!(!page.sees("knuth1981"), "closed as a folder starts");
+
+        page.press("▸ References");
+        page.frame(Vec::new());
+
+        assert!(page.can_press("▾ References"));
+        assert!(page.can_press("knuth1981"));
+        assert!(page.can_press("New reference…"));
+
+        page.press("▾ References");
+        page.frame(Vec::new());
+        assert!(!page.sees("knuth1981"));
+    }
+
+    #[test]
+    fn a_browser_with_no_references_can_still_add_one() {
+        let root = notebook_folder("no-references");
+        let session = Session::open(&root.join("doc.kame")).unwrap();
+        let mut page = Headless::new(session);
+        page.app.nb.browser_open = true;
+        page.frame(Vec::new());
+
+        page.press("▸ References");
+        page.frame(Vec::new());
+
+        assert!(page.can_press("New reference…"));
+    }
+
+    #[test]
+    fn the_browser_remembers_its_references_as_it_does_a_folder() {
+        let page = page_with_browser("");
+        assert!(page.app.nb.browser_folders.contains(BROWSER_SECTION));
+        // A folder's name is relative to the notebook, so none can be this.
+        assert!(BROWSER_SECTION.starts_with('/'));
+    }
+
+    #[test]
+    fn choosing_a_reference_in_the_browser_opens_it_to_edit() {
+        let mut page = page_with_browser("hello");
+
+        page.press("knuth1981");
+        page.frame(Vec::new());
+
+        assert!(page.sees("Edit reference"));
+        assert!(page.sees("Breaking paragraphs into lines"));
+        page.app.refs.form.as_mut().unwrap().form.reference.title = "Changed".to_string();
+        page.press("Save");
+
+        assert_eq!(
+            page.app.refs.list.get("knuth1981").unwrap().title,
+            "Changed"
+        );
+        assert_eq!(only_text(&page), "hello");
+    }
+
+    #[test]
+    fn adding_from_the_browser_leaves_the_document_alone() {
+        let mut page = page_with_browser("hello ");
+        let history = page.app.session.history();
+
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+        assert!(page.can_press("Add"));
+        assert!(!page.can_press("Add and cite"));
+        page.press("Add");
+
+        assert!(page.app.refs.form.is_none());
+        assert!(page.app.refs.list.contains("lamport1994"), "listed at once");
+        assert!(reference_file(&page, "lamport1994").exists());
+        assert_eq!(only_text(&page), "hello ");
+        assert_eq!(page.app.session.history(), history, "no edit was made");
+        page.frame(Vec::new());
+        assert!(page.can_press("lamport1994"), "and in the browser");
+    }
+
+    #[test]
+    fn enter_adds_from_the_browser_without_citing_too() {
+        let mut page = page_with_browser("hello ");
+
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(reference_file(&page, "lamport1994").exists());
+        assert_eq!(only_text(&page), "hello ");
+    }
+
+    #[test]
+    fn a_failed_add_from_the_browser_can_still_be_added_without_citing() {
+        let mut page = page_with_browser("hello ");
+        let folder = root_of(&page).join("references");
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+
+        std::fs::remove_dir_all(&folder).unwrap();
+        std::fs::write(&folder, "a file in the way").unwrap();
+        page.press("Add");
+        assert!(page.app.refs.form.is_some(), "stays up to say why");
+
+        std::fs::remove_file(&folder).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        page.frame(Vec::new());
+        assert!(page.can_press("Add"));
+        page.press("Add");
+
+        assert!(reference_file(&page, "lamport1994").exists());
+        assert_eq!(only_text(&page), "hello ");
+    }
+
+    #[test]
+    fn citing_still_adds_and_cites_once_the_browser_has_added() {
+        let mut page = page_with_browser("hello ");
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+        page.press("Add");
+
+        cite_chord(&mut page);
+        type_into(&mut page, "plass");
+        page.frame(Vec::new());
+        page.press("New reference “plass”…");
+        fill_form(&mut page, "plass1981");
+        assert!(page.can_press("Add and cite"));
+        page.press("Add and cite");
+
+        assert_eq!(only_text(&page), "hello [plass1981]");
+    }
+
+    #[test]
+    fn deleting_from_the_browser_asks_first() {
+        let mut page = page_with_browser("[knuth1981]");
+
+        page.right_click("knuth1981");
+        page.press("Delete…");
+        run_until(&mut page, |app| app.refs.counts.is_some());
+        page.frame(Vec::new());
+
+        assert!(page.sees("1 document cites it."));
+        assert!(reference_file(&page, "knuth1981").exists(), "only asked");
+
+        page.press("Delete knuth1981");
+
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert_eq!(only_text(&page), "[knuth1981]");
+    }
+
+    #[test]
+    fn renaming_from_the_browser_asks_for_the_new_key() {
+        let mut page = page_with_browser("see [knuth1981]");
+
+        page.right_click("knuth1981");
+        page.press("Rename…");
+        run_until(&mut page, |app| app.refs.counts.is_some());
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        type_into(&mut page, "plass1981");
+        page.frame(Vec::new());
+
+        page.press("Rename knuth1981");
+        wait_for_rename(&mut page);
+
+        assert_eq!(only_text(&page), "see [plass1981]");
+        assert!(reference_file(&page, "plass1981").exists());
+    }
+
+    #[test]
+    fn a_confirmation_asked_from_the_browser_scrolls_into_view() {
+        let mut page = page_in_notebook("");
+        let root = root_of(&page);
+        for at in 0..40 {
+            write_reference(&root, &format!("zed{at:02}"), GOOD);
+        }
+        page.app.reload_references();
+        page.app.nb.browser_open = true;
+        page.frame(Vec::new());
+        page.app
+            .browser_reference(BrowserReference::Delete("zed39".to_string()));
+        run_until(&mut page, |app| app.refs.counts.is_some());
+        for _ in 0..4 {
+            page.frame(Vec::new());
+        }
+
+        let (_, bottom) = page.drawn_at("Delete zed39").expect("the button is drawn");
+        let (close_top, _) = page.drawn_at("Close").expect("the window's button");
+        assert!(
+            bottom <= close_top,
+            "{bottom} is below the list, at {close_top}"
+        );
+    }
+
+    #[test]
+    fn the_browser_opens_the_form_over_the_references_window() {
+        let mut page = page_with_browser("");
+        page.app.open_references();
+        run_until(&mut page, |app| app.refs.counts.is_some());
+
+        page.app
+            .browser_reference(BrowserReference::Edit("knuth1981".to_string()));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        assert!(page.sees("Edit reference"));
+        press_key(&mut page, egui::Key::Escape);
+        assert!(page.app.refs.form.is_none());
+        assert!(page.app.refs.window.is_some(), "back to the list");
+    }
+
+    #[test]
+    fn the_browser_doesnt_take_away_a_form_being_typed_in() {
+        let mut page = page_with_browser("");
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+
+        page.press("knuth1981");
+
+        let form = &page.app.refs.form.as_ref().expect("still up").form;
+        assert_eq!(form.key, "lamport1994");
+        assert!(form.is_new());
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("Close what's open, then choose that again.")
+        );
+    }
+
+    #[test]
+    fn the_browser_waits_for_a_rename_under_way() {
+        let mut page = page_with_browser("");
+        page.app.open_references();
+        let (_send, coming) = channel();
+        let notebook = page.app.nb.notebook.clone().unwrap();
+        page.app.refs.renaming = Some(Renaming {
+            coming,
+            notebook,
+            open: None,
+            old: "knuth1981".to_string(),
+            new: "plass1981".to_string(),
+        });
+
+        page.app.browser_reference(BrowserReference::New);
+
+        assert!(page.app.refs.form.is_none());
+        assert_eq!(
+            page.app.notice.as_deref(),
+            Some("Close what's open, then choose that again.")
+        );
+    }
+
+    #[test]
+    fn the_browser_waits_behind_another_dialog() {
+        let mut page = page_with_browser("");
+        page.app.nb.move_report = Some(Default::default());
+
+        page.app
+            .browser_reference(BrowserReference::Delete("knuth1981".to_string()));
+
+        assert!(page.app.refs.window.is_none());
+    }
+
+    #[test]
+    fn the_browser_doesnt_take_away_a_search_being_typed_in() {
+        let mut page = page_with_browser("");
+        cite_chord(&mut page);
+        type_into(&mut page, "knu");
+
+        page.app.browser_reference(BrowserReference::New);
+
+        assert!(page.app.refs.form.is_none());
+        assert_eq!(page.app.refs.cite_search.as_ref().unwrap().query, "knu");
+    }
+
+    #[test]
+    fn the_browser_waits_for_the_close_prompt() {
+        let mut page = page_with_browser("");
+        page.app.close_flow.prompting = true;
+
+        page.app.browser_reference(BrowserReference::New);
+
+        assert!(page.app.refs.form.is_none());
+    }
+
+    #[test]
+    fn asking_from_the_browser_counts_again() {
+        let mut page = page_with_browser("");
+        open_list(&mut page);
+        page.press("Close");
+        other_document(&page, "other.kame", "see [knuth1981]");
+
+        page.app
+            .browser_reference(BrowserReference::Delete("knuth1981".to_string()));
+        page.frame(Vec::new());
+        run_until(&mut page, |app| app.refs.counts.is_some());
+        page.frame(Vec::new());
+
+        assert!(page.sees("1 document cites it."));
+    }
+
+    #[test]
+    fn the_references_window_can_add_without_citing() {
+        let mut page = page_in_notebook("hello ");
+        open_list(&mut page);
+
+        page.press("New reference…");
+        fill_form(&mut page, "lamport1994");
+        page.press("Add");
+
+        assert!(page.app.refs.window.is_some(), "the list stays up");
+        assert_eq!(only_text(&page), "hello ");
+        page.frame(Vec::new());
+        assert!(page.sees("lamport1994"), "and shows it");
+    }
+
+    #[test]
+    fn an_empty_references_window_says_how_to_add_one() {
+        let root = notebook_folder("empty-window");
+        let session = Session::open(&root.join("doc.kame")).unwrap();
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        open_list(&mut page);
+
+        assert!(page.sees("No references yet."));
+        assert!(!page.sees("Ctrl-Shift-C"), "the button is right there");
+        assert!(page.can_press("New reference…"));
     }
 }

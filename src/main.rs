@@ -6756,6 +6756,7 @@ impl Headless {
             app.handle_input(ui.ctx());
             let history = app.session.history();
             app.notice_tracker.update(&mut app.notice, history);
+            app.show_browser(ui);
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
@@ -6837,6 +6838,43 @@ impl Headless {
             (bounds.x0 + bounds.x1) as f32 / 2.0,
             (bounds.y0 + bounds.y1) as f32 / 2.0,
         ));
+    }
+
+    /// Where the last frame drew something saying `label`, as (top, bottom).
+    pub(crate) fn drawn_at(&self, label: &str) -> Option<(f32, f32)> {
+        self.drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .find_map(|(_, node)| node.bounds().filter(|_| node.label() == Some(label)))
+            .map(|bounds| (bounds.y0 as f32, bounds.y1 as f32))
+    }
+
+    /// Right-clicks what says `label`, wherever it's drawn, for the menu it has.
+    pub(crate) fn right_click(&mut self, label: &str) {
+        self.frame(Vec::new());
+        let bounds = self
+            .drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .find_map(|(_, node)| node.bounds().filter(|_| node.label() == Some(label)));
+        let Some(bounds) = bounds else {
+            panic!("nothing saying {label:?}");
+        };
+        let pos = Pos2::new(
+            (bounds.x0 + bounds.x1) as f32 / 2.0,
+            (bounds.y0 + bounds.y1) as f32 / 2.0,
+        );
+        self.time += 1.0;
+        self.frame(vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            self.frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        self.frame(Vec::new());
     }
 
     /// Where the text starts across the page.

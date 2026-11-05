@@ -21,10 +21,13 @@ use kame_notebook::search::{search, Hit};
 use kame_notebook::stranded::{apply, decide, find_stranded, Done, Healthy, Steps, Unsettled};
 use kame_notebook::Notebook;
 
+use super::references::{draw_browser_references, BrowserReference, BROWSER_SECTION};
 use super::{follow_move, now_unix, same_document, same_place, BackStop, KameApp};
 
 /// How wide the browser is.
 const BROWSER_WIDTH: f32 = 200.0;
+/// How far the browser indents each level of its tree.
+pub(crate) const BROWSER_INDENT: f32 = 14.0;
 /// The least room between the browser and the text.
 const BROWSER_GAP: f32 = 16.0;
 const LIST_WIDTH: f32 = 620.0;
@@ -909,6 +912,7 @@ impl KameApp {
         let mut choose: Option<(PathBuf, Kind)> = None;
         let mut toggle: Option<String> = None;
         let mut file_op: Option<FileOp> = None;
+        let mut reference: Option<BrowserReference> = None;
         let current = self.session.path().map(Path::to_path_buf);
         let entries: Vec<_> = self
             .nb
@@ -931,7 +935,7 @@ impl KameApp {
                 .show(ui, |ui| {
                     for row in rows(&entries, &self.nb.browser_folders) {
                         ui.horizontal(|ui| {
-                            ui.add_space(row.depth as f32 * 14.0);
+                            ui.add_space(row.depth as f32 * BROWSER_INDENT);
                             match &row.what {
                                 RowKind::Folder(folder) => {
                                     let mark = if self.nb.browser_folders.contains(folder) {
@@ -965,6 +969,16 @@ impl KameApp {
                             }
                         });
                     }
+                    ui.separator();
+                    let (toggled, chosen) = draw_browser_references(
+                        ui,
+                        &self.refs.list,
+                        self.nb.browser_folders.contains(BROWSER_SECTION),
+                    );
+                    if toggled {
+                        toggle = Some(BROWSER_SECTION.to_string());
+                    }
+                    reference = chosen;
                 });
         };
         if self.nb.page_hidden {
@@ -983,6 +997,9 @@ impl KameApp {
         }
         if let Some(op) = file_op {
             self.start_file_op(op);
+        }
+        if let Some(chosen) = reference {
+            self.browser_reference(chosen);
         }
         match choose {
             Some((path, Kind::Document)) => self.open_from_notebook(path, None),

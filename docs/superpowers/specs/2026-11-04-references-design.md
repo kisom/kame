@@ -127,7 +127,9 @@ A key is suggested from the first author's last name and the year, adding `a`, `
 
 **In footnotes and marginals**, this version has none of that. They're drawn as one plain string, and clicking one opens its edit box, so a `[key]` there is typed by hand and takes effect in exports. Ctrl-Shift-C and the status row's note don't apply in that box.
 
-**A References… window** in a notebook lists every reference, with how many documents cite it, for browsing, editing, renaming and deleting.
+**A References… window** in a notebook lists every reference, with how many documents cite it, for browsing, adding, editing, renaming and deleting. A reference added from it isn't cited.
+
+**The browser** has a References row below its folders, opening as a folder does and kept open or closed with them. Under it, a row for each key opens its edit form, its right-click menu asks to rename or delete in the References… window, and a New reference… row adds one without citing it. With another window up it says to close that first, as a form may hold typing. Reference files stay out of the tree itself.
 
 - **Deleting** says how many documents cite it first. They then hold plain `[key]` text.
 - **Renaming** rewrites `[old]` to `[new]` everywhere it counts as a citation in each document citing it: prose, footnotes and marginals, as an ordinary edit in that document. A note isn't touched. A document that can't be rewritten, or can't be read to see whether it cites the key, is named in the result, not skipped silently, and the old key is then kept so that `[old]` still resolves. Running the rename again once the problem is fixed finishes it. The old key's file is removed last, after the open document has followed, so a crash along the way leaves both.

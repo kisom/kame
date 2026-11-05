@@ -49,6 +49,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `edit/` — `Op` log + `Editor` (undo/redo, commands)
 - `export/` — `to_markdown`, `to_html` (deterministic), and `html_body` with `Publish` hooks for a tool that knows where links and images end up
 - `links.rs` — where a link between documents leads, and how a document keeps an image's path
+- `references/` — a notebook's sources: the `Reference` type, key rules, finding `[key]` citations, IEEE formatting and the text of the References section, which exports take as input
 - `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
 - `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk
 - `text.rs` — moving through text by character and word
@@ -63,13 +64,15 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies, and `logs` and `revlog` for revision logs in folders that turn them on. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
-`crates/kame-notebook` — a notebook: a folder with a `notebook.yaml`, on `kame-core` and `kame-sync`. It finds one, lists what's in it, searches it, works out where links lead and when one can create a document, and copies images in from outside. `manage` checks where a document may go, moves or renames one and rewrites the links to it, and deletes one. `stranded` settles databases left behind when a document was moved or deleted on another machine. Nothing derived is stored. The app's side of it is `src/notebook.rs`, and `kame-site` builds one as a site in `notebook.rs`. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
+`crates/kame-notebook` — a notebook: a folder with a `notebook.yaml`, on `kame-core` and `kame-sync`. It finds one, lists what's in it (a `.yaml` file directly in the root's `references/` is a reference, not an entry, and is read and written there as `KEY.yaml`), searches it, works out where links lead and when one can create a document, and copies images in from outside. `manage` checks where a document may go, moves or renames one and rewrites the links to it, and deletes one. `stranded` settles databases left behind when a document was moved or deleted on another machine. Nothing derived is stored. The app's side of it is `src/notebook.rs`, and `kame-site` builds one as a site in `notebook.rs`. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
 `crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
 
 `crates/kame-test-dir` — folders for tests, only ever a dev-dependency. Each test process gets one, removed as it exits, so tests put their files here and never directly in the temporary directory.
 
 `src/notebook.rs` — the app's jump list, search, browser and what links here.
+
+`src/references.rs` — the app's side of references: Cite, the new reference and edit windows, the References… window with rename and delete, the notice for a key with no reference, and which keys are drawn as citations.
 
 `src/publish.rs` — the app's Site menu, on `kame-site`.
 

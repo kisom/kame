@@ -16,6 +16,7 @@ This guide covers:
 - History and snapshots
 - Moving words in and out
 - Notebooks
+- References
 - Where to put papers and images
 - Building a site
 - Using more than one machine
@@ -167,6 +168,42 @@ Below the footnotes, "Linked from" lists the documents that link to this one. It
 
 To rename, move or delete a document in a notebook, right-click it in the browser. Links to it follow a rename or a move, and its published address changes with it. Move or rename the file by hand and links to it don't follow.
 
+## References
+
+A notebook keeps its sources in one list, and you cite one by typing its key in square brackets, such as `[knuth1981]`. Exports then end with a References section holding what that document cited. Nothing here changes how the page looks while you write, apart from a citation's colour.
+
+**Citing.** A key is ASCII letters, digits, `-` and `_`, starting with a letter, up to 64 bytes. So `[1]` is never a citation. Keys are case-sensitive, and `[[target]]` and `[text](url)` are links, not citations. The text stays exactly as you typed it, and a citation is just those brackets around a known key, so a source you add later makes earlier `[key]` text a citation without touching the document. Citations count in paragraphs, headings, list items, block quotes, footnotes and marginals. They don't count in code blocks, prose blocks, inline code, a link's own words or notes, since a note never publishes. A known key is drawn in the link colour, and clicking it shows its entry in IEEE format, with an Edit button. Spell checking skips it.
+
+When you close a `[key]` that has no reference, the status row says "No reference called kleppmann2019. Ctrl-Shift-C adds it." and nothing more, so `[sic]` costs nothing.
+
+**Ctrl-Shift-C** (Annotate > Cite…, and Cite… in the right-click menu) works in a notebook, and what it opens depends on the caret:
+
+- In or just after a `[key]` with no reference: the new reference window, with that key filled in. Saving leaves the text alone, and it becomes a citation.
+- In or just after a known `[key]`: that reference, for editing.
+- Anywhere else: a search over keys, authors and titles, ignoring case. Choosing one inserts `[key]` at the caret, as one undo step. If nothing matches, the last row is a new reference.
+
+Outside a notebook it says "Citing needs a notebook."
+
+**The new reference window** has two tabs. Structured takes a kind (Article, Conference, Book or Web) and its fields, with the names separated by commas, and shows the IEEE entry as you fill it in. Freeform takes a key and a box of text, which goes into the References section exactly as typed, for anything the form doesn't fit. The key is suggested from the first author's last name and the year, and you can change it. The button is "Add and cite" for a new reference and "Save" when editing, and a key that's taken, badly formed or missing, or an entry with no title, is refused. The key of an existing reference can't be changed there.
+
+**Annotate > References…** lists every reference, with how many documents cite it, and each row has Edit, Rename… and Delete….
+
+- Delete… says how many documents cite the reference first. Those documents then hold plain `[key]` text.
+- Rename… rewrites `[old]` to `[new]` in each citing document, in prose, footnotes and marginals but not notes, as an ordinary edit there with its own undo step. The window then lists what it did. A document that can't be rewritten, or can't be read to see whether it cites the key, is named with the reason, and the old key is kept, so `[old]` still resolves. Run the rename again once the problem is fixed to finish it.
+
+Reference files are written straight to disk and aren't undo steps.
+
+**Exporting.** HTML, Markdown and a notebook's site end with a `## References` section, after the footnotes. It lists only what that output cites, sorted by key ignoring case, one entry to a paragraph in IEEE format. In HTML and on a site, each citation links to its entry. In Markdown the citations stay as text. A document citing nothing gets no section and exports as it always did. A section you wrote yourself isn't looked for, so you'd get two. Markdown leaves out marginals, so a source cited only in a marginal appears in HTML and not in Markdown.
+
+**What it can't do yet:**
+
+- It needs a notebook. In a document outside one, `[key]` stays text and exports get no section.
+- Citations in footnotes and marginals aren't drawn differently on the page, and the status row doesn't comment on them. Type the key by hand. It takes effect in exports.
+- A `[key]` with no reference stays in the export as typed. Only keys shaped like the suggested ones, letters then four digits and an optional letter, such as `smith2020`, are warned about, in the export's notice ("exported; no reference for smith2020") and in a site build's report.
+- A site built from a `site.yaml` rather than a notebook has no references, and keeps `[key]` as text.
+- Importing a Markdown export brings its References section back as an ordinary heading and paragraphs, so exporting again from the notebook gives two sections.
+- Renaming a key edits documents that aren't open. On another machine, `[old]` can be plain text until that machine has the rewritten documents or you run the rename again. A second kame with a citing document open can overwrite a rename with its older copy.
+
 ## Where to put papers and images
 
 The folders decide what's public, so this is the part of a notebook to get right. A notebook might look like this:
@@ -274,6 +311,7 @@ kame's settings are in `config.json`, at `~/.config/kame/` on Linux and `~/Libra
 
 - Ctrl-Shift-N: note
 - Ctrl-Shift-F: footnote
+- Ctrl-Shift-C: cite a reference, in a notebook
 - Ctrl-K: link
 - Ctrl-F: find in this document
 - Ctrl-L: jump to a document in the notebook

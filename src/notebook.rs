@@ -18,7 +18,7 @@ use kame_notebook::list::{listed, listed_if_changed, narrow, rows, Entry, Kind, 
 use kame_notebook::log_folder;
 use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
 use kame_notebook::search::{search, Hit};
-use kame_notebook::stranded::{apply, decide, find_stranded, Done, Steps};
+use kame_notebook::stranded::{apply, decide, find_stranded, Done, Healthy, Steps};
 use kame_notebook::Notebook;
 
 use super::{follow_move, now_unix, same_document, same_place, BackStop, KameApp};
@@ -36,8 +36,8 @@ const LIST_CHECK_SECONDS: u64 = 10;
 /// How long a database must have been stranded before it's moved or retired, so that a sync still
 /// in progress has time to finish.
 const STRANDED_WAIT: Duration = Duration::from_secs(600);
-/// How often to look again while something's waiting, since nothing else would bring a pass back
-/// ten minutes on.
+/// How often to look again while something's waiting out `STRANDED_WAIT`, so that it's acted on
+/// when its time is up.
 const STRANDED_RECHECK: Duration = Duration::from_secs(60);
 
 /// The jump list, open.
@@ -125,8 +125,9 @@ impl OpenDialog {
     }
 }
 
-/// What a clean-up pass read: when each database was first seen stranded, and what to do.
-type StrandedPass = (HashMap<PathBuf, Instant>, Steps);
+/// What a clean-up pass read: when each database was first seen stranded, which were healthy, and
+/// what to do.
+type StrandedPass = (HashMap<PathBuf, Instant>, Healthy, Steps);
 
 #[derive(Default)]
 pub(crate) struct NotebookUi {
@@ -138,6 +139,8 @@ pub(crate) struct NotebookUi {
     listing_checked: Option<std::time::Instant>,
     /// When each database that's looked stranded was first seen so.
     stranded_seen: HashMap<PathBuf, Instant>,
+    /// Which databases needn't have their logs read again. It's with the pass while one is reading.
+    stranded_healthy: Healthy,
     stranded_checked: Option<Instant>,
     /// Whether a pass is wanted whatever the time: a notebook just found, or a different listing.
     stranded_due: bool,
@@ -225,26 +228,48 @@ impl NotebookUi {
     }
 }
 
-/// Whether a clean-up pass should start: it was asked for, or something is waiting out its time and
-/// `STRANDED_RECHECK` has gone since the last look.
-fn pass_due(asked: bool, seen_empty: bool, checked: Option<Instant>, now: Instant) -> bool {
+/// How long after a look the next pass is due. If something hadn't waited out its time by that
+/// look, it's `STRANDED_RECHECK`, so that the pass acting on it comes soon after its time is up.
+/// Otherwise that look could have acted on all there is, and what it left has no reason to change
+/// soon. A pass still comes every `STRANDED_WAIT`, as a log folder deleted by a sync doesn't change
+/// the listing, and the clock on it should start when it goes, rather than when something else does.
+fn pass_interval(seen: &HashMap<PathBuf, Instant>, checked: Instant) -> Duration {
+    let still_waiting = seen
+        .values()
+        .any(|first| checked.saturating_duration_since(*first) < STRANDED_WAIT);
+    if still_waiting {
+        STRANDED_RECHECK
+    } else {
+        STRANDED_WAIT
+    }
+}
+
+/// Whether a clean-up pass should start: it was asked for, there's never been one, or it's been
+/// long enough since the last.
+fn pass_due(
+    asked: bool,
+    seen: &HashMap<PathBuf, Instant>,
+    checked: Option<Instant>,
+    now: Instant,
+) -> bool {
     asked
-        || (!seen_empty
-            && checked
-                .is_none_or(|checked| now.saturating_duration_since(checked) >= STRANDED_RECHECK))
+        || checked.is_none_or(|checked| {
+            now.saturating_duration_since(checked) >= pass_interval(seen, checked)
+        })
 }
 
 /// What a pass reads: what's stranded, when each was first seen so, and what to do about those that
-/// have waited long enough. It changes nothing, so it can be on any thread.
+/// have waited long enough. It changes nothing on disk, so it can be on any thread.
 fn read_pass(
     notebook: &Notebook,
     mut seen: HashMap<PathBuf, Instant>,
+    mut healthy: Healthy,
     now: Instant,
 ) -> StrandedPass {
-    let found = find_stranded(notebook);
+    let found = find_stranded(notebook, &mut healthy);
     let ready = stranded_ready(&mut seen, &found, now);
     let steps = decide(notebook, &ready);
-    (seen, steps)
+    (seen, healthy, steps)
 }
 
 /// Notes when each of `found` was first seen stranded, forgetting any that no longer are, and
@@ -551,11 +576,14 @@ impl KameApp {
     fn stranded_tick(&mut self, ctx: &egui::Context) {
         if let Some((_, coming)) = &self.nb.stranded_coming {
             match coming.try_recv() {
-                Ok((seen, steps)) => {
+                Ok((seen, healthy, steps)) => {
                     let Some((notebook, _)) = self.nb.stranded_coming.take() else {
                         return;
                     };
                     self.nb.stranded_seen = seen;
+                    self.nb.stranded_healthy = healthy;
+                    // The next frame works out when the next pass is.
+                    ctx.request_repaint();
                     let done = apply(&notebook, steps, self.session.path());
                     if !done.is_empty() {
                         self.nb.refresh_listing();
@@ -574,26 +602,24 @@ impl KameApp {
         let Some(notebook) = self.nb.notebook.clone() else {
             return;
         };
-        let waiting = !self.nb.stranded_seen.is_empty();
-        if waiting {
-            ctx.request_repaint_after(STRANDED_RECHECK);
-        }
-        if !pass_due(
-            self.nb.stranded_due,
-            !waiting,
-            self.nb.stranded_checked,
-            Instant::now(),
-        ) {
+        let now = Instant::now();
+        let seen = &self.nb.stranded_seen;
+        if !pass_due(self.nb.stranded_due, seen, self.nb.stranded_checked, now) {
+            if let Some(checked) = self.nb.stranded_checked {
+                let since = now.saturating_duration_since(checked);
+                ctx.request_repaint_after(pass_interval(seen, checked).saturating_sub(since));
+            }
             return;
         }
         self.nb.stranded_due = false;
-        self.nb.stranded_checked = Some(Instant::now());
+        self.nb.stranded_checked = Some(now);
         let seen = self.nb.stranded_seen.clone();
+        let healthy = std::mem::take(&mut self.nb.stranded_healthy);
         let (send, coming) = channel();
         let reading = notebook.clone();
         self.nb.stranded_coming = Some((notebook, coming));
         std::thread::spawn(move || {
-            let _ = send.send(read_pass(&reading, seen, Instant::now()));
+            let _ = send.send(read_pass(&reading, seen, healthy, Instant::now()));
         });
     }
 
@@ -1983,17 +2009,96 @@ mod tests {
         );
     }
 
+    /// A map with one database in it, first seen stranded at `first`.
+    fn seen_at(first: Instant) -> HashMap<PathBuf, Instant> {
+        HashMap::from([(PathBuf::from("/n/a.kame"), first)])
+    }
+
     #[test]
-    fn a_pass_is_due_when_asked_or_when_something_waits_and_a_minute_has_passed() {
+    fn a_pass_is_due_when_asked_or_when_there_has_never_been_one() {
         let now = Instant::now();
-        let long_ago = now.checked_sub(STRANDED_RECHECK).unwrap();
-        let just_now = now.checked_sub(STRANDED_RECHECK / 2).unwrap();
-        assert!(pass_due(true, true, Some(now), now));
-        assert!(!pass_due(false, true, None, now), "nothing waits");
-        assert!(!pass_due(false, true, Some(long_ago), now), "nothing waits");
-        assert!(pass_due(false, false, None, now), "never checked");
-        assert!(!pass_due(false, false, Some(just_now), now), "too soon");
-        assert!(pass_due(false, false, Some(long_ago), now));
+        assert!(pass_due(true, &HashMap::new(), Some(now), now));
+        assert!(pass_due(true, &seen_at(now), Some(now), now));
+        assert!(pass_due(false, &HashMap::new(), None, now));
+    }
+
+    #[test]
+    fn with_nothing_stranded_a_pass_is_due_every_wait() {
+        let looked = Instant::now();
+        let nothing = HashMap::new();
+        assert!(!pass_due(
+            false,
+            &nothing,
+            Some(looked),
+            looked + STRANDED_RECHECK
+        ));
+        assert!(pass_due(
+            false,
+            &nothing,
+            Some(looked),
+            looked + STRANDED_WAIT
+        ));
+    }
+
+    #[test]
+    fn while_something_is_waiting_out_its_time_a_pass_is_due_every_minute() {
+        let first = Instant::now();
+        let looked = first + STRANDED_RECHECK;
+        let seen = seen_at(first);
+        assert!(!pass_due(
+            false,
+            &seen,
+            Some(looked),
+            looked + STRANDED_RECHECK / 2
+        ));
+        assert!(pass_due(
+            false,
+            &seen,
+            Some(looked),
+            looked + STRANDED_RECHECK
+        ));
+    }
+
+    #[test]
+    fn the_time_running_out_since_the_last_look_still_brings_a_pass_in_a_minute() {
+        let first = Instant::now();
+        let looked = first + STRANDED_WAIT - STRANDED_RECHECK / 2;
+        let now = looked + STRANDED_RECHECK;
+        assert!(now > first + STRANDED_WAIT);
+        assert!(pass_due(false, &seen_at(first), Some(looked), now));
+    }
+
+    #[test]
+    fn once_everything_has_waited_and_been_looked_at_a_pass_is_due_every_wait() {
+        let first = Instant::now();
+        let looked = first + STRANDED_WAIT;
+        let seen = seen_at(first);
+        assert!(!pass_due(
+            false,
+            &seen,
+            Some(looked),
+            looked + STRANDED_RECHECK
+        ));
+        assert!(pass_due(
+            false,
+            &seen,
+            Some(looked),
+            looked + STRANDED_WAIT
+        ));
+    }
+
+    #[test]
+    fn one_still_waiting_keeps_the_minutes_going_for_one_that_has_waited() {
+        let first = Instant::now();
+        let looked = first + STRANDED_WAIT;
+        let mut seen = seen_at(first);
+        seen.insert(PathBuf::from("/n/b.kame"), looked);
+        assert!(pass_due(
+            false,
+            &seen,
+            Some(looked),
+            looked + STRANDED_RECHECK
+        ));
     }
 
     #[test]
@@ -2019,15 +2124,16 @@ mod tests {
         std::fs::rename(log_folder(&a), &carried).unwrap();
 
         let start = Instant::now();
-        let (seen, steps) = read_pass(&notebook, HashMap::new(), start);
+        let (seen, healthy, steps) =
+            read_pass(&notebook, HashMap::new(), Healthy::default(), start);
         assert!(apply(&notebook, steps, None).is_empty(), "first sighting");
-        let (seen, steps) = read_pass(&notebook, seen, start + STRANDED_WAIT);
+        let (seen, healthy, steps) = read_pass(&notebook, seen, healthy, start + STRANDED_WAIT);
         assert_eq!(apply(&notebook, steps, None).len(), 1);
         let retired = root.join(".a.retired.kame");
         assert!(retired.is_file());
 
         std::fs::rename(&carried, log_folder(&b)).unwrap();
-        let (seen, steps) = read_pass(&notebook, seen, start + STRANDED_WAIT);
+        let (seen, _, steps) = read_pass(&notebook, seen, healthy, start + STRANDED_WAIT);
         assert!(seen.is_empty());
         assert_eq!(
             apply(&notebook, steps, None),

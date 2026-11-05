@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use kame_core::session::Session;
-use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done};
+use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done, Healthy};
 use kame_notebook::Notebook;
 use kame_sync::logs::{build_from_logs, log_folder, Logged, MARKER};
 use kame_sync::revlog::Store;
@@ -147,7 +147,7 @@ fn a_database_that_never_synced_is_not_stranded() {
     let (root, nb) = logged_notebook("stranded-never-synced");
     let a = root.join("a.kame");
     Session::open(&a).unwrap().insert("Never synced.");
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(reconcile(&nb, just(&a), None).is_empty());
     assert!(a.is_file());
 }
@@ -158,9 +158,9 @@ fn one_outside_a_marked_folder_is_not_stranded() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     remove_logs(&a);
-    assert_eq!(find_stranded(&nb), just(&a));
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
     std::fs::remove_file(root.join(MARKER)).unwrap();
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(reconcile(&nb, just(&a), None).is_empty());
     assert!(a.is_file());
 }
@@ -170,7 +170,7 @@ fn one_with_its_logs_is_not_stranded() {
     let (root, nb) = logged_notebook("stranded-with-logs");
     let a = root.join("a.kame");
     synced(&a, "Words.");
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(reconcile(&nb, just(&a), None).is_empty());
     assert!(a.is_file());
 }
@@ -188,7 +188,7 @@ fn a_moved_document_joins_its_logs_with_history_intact() {
     let revisions = Store::load(&log_folder(&a)).unwrap().revision_count();
     move_logs(&a, &b);
 
-    assert_eq!(find_stranded(&nb), just(&a));
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
     assert_eq!(
         reconcile(&nb, just(&a), None),
         [Done::Moved {
@@ -197,7 +197,7 @@ fn a_moved_document_joins_its_logs_with_history_intact() {
         }]
     );
     assert!(!a.exists());
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
 
     let mut session = Session::open(&b).unwrap();
     assert_eq!(session.history(), history);
@@ -254,7 +254,7 @@ fn a_deleted_document_is_retired_and_stays_gone() {
     assert!(!a.exists());
     assert!(text_of(&retired).contains("Words."));
     assert!(listed(&nb).is_empty());
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(!log_folder(&a).exists());
     assert!(reconcile(&nb, &[], None).is_empty());
     assert!(!a.exists());
@@ -337,7 +337,7 @@ fn a_swap_moves_both_through_temporary_names() {
     );
     assert!(text_of(&b).contains("Words of a."));
     assert!(text_of(&a).contains("Words of b."));
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     let left = names_in(&root);
     assert!(
         !left.iter().any(|name| name.contains(".moving-")),
@@ -496,7 +496,7 @@ fn two_homes_leave_it_alone() {
     assert_eq!(std::fs::read(&a).unwrap(), before);
     assert!(!b.exists());
     assert!(!c.exists());
-    assert_eq!(find_stranded(&nb), just(&a));
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
 }
 
 #[test]
@@ -539,7 +539,7 @@ fn late_logs_bring_a_retired_database_back() {
     );
     assert!(!retired.exists());
     assert_eq!(Session::open(&b).unwrap().history(), history);
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
 }
 
 #[test]
@@ -653,11 +653,11 @@ fn a_save_as_copy_is_never_mistaken() {
         let mut session = Session::open(&a).unwrap();
         session.save_as(&c).unwrap();
     }
-    assert!(find_stranded(&nb).is_empty());
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
 
     let copy = std::fs::read(&c).unwrap();
     remove_logs(&a);
-    assert_eq!(find_stranded(&nb), just(&a));
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
     assert_eq!(
         reconcile(&nb, just(&a), None),
         [Done::Retired {
@@ -680,7 +680,7 @@ fn only_what_may_be_acted_on_is_touched() {
     remove_logs(&b);
 
     assert!(reconcile(&nb, &[], None).is_empty());
-    assert_eq!(find_stranded(&nb), [a.clone(), b.clone()]);
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), [a.clone(), b.clone()]);
     assert_eq!(reconcile(&nb, just(&b), None).len(), 1);
     assert!(a.is_file());
     assert!(!b.exists());
@@ -1447,4 +1447,161 @@ fn a_retirement_goes_ahead_if_the_database_was_only_opened_after_it_was_decided(
             ..
         }]
     ));
+}
+
+/// A document's one log.
+fn only_log(path: &Path) -> PathBuf {
+    let logs: Vec<PathBuf> = std::fs::read_dir(log_folder(path))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    logs.into_iter().next().unwrap()
+}
+
+/// Makes a document's log say something else at the same size, so that reading it finds no sign of
+/// the revision its database remembers: a line whose bytes don't match its id is passed over.
+fn spoil_at_the_same_size(path: &Path) {
+    let log = only_log(path);
+    let revision = Session::open(path).unwrap().sync_state().unwrap();
+    let other = if revision.starts_with('0') { "1" } else { "0" };
+    let spoiled = std::fs::read_to_string(&log)
+        .unwrap()
+        .replace(&revision, &format!("{other}{}", &revision[1..]));
+    let size = std::fs::metadata(&log).unwrap().len();
+    std::fs::write(&log, spoiled).unwrap();
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), size);
+}
+
+#[test]
+fn a_second_look_at_healthy_logs_reads_none_of_them() {
+    let (root, nb) = logged_notebook("stranded-healthy-unread");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+
+    spoil_at_the_same_size(&a);
+
+    assert_eq!(
+        find_stranded(&nb, &mut Healthy::default()),
+        just(&a),
+        "read, the log no longer holds the revision"
+    );
+    assert!(find_stranded(&nb, &mut healthy).is_empty(), "so it wasn't");
+    assert!(find_stranded(&nb, &mut healthy).is_empty(), "nor this time");
+}
+
+#[test]
+fn a_log_of_another_size_is_read_again() {
+    let (root, nb) = logged_notebook("stranded-healthy-size");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+
+    spoil_at_the_same_size(&a);
+    let log = only_log(&a);
+    let mut grown = std::fs::read(&log).unwrap();
+    grown.extend_from_slice(b"
+");
+    std::fs::write(&log, grown).unwrap();
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+#[test]
+fn a_new_log_is_read_again() {
+    let (root, nb) = logged_notebook("stranded-healthy-new-log");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+
+    spoil_at_the_same_size(&a);
+    std::fs::write(log_folder(&a).join("other-0000.log"), "").unwrap();
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+#[test]
+fn another_recorded_revision_is_read_again() {
+    let (root, nb) = logged_notebook("stranded-healthy-revision");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+
+    Session::open(&a).unwrap().set_sync_state("not in its logs");
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+#[test]
+fn logs_gone_are_seen_at_once_whatever_is_remembered() {
+    let (root, nb) = logged_notebook("stranded-healthy-gone");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+
+    remove_logs(&a);
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+#[test]
+fn being_stranded_is_never_remembered() {
+    let (root, nb) = logged_notebook("stranded-healthy-not-stranded");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let carried = root.join(".carried");
+    std::fs::rename(log_folder(&a), &carried).unwrap();
+    let mut healthy = Healthy::default();
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+
+    std::fs::rename(&carried, log_folder(&a)).unwrap();
+
+    assert!(find_stranded(&nb, &mut healthy).is_empty());
+}
+
+#[test]
+fn logs_that_cannot_be_read_are_not_remembered_as_healthy() {
+    let (root, nb) = logged_notebook("stranded-healthy-unreadable");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let log = only_log(&a);
+    set_mode(&log, 0o000);
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty(), "can't be told");
+
+    set_mode(&log, 0o644);
+    spoil_at_the_same_size(&a);
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
+}
+
+#[test]
+fn logs_from_a_newer_kame_are_not_remembered_as_healthy() {
+    let (root, nb) = logged_notebook("stranded-healthy-newer");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let log = only_log(&a);
+    add_newer_line(&a);
+    let newer = log_folder(&a).join("new-0000.log");
+    let mut healthy = Healthy::default();
+    assert!(find_stranded(&nb, &mut healthy).is_empty(), "can't be told");
+
+    let blank = "
+".repeat(std::fs::metadata(&newer).unwrap().len() as usize);
+    std::fs::write(&newer, blank).unwrap();
+    let revision = Session::open(&a).unwrap().sync_state().unwrap();
+    let spoiled = std::fs::read_to_string(&log)
+        .unwrap()
+        .replace(&revision, &format!("_{}", &revision[1..]));
+    std::fs::write(&log, spoiled).unwrap();
+
+    assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
 }

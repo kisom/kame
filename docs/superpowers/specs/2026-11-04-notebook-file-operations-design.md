@@ -192,16 +192,27 @@ what the machine retired to every other machine. A leading `.` and a final `.kam
 ever written, and the browser and listing already skip it. Words in a retired database are kept and reachable by hand, and
 `docs/keybindings.md` says where.
 
-**When.** When a notebook's found (`notebook_tick`, where `looked_from` changes), when a listing comes back different, and
-every minute while any database is waiting out the wait below. A pass reads on a background thread and renames on the main
+**When.** When a notebook's found (`notebook_tick`, where `looked_from` changes), when a listing comes back different, every
+minute while any database is still waiting out the wait below, and otherwise every 10 minutes while a notebook is open, since
+a log folder being deleted doesn't change the listing, and the clock on it would start late. So a database that's waited and
+can't be settled costs one pass in 10 minutes, not one a minute. A pass reads on a background thread and renames on the main
 thread. Reading every log is slow, so it can't be on the main thread. But `build_from_logs` and opening a document run on the
 main thread, and a build's rename replaces whatever is at its path, so a rename from another thread landing there would be
 lost, and one in the middle of an open would move a file from under its session. So the thread only decides (`decide`), and
 the main thread does what was decided (`apply`) when the result arrives, with the open path as of then, looking at each step
 again just before taking it. That happens each time a pass finishes, even when nothing has waited long enough, since a retired
 database coming back needs no wait. Passes never overlap, since a temporary name seen by a second pass would be taken for
-something else; a due pass waits for the next tick. The cheap test (is there a log folder?) runs first, and logs are read only
-for a stranded database. Afterwards the listing refreshes, and a notice says what happened to each of the first three, retirements first, with where the file is and what it holds, and
+something else; a due pass waits for the next tick.
+
+Logs are read only for a stranded database, since a pass runs with nobody looking, on a laptop. Each pass remembers which
+databases it found healthy (`Healthy`, which goes to the pass's thread and comes back with it, as the times first seen do),
+with what that rested on: the revision the database remembers, and each log's name and size, from `stat` and no reading. If
+those are unchanged on the next pass, it's still healthy. Only not being stranded is remembered, and not a verdict that couldn't
+be reached, so a change can only cause another read. Within a pass, every log folder is read only if something has waited long
+enough to be acted on, or a retired or temporary database has logs with no database at their path to come back to, and that
+reading serves the whole pass. Just before a database is acted on, its own logs are read again (`is_still_stranded`).
+
+Afterwards the listing refreshes, and a notice says what happened to each of the first three, retirements first, with where the file is and what it holds, and
 counting any more.
 
 **The wait.** Nothing is moved or retired the first time it's seen stranded. The app remembers when it first saw each one,

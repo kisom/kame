@@ -13,11 +13,12 @@
 //! whatever has got there since it looked, so a rename landing there would be lost, and a document
 //! opened during one would be moved out from under its session.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use kame_core::model::Metadata;
 use kame_core::storage::Db;
-use kame_sync::logs::log_folder;
+use kame_sync::logs::{log_folder, logging_root, stranded_verdict};
 use kame_sync::merge::document_digest;
 use kame_sync::revlog::Store;
 
@@ -86,14 +87,57 @@ struct Going {
 /// How many numbered names to try for a retired or moving database before leaving it for now.
 const NAMES_TO_TRY: u32 = 1000;
 
-/// The databases in the notebook that have lost their logs, for now at least.
-pub fn find_stranded(notebook: &Notebook) -> Vec<PathBuf> {
-    notebook
-        .documents()
-        .into_iter()
-        .map(|entry| entry.path)
-        .filter(|path| is_database(path) && path.is_file() && is_stranded_database(path))
-        .collect()
+/// Which databases were found not to be stranded, and what was true when they were, so that a
+/// later pass reads their logs only if that has changed. Being stranded is never remembered, nor is
+/// a verdict that couldn't be reached, so a change can only cause another read. It belongs to one
+/// pass at a time, going with it to its thread and back. Starting again with an empty one is only
+/// slower.
+#[derive(Debug, Default)]
+pub struct Healthy {
+    databases: HashMap<PathBuf, LooksHealthy>,
+}
+
+/// What a database's healthy verdict rests on: the revision it remembers, and each log's name and
+/// size. Logs are only ever added to, so this comes from looking at them, with no reading.
+#[derive(Debug, PartialEq)]
+struct LooksHealthy {
+    revision: String,
+    logs: Vec<(PathBuf, u64)>,
+}
+
+/// The databases in the notebook that have lost their logs, for now at least. A database's logs are
+/// read only if it has no verdict in `healthy` that still holds. So that's only one that's stranded,
+/// or has logs or a revision new since the last look.
+pub fn find_stranded(notebook: &Notebook, healthy: &mut Healthy) -> Vec<PathBuf> {
+    let known = std::mem::take(&mut healthy.databases);
+    let mut stranded = Vec::new();
+    for path in notebook.documents().into_iter().map(|entry| entry.path) {
+        // Nothing above it turning logs on means its state says nothing, and nothing would ever
+        // settle it.
+        if !is_database(&path) || !path.is_file() || logging_root(&path).is_none() {
+            continue;
+        }
+        // With no revision it has no state to lose.
+        let Some(revision) = recorded_revision(&path) else {
+            continue;
+        };
+        let folder = log_folder(&path);
+        // Before any reading, so that logs added to meanwhile are read again next time.
+        let looks = Store::log_sizes(&folder).map(|logs| LooksHealthy {
+            revision: revision.clone(),
+            logs,
+        });
+        if looks.is_some() && looks.as_ref() == known.get(&path) {
+            healthy.databases.extend(looks.map(|looks| (path, looks)));
+            continue;
+        }
+        match stranded_verdict(Some(&revision), &folder) {
+            Some(true) => stranded.push(path),
+            Some(false) => healthy.databases.extend(looks.map(|looks| (path, looks))),
+            None => {}
+        }
+    }
+    stranded
 }
 
 /// What to do about the databases in `may_act_on`, each of which is looked at again first, and any
@@ -113,7 +157,11 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
 
     let mut walked = Walked::default();
     walk(notebook, &notebook.root, &mut walked);
-    if to_settle.is_empty() && walked.set_aside.is_empty() {
+    // A retired database stays for good, so having one can't be a reason to read every log on every
+    // pass. It can only come back to logs with no database at their path.
+    let may_come_back =
+        !walked.set_aside.is_empty() && walked.documents.iter().any(|document| is_free(document));
+    if to_settle.is_empty() && !may_come_back {
         return steps;
     }
     // A home in what can't be read can't be ruled out, and that would make a retirement a guess.
@@ -487,10 +535,7 @@ fn those_coming_back(notebook: &Notebook, set_aside: &[PathBuf], logs: &[Logs]) 
     if wanting.is_empty() {
         return wanting;
     }
-    let spoken_for: Vec<String> = find_stranded(notebook)
-        .iter()
-        .filter_map(|path| recorded_revision(path))
-        .collect();
+    let spoken_for = revisions_of_stranded(notebook, logs);
     wanting.retain(|going| {
         !spoken_for
             .iter()
@@ -498,6 +543,22 @@ fn those_coming_back(notebook: &Notebook, set_aside: &[PathBuf], logs: &[Logs]) 
     });
     wanting.sort_by(|one, other| one.path.cmp(&other.path));
     wanting
+}
+
+/// What each stranded database remembers, going by logs that have already been read. Logs that
+/// aren't among them aren't a folder this could read, so they don't hold the revision.
+fn revisions_of_stranded(notebook: &Notebook, logs: &[Logs]) -> Vec<String> {
+    notebook
+        .documents()
+        .into_iter()
+        .map(|entry| entry.path)
+        .filter(|path| is_database(path) && path.is_file() && logging_root(path).is_some())
+        .filter_map(|path| {
+            let revision = recorded_revision(&path)?;
+            let own = logs.iter().find(|logs| logs.document == path);
+            (!own.is_some_and(|logs| logs.store.contains(&revision))).then_some(revision)
+        })
+        .collect()
 }
 
 fn stem_of(path: &Path) -> String {

@@ -117,6 +117,21 @@ impl Store {
         paths
     }
 
+    /// Each log in a folder, with its size, sorted, from looking at the folder and reading no log.
+    /// `None` if a folder or a log can't be looked at.
+    pub fn log_sizes(folder: &Path) -> Option<Vec<(PathBuf, u64)>> {
+        let mut sizes = Vec::new();
+        for entry in std::fs::read_dir(folder).ok()? {
+            let path = entry.ok()?.path();
+            if path.extension().is_some_and(|extension| extension == "log") {
+                let size = std::fs::metadata(&path).ok()?.len();
+                sizes.push((path, size));
+            }
+        }
+        sizes.sort();
+        Some(sizes)
+    }
+
     /// Reads what has been added to the logs since the last read, returning the ids of the
     /// revisions it found. A log that has shrunk was replaced, so it's read again from the start,
     /// which is harmless since everything is addressed by content.

@@ -83,16 +83,19 @@ pub fn display_device(device: &str) -> &str {
 /// told, for logs that can't be read or that came from a newer kame, since nothing is done on a
 /// guess.
 pub fn is_stranded(last: Option<&str>, folder: &Path) -> bool {
+    stranded_verdict(last, folder).unwrap_or(false)
+}
+
+/// The same, with `None` for when it can't be told, for a caller that remembers the answer.
+pub fn stranded_verdict(last: Option<&str>, folder: &Path) -> Option<bool> {
     let Some(last) = last else {
-        return false;
+        return Some(false);
     };
     if !folder.exists() {
-        return true;
+        return Some(true);
     }
-    match Store::load(folder) {
-        Ok(store) => !store.holds_newer() && !store.contains(last),
-        Err(_) => false,
-    }
+    let store = Store::load(folder).ok()?;
+    (!store.holds_newer()).then(|| !store.contains(last))
 }
 
 /// What a sync did.

@@ -13,6 +13,12 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **Check `.stignore` on each machine** for `*.kame-wal` and `*.kame-shm`. `kame-sync enable` prints
   them now, but folders already turned on won't have been told.
 - [ ] **A footnote or note added right after punctuation** has no word to anchor to, so it sits at one point and its mark moves along as you keep typing there.
+- [ ] **Save As's rewrite of links and images is an invisible undo step, and it ends the redo tail.** Undoing it changes nothing on the
+  screen, and leaves a link that's wrong from the new folder until it's redone, and anything waiting for a redo can't come back once it's run.
+- [ ] **The replaced-file prompt's Merge them and Open the one on disk take a reference form with them.** Nothing guards those two, as
+  it does the other ways of leaving a document.
+- [ ] **On Save As, a `Link` to a document that's there only as logs stays as written.** Only what's on disk counts as what it names, and core can't
+  see logs, so the link stops leading to the document from another folder. A `DocumentLink` isn't affected.
 
 ## Annotations
 
@@ -27,6 +33,8 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
+- [ ] **A notebook opened through a symbolic link can't create a document from a link.** Its root is the real path and the document's isn't, so
+  `Notebook::holds` says no to anything not there yet, and a click says "no document at" it. `/tmp` and `/var` on macOS are such paths.
 - [ ] **A corrupt log line stays for good.** Logs are only added to, so a line that doesn't parse, and isn't torn, stays until it's
   removed by hand. Until then a document it could belong to can't be retired as having no home. A notice says which logs.
 - [ ] **A stale database from before places were recorded,** whose logs left before a pass first saw it, has no place, so it isn't
@@ -79,6 +87,8 @@ Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-0
   Tables are wanted but too complex for now, and a code block is the stopgap.
 - [ ] **A relative link in an imported file breaks when it's first saved in another folder.** Until then it leads from the Markdown
   file, and Save As only says links again from a document's own earlier file, which an import doesn't have.
+- [ ] **An image's link to a heading with a literal `%XX` doesn't round trip.** `#a%20b` exports as `[![](/a.png)](#a%20b)` and imports as
+  `#a b`, since an image's link doesn't encode `%` as a text link's does.
 
 ## Export
 

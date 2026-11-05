@@ -2856,3 +2856,64 @@ fn a_database_at_the_new_home_whose_document_cannot_be_read_leaves_the_stale_one
     assert!(reconcile(&nb, just(&a), None).is_empty());
     assert!(a.is_file());
 }
+
+/// That `-wal` may be another machine's, so nothing opens it with nobody looking. It keeps the place
+/// it had, so that if its logs move on before it's opened, it's merely not stranded.
+#[test]
+fn a_database_arriving_with_a_wal_beside_it_is_not_opened() {
+    let (root, nb) = logged_notebook("arrive-with-wal");
+    let (a, b, c) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("c.kame"),
+    );
+    synced(&a, "Synced.");
+    crash_with_words_in_the_wal(&a, " Only in the wal.");
+    move_logs(&a, &b);
+    let (file, wal) = (
+        std::fs::read(&a).unwrap(),
+        std::fs::read(with_suffix(&a, "-wal")).unwrap(),
+    );
+
+    assert_eq!(
+        reconcile(&nb, just(&a), None),
+        [Done::Moved {
+            from: a.clone(),
+            to: b.clone()
+        }]
+    );
+    assert_eq!(std::fs::read(&b).unwrap(), file);
+    assert_eq!(std::fs::read(with_suffix(&b, "-wal")).unwrap(), wal);
+    assert_eq!(place_in(&b), place_of(&a));
+
+    move_logs(&b, &c);
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(text_of(&b).contains("Only in the wal."));
+}
+
+#[test]
+fn a_retired_database_coming_back_with_a_wal_beside_it_is_not_opened() {
+    let (root, nb) = logged_notebook("return-with-wal");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Synced.");
+    crash_with_words_in_the_wal(&a, " Only in the wal.");
+    let retired = root.join(".a.retired.kame");
+    for suffix in ["", "-wal", "-shm"] {
+        std::fs::rename(with_suffix(&a, suffix), with_suffix(&retired, suffix)).unwrap();
+    }
+    move_logs(&a, &b);
+    let (file, wal) = (
+        std::fs::read(&retired).unwrap(),
+        std::fs::read(with_suffix(&retired, "-wal")).unwrap(),
+    );
+
+    assert_eq!(
+        reconcile(&nb, &[], None),
+        [Done::Returned {
+            from: retired,
+            to: b.clone()
+        }]
+    );
+    assert_eq!(std::fs::read(&b).unwrap(), file);
+    assert_eq!(std::fs::read(with_suffix(&b, "-wal")).unwrap(), wal);
+}

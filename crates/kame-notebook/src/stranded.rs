@@ -285,7 +285,7 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
         }
     }
     for (path, last) in steps.stamping {
-        if as_it_was(&path, &last) && can_be_stamped(&path) {
+        if as_it_was(&path, &last) {
             record_place(&path);
         }
     }
@@ -330,14 +330,14 @@ fn last_sync(path: &Path) -> Option<LastSync> {
 /// shows they synced where they are, so that they can say so. A copy made by hand, with no logs beside
 /// it, doesn't show that. Once one has a place it isn't asked about again, so this reads logs for a
 /// database only until then, and on every pass only for one whose revision isn't beside it. One that
-/// can't be stamped yet is passed over before any of that, and is just asked again next time.
+/// can't take a place yet is passed over before any of that, and is just asked again next time.
 fn those_to_stamp(notebook: &Notebook) -> Vec<(PathBuf, LastSync)> {
     notebook
         .documents()
         .into_iter()
         .map(|entry| entry.path)
         .filter(|path| is_database(path) && path.is_file() && log_folder(path).is_dir())
-        .filter(|path| logging_root(path).is_some() && can_be_stamped(path))
+        .filter(|path| logging_root(path).is_some() && can_record_place(path))
         .filter_map(|path| {
             let last = last_sync(&path)?;
             let shows_it = last.place.is_none()
@@ -350,26 +350,21 @@ fn those_to_stamp(notebook: &Notebook) -> Vec<(PathBuf, LastSync)> {
 
 /// Whether a database can have its place written with nothing else happening to it. Opening it for
 /// writing folds in any `-wal` beside it, which may be another machine's, carried here by a sync tool,
-/// and it may be open in another process. So it waits until nothing is beside it. A file that can't be
-/// written would only leave side files behind.
-fn can_be_stamped(path: &Path) -> bool {
-    can_be_written(path)
+/// and it may be open in another process. So it waits until nothing is beside it. `Db::open` also
+/// makes a file that's gone, and leaves side files beside one it can't write.
+fn can_record_place(path: &Path) -> bool {
+    std::fs::OpenOptions::new().write(true).open(path).is_ok()
         && sqlite_files(path).iter().all(|side| {
             matches!(side.symlink_metadata(),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound)
         })
 }
 
-/// Whether a file is there and can be written, from trying to open it, which creates nothing.
-fn can_be_written(path: &Path) -> bool {
-    std::fs::OpenOptions::new().write(true).open(path).is_ok()
-}
-
-/// Says where a database is, so that it's recognised if its logs move on before it's next opened. If
-/// this fails, it's left saying somewhere else or nothing, and is merely not stranded. It's looked at
-/// first since `Db::open` makes a file that's gone, and leaves side files beside one it can't write.
+/// Says where a database is, so that it's recognised if its logs move on before it's next opened, if
+/// that can be done with nothing else happening to it. Otherwise, or if this fails, it's left saying
+/// somewhere else or nothing, and is merely not stranded.
 fn record_place(path: &Path) {
-    if !can_be_written(path) {
+    if !can_record_place(path) {
         return;
     }
     if let (Some(place), Ok(mut db)) = (place_of(path), Db::open(path)) {

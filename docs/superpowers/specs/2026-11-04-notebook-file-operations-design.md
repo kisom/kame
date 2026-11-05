@@ -182,14 +182,15 @@ A database from before places were recorded gets one from a pass. If it has a sy
 beside it, that shows it synced there, so `decide` lists it, and `apply` records the place on the main thread, with the same looks
 again as any other step, never for the open document, and ignoring a failure. Having a place is what stops it being asked again. A
 hand copy with no logs beside it isn't stamped, nor is a database whose revision isn't beside it, whose logs are then read on each pass.
-A stamp changes the file's modified time once, which a machine lacking the `**.kame` ignore line would carry, once per document. It waits
-while a `-wal` or `-shm` is beside the database, as opening it for writing would fold in a `-wal` that may be another machine's, with nobody
-looking, and it may be open in another process. Such a database is just asked again on the next pass, which keeps no recheck alive, as
-nothing is waiting on it. A read-only file isn't asked, and nothing is left beside it.
+A stamp changes the file's modified time once, which a machine lacking the `**.kame` ignore line would carry, once per document. Neither a
+stamp nor the place recorded on arrival at a home opens a database with a `-wal` or `-shm` beside it, as opening it for writing would fold
+in a `-wal` that may be another machine's, with nobody looking, and it may be open in another process. A stamp is just asked again on the
+next pass, which keeps no recheck alive, as nothing is waiting on it. A database that arrived with one keeps the place it had, so a
+second move before it's next opened isn't recognised, and it's merely not stranded. A read-only file isn't asked, and nothing is left beside it.
 
 The place follows the moves kame makes itself. `carry_out` syncs a moved document afterwards. `apply` records the new place as
 each database arrives at a home, by opening it for writing on the main thread and ignoring a failure, so that a second move
-before it's next opened is still recognised. If that fails, it's merely not stranded. A retired file keeps what it had, and is
+before it's next opened is still recognised. If that fails, or something is beside it (see above), it's merely not stranded. A retired file keeps what it had, and is
 found by its revision, whatever its place. Under a name it never synced at, it's a document of its own, which is how to get one back
 by hand. Under the name it left it's stale again. Under its retired name it's not a document: opened there, it's held off as
 stranded, whatever its place, since logs for it would go to every machine and be taken there for a home.

@@ -36,9 +36,12 @@ pub fn logging_root(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Where a document is, as a sync records it: its path from its logging root, with `/` between
-/// folders. `None` if nothing above it turns logs on. It's relative so that a database carried to
-/// another machine, where the notebook may be somewhere else, is still in the same place.
+/// Where a document is, as a sync records it: the name of its logging root's folder and its path
+/// from there, with `/` between folders. `None` if nothing above it turns logs on. It's relative so
+/// that a database carried to another machine, where the notebook may be somewhere else, is still in
+/// the same place. The root's name is in it so that a copy into another notebook isn't. A root named
+/// differently on another machine, or renamed, is somewhere else until the next sync, which only
+/// makes a database not stranded.
 pub fn place_of(path: &Path) -> Option<String> {
     let root = logging_root(path)?;
     let absolute = if path.is_absolute() {
@@ -46,12 +49,19 @@ pub fn place_of(path: &Path) -> Option<String> {
     } else {
         std::env::current_dir().ok()?.join(path)
     };
-    let inside = absolute.strip_prefix(root).ok()?;
-    let mut parts: Vec<String> = Vec::new();
+    let inside = absolute.strip_prefix(&root).ok()?;
+    let mut parts: Vec<String> = root
+        .canonicalize()
+        .ok()?
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .into_iter()
+        .collect();
+    let at_root = parts.len();
     for part in inside.components() {
         match part {
             Component::Normal(name) => parts.push(name.to_string_lossy().into_owned()),
-            Component::ParentDir => {
+            Component::ParentDir if parts.len() > at_root => {
                 parts.pop();
             }
             _ => {}

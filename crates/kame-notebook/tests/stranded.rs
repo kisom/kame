@@ -9,7 +9,7 @@ use kame_core::storage::Db;
 use kame_notebook::manage::{carry_out, delete_document, plan_move};
 use kame_notebook::stranded::{apply, decide, find_stranded, reconcile, Done, Healthy};
 use kame_notebook::Notebook;
-use kame_sync::logs::{build_from_logs, log_folder, Logged, MARKER};
+use kame_sync::logs::{build_from_logs, log_folder, place_of, Logged, MARKER};
 use kame_sync::revlog::Store;
 
 const DEVICE: &str = "titan-bbbb";
@@ -1632,29 +1632,28 @@ fn a_hand_copy_is_not_stranded_and_starts_its_own_logs() {
     let (original, its_logs) = (std::fs::read(&a).unwrap(), words_in_logs(&log_folder(&a)));
 
     let copies = [
-        (root.join("deep/down/a.kame"), "deep/down/a.kame"),
-        (root.join("z.kame"), "z.kame"),
-        (other_root.join("deep/a.kame"), "deep/a.kame"),
-        (other_root.join("z.kame"), "z.kame"),
+        root.join("deep/down/a.kame"),
+        root.join("z.kame"),
+        other_root.join("deep/a.kame"),
+        other_root.join("z.kame"),
     ];
-    for (copy, _) in &copies {
+    for copy in &copies {
         std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
         std::fs::copy(&a, copy).unwrap();
     }
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(find_stranded(&other_nb, &mut Healthy::default()).is_empty());
-    let all: Vec<PathBuf> = copies.iter().map(|(copy, _)| copy.clone()).collect();
-    assert!(reconcile(&nb, &all, None).is_empty());
+    assert!(reconcile(&nb, &copies, None).is_empty());
     assert!(listed(&nb).contains(&"z.kame".to_string()));
     assert!(root.join("z.kame").is_file());
 
-    for (copy, place) in &copies {
+    for copy in &copies {
         let mut session = Session::open(copy).unwrap();
         let outcome = sync(&mut session);
-        assert!(!outcome.stranded, "{place}");
+        assert!(!outcome.stranded, "{}", copy.display());
         assert!(outcome.written > 0, "its history, as new logs");
         assert!(words_in_logs(&log_folder(copy)).contains("Words."));
-        assert_eq!(session.sync_place().as_deref(), Some(*place));
+        assert_eq!(session.sync_place(), place_of(copy));
         session.insert(" More.");
         assert!(sync(&mut session).written > 0, "and it syncs from then on");
     }
@@ -1664,20 +1663,44 @@ fn a_hand_copy_is_not_stranded_and_starts_its_own_logs() {
     assert_eq!(words_in_logs(&log_folder(&a)), its_logs);
 }
 
-/// The path from the logging root is all a sync records, so that a database that travelled is still
-/// recognised. A copy put at the same path in another notebook, with no logs, can't be told from one.
+/// The logging root's name is in the place, so that a copy into another notebook isn't taken for this
+/// document having lost its logs there.
 #[test]
-fn a_hand_copy_to_the_same_path_in_another_notebook_is_taken_for_a_stale_one() {
+fn a_hand_copy_to_the_same_path_in_another_notebook_is_not_stranded() {
     let (root, _) = logged_notebook("stranded-hand-copy-same-path");
     let (other_root, other_nb) = logged_notebook("stranded-hand-copy-same-path-other");
     let a = root.join("a.kame");
     synced(&a, "Words.");
     let copy = other_root.join("a.kame");
     std::fs::copy(&a, &copy).unwrap();
-    assert_eq!(
-        find_stranded(&other_nb, &mut Healthy::default()),
-        just(&copy)
-    );
+
+    assert!(find_stranded(&other_nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&other_nb, just(&copy), None).is_empty());
+    assert!(copy.is_file());
+    let mut session = Session::open(&copy).unwrap();
+    assert!(sync(&mut session).written > 0);
+}
+
+/// A notebook named differently on another machine says nothing about the logs having left, so a
+/// database carried there is merely not stranded until its next sync.
+#[test]
+fn a_database_in_a_renamed_notebook_is_not_stranded_until_it_next_syncs() {
+    let (root, _) = logged_notebook("stranded-renamed-root");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    let renamed = root.with_file_name("stranded-renamed-root-now");
+    std::fs::rename(&root, &renamed).unwrap();
+    let nb = Notebook::open(&renamed).unwrap();
+    let a = renamed.join("a.kame");
+    assert_ne!(place_in(&a), place_of(&a));
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+
+    let mut session = Session::open(&a).unwrap();
+    assert_eq!(sync(&mut session).written, 0, "its logs came along");
+    drop(session);
+    assert_eq!(place_in(&a), place_of(&a));
+    remove_logs(&a);
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
 }
 
 /// The logs went with it, so it has what it remembers beside it, and just says where it is now.
@@ -1695,7 +1718,7 @@ fn a_move_by_hand_with_its_logs_carries_on() {
     let outcome = sync(&mut session);
     assert!(!outcome.stranded);
     assert_eq!(outcome.written, 0);
-    assert_eq!(session.sync_place().as_deref(), Some("deep/b.kame"));
+    assert_eq!(session.sync_place(), place_of(&b));
 }
 
 /// The logs stayed, so it starts its own, as a copy does, and the old ones have no database.
@@ -1733,7 +1756,7 @@ fn a_database_with_no_recorded_place_is_not_stranded() {
     assert!(!outcome.stranded);
     assert!(outcome.written > 0);
     drop(session);
-    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+    assert_eq!(place_in(&a), place_of(&a));
 
     remove_logs(&a);
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
@@ -1798,7 +1821,7 @@ fn a_copy_on_a_reused_path() {
     move_logs(&other, &a);
     std::fs::remove_file(&other).unwrap();
     let before = words_in_logs(&log_folder(&a));
-    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+    assert_eq!(place_in(&a), place_of(&a));
 
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
     let mut session = Session::open(&a).unwrap();
@@ -1847,7 +1870,7 @@ fn a_database_that_arrives_at_a_new_home_is_recognised_if_that_moves_too() {
     synced(&a, "Words.");
     move_logs(&a, &b);
     assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
-    assert_eq!(place_in(&b).as_deref(), Some("b.kame"));
+    assert_eq!(place_in(&b), place_of(&b));
 
     move_logs(&b, &c);
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&b));
@@ -1858,7 +1881,7 @@ fn a_database_that_arrives_at_a_new_home_is_recognised_if_that_moves_too() {
             to: c.clone()
         }]
     );
-    assert_eq!(place_in(&c).as_deref(), Some("c.kame"));
+    assert_eq!(place_in(&c), place_of(&c));
 }
 
 #[test]
@@ -1874,7 +1897,7 @@ fn a_retired_database_found_by_its_revision_records_its_new_place_on_arrival() {
     std::fs::rename(log_folder(&a), &carried).unwrap();
     reconcile(&nb, just(&a), None);
     let retired = root.join(".a.retired.kame");
-    assert_eq!(place_in(&retired).as_deref(), Some("a.kame"), "as it was");
+    assert_eq!(place_in(&retired), place_of(&a), "as it was");
 
     std::fs::rename(&carried, log_folder(&b)).unwrap();
     assert_eq!(
@@ -1884,7 +1907,7 @@ fn a_retired_database_found_by_its_revision_records_its_new_place_on_arrival() {
             to: b.clone()
         }]
     );
-    assert_eq!(place_in(&b).as_deref(), Some("b.kame"));
+    assert_eq!(place_in(&b), place_of(&b));
 
     move_logs(&b, &c);
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&b));
@@ -1906,7 +1929,7 @@ fn a_place_that_cannot_be_written_on_arrival_does_not_stop_the_move() {
         }]
     );
     set_mode(&b, 0o644);
-    assert_eq!(place_in(&b).as_deref(), Some("a.kame"));
+    assert_eq!(place_in(&b), place_of(&a));
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
 }
 
@@ -1977,7 +2000,9 @@ fn another_recorded_place_is_read_again() {
     let mut healthy = Healthy::default();
     assert!(find_stranded(&nb, &mut healthy).is_empty());
 
-    Session::open(&a).unwrap().set_sync_place("a.kame");
+    Session::open(&a)
+        .unwrap()
+        .set_sync_place(&place_of(&a).unwrap());
 
     assert_eq!(find_stranded(&nb, &mut healthy), just(&a));
 }
@@ -2195,7 +2220,7 @@ fn another_documents_aged_logs_at_its_recorded_place_are_not_taken_for_its_own()
     move_logs(&other, &a);
     std::fs::remove_file(&other).unwrap();
     age_logs(&log_folder(&a), &state);
-    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+    assert_eq!(place_in(&a), place_of(&a));
     assert_eq!(Store::load(&log_folder(&a)).unwrap().revision_count(), 0);
     let before = words_in_logs(&log_folder(&a));
 

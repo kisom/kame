@@ -588,7 +588,7 @@ fn a_save_as_starts_from_the_history_again() {
     assert_eq!(there.sync_place(), None);
     copy.sync(&mut there, 2);
     assert_eq!(revisions(&copy.path), checkpoints);
-    assert_eq!(there.sync_place().as_deref(), Some("copy.kame"));
+    assert_eq!(there.sync_place(), place_of(&copy.path));
 }
 
 /// The main use: left open on one machine while writing on another.
@@ -869,28 +869,33 @@ fn a_first_sync_is_not_stranded() {
 }
 
 #[test]
-fn a_place_is_the_path_from_the_logging_root() {
-    let root = common::test_folder("place");
+fn a_place_is_the_path_from_the_logging_roots_folder() {
+    let root = common::test_folder("place").join("essays");
     let deep = root.join("a/b");
     std::fs::create_dir_all(&deep).unwrap();
     assert_eq!(place_of(&deep.join("essay.kame")), None);
     std::fs::write(root.join(MARKER), "").unwrap();
     assert_eq!(
         place_of(&deep.join("essay.kame")).as_deref(),
-        Some("a/b/essay.kame")
+        Some("essays/a/b/essay.kame")
     );
     assert_eq!(
         place_of(&root.join("essay.kame")).as_deref(),
-        Some("essay.kame")
+        Some("essays/essay.kame")
     );
     assert_eq!(
         place_of(&deep.join("../essay.kame")).as_deref(),
-        Some("a/essay.kame")
+        Some("essays/a/essay.kame")
+    );
+    assert_eq!(
+        place_of(&root.join("a/../essay.kame")).as_deref(),
+        Some("essays/essay.kame"),
+        "the root's name, however it's reached"
     );
     std::fs::write(deep.join(MARKER), "").unwrap();
     assert_eq!(
         place_of(&deep.join("essay.kame")).as_deref(),
-        Some("essay.kame"),
+        Some("b/essay.kame"),
         "the nearest marker"
     );
 }
@@ -901,12 +906,12 @@ fn a_sync_and_a_build_record_the_place() {
     let mut there = talos.session();
     assert_eq!(there.sync_place(), None);
     talos.sync(&mut there, 1);
-    assert_eq!(there.sync_place().as_deref(), Some("essay.kame"));
+    assert_eq!(there.sync_place(), place_of(&talos.path));
 
     std::fs::remove_file(&titan.path).unwrap();
     titan.receive_from(&talos);
     assert!(build_from_logs(&titan.path).unwrap());
-    assert_eq!(titan.session().sync_place().as_deref(), Some("essay.kame"));
+    assert_eq!(titan.session().sync_place(), place_of(&titan.path));
 }
 
 /// As an older kame leaves one.
@@ -930,7 +935,7 @@ fn a_database_with_no_place_and_no_logs_starts_them_again() {
     let outcome = talos.sync(&mut session, 2);
     assert!(!outcome.stranded);
     assert!(outcome.written > 0);
-    assert_eq!(session.sync_place().as_deref(), Some("essay.kame"));
+    assert_eq!(session.sync_place(), place_of(&talos.path));
 }
 
 /// Once it has synced here, it's somewhere it can be left behind.
@@ -989,7 +994,7 @@ fn a_hand_copy_on_another_documents_logs_writes_nothing() {
     assert_eq!(outcome.written, 0);
     assert!(!outcome.merged);
     assert_eq!(revisions(&copy.path), before);
-    assert_eq!(session.sync_place(), Some("essay.kame".to_string()));
+    assert_eq!(session.sync_place(), place_of(&talos.path), "as it was");
     let store = Store::load(&folder).unwrap();
     for head in store.heads() {
         assert!(!store.document(&head).blocks[0].text.contains("shared"));

@@ -10,7 +10,7 @@ use kame_core::storage::Db;
 use kame_notebook::links::Follow;
 use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
 use kame_notebook::Notebook;
-use kame_sync::logs::{log_folder, Logged, MARKER};
+use kame_sync::logs::{log_folder, place_of, Logged, MARKER};
 use kame_sync::revlog::Store;
 
 fn folder(name: &str) -> PathBuf {
@@ -1438,13 +1438,13 @@ fn a_rename_with_nothing_else_to_change_records_the_new_place() {
     let a = root.join("a.kame");
     document(&a, "Words.");
     sync(&a);
-    assert_eq!(place_in(&a).as_deref(), Some("a.kame"));
+    assert_eq!(place_in(&a), place_of(&a));
     let revisions = Store::load(&log_folder(&a)).unwrap().revision_count();
 
     let b = root.join("deep/b.kame");
     let report = make_move(&nb, &a, &b);
     assert!(report.left.is_empty(), "{:?}", report.left);
-    assert_eq!(place_in(&b).as_deref(), Some("deep/b.kame"));
+    assert_eq!(place_in(&b), place_of(&b));
     assert!(Store::load(&log_folder(&b)).unwrap().revision_count() >= revisions);
 
     // It's recognised if the logs now leave it.
@@ -1483,7 +1483,7 @@ fn a_hand_copy_is_changed_moved_and_deleted_like_any_document() {
     assert!(report.left.is_empty(), "{:?}", report.left);
     assert!(moved.is_file());
     assert!(log_folder(&moved).is_dir());
-    assert_eq!(place_in(&moved).as_deref(), Some("moved.kame"));
+    assert_eq!(place_in(&moved), place_of(&moved));
 
     assert!(!delete_document(&moved).unwrap());
     assert!(!moved.exists());

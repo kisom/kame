@@ -86,6 +86,45 @@ pub(crate) enum FileOp {
     },
 }
 
+/// Something a menu choice from the browser can find already open, since the browser is a side panel
+/// and stays clickable under all of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenDialog {
+    FileOp,
+    Replaced,
+    ClosePrompt,
+    Metadata,
+    Snapshot,
+    OpenPath,
+    Link,
+    JumpList,
+    Search,
+    MoveReport,
+    SiteReport,
+    RestorePicker,
+}
+
+impl OpenDialog {
+    /// Whether this may hold something typed or wants an answer, so that a menu choice has to wait
+    /// for it. Anything else has nothing to lose, and is closed to make way.
+    fn makes_menu_wait(self) -> bool {
+        match self {
+            OpenDialog::FileOp
+            | OpenDialog::Replaced
+            | OpenDialog::ClosePrompt
+            | OpenDialog::Metadata
+            | OpenDialog::Snapshot
+            | OpenDialog::OpenPath
+            | OpenDialog::Link => true,
+            OpenDialog::JumpList
+            | OpenDialog::Search
+            | OpenDialog::MoveReport
+            | OpenDialog::SiteReport
+            | OpenDialog::RestorePicker => false,
+        }
+    }
+}
+
 /// What a clean-up pass read: when each database was first seen stranded, and what to do.
 type StrandedPass = (HashMap<PathBuf, Instant>, Steps);
 
@@ -354,6 +393,37 @@ fn select_in_path_field(ctx: &egui::Context, selection: Range<usize>) {
             egui::text::CCursor::new(selection.end),
         )));
     state.store(ctx, path_field_id());
+}
+
+/// The rename and move dialog's field, taking the keyboard with `selection` selected if it's given.
+fn path_field(
+    ui: &mut egui::Ui,
+    field: &mut String,
+    selection: Option<Range<usize>>,
+) -> egui::Response {
+    // Before the field is drawn, so that it's selected when first seen, as a field drawn without the
+    // keyboard collapses its selection onto its end.
+    if let Some(selection) = &selection {
+        select_in_path_field(ui.ctx(), selection.clone());
+        ui.memory_mut(|memory| memory.request_focus(path_field_id()));
+    }
+    let edit = ui.add(
+        egui::TextEdit::singleline(field)
+            .id(path_field_id())
+            // Enter would take the keyboard away, and a refusal leaves the field there to be
+            // corrected.
+            .return_key(None)
+            .desired_width(420.0),
+    );
+    // And again after, since drawing it can take the keyboard away, and with that the selection: a new
+    // window's first frame only measures, with its widgets disabled, and the click that closed the
+    // menu counts as a click outside the field. The next frame then finds both in place.
+    if let Some(selection) = selection {
+        select_in_path_field(ui.ctx(), selection);
+        edit.request_focus();
+        ui.ctx().request_repaint();
+    }
+    edit
 }
 
 /// Where the text starts, within the room right of the browser: where it would be anyway if
@@ -1188,11 +1258,38 @@ impl KameApp {
         self.nb.refresh_listing();
     }
 
-    /// Puts up a dialog chosen from a document's right-click menu, unless another is up, which may
-    /// hold something typed, and would be drawn in the same place. Something that can't be moved
-    /// says so now, rather than after a path has been typed for it.
+    /// What's open that a menu choice from the browser could run into.
+    fn open_dialogs(&self) -> Vec<OpenDialog> {
+        [
+            (self.nb.file_op.is_some(), OpenDialog::FileOp),
+            (self.replaced_prompt, OpenDialog::Replaced),
+            (self.close_flow.prompting, OpenDialog::ClosePrompt),
+            (self.metadata_prompt.is_some(), OpenDialog::Metadata),
+            (self.snapshot_prompt.is_some(), OpenDialog::Snapshot),
+            (self.open_prompt.is_some(), OpenDialog::OpenPath),
+            (self.link_prompt.is_some(), OpenDialog::Link),
+            (self.nb.jump.is_some(), OpenDialog::JumpList),
+            (self.nb.search.is_some(), OpenDialog::Search),
+            (self.nb.move_report.is_some(), OpenDialog::MoveReport),
+            (self.publishing.report.is_some(), OpenDialog::SiteReport),
+            (self.restore_picker.is_some(), OpenDialog::RestorePicker),
+        ]
+        .into_iter()
+        .filter_map(|(open, dialog)| open.then_some(dialog))
+        .collect()
+    }
+
+    /// Puts up a dialog chosen from a document's right-click menu. One that's open may hold something
+    /// typed, or want an answer, and then this says to deal with it first. Something that can't be
+    /// moved says so now, rather than after a path has been typed for it.
     fn start_file_op(&mut self, op: FileOp) {
-        if self.close_flow.prompting || self.dialog_open() {
+        if self
+            .open_dialogs()
+            .into_iter()
+            .any(OpenDialog::makes_menu_wait)
+        {
+            self.notice_tracker.announced();
+            self.notice = Some("finish or close the open dialog first".to_string());
             return;
         }
         if let FileOp::Path { from, .. } = &op {
@@ -1200,6 +1297,8 @@ impl KameApp {
                 return;
             }
         }
+        // By now, everything this closes has nothing to lose.
+        self.dismiss_dialog();
         self.nb.file_op = Some(op);
     }
 
@@ -1230,9 +1329,7 @@ impl KameApp {
                 // nobody has looked at.
                 let mut submit = enter && !focus;
                 let mut cancel = false;
-                if focus {
-                    select_in_path_field(ctx, path_selection(&field, rename));
-                }
+                let selection = focus.then(|| path_selection(&field, rename));
                 let error = self.palette.error_ink;
                 egui::Window::new(if rename { "Rename" } else { "Move" })
                     .id(egui::Id::unique("kame-file-op-path-dialog"))
@@ -1242,17 +1339,7 @@ impl KameApp {
                     .order(egui::Order::Foreground)
                     .show(ctx, |ui| {
                         ui.label("Its path in this notebook:");
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(&mut field)
-                                .id(path_field_id())
-                                // Enter would take the keyboard away, and a refusal leaves the
-                                // field there to be corrected.
-                                .return_key(None)
-                                .desired_width(420.0),
-                        );
-                        if focus {
-                            edit.request_focus();
-                        }
+                        let edit = path_field(ui, &mut field, selection);
                         if edit.changed() {
                             refusal = None;
                         }
@@ -1539,6 +1626,153 @@ impl KameApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the field for a frame in a window, as the dialog does, with `events` as what arrived.
+    fn field_frame(
+        ctx: &egui::Context,
+        field: &mut String,
+        selection: Option<Range<usize>>,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut selection = selection;
+        ctx.run_ui(input, |ui| {
+            egui::Window::new("field").show(ui.ctx(), |ui| {
+                path_field(ui, field, selection.take());
+            });
+        })
+        .drop_without_applying_deltas();
+    }
+
+    /// What's selected in the field, as the start and end of a range.
+    fn selected_in_field(ctx: &egui::Context) -> Range<usize> {
+        let state = egui::TextEdit::load_state(ctx, path_field_id()).expect("it was drawn");
+        let range = state.cursor.char_range().expect("something is selected");
+        let [start, end] = range.sorted_cursors();
+        start.index.into()..end.index.into()
+    }
+
+    #[test]
+    fn the_field_opens_with_the_selection_it_was_given_and_keeps_it() {
+        let ctx = egui::Context::default();
+        let mut field = "a/b/doc.kame".to_string();
+        field_frame(&ctx, &mut field, Some(4..7), Vec::new());
+        assert_eq!(selected_in_field(&ctx), 4..7, "the frame it opens");
+        assert!(ctx.memory(|memory| memory.has_focus(path_field_id())));
+        field_frame(&ctx, &mut field, None, Vec::new());
+        assert_eq!(selected_in_field(&ctx), 4..7, "the frame after");
+    }
+
+    /// A click on nothing in the field, as the one on a menu item is.
+    fn click_elsewhere() -> Vec<egui::Event> {
+        let at = egui::Pos2::new(700.0, 500.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        vec![egui::Event::PointerMoved(at), button(true), button(false)]
+    }
+
+    #[test]
+    fn the_click_that_closes_the_menu_leaves_the_field_selected_and_ready() {
+        let ctx = egui::Context::default();
+        let mut field = "a/b/doc.kame".to_string();
+        field_frame(&ctx, &mut field, Some(4..7), click_elsewhere());
+        assert!(ctx.memory(|memory| memory.has_focus(path_field_id())));
+        field_frame(&ctx, &mut field, None, Vec::new());
+        assert_eq!(selected_in_field(&ctx), 4..7);
+
+        // Opening again, in a window that has been drawn before.
+        ctx.memory_mut(|memory| memory.surrender_focus(path_field_id()));
+        field_frame(&ctx, &mut field, None, Vec::new());
+        field_frame(&ctx, &mut field, Some(0..3), click_elsewhere());
+        assert!(ctx.memory(|memory| memory.has_focus(path_field_id())));
+        field_frame(&ctx, &mut field, None, Vec::new());
+        assert_eq!(selected_in_field(&ctx), 0..3);
+        field_frame(
+            &ctx,
+            &mut field,
+            None,
+            vec![egui::Event::Text("x".to_string())],
+        );
+        assert_eq!(field, "x/doc.kame");
+    }
+
+    #[test]
+    fn typing_over_a_rename_replaces_the_name() {
+        let ctx = egui::Context::default();
+        let mut field = "alpha.kame".to_string();
+        let selection = path_selection(&field, true);
+        field_frame(&ctx, &mut field, Some(selection), Vec::new());
+        field_frame(&ctx, &mut field, None, Vec::new());
+        field_frame(
+            &ctx,
+            &mut field,
+            None,
+            vec![egui::Event::Text("omega".to_string())],
+        );
+        assert_eq!(field, "omega.kame");
+    }
+
+    #[test]
+    fn typing_over_a_move_replaces_the_folders() {
+        let ctx = egui::Context::default();
+        let mut field = "é/matière.kame".to_string();
+        let selection = path_selection(&field, false);
+        field_frame(&ctx, &mut field, Some(selection), Vec::new());
+        field_frame(
+            &ctx,
+            &mut field,
+            None,
+            vec![egui::Event::Text("x/y".to_string())],
+        );
+        assert_eq!(field, "x/y/matière.kame");
+    }
+
+    #[test]
+    fn reopening_the_field_selects_again_whatever_it_last_held() {
+        let ctx = egui::Context::default();
+        let mut field = "one/long/name.kame".to_string();
+        field_frame(&ctx, &mut field, Some(9..13), Vec::new());
+        ctx.memory_mut(|memory| memory.surrender_focus(path_field_id()));
+        field_frame(&ctx, &mut field, None, Vec::new());
+        let mut other = "b.kame".to_string();
+        field_frame(&ctx, &mut other, Some(0..1), Vec::new());
+        assert_eq!(selected_in_field(&ctx), 0..1);
+    }
+
+    #[test]
+    fn a_dialog_that_may_hold_typing_or_wants_an_answer_makes_a_menu_choice_wait() {
+        for dialog in [
+            OpenDialog::FileOp,
+            OpenDialog::Replaced,
+            OpenDialog::ClosePrompt,
+            OpenDialog::Metadata,
+            OpenDialog::Snapshot,
+            OpenDialog::OpenPath,
+            OpenDialog::Link,
+        ] {
+            assert!(dialog.makes_menu_wait(), "{dialog:?}");
+        }
+    }
+
+    #[test]
+    fn a_dialog_with_nothing_typed_gives_way_to_a_menu_choice() {
+        for dialog in [
+            OpenDialog::JumpList,
+            OpenDialog::Search,
+            OpenDialog::MoveReport,
+            OpenDialog::SiteReport,
+            OpenDialog::RestorePicker,
+        ] {
+            assert!(!dialog.makes_menu_wait(), "{dialog:?}");
+        }
+    }
 
     #[test]
     fn rename_selects_the_name_and_move_selects_the_folders() {

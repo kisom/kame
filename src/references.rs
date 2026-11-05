@@ -32,6 +32,8 @@ const BELOW_CLICK: f32 = 16.0;
 const SHOWN_OF_ENTRY: usize = 60;
 /// How often to look for what a background thread has found.
 const LOOK_AGAIN: Duration = Duration::from_millis(50);
+/// What's wrong with a key that isn't one.
+const NOT_A_KEY: &str = "A key is letters, digits, - and _, starting with a letter.";
 
 /// The notebook's references, and which one is showing.
 #[derive(Default)]
@@ -62,6 +64,8 @@ pub(crate) struct ReferencesUi {
     counting: Option<Receiver<BTreeMap<String, Vec<PathBuf>>>>,
     /// Whether the list has changed since the count was started.
     recount: bool,
+    /// Whether the last count stopped before finding anything.
+    count_stopped: bool,
     /// The rename under way, on a background thread.
     renaming: Option<Renaming>,
 }
@@ -107,6 +111,8 @@ struct Renaming {
     coming: Receiver<Result<Renamed, String>>,
     /// The notebook it's in, which is the one to put anything back in.
     notebook: Notebook,
+    /// The document it left alone, for this app to rewrite.
+    open: Option<PathBuf>,
     old: String,
     new: String,
     /// What to put back if the open document can't follow, since `rename` will have removed it.
@@ -122,6 +128,15 @@ enum ListAction {
     Cancel,
     Delete(String),
     Rename(String, String),
+}
+
+/// What's known of how many documents cite a key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Citing {
+    Counting,
+    /// The count stopped, so the windows go on without it.
+    NotCounted,
+    Documents(usize),
 }
 
 /// What Cite opens, going by the caret.
@@ -194,6 +209,42 @@ fn cited_by(count: usize) -> String {
         0 => "No document cites it.".to_string(),
         1 => "1 document cites it.".to_string(),
         _ => format!("{count} documents cite it."),
+    }
+}
+
+/// What a confirmation row says before deleting `key`.
+fn delete_warning(key: &str, citing: Citing) -> String {
+    match citing {
+        Citing::Counting => "Counting the documents that cite it…".to_string(),
+        Citing::NotCounted => {
+            format!("Its documents couldn't be counted. Any would then hold plain [{key}] text.")
+        }
+        Citing::Documents(0) => cited_by(0),
+        Citing::Documents(1) => {
+            format!("{} It would then hold plain [{key}] text.", cited_by(1))
+        }
+        Citing::Documents(count) => {
+            format!(
+                "{} They would then hold plain [{key}] text.",
+                cited_by(count)
+            )
+        }
+    }
+}
+
+/// What a confirmation row says before renaming a key.
+fn rename_warning(citing: Citing) -> String {
+    match citing {
+        Citing::Counting => "Counting the documents that cite it…".to_string(),
+        Citing::NotCounted => {
+            "Its documents couldn't be counted. Any found are rewritten as an ordinary edit."
+                .to_string()
+        }
+        Citing::Documents(0) => cited_by(0),
+        Citing::Documents(1) => format!("{} It's rewritten as an ordinary edit.", cited_by(1)),
+        Citing::Documents(count) => {
+            format!("{} Each is rewritten as an ordinary edit.", cited_by(count))
+        }
     }
 }
 
@@ -318,7 +369,7 @@ impl ReferenceForm {
             return Some("It needs a key.".to_string());
         }
         if !valid_key(&self.key) {
-            return Some("A key is letters, digits, - and _, starting with a letter.".to_string());
+            return Some(NOT_A_KEY.to_string());
         }
         if self.editing.as_deref() == Some(&self.key) {
             return None;
@@ -456,7 +507,17 @@ impl ReferencesUi {
     /// changes, as there's no use saying it every time they are looked at.
     pub(crate) fn refresh(&mut self, notebook: Option<&Notebook>) -> Option<String> {
         let Some(notebook) = notebook else {
-            *self = ReferencesUi::default();
+            // A rename goes on, and its window stays until it has been read to say how it went.
+            let renaming = self.renaming.take();
+            let window = self
+                .window
+                .take()
+                .filter(|window| renaming.is_some() || !window.said.is_empty());
+            *self = ReferencesUi {
+                renaming,
+                window,
+                ..ReferencesUi::default()
+            };
             return None;
         };
         let moved = self.root.as_ref() != Some(&notebook.root);
@@ -511,20 +572,25 @@ impl ReferencesUi {
             || self.window.is_some()
     }
 
-    /// Closes everything, for another document or notebook.
+    /// Closes everything, for another document or notebook, but for the window of a rename under
+    /// way, which has yet to say how it went.
     pub(crate) fn close_windows(&mut self) {
         self.shown = None;
         self.cite_search = None;
         self.form = None;
-        self.window = None;
+        if self.renaming.is_none() {
+            self.window = None;
+        }
     }
 
     /// Closes the window on top, as Escape does. The form goes back to the window it came from,
     /// and a rename under way keeps its window up to say how it went.
     pub(crate) fn dismiss(&mut self) {
-        self.shown = None;
-        self.cite_search = None;
-        if self.form.take().is_some() || self.renaming.is_some() {
+        if self.shown.take().is_some()
+            || self.cite_search.take().is_some()
+            || self.form.take().is_some()
+            || self.renaming.is_some()
+        {
             return;
         }
         let asking = self
@@ -671,15 +737,11 @@ impl KameApp {
         }
     }
 
-    /// Cite: the chord, the menus and the right-click row. Does nothing over another dialog.
-    pub(crate) fn begin_cite(&mut self) {
-        if self.dialog_open() || self.close_flow.prompting {
-            return;
-        }
-        let caret = self.session.valid_caret();
-        // Text that only looks like a key, in code or a link's words, is no key to open.
-        let text = self
-            .session
+    /// The text of the block `caret` is in, to look for a key there. Nothing if the caret is on
+    /// text that only looks like a key, in code or a link's words, as that is no key to open or
+    /// to take for one already cited.
+    fn text_for_citing(&self, caret: crate::edit::Cursor) -> &str {
+        self.session
             .document()
             .blocks
             .iter()
@@ -688,7 +750,16 @@ impl KameApp {
                 citation_at(&block.text, caret.offset)
                     .is_none_or(|range| block_citation_ranges(block).contains(&range))
             })
-            .map_or("", |block| block.text.as_str());
+            .map_or("", |block| block.text.as_str())
+    }
+
+    /// Cite: the chord, the menus and the right-click row. Does nothing over another dialog.
+    pub(crate) fn begin_cite(&mut self) {
+        if self.dialog_open() || self.close_flow.prompting {
+            return;
+        }
+        let caret = self.session.valid_caret();
+        let text = self.text_for_citing(caret);
         let in_notebook = self.nb.notebook.is_some();
         match cite_start(text, caret.offset, &self.refs.list, in_notebook) {
             CiteStart::NeedsNotebook => {
@@ -730,17 +801,15 @@ impl KameApp {
         }
     }
 
-    /// Puts `[key]` in the document, as one ordinary edit, unless the caret is on it already.
+    /// Puts `[key]` in the document, as one ordinary edit, unless the caret is on it already. A
+    /// selection is left in the document, with the key just after it, as citing is no way to
+    /// replace words.
     fn cite(&mut self, key: &str) {
+        if let Some((_, end)) = self.session.ordered_selection() {
+            self.session.set_caret(end);
+        }
         let caret = self.session.valid_caret();
-        let text = self
-            .session
-            .document()
-            .blocks
-            .iter()
-            .find(|block| block.id == caret.block_id)
-            .map_or("", |block| block.text.as_str());
-        let Some(at) = where_to_cite(text, caret.offset, key) else {
+        let Some(at) = where_to_cite(self.text_for_citing(caret), caret.offset, key) else {
             return;
         };
         if at != caret.offset {
@@ -749,8 +818,27 @@ impl KameApp {
                 offset: at,
             });
         }
-        self.session.insert(&format!("[{key}]"));
         self.follow_caret = true;
+        if !self.session.insert(&format!("[{key}]")) {
+            let why = self.session.last_error.take();
+            self.session.last_error = Some(format!(
+                "could not cite {key} here — {}",
+                why.as_deref().unwrap_or("this document can't be changed")
+            ));
+        }
+    }
+
+    /// Whether the keyboard is with something over the windows for references, so that an Enter
+    /// is not for them: another dialog, the close prompt, help, or the find bar or a note's box
+    /// if it has the keys. Those two can stay up beside a window without having them.
+    fn keys_are_elsewhere(&self, ctx: &egui::Context) -> bool {
+        self.other_dialog_open()
+            || self.close_flow.prompting
+            || self.show_help
+            || ctx.memory(|memory| {
+                memory.has_focus(super::find_query_id())
+                    || memory.has_focus(super::note_body_edit_id())
+            })
     }
 
     /// Says so and returns true if a rename is running. It has left the open document to be
@@ -777,7 +865,10 @@ impl KameApp {
                     );
                     self.refs.counting = None;
                 }
-                Err(TryRecvError::Disconnected) => self.refs.counting = None,
+                Err(TryRecvError::Disconnected) => {
+                    self.refs.counting = None;
+                    self.refs.count_stopped = true;
+                }
                 Err(TryRecvError::Empty) => ctx.request_repaint_after(LOOK_AGAIN),
             }
         }
@@ -805,6 +896,7 @@ impl KameApp {
         };
         let (send, coming) = channel();
         self.refs.counts = None;
+        self.refs.count_stopped = false;
         // Dropping an older one leaves it nowhere to send what it finds.
         self.refs.counting = Some(coming);
         std::thread::spawn(move || {
@@ -823,6 +915,7 @@ impl KameApp {
         self.refs.renaming = Some(Renaming {
             coming,
             notebook: notebook.clone(),
+            open: open.clone(),
             old: old.clone(),
             new: new.clone(),
             reference,
@@ -841,6 +934,7 @@ impl KameApp {
         };
         let Renaming {
             notebook,
+            open,
             old,
             new,
             reference,
@@ -853,22 +947,27 @@ impl KameApp {
                 return;
             }
         };
+        // Left alone for being open, it's no longer what's open if it was saved as another file.
+        if let Some(left) =
+            open.filter(|open| !super::same_document(self.session.path(), Some(open)))
+        {
+            let why = "it was saved as another file during this, so it may still cite this";
+            renamed.failed.push((left, why.to_string()));
+        }
         let here = self
             .session
             .path()
             .map_or_else(|| PathBuf::from("this document"), Path::to_path_buf);
-        let mut not_put_back = None;
         match self.rename_in_open_document(&old, &new) {
             Ok(true) => renamed.rewritten.push(here),
             Ok(false) => {}
-            Err(why) => {
-                renamed.failed.push((here, why));
-                if !renamed.old_kept {
-                    match save(&notebook, &old, &reference) {
-                        Ok(()) => renamed.old_kept = true,
-                        Err(why) => not_put_back = Some(format!("{old} wasn't put back: {why}")),
-                    }
-                }
+            Err(why) => renamed.failed.push((here, why)),
+        }
+        let mut not_put_back = None;
+        if !renamed.failed.is_empty() && !renamed.old_kept {
+            match save(&notebook, &old, &reference) {
+                Ok(()) => renamed.old_kept = true,
+                Err(why) => not_put_back = Some(format!("{old} wasn't put back: {why}")),
             }
         }
         let mut said = rename_outcome(&old, &new, &renamed, &notebook.root);
@@ -912,8 +1011,11 @@ impl KameApp {
             .map(str::to_string)
             .collect();
         let rows_count = hits.len() + 1;
-        let (close, confirm) = list_keys(ctx, &mut search_list.selected, rows_count);
-        let confirm = confirm && !search_list.focus;
+        // Keys taken here wouldn't reach what's on top of this. Escape needs nothing from here, as
+        // `dismiss_dialog` has seen to it, knowing whether this is the one on top.
+        let confirm = !self.keys_are_elsewhere(ctx)
+            && list_keys(ctx, &mut search_list.selected, rows_count).1
+            && !search_list.focus;
         let mut clicked = None;
         let references = &self.refs.list;
         let typed = search_list.query.trim().to_string();
@@ -956,8 +1058,7 @@ impl KameApp {
                     self.refs.open_form(ReferenceForm::new(key));
                 }
             },
-            None if !close => self.refs.cite_search = Some(search_list),
-            None => {}
+            None => self.refs.cite_search = Some(search_list),
         }
     }
 
@@ -970,7 +1071,8 @@ impl KameApp {
         // A chord and an Enter arriving in the same frame would otherwise save a form nobody has
         // read, and in the text box Enter is a new line.
         let in_text_box = ctx.memory(|memory| memory.has_focus(freeform_text_id()));
-        let mut submit = enter_pressed(ctx) && !focus && !in_text_box;
+        let mut submit =
+            enter_pressed(ctx) && !focus && !in_text_box && !self.keys_are_elsewhere(ctx);
         let mut cancel = false;
         let is_new = window.form.is_new();
         let title = if is_new {
@@ -1040,7 +1142,9 @@ impl KameApp {
         let renaming = self.refs.renaming.is_some();
         let busy = renaming || self.refs.form.is_some();
         // The form on top of this has the keyboard.
-        let enter = enter_pressed(ctx) && !busy;
+        let enter = enter_pressed(ctx) && !busy && !self.keys_are_elsewhere(ctx);
+        let in_notebook = self.refs.root.is_some();
+        let count_stopped = self.refs.count_stopped;
         let error_ink = self.palette.error_ink;
         let (references, counts, problems) =
             (&self.refs.list, &self.refs.counts, &self.refs.problems);
@@ -1055,8 +1159,8 @@ impl KameApp {
                 for problem in problems {
                     ui.colored_label(error_ink, problem);
                 }
-                if references.is_empty() {
-                    ui.weak("This notebook has no references yet. Ctrl-Shift-C adds one.");
+                if references.is_empty() && in_notebook {
+                    ui.weak("No references yet. Close this and press Ctrl-Shift-C to add one.");
                 }
                 ui.add_enabled_ui(!busy, |ui| {
                     egui::ScrollArea::vertical()
@@ -1064,12 +1168,23 @@ impl KameApp {
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             for (key, reference) in references.sorted() {
-                                let count = counts
-                                    .as_ref()
-                                    .map(|counts| counts.get(key).copied().unwrap_or_default());
-                                draw_list_row(ui, key, reference, count, &mut action);
+                                let citing = match counts {
+                                    Some(counts) => Citing::Documents(
+                                        counts.get(key).copied().unwrap_or_default(),
+                                    ),
+                                    None if count_stopped => Citing::NotCounted,
+                                    None => Citing::Counting,
+                                };
+                                draw_list_row(ui, key, reference, citing, &mut action);
                                 if let Some(confirming) = &mut window.confirming {
-                                    draw_confirming(ui, key, confirming, count, enter, &mut action);
+                                    draw_confirming(
+                                        ui,
+                                        key,
+                                        confirming,
+                                        citing,
+                                        enter,
+                                        &mut action,
+                                    );
                                 }
                                 ui.separator();
                             }
@@ -1239,12 +1354,16 @@ fn draw_list_row(
     ui: &mut egui::Ui,
     key: &str,
     reference: &Reference,
-    count: Option<usize>,
+    citing: Citing,
     action: &mut Option<ListAction>,
 ) {
     ui.horizontal(|ui| {
         ui.strong(key);
-        ui.weak(count.map_or_else(|| "counting…".to_string(), documents));
+        ui.weak(match citing {
+            Citing::Counting => "counting…".to_string(),
+            Citing::NotCounted => "not counted".to_string(),
+            Citing::Documents(count) => documents(count),
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.small_button("Delete…").clicked() {
                 *action = Some(ListAction::AskToDelete(key.to_string()));
@@ -1260,26 +1379,23 @@ fn draw_list_row(
     ui.weak(plain(reference));
 }
 
-/// The confirmation row, if it's about `key`. Nothing can be confirmed until the count it has to
-/// say is known.
+/// The confirmation row, if it's about `key`. Nothing can be confirmed while the count it has to
+/// say is coming.
 fn draw_confirming(
     ui: &mut egui::Ui,
     key: &str,
     confirming: &mut Confirming,
-    count: Option<usize>,
+    citing: Citing,
     enter: bool,
     action: &mut Option<ListAction>,
 ) {
-    let said = count.map_or_else(
-        || "Counting the documents that cite it…".to_string(),
-        cited_by,
-    );
+    let counted = citing != Citing::Counting;
     match confirming {
         Confirming::Delete { key: asked } if asked == key => {
-            ui.label(format!("{said} They'd then hold plain [{key}] text."));
+            ui.label(delete_warning(key, citing));
             ui.horizontal(|ui| {
                 let delete = egui::Button::new(format!("Delete {key}"));
-                if ui.add_enabled(count.is_some(), delete).clicked() {
+                if ui.add_enabled(counted, delete).clicked() {
                     *action = Some(ListAction::Delete(key.to_string()));
                 }
                 if ui.button("Cancel").clicked() {
@@ -1292,8 +1408,8 @@ fn draw_confirming(
             new,
             focus,
         } if asked == key => {
-            ui.label(format!("{said} Each is rewritten as an ordinary edit."));
-            let ready = count.is_some() && valid_key(new) && new != key;
+            ui.label(rename_warning(citing));
+            let ready = counted && valid_key(new) && new != key;
             let opening = *focus;
             ui.horizontal(|ui| {
                 ui.label("New key");
@@ -1312,6 +1428,11 @@ fn draw_confirming(
                     *action = Some(ListAction::Cancel);
                 }
             });
+            if !valid_key(new) {
+                ui.weak(NOT_A_KEY);
+            } else if new == key {
+                ui.weak("Type the new key.");
+            }
         }
         _ => {}
     }
@@ -2797,6 +2918,7 @@ mod tests {
         page.app.refs.renaming = Some(Renaming {
             coming,
             notebook: page.app.nb.notebook.clone().unwrap(),
+            open: page.app.session.path().map(Path::to_path_buf),
             old: "knuth1981".to_string(),
             new: "plass1981".to_string(),
             reference: Reference::default(),
@@ -2826,5 +2948,547 @@ mod tests {
             page.app.refs.window.is_none(),
             "another document's windows are its own"
         );
+    }
+
+    /// Selects `start..end` of the first block, with the caret at `caret`.
+    fn select(page: &mut Headless, start: usize, end: usize, caret: usize) {
+        let block_id = page.app.session.document().blocks[0].id;
+        let at = |offset| crate::edit::Cursor { block_id, offset };
+        page.app.session.set_caret(at(caret));
+        let (from, to) = if caret == start {
+            (end, start)
+        } else {
+            (start, end)
+        };
+        page.app.session.selection = Some(crate::edit::Selection {
+            start: at(from),
+            end: at(to),
+        });
+    }
+
+    fn ctrl_k(page: &mut Headless) {
+        let modifiers = egui::Modifiers {
+            command: true,
+            ..egui::Modifiers::NONE
+        };
+        key(page, egui::Key::K, modifiers);
+        page.frame(Vec::new());
+    }
+
+    /// A rename that never finishes until `send` says so, of `knuth1981`.
+    fn rename_held_open(page: &mut Headless) -> std::sync::mpsc::Sender<Result<Renamed, String>> {
+        let (send, coming) = channel();
+        page.app.refs.renaming = Some(Renaming {
+            coming,
+            notebook: page.app.nb.notebook.clone().unwrap(),
+            open: page.app.session.path().map(Path::to_path_buf),
+            old: "knuth1981".to_string(),
+            new: "plass1981".to_string(),
+            reference: page.app.refs.list.get("knuth1981").unwrap().clone(),
+        });
+        send
+    }
+
+    /// The form for a new reference, over a page that has `[knuth1981]` near its start, with
+    /// something typed in it.
+    fn typed_form_over_a_citation() -> Headless {
+        let mut page = page_in_notebook("[knuth1981] says so ");
+        cite_chord(&mut page);
+        type_into(&mut page, "zzz");
+        press_key(&mut page, egui::Key::Enter);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        type_into(&mut page, "Typed Author");
+        page.frame(Vec::new());
+        assert_eq!(typed_authors(&page), "Typed Author");
+        page
+    }
+
+    fn typed_authors(page: &Headless) -> String {
+        let window = page.app.refs.form.as_ref().expect("the form is up");
+        window.form.authors_text.clone()
+    }
+
+    #[test]
+    fn citing_over_a_selection_keeps_the_words_and_one_undo_takes_only_the_key() {
+        for caret in [10, 5] {
+            let mut page = page_in_notebook("keep these words here");
+            select(&mut page, 5, 10, caret);
+            cite_chord(&mut page);
+            assert!(page.app.refs.cite_search.is_some());
+
+            press_key(&mut page, egui::Key::Enter);
+
+            assert_eq!(only_text(&page), "keep these[knuth1981] words here");
+            assert_eq!(page.app.session.selection, None);
+            assert!(page.app.session.undo());
+            assert_eq!(
+                only_text(&page),
+                "keep these words here",
+                "caret at {caret}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_and_cite_over_a_selection_keeps_the_words_too() {
+        let mut page = page_in_notebook("keep these words here");
+        select(&mut page, 5, 10, 10);
+        cite_chord(&mut page);
+        type_into(&mut page, "lamport1994");
+        page.frame(Vec::new());
+        press_key(&mut page, egui::Key::Enter);
+        page.frame(Vec::new());
+        page.app.refs.form.as_mut().unwrap().form.reference.title = "T".to_string();
+        page.frame(Vec::new());
+
+        page.press("Add and cite");
+
+        assert_eq!(only_text(&page), "keep these[lamport1994] words here");
+        assert!(page.app.session.undo());
+        assert_eq!(only_text(&page), "keep these words here");
+    }
+
+    #[test]
+    fn save_as_waits_for_a_rename() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+        let _send = rename_held_open(&mut page);
+        let ctx = page.ctx.clone();
+
+        // A test panics if this asks where to save.
+        page.app.save_with_dialog(&ctx, false);
+
+        assert!(page
+            .app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("being renamed"));
+    }
+
+    #[test]
+    fn a_document_saved_elsewhere_during_a_rename_keeps_the_old_key_and_is_named() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        let original = page.app.session.path().unwrap().to_path_buf();
+        open_list(&mut page);
+        page.app
+            .start_rename("knuth1981".to_string(), "plass1981".to_string());
+        page.app
+            .session
+            .save_as(&root_of(&page).join("copy.kame"))
+            .unwrap();
+
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+        page.frame(Vec::new());
+
+        assert_eq!(text_on_disk(&original), "see [knuth1981]");
+        assert!(
+            reference_file(&page, "knuth1981").exists(),
+            "[old] still resolves"
+        );
+        assert!(page.sees("knuth1981 was kept"));
+        assert!(page.sees("doc.kame: "), "the document left behind is named");
+    }
+
+    #[test]
+    fn leaving_the_notebook_during_a_rename_keeps_its_window_and_outcome() {
+        let mut page = page_in_notebook("see [knuth1981]");
+        let root = root_of(&page);
+        open_list(&mut page);
+        let send = rename_held_open(&mut page);
+        let outside = test_temp_dir().join(format!("outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&outside).unwrap();
+
+        page.app
+            .session
+            .save_as(&outside.join("copy.kame"))
+            .unwrap();
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        assert!(page.app.nb.notebook.is_none());
+        assert!(page.app.refs.renaming.is_some(), "still waited for");
+        assert!(
+            page.app.refs.window.is_some(),
+            "still there to say how it went"
+        );
+        assert!(page.sees("Renaming…"));
+
+        let notebook = Notebook::open(&root).unwrap();
+        let open = root.join("doc.kame");
+        send.send(rename(&notebook, "knuth1981", "plass1981", Some(&open)))
+            .unwrap();
+        run_until(&mut page, |app| app.refs.renaming.is_none());
+        page.frame(Vec::new());
+
+        assert!(page.sees("knuth1981 was kept"));
+        assert!(root.join("references/knuth1981.yaml").exists());
+        assert_eq!(text_on_disk(&open), "see [knuth1981]");
+    }
+
+    #[test]
+    fn enter_in_a_link_prompt_doesnt_start_the_rename_behind_it() {
+        let mut page = page_in_notebook("hello [knuth1981]");
+        select(&mut page, 0, 5, 5);
+        open_list(&mut page);
+        ask_to_rename(&mut page, "plass1981");
+        ctrl_k(&mut page);
+        assert!(page.app.link_prompt.is_some());
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.link_prompt.is_none(), "the prompt had it");
+        assert!(page.app.refs.renaming.is_none());
+        assert!(reference_file(&page, "knuth1981").exists());
+        assert!(!reference_file(&page, "plass1981").exists());
+    }
+
+    #[test]
+    fn enter_in_a_link_prompt_doesnt_save_the_form_behind_it() {
+        let mut page = page_in_notebook("hello [lamport1994]");
+        select(&mut page, 0, 5, 5);
+        // The caret's on nothing, so reach the form on the key by hand.
+        page.app
+            .refs
+            .open_form(ReferenceForm::new(Some("lamport1994".to_string())));
+        page.app.refs.form.as_mut().unwrap().form.reference.title = "T".to_string();
+        page.frame(Vec::new());
+        ctrl_k(&mut page);
+        assert!(page.app.link_prompt.is_some());
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.link_prompt.is_none(), "the prompt had it");
+        assert!(page.app.refs.form.is_some());
+        assert!(!reference_file(&page, "lamport1994").exists());
+    }
+
+    #[test]
+    fn enter_in_the_properties_prompt_doesnt_save_the_form_behind_it() {
+        let mut page = page_in_notebook("[lamport1994]");
+        cite_chord(&mut page);
+        page.app.refs.form.as_mut().unwrap().form.reference.title = "T".to_string();
+        page.app.begin_properties();
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.metadata_prompt.is_none(), "the prompt had it");
+        assert!(page.app.refs.form.is_some());
+        assert!(!reference_file(&page, "lamport1994").exists());
+    }
+
+    #[test]
+    fn enter_in_a_link_prompt_doesnt_choose_from_the_search_behind_it() {
+        let mut page = page_in_notebook("hello ");
+        select(&mut page, 0, 5, 5);
+        cite_chord(&mut page);
+        ctrl_k(&mut page);
+        assert!(page.app.link_prompt.is_some());
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.link_prompt.is_none());
+        assert!(page.app.refs.cite_search.is_some());
+        assert_eq!(only_text(&page), "hello ");
+    }
+
+    #[test]
+    fn enter_in_the_find_bar_doesnt_save_the_form_behind_it() {
+        let mut page = page_in_notebook("[lamport1994]");
+        cite_chord(&mut page);
+        page.app.refs.form.as_mut().unwrap().form.reference.title = "T".to_string();
+        let ctrl = egui::Modifiers {
+            command: true,
+            ..egui::Modifiers::NONE
+        };
+        key(&mut page, egui::Key::F, ctrl);
+        assert!(page.app.find.is_some());
+        // The find bar is in the chrome, which isn't drawn here. It takes the keyboard as it opens.
+        page.ctx
+            .memory_mut(|memory| memory.request_focus(crate::find_query_id()));
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.refs.form.is_some());
+        assert!(!reference_file(&page, "lamport1994").exists());
+    }
+
+    #[test]
+    fn a_find_bar_left_up_doesnt_take_enter_from_a_form_opened_after_it() {
+        let mut page = page_in_notebook("[lamport1994]");
+        let ctrl = egui::Modifiers {
+            command: true,
+            ..egui::Modifiers::NONE
+        };
+        key(&mut page, egui::Key::F, ctrl);
+        page.frame(Vec::new());
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+        let end = only_text(&page).len();
+        let block_id = page.app.session.document().blocks[0].id;
+        page.app.session.set_caret(crate::edit::Cursor {
+            block_id,
+            offset: end,
+        });
+
+        cite_chord(&mut page);
+        page.app
+            .refs
+            .form
+            .as_mut()
+            .expect("the form opens")
+            .form
+            .reference
+            .title = "T".to_string();
+        page.frame(Vec::new());
+        press_key(&mut page, egui::Key::Enter);
+
+        assert!(page.app.find.is_some());
+        assert!(reference_file(&page, "lamport1994").exists());
+    }
+
+    #[test]
+    fn a_click_on_a_citation_behind_a_form_leaves_the_form_alone() {
+        let mut page = typed_form_over_a_citation();
+
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.refs.shown, None);
+        assert_eq!(typed_authors(&page), "Typed Author");
+    }
+
+    #[test]
+    fn a_click_on_a_citation_during_a_rename_opens_nothing() {
+        let mut page = page_in_notebook("[knuth1981] says so");
+        open_list(&mut page);
+        let _send = rename_held_open(&mut page);
+
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.refs.shown, None);
+        assert!(page.app.refs.form.is_none());
+    }
+
+    #[test]
+    fn a_click_on_a_link_behind_a_form_stays_where_it_is() {
+        let mut page = page_in_notebook("other says so ");
+        other_document(&page, "other.kame", "words");
+        let block_id = page.app.session.document().blocks[0].id;
+        assert!(page
+            .app
+            .session
+            .edit_link(block_id, 0, 5, "other", "other.kame"));
+        let here = page.app.session.path().unwrap().to_path_buf();
+        page.frame(Vec::new());
+        cite_chord(&mut page);
+        press_key(&mut page, egui::Key::Escape);
+        page.app.refs.open_form(ReferenceForm::new(None));
+        page.frame(Vec::new());
+
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        assert!(page.app.refs.form.is_some());
+
+        // Nor does a right-click offer to follow it.
+        let pos = near_the_start(&page);
+        page.frame(vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            page.frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert_eq!(page.app.link_menu, None);
+
+        // With nothing up, the same click does follow it.
+        press_key(&mut page, egui::Key::Escape);
+        press_key(&mut page, egui::Key::Escape);
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+        assert_ne!(page.app.session.path(), Some(here.as_path()));
+    }
+
+    #[test]
+    fn a_click_on_what_links_here_behind_a_form_stays_where_it_is() {
+        let root = notebook_folder("linked-to");
+        let mut linking = Session::open(&root.join("linking.kame")).unwrap();
+        linking.insert("to it");
+        let block_id = linking.document().blocks[0].id;
+        assert!(linking.edit_link(block_id, 0, 2, "to", "doc.kame"));
+        drop(linking);
+        let mut session = Session::open(&root.join("doc.kame")).unwrap();
+        session.insert("words");
+        let mut page = Headless::new(session);
+        run_until(&mut page, |app| !app.nb.backlinks.is_empty());
+        let x = page.body_left() + 8.0;
+        let click_down_the_page = |page: &mut Headless| {
+            for y in (20..780).step_by(8) {
+                page.click(Pos2::new(x, y as f32));
+            }
+        };
+
+        page.app.refs.open_form(ReferenceForm::new(None));
+        page.frame(Vec::new());
+        click_down_the_page(&mut page);
+        assert_eq!(page.app.nb.pending_open, None);
+        assert!(page.app.refs.form.is_some());
+
+        // With nothing up, one of those clicks is on it.
+        press_key(&mut page, egui::Key::Escape);
+        click_down_the_page(&mut page);
+        assert_ne!(page.app.nb.pending_open, None);
+    }
+
+    #[test]
+    fn a_key_that_cant_be_put_in_the_document_says_so() {
+        let mut page = page_in_notebook("hello ");
+        cite_chord(&mut page);
+        page.app.session.save_failed = true;
+        page.app.session.last_error = Some("the disk is full".to_string());
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert_eq!(only_text(&page), "hello ");
+        let said = page.app.session.last_error.as_deref().unwrap();
+        assert!(said.contains("knuth1981"), "{said}");
+        assert!(said.contains("the disk is full"), "{said}");
+    }
+
+    #[test]
+    fn a_key_chosen_on_the_same_text_in_code_is_still_put_in() {
+        let mut page = page_in_notebook("[knuth1981]");
+        let block_id = page.app.session.document().blocks[0].id;
+        page.app
+            .session
+            .set_block_kind(block_id, BlockKind::Code { language: None });
+        cite_chord(&mut page);
+        assert!(page.app.refs.cite_search.is_some());
+
+        press_key(&mut page, egui::Key::Enter);
+
+        assert_eq!(only_text(&page), "[knuth1981][knuth1981]");
+    }
+
+    #[test]
+    fn escape_closes_an_entry_over_the_list_and_leaves_the_list() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+        page.press("Delete…");
+        page.frame(Vec::new());
+        page.app.refs.show("knuth1981", Pos2::new(10.0, 10.0));
+        page.frame(Vec::new());
+
+        press_key(&mut page, egui::Key::Escape);
+
+        assert_eq!(page.app.refs.shown, None);
+        let window = page.app.refs.window.as_ref().expect("the list stays");
+        assert!(window.confirming.is_some(), "and so does what it's asking");
+    }
+
+    #[test]
+    fn escape_closes_a_prompt_over_a_form_and_leaves_the_form() {
+        let mut page = typed_form_over_a_citation();
+        select(&mut page, 0, 3, 3);
+        ctrl_k(&mut page);
+        assert!(page.app.link_prompt.is_some());
+
+        press_key(&mut page, egui::Key::Escape);
+
+        assert!(page.app.link_prompt.is_none());
+        assert_eq!(typed_authors(&page), "Typed Author");
+    }
+
+    #[test]
+    fn escape_closes_a_prompt_over_the_search_and_leaves_the_search() {
+        let mut page = page_in_notebook("hello ");
+        select(&mut page, 0, 5, 5);
+        cite_chord(&mut page);
+        ctrl_k(&mut page);
+
+        press_key(&mut page, egui::Key::Escape);
+
+        assert!(page.app.link_prompt.is_none());
+        assert!(page.app.refs.cite_search.is_some());
+    }
+
+    #[test]
+    fn an_empty_list_doesnt_offer_a_chord_that_it_ignores() {
+        let mut page = page_in_notebook("hello");
+        std::fs::remove_file(reference_file(&page, "knuth1981")).unwrap();
+        page.app.reload_references();
+        open_list(&mut page);
+
+        assert!(page.sees("Close this"), "says how to go about it");
+    }
+
+    #[test]
+    fn a_rename_says_why_its_button_is_off() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+
+        ask_to_rename(&mut page, "not a key");
+        page.frame(Vec::new());
+        assert!(!page.can_press("Rename knuth1981"));
+        assert!(page.sees("A key is letters"));
+
+        ask_to_rename(&mut page, "knuth1981");
+        page.frame(Vec::new());
+        assert!(!page.can_press("Rename knuth1981"));
+        assert!(page.sees("Type the new key."));
+    }
+
+    #[test]
+    fn a_confirmation_reads_right_with_nothing_citing_the_key() {
+        let mut page = page_in_notebook("no citations here");
+        open_list(&mut page);
+
+        page.press("Delete…");
+        page.frame(Vec::new());
+        assert!(page.sees("No document cites it."));
+        assert!(!page.sees("hold plain"));
+
+        page.press("Cancel");
+        ask_to_rename(&mut page, "plass1981");
+        assert!(page.sees("No document cites it."));
+        assert!(!page.sees("rewritten"));
+    }
+
+    #[test]
+    fn a_confirmation_reads_right_with_one_document_citing_the_key() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+
+        page.press("Delete…");
+        page.frame(Vec::new());
+        assert!(page.sees("1 document cites it. It would then hold plain [knuth1981] text."));
+    }
+
+    #[test]
+    fn a_count_that_stopped_can_still_be_gone_ahead_with() {
+        let mut page = page_in_notebook("[knuth1981]");
+        open_list(&mut page);
+        page.press("Delete…");
+        page.frame(Vec::new());
+
+        let (send, coming) = channel();
+        drop(send);
+        page.app.refs.counts = None;
+        page.app.refs.counting = Some(coming);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+
+        assert!(page.sees("couldn't be counted"));
+        assert!(page.can_press("Delete knuth1981"));
+        page.press("Delete knuth1981");
+        assert!(!reference_file(&page, "knuth1981").exists());
     }
 }

@@ -823,11 +823,18 @@ fn pick_export_path(
 /// is a full file browser: directories, navigation and a file-name field, the
 /// same dialog a GTK application shows. The synchronous API blocks the frame
 /// thread while the (modal) dialog is up, which is correct for a save prompt.
+#[cfg(not(test))]
 fn pick_save_path(suggested_name: &str, directory: Option<&Path>) -> Option<PathBuf> {
     file_dialog("Save kame document", directory)
         .add_filter("kame document", &["kame"])
         .set_file_name(suggested_name)
         .save_file()
+}
+
+/// A test has no one to answer a native dialog, so asking for one is a failure.
+#[cfg(test)]
+fn pick_save_path(_suggested_name: &str, _directory: Option<&Path>) -> Option<PathBuf> {
+    panic!("a test asked for the save dialog");
 }
 
 /// The link a right-click landed on.
@@ -2530,6 +2537,11 @@ impl KameApp {
 
     /// Whether a file dialog is up. While one is, it owns the keyboard.
     fn dialog_open(&self) -> bool {
+        self.other_dialog_open() || self.refs.window_open()
+    }
+
+    /// Whether a dialog other than the windows for references is up. These open over those.
+    fn other_dialog_open(&self) -> bool {
         self.snapshot_prompt.is_some()
             || self.metadata_prompt.is_some()
             || self.open_prompt.is_some()
@@ -2540,13 +2552,16 @@ impl KameApp {
             || self.nb.file_op.is_some()
             || self.nb.move_report.is_some()
             || self.publishing.report.is_some()
-            || self.refs.window_open()
     }
 
-    /// Closes whichever file dialog is open. Returns whether one was closed, so
-    /// Escape can fall through to the note popover only when it was not.
+    /// Closes whichever file dialog is open, leaving a window for references that it was over.
+    /// Returns whether one was closed, so Escape can fall through to the note popover only when
+    /// it was not.
     fn dismiss_dialog(&mut self) -> bool {
         let open = self.dialog_open();
+        if !self.other_dialog_open() {
+            self.refs.dismiss();
+        }
         self.nb.close_lists();
         self.nb.file_op = None;
         self.nb.move_report = None;
@@ -2556,7 +2571,6 @@ impl KameApp {
         self.link_prompt = None;
         self.restore_picker = None;
         self.publishing.report = None;
-        self.refs.dismiss();
         open
     }
 
@@ -3931,6 +3945,9 @@ impl KameApp {
     fn draw_surface(&mut self, ui: &mut egui::Ui) {
         self.update_marks(ui.ctx());
         let dialog_open = self.dialog_open();
+        // Under these, a click goes no further than the caret: it would otherwise open what's in
+        // their way, or leave this document and them with it.
+        let references_up = self.refs.window_open();
         let config = self.renderer.config();
         let focus = self.modes.paragraph_focus;
         let typewriter = self.modes.typewriter;
@@ -4089,7 +4106,7 @@ impl KameApp {
                 self.palette.apparatus_ink[2],
             ),
         );
-        if backlink.is_some() {
+        if backlink.is_some() && !references_up {
             self.nb.pending_open = backlink;
         }
 
@@ -4760,6 +4777,9 @@ impl KameApp {
                     if let Some(url) = image_link {
                         self.link_menu = Some(LinkMenu { link: None, url });
                     }
+                    if references_up {
+                        self.link_menu = None;
+                    }
                     self.image_menu = blocks
                         .iter()
                         .find(|block| block.id == cursor.block_id)
@@ -4906,6 +4926,8 @@ impl KameApp {
                     // the caret.
                     if response.double_clicked() {
                         word_selection = Some(cursor);
+                    } else if references_up {
+                        caret_action = Some((cursor, shift));
                     } else if let Some(target) = document_link_at(blocks, &cursor) {
                         followed_link = Some(target);
                     } else if let Some(url) = url_at(blocks, &cursor) {
@@ -5992,6 +6014,9 @@ impl KameApp {
     /// Asks where to save the document, then saves it there. Cancelling changes
     /// nothing, and leaves the close prompt up if it was what asked.
     fn save_with_dialog(&mut self, ctx: &egui::Context, close_after: bool) {
+        if self.held_by_rename() {
+            return;
+        }
         let directory = self.session.dialog_directory();
         let name = self.session.suggested_file_name();
         let Some(path) = pick_save_path(&name, directory.as_deref()) else {
@@ -6665,14 +6690,15 @@ impl eframe::App for KameApp {
                 });
         }
         // Dialogs are drawn last, from the root: above the page, and available
-        // even while the chrome (and with it the buttons) is hidden.
+        // even while the chrome (and with it the buttons) is hidden. The windows for references
+        // come first, to see what's over them before an Enter closes it.
+        self.show_reference_windows(ui.ctx());
         self.show_dialogs(ui.ctx());
         self.show_notebook_lists(ui.ctx());
         self.open_pending_backlink();
         self.show_replaced_prompt(ui.ctx());
         self.show_site_report(ui.ctx());
         self.show_citation(ui.ctx());
-        self.show_reference_windows(ui.ctx());
         self.remember_document();
         self.keep_position(ui.ctx());
     }
@@ -6737,8 +6763,10 @@ impl Headless {
                         .auto_shrink([false, false])
                         .show(ui, |ui| app.draw_surface(ui));
                 });
-            app.show_citation(ui.ctx());
             app.show_reference_windows(ui.ctx());
+            app.show_dialogs(ui.ctx());
+            app.show_notebook_lists(ui.ctx());
+            app.show_citation(ui.ctx());
         });
         self.drawn = output.platform_output.accesskit_update.take();
         output.drop_without_applying_deltas();

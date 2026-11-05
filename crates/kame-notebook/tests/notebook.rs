@@ -373,6 +373,26 @@ mod linking {
         );
     }
 
+    /// The root is the real path, and a document opened through a symbolic link to the notebook
+    /// isn't, as for anything under `/tmp` on macOS.
+    #[test]
+    fn links_lead_on_from_a_document_opened_through_a_symbolic_link() {
+        let (root, found) = with_notebook("through-link");
+        document(&root.join("there.kame"), "There.");
+        let link = folder("through-link-way").join("way");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let from = link.join("a.kame");
+        assert_eq!(
+            found.follow("new", &from),
+            Follow::Create(root.join("new.kame"))
+        );
+        assert_eq!(
+            found.follow("there", &from),
+            Follow::Open(root.join("there.kame"))
+        );
+        assert_eq!(found.follow("../escape", &from), Follow::Rotted);
+    }
+
     #[test]
     fn only_what_could_be_a_document_is_created() {
         let (root, found) = with_notebook("kinds");

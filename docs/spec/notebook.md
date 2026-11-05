@@ -181,7 +181,7 @@ The rules above cover document links. In the app, inside a notebook, a `Link` sp
 
 **New links should be relative.** The desktop's link dialog writes `~/…` or a whole path, and those rot on any machine where the notebook lives somewhere else. Typing `[[path]]` keeps what was typed.
 
-**Use real paths.** Comparing with the root starts with the path as written, so a document opened through a symbolic link makes its links rot. The desktop doesn't guard against this. Resolve the document's folder first, which matters on Android, where `/sdcard` is a symbolic link.
+**Use real paths.** Comparing with the root starts with the path as written, so a document opened through a symbolic link would make its links rot. When a document's path isn't inside the root as written, resolve its folder first, as the desktop does. This matters on Android, where `/sdcard` is a symbolic link, and on macOS, where `/tmp` and `/var` are.
 
 ## 5. Images
 

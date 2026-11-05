@@ -105,6 +105,24 @@ impl Notebook {
             .all(|part| !part.as_os_str().to_string_lossy().starts_with('.'))
     }
 
+    /// A document's path as the notebook knows it. The root is a real path, so a document opened
+    /// through a symbolic link, as anything under `/tmp` on macOS is, has its folder resolved, or
+    /// nothing it links to would be inside. One that's inside as written is as it was, so that a
+    /// link leads where it says from a folder that's a symbolic link within the notebook.
+    fn real_base(&self, base: &Path) -> PathBuf {
+        if base.starts_with(&self.root) {
+            return base.to_path_buf();
+        }
+        let real = base
+            .parent()
+            .and_then(|folder| folder.canonicalize().ok())
+            .zip(base.file_name());
+        match real {
+            Some((folder, name)) => folder.join(name),
+            None => base.to_path_buf(),
+        }
+    }
+
     /// Where a relative link leads from the document at `base`.
     pub fn follow(&self, target: &str, base: &Path) -> Follow {
         let (path, _heading) = split_document_target(target);
@@ -112,7 +130,8 @@ impl Notebook {
             return Follow::Rotted;
         }
         let is_folder = path.ends_with('/');
-        let named = tidied(&resolve_open_path(path, base));
+        let base = self.real_base(base);
+        let named = tidied(&resolve_open_path(path, &base));
         if !self.holds(&named) {
             return Follow::Rotted;
         }

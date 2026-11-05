@@ -34,8 +34,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
-- [ ] **A notebook opened through a symbolic link can't create a document from a link.** Its root is the real path and the document's isn't, so
-  `Notebook::holds` says no to anything not there yet, and a click says "no document at" it. `/tmp` and `/var` on macOS are such paths.
 - [ ] **A corrupt log line stays for good.** Logs are only added to, so a line that doesn't parse, and isn't torn, stays until it's
   removed by hand. Until then a document it could belong to can't be retired as having no home. A notice says which logs.
 - [ ] **A stale database from before places were recorded,** whose logs left before a pass first saw it, has no place, so it isn't

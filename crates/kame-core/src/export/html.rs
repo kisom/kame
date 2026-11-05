@@ -587,7 +587,7 @@ fn reference_html(reference: &Reference) -> String {
         .map(|Run { text, style }| match style {
             RunStyle::Plain => escape(&text.replace(['\r', '\n'], " ")),
             RunStyle::Italic => format!("<em>{}</em>", escape(text)),
-            RunStyle::Url if is_script_url(text) => escape(text),
+            RunStyle::Url if !references::linkable_url(text) => escape(text),
             RunStyle::Url => format!(
                 "<a href=\"{}\">{}</a>",
                 escape_attribute(text),
@@ -2613,5 +2613,64 @@ mod tests {
         assert!(body.contains(KNUTH_LINK), "{body}");
         assert!(body.ends_with("</p>\n</section>\n"), "{body}");
         assert!(!body.contains("<style>"));
+    }
+
+    #[test]
+    fn only_a_web_or_mail_address_in_a_reference_is_a_link() {
+        let web = |url: &str| Reference {
+            kind: crate::references::Kind::Web,
+            title: "Page".to_string(),
+            url: url.to_string(),
+            ..Reference::default()
+        };
+        for url in [
+            "script",
+            "/about",
+            "www.example.com/x",
+            "javascript:alert(1)",
+        ] {
+            let html = page_of("See [src].", &with_reference(web(url)));
+            assert!(!html.contains("<a href=\"script"), "{url}: {html}");
+            assert!(
+                !html.contains(&format!("<a href=\"{url}\"")),
+                "{url}: {html}"
+            );
+            assert!(
+                html.contains(&format!("Available: {url}</p>")),
+                "{url}: {html}"
+            );
+        }
+        for url in ["HTTPS://a.b", "mailto:a@b.c"] {
+            let html = page_of("See [src].", &with_reference(web(url)));
+            assert!(
+                html.contains(&format!("<a href=\"{url}\">{url}</a>")),
+                "{html}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_citation_inside_a_bare_url_is_not_linked_or_listed() {
+        let html = page_of("see https://a.b/c[knuth1981] now", &knuth());
+        assert!(!html.contains("#ref-knuth1981"), "{html}");
+        assert!(!html.contains("class=\"references\""), "{html}");
+        assert_eq!(html.matches("<a ").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn a_footnote_with_no_block_still_lists_its_source() {
+        let doc = document(
+            vec![paragraph("Text.")],
+            vec![annotation(
+                AnnotationKind::Footnote,
+                Uuid::new_v4(),
+                0,
+                0,
+                "See [knuth1981].",
+            )],
+        );
+        let html = page(&doc, &knuth());
+        assert!(html.contains(&format!("See {KNUTH_LINK}.")), "{html}");
+        assert!(html.contains("<p id=\"ref-knuth1981\">"), "{html}");
     }
 }

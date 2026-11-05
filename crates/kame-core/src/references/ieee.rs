@@ -57,7 +57,7 @@ const SENTENCE_QUOTE: After = After {
 impl After {
     /// The same, but ending a sentence, for what comes before `[Online]`.
     fn ending_sentence(self) -> After {
-        if self.mid.starts_with(',') && self.end.ends_with('”') {
+        if self.end.ends_with('”') {
             SENTENCE_QUOTE
         } else {
             PERIOD
@@ -680,5 +680,16 @@ mod tests {
             ..Reference::default()
         };
         assert_eq!(plain(&article), "é <b> & Q, “lower *case* [x].”");
+    }
+
+    #[test]
+    fn a_web_page_with_a_title_and_a_url_keeps_its_closing_quote() {
+        let page = Reference {
+            kind: Kind::Web,
+            title: s("Page"),
+            url: s("https://a.b/c"),
+            ..Reference::default()
+        };
+        assert_eq!(plain(&page), "“Page.” [Online]. Available: https://a.b/c");
     }
 }

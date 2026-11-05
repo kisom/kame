@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::model::{AnnotationKind, Block, BlockKind, Document, Span, SpanStyle};
+use crate::model::{bare_link_ranges, AnnotationKind, Block, BlockKind, Document, Span, SpanStyle};
 
 mod ieee;
 
@@ -354,23 +354,35 @@ pub fn citation_ranges(text: &str) -> Vec<(usize, usize)> {
 }
 
 /// The citations in `block` as it's read: none in code, prose or an image, and none that
-/// overlap inline code or a link's own words.
+/// overlap inline code, a link's own words or a bare link.
 pub fn block_citation_ranges(block: &Block) -> Vec<(usize, usize)> {
     if block.kind.is_verbatim() || matches!(block.kind, BlockKind::Image { .. }) {
         return Vec::new();
     }
+    let links = bare_link_ranges(block);
     citation_ranges(&block.text)
         .into_iter()
         .filter(|(start, end)| {
-            !block.spans.iter().any(|span| {
-                matches!(
-                    span.style,
-                    SpanStyle::Code | SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
-                ) && span.start < *end
-                    && *start < span.end
-            })
+            !links.iter().any(|(from, to)| from < end && start < to)
+                && !block.spans.iter().any(|span| {
+                    matches!(
+                        span.style,
+                        SpanStyle::Code | SpanStyle::Link { .. } | SpanStyle::DocumentLink { .. }
+                    ) && span.start < *end
+                        && *start < span.end
+                })
         })
         .collect()
+}
+
+/// Whether a reference's `url` may be written as a link: it starts, ignoring case, with `http:`,
+/// `https:` or `mailto:`, and has no whitespace, control character, `<` or `>`.
+pub fn linkable_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    ["http:", "https:", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+        && !url.contains(|c: char| c.is_whitespace() || c.is_control() || c == '<' || c == '>')
 }
 
 /// The key inside a range from `citation_ranges`.
@@ -885,5 +897,35 @@ mod tests {
             !written.contains("authors") && !written.contains("doi"),
             "{written}"
         );
+    }
+
+    #[test]
+    fn only_a_web_or_mail_address_is_linkable() {
+        for url in [
+            "https://a.b/c_d",
+            "http://a.b",
+            "HTTPS://a.b",
+            "mailto:a@b.c",
+        ] {
+            assert!(linkable_url(url), "{url}");
+        }
+        for url in [
+            "script",
+            "/about",
+            "www.example.com/x",
+            "javascript:alert(1)",
+            "https://a.b/ c",
+            "https://a.b/<c>",
+            "https://a.b/\u{7}",
+            "",
+        ] {
+            assert!(!linkable_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_citation_inside_a_bare_url_is_skipped() {
+        let found = block_citation_ranges(&paragraph("see https://a.b/c[knuth1981] now [x]"));
+        assert_eq!(found, vec![(33, 36)]);
     }
 }

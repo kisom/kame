@@ -148,7 +148,7 @@ fn markdown_with(doc: &Document, references: &References) -> String {
         out.push_str(&lines.join("\n"));
         out.push('\n');
     }
-    let cited = references::cited(doc, references, false);
+    let cited = cited_in_output(doc, &footnotes, references);
     if !cited.is_empty() {
         if !out.is_empty() {
             out.push('\n');
@@ -168,8 +168,26 @@ fn markdown_with(doc: &Document, references: &References) -> String {
     out
 }
 
-/// One entry's text: titles in italics, a web address as an autolink unless it would run a
-/// script or can't be written as one. A line break becomes a space, to stay one paragraph.
+/// The sources cited in what is written: footnotes that aren't, because their block is gone or
+/// empty, don't count, or a source would be listed with no citation in the output.
+fn cited_in_output<'a>(
+    doc: &Document,
+    footnotes: &[(usize, &crate::model::Annotation)],
+    references: &'a References,
+) -> Vec<(&'a str, &'a Reference)> {
+    if references.is_empty() {
+        return Vec::new();
+    }
+    let mut written = doc.clone();
+    written.annotations.retain(|annotation| {
+        annotation.kind != AnnotationKind::Footnote
+            || footnotes.iter().any(|(_, kept)| kept.id == annotation.id)
+    });
+    references::cited(&written, references, false)
+}
+
+/// One entry's text: titles in italics, a web or mail address as an autolink, and any other
+/// address as text. A line break becomes a space, to stay one paragraph.
 fn reference_markdown(reference: &Reference) -> String {
     let mut out = String::new();
     for Run { text, style } in references::entry(reference) {
@@ -181,14 +199,7 @@ fn reference_markdown(reference: &Reference) -> String {
                 push_escaped(&mut out, &text);
                 out.push('*');
             }
-            RunStyle::Url
-                if !is_script_url(&text)
-                    && !text.contains(|c: char| {
-                        c.is_whitespace() || c.is_control() || c == '<' || c == '>'
-                    }) =>
-            {
-                out.push_str(&format!("<{text}>"));
-            }
+            RunStyle::Url if references::linkable_url(&text) => out.push_str(&format!("<{text}>")),
             RunStyle::Url => push_escaped(&mut out, &text),
         }
     }
@@ -1913,5 +1924,52 @@ mod tests {
             md.ends_with("## References\n\n\\[src\\] Smith \\*et al.\\*  second line\n"),
             "{md}"
         );
+    }
+
+    #[test]
+    fn only_a_web_or_mail_address_in_a_reference_is_an_autolink() {
+        let web = |url: &str| Reference {
+            kind: crate::references::Kind::Web,
+            title: "Page".to_string(),
+            url: url.to_string(),
+            ..Reference::default()
+        };
+        for url in [
+            "script",
+            "/about",
+            "www.example.com/x",
+            "javascript:alert(1)",
+        ] {
+            let md = md_of("See [src].", &with_reference(web(url)));
+            assert!(!md.contains(&format!("<{url}>")), "{url}: {md}");
+            assert!(md.ends_with(&format!("Available: {url}\n")), "{url}: {md}");
+        }
+        for url in ["HTTPS://a.b", "mailto:a@b.c"] {
+            let md = md_of("See [src].", &with_reference(web(url)));
+            assert!(md.contains(&format!("<{url}>")), "{md}");
+        }
+    }
+
+    #[test]
+    fn a_citation_inside_a_bare_url_is_not_listed() {
+        let md = md_of("see https://a.b/c[knuth1981] now", &knuth());
+        assert!(!md.contains("References"), "{md}");
+    }
+
+    #[test]
+    fn a_footnote_that_is_not_exported_lists_no_source() {
+        let orphan = footnote(Uuid::new_v4(), 0, 0, "See [knuth1981].");
+        let doc = document(vec![paragraph("Text.")], vec![orphan]);
+        let md = to_markdown_with(&doc, &Metadata::default(), &knuth());
+        assert!(!md.contains("References") && !md.contains("[^1]"), "{md}");
+
+        let empty = block(BlockKind::Paragraph, "");
+        let id = empty.id;
+        let doc = document(
+            vec![paragraph("Text."), empty],
+            vec![footnote(id, 0, 0, "See [knuth1981].")],
+        );
+        let md = to_markdown_with(&doc, &Metadata::default(), &knuth());
+        assert!(!md.contains("References") && !md.contains("[^1]"), "{md}");
     }
 }

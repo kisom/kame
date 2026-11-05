@@ -4007,6 +4007,49 @@ mod tests {
         assert_ne!(page.app.session.path(), Some(here.as_path()));
     }
 
+    /// A page in a notebook whose path is the real one, for which a link that leads to nothing
+    /// there yet can create a document.
+    fn page_in_notebook_at_its_real_path(text: &str) -> Headless {
+        let root = notebook_folder("page").canonicalize().unwrap();
+        let mut session = Session::open(&root.join("doc.kame")).unwrap();
+        session.insert(text);
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page
+    }
+
+    #[test]
+    fn a_click_on_a_web_address_with_no_scheme_goes_to_the_browser() {
+        let mut page = page_in_notebook_at_its_real_path("www.example.com/page and more");
+        let here = page.app.session.path().unwrap().to_path_buf();
+
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        assert!(!root_of(&page).join("www.example.com").exists());
+        assert_eq!(crate::opened_in_browser(), ["https://www.example.com/page"]);
+    }
+
+    #[test]
+    fn a_click_on_a_link_to_a_web_address_with_no_scheme_goes_to_the_browser() {
+        let mut page = page_in_notebook_at_its_real_path("the words");
+        let block_id = page.app.session.document().blocks[0].id;
+        assert!(page
+            .app
+            .session
+            .edit_link(block_id, 0, 9, "the words", "www.example.com/x"));
+        let here = page.app.session.path().unwrap().to_path_buf();
+        page.frame(Vec::new());
+
+        page.click(near_the_start(&page));
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        assert!(!root_of(&page).join("www.example.com").exists());
+        assert_eq!(crate::opened_in_browser(), ["https://www.example.com/x"]);
+    }
+
     #[test]
     fn a_click_on_what_links_here_behind_a_form_stays_where_it_is() {
         let root = notebook_folder("linked-to");

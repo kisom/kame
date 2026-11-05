@@ -2164,22 +2164,53 @@ fn may_open(url: &str) -> bool {
 }
 
 /// Whether following `url` stays in kame rather than going to the browser. A heading is in this
-/// document, and in a notebook so is anything relative.
+/// document, and in a notebook so is anything relative, but for `www.`, which starts a web address
+/// as it does in a document's text.
 fn leads_within_kame(url: &str, in_notebook: bool) -> bool {
-    (url.starts_with('#') && url.len() > 1) || (in_notebook && notebook::is_relative_link(url))
+    (url.starts_with('#') && url.len() > 1)
+        || (in_notebook && !url.starts_with("www.") && notebook::is_relative_link(url))
 }
 
 /// Opens `url` in the system browser, best-effort: a link that cannot launch is
-/// never worth an error dialog in the editor.
+/// never worth an error dialog in the editor. An opener takes `www.` for a file, so it gets the
+/// web address in full.
 fn open_in_browser(url: &str) {
     if !may_open(url) {
         return;
     }
+    if url.starts_with("www.") {
+        launch_browser(&format!("https://{url}"));
+    } else {
+        launch_browser(url);
+    }
+}
+
+/// Hands `url` to the system's opener.
+#[cfg(not(test))]
+fn launch_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let (program, arg) = ("open", url);
     #[cfg(not(target_os = "macos"))]
     let (program, arg) = ("xdg-open", url);
     let _ = std::process::Command::new(program).arg(arg).spawn();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What this test would have put in front of whoever is at the machine.
+    static OPENED_IN_BROWSER: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Notes the address, since a test shouldn't launch a browser on the desktop.
+#[cfg(test)]
+fn launch_browser(url: &str) {
+    OPENED_IN_BROWSER.with(|opened| opened.borrow_mut().push(url.to_string()));
+}
+
+/// What this test has asked the system's browser to open.
+#[cfg(test)]
+pub(crate) fn opened_in_browser() -> Vec<String> {
+    OPENED_IN_BROWSER.with(|opened| opened.borrow().clone())
 }
 
 /// The space below a block of kind `block` when `next` follows it. A heading sits
@@ -7977,6 +8008,23 @@ mod tests {
         assert!(!leads_within_kame("a/b.md", false));
         assert!(!leads_within_kame("https://e.com/#x", true));
         assert!(!leads_within_kame("#", true));
+        assert!(!leads_within_kame("www.example.com/a", true));
+        assert!(!leads_within_kame("www.a.kame#Part", true));
+    }
+
+    #[test]
+    fn a_web_address_with_no_scheme_reaches_the_browser_with_one() {
+        for url in ["www.example.com/x", "https://example.com", "a/b.pdf", "-a"] {
+            open_in_browser(url);
+        }
+        assert_eq!(
+            opened_in_browser(),
+            [
+                "https://www.example.com/x",
+                "https://example.com",
+                "a/b.pdf"
+            ]
+        );
     }
 
     #[test]

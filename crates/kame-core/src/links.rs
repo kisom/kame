@@ -89,12 +89,28 @@ fn tidied(path: &Path) -> PathBuf {
     tidy
 }
 
+/// How `text` starts a web address, if it does: `https://`, `http://`, or `www.`, which starts one
+/// in writing as it does in a browser's address bar. Any case counts, as it does there, and the
+/// start is given in lowercase.
+pub fn web_address_start(text: &str) -> Option<&'static str> {
+    ["https://", "http://", "www."].into_iter().find(|start| {
+        text.get(..start.len())
+            .is_some_and(|written| written.eq_ignore_ascii_case(start))
+    })
+}
+
+/// Whether a link is a web address, by how it starts, as [`web_address_start`] has it.
+pub fn is_web_address(link: &str) -> bool {
+    web_address_start(link).is_some()
+}
+
 /// `target`, a link copied from the document at `from`, as it has to be written to lead to the
-/// same place from the document at `to`. Only a relative one depends on where it is, and
-/// `www.` starts a web address, as it does in a document's text. `#Heading` means the document
+/// same place from the document at `to`. Only a relative one depends on where it is. A link to a
+/// document, as `document` says this is, always names a file, but any other link that starts
+/// with `www.` is a web address, as it is in a document's text. `#Heading` means the document
 /// it's in, so elsewhere it names `from`. If either document has no file, or no folder that can
 /// be found, there's no way to say, and it stays as it is.
-pub fn retargeted(target: &str, from: &Path, to: &Path) -> String {
+pub fn retargeted(target: &str, from: &Path, to: &Path, document: bool) -> String {
     let (path, _) = split_document_target(target);
     let has_scheme = path.split_once(':').is_some_and(|(before, _)| {
         before
@@ -105,7 +121,11 @@ pub fn retargeted(target: &str, from: &Path, to: &Path) -> String {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });
-    if has_scheme || path.starts_with('/') || path.starts_with('~') || path.starts_with("www.") {
+    if has_scheme
+        || path.starts_with('/')
+        || path.starts_with('~')
+        || (!document && is_web_address(path))
+    {
         return target.to_string();
     }
     let real_folder = |document: &Path| document.parent()?.canonicalize().ok();
@@ -203,29 +223,31 @@ pub fn moved_target(target: &str, new_file: &Path, document_after: &Path) -> Str
 }
 
 /// `target`, a link in the document that moves from `from` to `to`, as it has to be written
-/// afterward. `#Heading` means the document itself, so it stays; any other is `retargeted`.
-pub fn own_target_after_move(target: &str, from: &Path, to: &Path) -> String {
+/// afterward. `#Heading` means the document itself, so it stays; any other is `retargeted`, which
+/// `document` tells whether it's a link to a document.
+pub fn own_target_after_move(target: &str, from: &Path, to: &Path, document: bool) -> String {
     let (path, _) = split_document_target(target);
     if path.is_empty() {
         target.to_string()
     } else {
-        retargeted(target, from, to)
+        retargeted(target, from, to, document)
     }
 }
 
 /// `target`, a link in the document saved as `to` having been at `from`, as it has to be written
 /// afterward. A link to the document itself goes on meaning the document, under the name it now
-/// has, and any other goes on leading where it did, as for a move.
-pub fn own_target_after_save_as(target: &str, from: &Path, to: &Path) -> String {
+/// has, and any other goes on leading where it did, as for a move. `document` says whether it's
+/// a link to a document.
+pub fn own_target_after_save_as(target: &str, from: &Path, to: &Path, document: bool) -> String {
     let (path, _) = split_document_target(target);
     let same_file = match (from.canonicalize(), to.canonicalize()) {
         (Ok(from), Ok(to)) => from == to,
         _ => from == to,
     };
-    if !same_file && names_document(path, from) {
+    if !same_file && names_document(path, from, document) {
         moved_target(target, to, to)
     } else {
-        own_target_after_move(target, from, to)
+        own_target_after_move(target, from, to, document)
     }
 }
 
@@ -237,14 +259,15 @@ pub fn names_something(target: &str, document: &Path) -> bool {
     !path.is_empty()
         && (resolve_open_path(path, document).exists()
             || find_document(path, document).is_some()
-            || names_document(path, document))
+            || names_document(path, document, false))
 }
 
-/// Whether a link's path, written in the document at `document`, leads to that document. `www.`
-/// starts a web address, as it does in a document's text. If the document's file has gone, what
+/// Whether a link's path, written in the document at `document`, leads to that document. A link
+/// to a document, as `to_document` says this is, always names a file, but `www.` starts any
+/// other as a web address, as it does in a document's text. If the document's file has gone, what
 /// the link names is compared with where it was, by what the paths say.
-fn names_document(path: &str, document: &Path) -> bool {
-    if path.is_empty() || path.starts_with("www.") {
+fn names_document(path: &str, document: &Path, to_document: bool) -> bool {
+    if path.is_empty() || (!to_document && is_web_address(path)) {
         return false;
     }
     let named = resolve_open_path(path, document);
@@ -361,19 +384,51 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         let (at_root, in_a) = (root.join("doc.kame"), root.join("a/doc.kame"));
-        assert_eq!(retargeted("../", &in_a, &at_root), "./");
-        assert_eq!(retargeted("..", &in_a, &at_root), "./");
-        assert_eq!(retargeted("../#Part", &in_a, &at_root), "./#Part");
-        assert_eq!(retargeted("b/", &in_a, &at_root), "a/b/");
-        assert_eq!(retargeted("a/b/", &at_root, &in_a), "b/");
-        assert_eq!(retargeted("./", &at_root, &in_a), "../");
-        assert_eq!(retargeted("a/#Part", &at_root, &in_a), "./#Part");
+        assert_eq!(retargeted("../", &in_a, &at_root, true), "./");
+        assert_eq!(retargeted("..", &in_a, &at_root, true), "./");
+        assert_eq!(retargeted("../#Part", &in_a, &at_root, true), "./#Part");
+        assert_eq!(retargeted("b/", &in_a, &at_root, true), "a/b/");
+        assert_eq!(retargeted("a/b/", &at_root, &in_a, true), "b/");
+        assert_eq!(retargeted("./", &at_root, &in_a, true), "../");
+        assert_eq!(retargeted("a/#Part", &at_root, &in_a, true), "./#Part");
         assert_eq!(
-            own_target_after_move("../#Part", &in_a, &at_root),
+            own_target_after_move("../#Part", &in_a, &at_root, true),
             "./#Part"
         );
         // Without its slash, it's written as it was.
-        assert_eq!(retargeted("a/b", &at_root, &in_a), "b");
+        assert_eq!(retargeted("a/b", &at_root, &in_a, true), "b");
+    }
+
+    #[test]
+    fn a_web_address_in_any_case_stays_and_a_document_named_like_one_moves() {
+        let root = kame_test_dir::folder("retargeted-www")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/www.x.kame"), "").unwrap();
+        let (from, to) = (root.join("a/doc.kame"), root.join("a/b/doc.kame"));
+        for web in ["www.example.com/x", "WWW.Example.com/x", "Www.x.kame"] {
+            assert_eq!(retargeted(web, &from, &to, false), web);
+            assert_eq!(own_target_after_save_as(web, &from, &to, false), web);
+        }
+        assert_eq!(
+            retargeted("www.x.kame#Part", &from, &to, true),
+            "../www.x.kame#Part"
+        );
+        assert_eq!(
+            own_target_after_move("www.x.kame", &from, &to, true),
+            "../www.x.kame"
+        );
+        assert_eq!(
+            own_target_after_save_as("www.x.kame", &from, &to, true),
+            "../www.x.kame"
+        );
+        // A document named like a web address can still be the one with the link.
+        let named = root.join("a/www.x.kame");
+        assert_eq!(
+            own_target_after_save_as("www.x.kame#Part", &named, &to, true),
+            "doc.kame#Part"
+        );
     }
 
     /// The way to a file always has the file's name in it, so it's never empty.
@@ -393,13 +448,16 @@ mod tests {
         let root = kame_test_dir::folder("own-target").canonicalize().unwrap();
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         let (from, to) = (root.join("a/doc.kame"), root.join("a/b/doc.kame"));
-        assert_eq!(own_target_after_move("#Part two", &from, &to), "#Part two");
         assert_eq!(
-            own_target_after_move("other.kame", &from, &to),
+            own_target_after_move("#Part two", &from, &to, true),
+            "#Part two"
+        );
+        assert_eq!(
+            own_target_after_move("other.kame", &from, &to, true),
             "../other.kame"
         );
         assert_eq!(
-            own_target_after_move("https://example.com", &from, &to),
+            own_target_after_move("https://example.com", &from, &to, false),
             "https://example.com"
         );
     }

@@ -16,7 +16,8 @@ mod publish;
 mod references;
 
 use kame_core::links::{
-    image_file, resolve_open_path, split_document_target, stored_image_path, way_within_notebook,
+    image_file, is_web_address, resolve_open_path, split_document_target, stored_image_path,
+    way_within_notebook, web_address_start,
 };
 use kame_core::references::{cited_key, with_citation_spans};
 use kame_core::session::{is_markdown_path, Clipped, LinkUnder, Session};
@@ -2188,11 +2189,11 @@ fn may_open(url: &str) -> bool {
 }
 
 /// Whether following `url` stays in kame rather than going to the browser. A heading is in this
-/// document, and in a notebook so is anything relative, but for `www.`, which starts a web address
-/// as it does in a document's text.
+/// document, and in a notebook so is anything relative, but for `www.` in any case, which starts a
+/// web address as it does in a document's text.
 fn leads_within_kame(url: &str, in_notebook: bool) -> bool {
     (url.starts_with('#') && url.len() > 1)
-        || (in_notebook && !url.starts_with("www.") && notebook::is_relative_link(url))
+        || (in_notebook && !is_web_address(url) && notebook::is_relative_link(url))
 }
 
 /// What to call a file in a notice: its name, or its whole path if it has none.
@@ -2210,7 +2211,7 @@ fn open_in_browser(url: &str) {
     if !may_open(url) {
         return;
     }
-    if url.starts_with("www.") {
+    if web_address_start(url) == Some("www.") {
         launch_browser(&format!("https://{url}"));
     } else {
         launch_browser(url);
@@ -8240,11 +8241,19 @@ mod tests {
         assert!(!leads_within_kame("#", true));
         assert!(!leads_within_kame("www.example.com/a", true));
         assert!(!leads_within_kame("www.a.kame#Part", true));
+        assert!(!leads_within_kame("WWW.Example.com/x", true));
+        assert!(!leads_within_kame("Www.example.com", true));
     }
 
     #[test]
     fn a_web_address_with_no_scheme_reaches_the_browser_with_one() {
-        for url in ["www.example.com/x", "https://example.com", "a/b.pdf", "-a"] {
+        for url in [
+            "www.example.com/x",
+            "https://example.com",
+            "a/b.pdf",
+            "-a",
+            "WWW.Example.com/x",
+        ] {
             open_in_browser(url);
         }
         assert_eq!(
@@ -8252,7 +8261,8 @@ mod tests {
             [
                 "https://www.example.com/x",
                 "https://example.com",
-                "a/b.pdf"
+                "a/b.pdf",
+                "https://WWW.Example.com/x",
             ]
         );
     }

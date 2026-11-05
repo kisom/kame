@@ -181,17 +181,14 @@ pub fn bare_link_ranges(block: &Block) -> Vec<(usize, usize)> {
 
 /// Byte ranges of URLs in `text`, each extended to the next whitespace and
 /// with trailing punctuation (`.,;:!?)]}`) trimmed. Recognises `http://`,
-/// `https://` and `www.` forms, so a pasted or typed link becomes a clickable
+/// `https://` and `www.` forms, in any case, so a pasted or typed link becomes a clickable
 /// range without the author marking it up.
 pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut i = 0;
     while i < text.len() {
         let rest = &text[i..];
-        let scheme = ["https://", "http://", "www."]
-            .into_iter()
-            .find(|prefix| rest.starts_with(prefix));
-        let Some(scheme) = scheme else {
+        let Some(scheme) = crate::links::web_address_start(rest) else {
             i += text[i..].chars().next().map_or(0, char::len_utf8);
             continue;
         };

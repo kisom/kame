@@ -1934,6 +1934,12 @@ around at this measure.\n\nAnd one after a blank line."
             vec![(2, 13), (18, 29)]
         );
         assert!(link_ranges("plain prose").is_empty());
+        // In any case, as an address bar takes it.
+        assert_eq!(link_ranges("visit WWW.Example.org today"), vec![(6, 21)]);
+        assert_eq!(link_ranges("go to HTTPS://a.b now"), vec![(6, 17)]);
+        assert_eq!(link_ranges("go to Http://a.b now"), vec![(6, 16)]);
+        assert!(link_ranges("a www").is_empty());
+        assert!(link_ranges("été wwwé").is_empty());
     }
 
     #[test]

@@ -693,11 +693,11 @@ pub fn carry_out(
     }
     let result = edit_closed(&to, device, now, |session| {
         let history = session.history();
-        session.rewrite_links(|link| {
+        session.rewrite_links_by_kind(|link, document| {
             Some(
                 own.get(link)
                     .cloned()
-                    .unwrap_or_else(|| own_target_after_move(link, &from, &to)),
+                    .unwrap_or_else(|| own_target_after_move(link, &from, &to, document)),
             )
         })?;
         if !same_folder(&from, &to) {

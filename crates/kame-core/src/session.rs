@@ -967,7 +967,7 @@ impl Session {
 
     /// [`Session::rewrite_links`], telling `rewrite` whether each is a link to a document, as a
     /// `DocumentLink` is, rather than a link to anything at all.
-    fn rewrite_links_by_kind(
+    pub fn rewrite_links_by_kind(
         &mut self,
         mut rewrite: impl FnMut(&str, bool) -> Option<String>,
     ) -> Result<usize, String> {
@@ -1784,7 +1784,7 @@ impl Session {
         let selection = self.selection;
         let rewritten = self.rewrite_links_by_kind(|link, to_document| {
             (to_document || names_something(link, from))
-                .then(|| own_target_after_save_as(link, from, &to))
+                .then(|| own_target_after_save_as(link, from, &to, to_document))
         });
         match rewritten {
             Ok(_) => self.selection = selection,
@@ -2015,10 +2015,10 @@ impl Session {
             .map(|span| {
                 let style = match &span.style {
                     SpanStyle::Link { url } => SpanStyle::Link {
-                        url: retargeted(url, &clipped.from, &here),
+                        url: retargeted(url, &clipped.from, &here, false),
                     },
                     SpanStyle::DocumentLink { target } => SpanStyle::DocumentLink {
-                        target: retargeted(target, &clipped.from, &here),
+                        target: retargeted(target, &clipped.from, &here, true),
                     },
                     other => other.clone(),
                 };

@@ -130,7 +130,7 @@ A key is suggested from the first author's last name and the year, adding `a`, `
 **A References… window** in a notebook lists every reference, with how many documents cite it, for browsing, editing, renaming and deleting.
 
 - **Deleting** says how many documents cite it first. They then hold plain `[key]` text.
-- **Renaming** rewrites `[old]` to `[new]` everywhere it counts as a citation in each document citing it: prose, footnotes and marginals, as an ordinary edit in that document. A note isn't touched. A document that can't be rewritten is named in the result, not skipped silently.
+- **Renaming** rewrites `[old]` to `[new]` everywhere it counts as a citation in each document citing it: prose, footnotes and marginals, as an ordinary edit in that document. A note isn't touched. A document that can't be rewritten, or can't be read to see whether it cites the key, is named in the result, not skipped silently, and the old key is then kept so that `[old]` still resolves. Running the rename again once the problem is fixed finishes it.
 
 ### Exporting
 
@@ -203,7 +203,7 @@ The layering stays one-way, and there are no new dependencies (`kame-notebook` a
 - **Unresolved keys** are only warned about when they're shaped like a suggested key.
 - **A mistyped key in a footnote** looks the same as a right one on the page, and shows up only at export.
 - **Two machines changing the same reference while apart** still gives a sync conflict for that one file. The conflict copy is skipped by kame like any other.
-- **Renaming a key** edits documents that aren't open, and a document on another machine that hasn't synced yet keeps the old key until the next rename or by hand.
+- **Renaming a key** edits documents that aren't open. It reaches another machine only after this machine next opens each rewritten document, and the old key's file can be gone there sooner, leaving `[old]` as plain text until then or until a rename is run again by hand.
 - **Renaming while a second kame has a citing document open:** that window keeps its old copy and can overwrite the rename. There's no per-document lock, and two programs writing one file isn't something kame is trying to support, so this doesn't get one.
 
 ## Testing

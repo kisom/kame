@@ -1,6 +1,7 @@
 //! An open document: its editor, its file, the caret and selection, and how every edit
 //! reaches the disk. No window is involved, so anything can drive one.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
@@ -2180,69 +2181,85 @@ impl Session {
     }
 
     /// Makes each citation of `old` a citation of `new`: in blocks, footnotes and marginals, where
-    /// `[old]` counts as one, and never in a note. Each is an ordinary undoable edit, working from
-    /// the last to the first so that the offsets still to come stay right. Only the key changes,
-    /// so a citation keeps any formatting around it. The caret stays on its text; a selection is
-    /// dropped. Returns how many citations changed, and stops at the first edit that is refused.
+    /// `[old]` counts as one, and never in a note. The whole rename is one undo step. Only the key
+    /// changes, and spans, anchors, the caret and the selection are moved across it by hand so
+    /// that whatever covered a key still covers it, and a note on exactly the key stays on it.
+    /// Returns how many citations changed; 0 and no change when nothing did, when `new` is
+    /// the same or not a key, or when the document can't be written.
     pub fn rename_citation(&mut self, old: &str, new: &str) -> usize {
-        if old == new || !valid_key(new) {
+        if old == new || !valid_key(new) || self.save_failed || self.newer || self.replaced {
             return 0;
         }
-        let caret = self.caret;
-        let mut moved = caret.offset;
+        let mut document = self.document().clone();
+        let mut keys_in: HashMap<BlockId, Vec<(usize, usize)>> = HashMap::new();
         let mut changed = 0;
-        let blocks: Vec<(BlockId, Vec<(usize, usize)>)> = self
-            .document()
-            .blocks
-            .iter()
-            .map(|block| {
-                let ranges = block_citation_ranges(block)
-                    .into_iter()
-                    .filter(|range| key_of(&block.text, *range) == old)
-                    .collect();
-                (block.id, ranges)
-            })
-            .collect();
-        for (id, ranges) in blocks {
-            if id == caret.block_id {
-                moved = moved_by_rename(caret.offset, &ranges, new.len());
+        for block in &mut document.blocks {
+            let keys: Vec<(usize, usize)> = block_citation_ranges(block)
+                .into_iter()
+                .filter(|range| key_of(&block.text, *range) == old)
+                .map(|(start, end)| (start + 1, end - 1))
+                .collect();
+            if keys.is_empty() {
+                continue;
             }
-            for (start, end) in ranges.into_iter().rev() {
-                if !self.replace_text(id, start + 1, end - 1, new) {
-                    return changed;
-                }
-                changed += 1;
+            changed += keys.len();
+            let mut text = String::with_capacity(block.text.len());
+            let mut from = 0;
+            for (start, end) in &keys {
+                text.push_str(&block.text[from..*start]);
+                text.push_str(new);
+                from = *end;
             }
+            text.push_str(&block.text[from..]);
+            for span in &mut block.spans {
+                span.start = offset_after_rename(span.start, &keys, new.len(), false);
+                span.end = offset_after_rename(span.end, &keys, new.len(), true);
+            }
+            block.text = text;
+            keys_in.insert(block.id, keys);
         }
-        let annotations: Vec<(AnnotationId, String, usize)> = self
-            .document()
-            .annotations
-            .iter()
-            .filter(|annotation| annotation.kind != AnnotationKind::Note)
-            .filter_map(|annotation| {
+        for annotation in &mut document.annotations {
+            if let Anchor::Range {
+                block_id,
+                start,
+                end,
+            } = &mut annotation.anchor
+            {
+                if let Some(keys) = keys_in.get(block_id) {
+                    *start = offset_after_rename(*start, keys, new.len(), false);
+                    *end = offset_after_rename(*end, keys, new.len(), true);
+                }
+            }
+            if annotation.kind != AnnotationKind::Note {
                 let count = citation_ranges(&annotation.body)
                     .into_iter()
                     .filter(|range| key_of(&annotation.body, *range) == old)
                     .count();
-                (count > 0).then(|| {
-                    (
-                        annotation.id,
-                        rewrite_citation(&annotation.body, old, new),
-                        count,
-                    )
-                })
-            })
-            .collect();
-        for (id, body, count) in annotations {
-            if !self.set_annotation_body(id, &body) {
-                return changed;
+                if count > 0 {
+                    annotation.body = rewrite_citation(&annotation.body, old, new);
+                    changed += count;
+                }
             }
-            changed += count;
         }
-        self.set_caret(Cursor {
-            block_id: caret.block_id,
-            offset: moved,
+        if changed == 0 {
+            return 0;
+        }
+        let moved = |cursor: Cursor| Cursor {
+            block_id: cursor.block_id,
+            offset: keys_in.get(&cursor.block_id).map_or(cursor.offset, |keys| {
+                offset_after_rename(cursor.offset, keys, new.len(), true)
+            }),
+        };
+        let (caret, selection) = (moved(self.caret), self.selection);
+        if !self.replace_document(document) {
+            return 0;
+        }
+        self.caret = caret;
+        self.selection = selection.map(|selection| Selection {
+            start: moved(selection.start),
+            end: moved(selection.end),
         });
+        self.valid_caret();
         changed
     }
 
@@ -2521,19 +2538,28 @@ fn spans_after_replacing(spans: &[Span], start: usize, end: usize, new_len: usiz
 /// Readable and writable by the owner alone.
 pub const PRIVATE_MODE: u32 = 0o600;
 
-/// Where a caret at `offset` goes when the key of each citation in `ranges` becomes `new_len`
-/// bytes long: along with the text after a key, and to the end of the key it was in.
-fn moved_by_rename(offset: usize, ranges: &[(usize, usize)], new_len: usize) -> usize {
-    let mut moved = offset;
-    for (start, end) in ranges {
-        let (key_start, key_end) = (start + 1, end - 1);
-        if key_end <= offset {
-            moved = moved + new_len - (key_end - key_start);
-        } else if key_start < offset {
-            return moved - (offset - key_start) + new_len;
+/// Where `offset` goes when each key in `keys` (byte ranges, in order) becomes `new_len` bytes. An
+/// offset at or before a key's start stays, one at or after its end moves with the text, and one
+/// inside goes to the key's start if it begins a range, else to the key's new end.
+fn offset_after_rename(
+    offset: usize,
+    keys: &[(usize, usize)],
+    new_len: usize,
+    ends: bool,
+) -> usize {
+    let mut shift: isize = 0;
+    for (start, end) in keys {
+        if offset <= *start {
+            break;
+        }
+        if offset >= *end {
+            shift += new_len as isize - (end - start) as isize;
+        } else {
+            let start = (*start as isize + shift) as usize;
+            return if ends { start + new_len } else { start };
         }
     }
-    moved
+    (offset as isize + shift) as usize
 }
 
 /// Caret position implied by an applied op: the start of erased text, the end
@@ -7734,10 +7760,8 @@ mod tests {
         let document = session.document();
         assert_eq!(document.blocks[2].spans, before_document.blocks[2].spans);
         assert_eq!(document.blocks[1].kind, before_document.blocks[1].kind);
-        // Two in the first block, a footnote and a marginal: each is a step.
-        for _ in 0..4 {
-            assert!(session.undo());
-        }
+        // The whole rename is one step.
+        assert!(session.undo());
         assert_eq!(texts(&session), before);
     }
 
@@ -7768,6 +7792,136 @@ mod tests {
         assert_eq!(session.rename_citation("old", "old"), 0);
         assert_eq!(session.rename_citation("old", "1bad"), 0);
         assert_eq!(session.rename_citation("absent", "fresh"), 0);
+        assert_eq!(texts(&session), before);
+    }
+
+    fn anchors(session: &Session) -> Vec<(usize, usize)> {
+        let ranges = session.document().annotations.iter().map(|note| {
+            let (start, end) = note.anchor.byte_range().unwrap();
+            (start, end)
+        });
+        ranges.collect()
+    }
+
+    /// One paragraph, `text`, with a note and a footnote added while the caret was at `at`.
+    fn noted(text: &str, at: usize) -> Session {
+        let mut session = Session::anonymous().unwrap();
+        session.insert(text);
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: at,
+        });
+        for (kind, body) in [
+            (AnnotationKind::Note, "my note"),
+            (AnnotationKind::Footnote, "my footnote"),
+        ] {
+            let id = session.add_annotation(kind).unwrap();
+            assert!(session.set_annotation_body(id, body));
+        }
+        session
+    }
+
+    #[test]
+    fn a_note_and_a_footnote_on_exactly_the_key_survive_and_cover_the_new_key() {
+        let mut session = noted("see [smith2020] now", 8);
+        assert_eq!(anchors(&session), [(5, 14), (5, 14)]);
+        assert_eq!(session.rename_citation("smith2020", "li19"), 1);
+        assert_eq!(session.document().blocks[0].text, "see [li19] now");
+        assert_eq!(anchors(&session), [(5, 9), (5, 9)]);
+        let bodies: Vec<&str> = session
+            .document()
+            .annotations
+            .iter()
+            .map(|note| note.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["my note", "my footnote"]);
+        assert_eq!(session.rename_citation("li19", "jones2001abc"), 1);
+    }
+
+    #[test]
+    fn a_longer_and_a_shorter_key_move_everything_after_them() {
+        let text = "éé [a] and [a] then [a] end";
+        let key = |n: usize| text.match_indices("[a]").nth(n).unwrap().0 + 1;
+        let mut session = noted(text, key(1));
+        let bold_whole = Span {
+            start: key(1) - 1,
+            end: key(1) + 2,
+            style: SpanStyle::Bold,
+        };
+        let bold_later = Span {
+            start: key(2) - 1,
+            end: key(2) + 2,
+            style: SpanStyle::Bold,
+        };
+        let mut document = session.document().clone();
+        document.blocks[0].spans = vec![bold_whole, bold_later];
+        // A note on later text, and one around a whole citation.
+        let id = document.blocks[0].id;
+        document.annotations[0].anchor = Anchor::range(id, key(2) + 4, text.len());
+        document.annotations[1].anchor = Anchor::range(id, key(0) - 1, key(0) + 2);
+        assert!(session.replace_document(document));
+        assert_eq!(session.rename_citation("a", "longer"), 3);
+        let new = "éé [longer] and [longer] then [longer] end";
+        assert_eq!(session.document().blocks[0].text, new);
+        let whole = |n: usize| new.match_indices("[longer]").nth(n).unwrap().0;
+        let spans = &session.document().blocks[0].spans;
+        assert_eq!((spans[0].start, spans[0].end), (whole(1), whole(1) + 8));
+        assert_eq!((spans[1].start, spans[1].end), (whole(2), whole(2) + 8));
+        assert_eq!(
+            anchors(&session),
+            [(whole(2) + 8 + 2, new.len()), (whole(0), whole(0) + 8)]
+        );
+        assert_eq!(
+            session.caret.offset,
+            whole(1) + 1,
+            "a caret at a key's start stays"
+        );
+        assert_eq!(session.rename_citation("longer", "z"), 3);
+        let back = "éé [z] and [z] then [z] end";
+        assert_eq!(session.document().blocks[0].text, back);
+        assert_eq!(
+            anchors(&session)[1],
+            (back.find("[z]").unwrap(), back.find("[z]").unwrap() + 3)
+        );
+        // One undo returns the document whole, anchors and all.
+        let before = session.document().clone();
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].text, new);
+        assert!(session.undo());
+        assert_eq!(session.document().blocks[0].text, text);
+        assert_ne!(session.document(), &before);
+        assert_eq!(anchors(&session)[1], (key(0) - 1, key(0) + 2));
+    }
+
+    #[test]
+    fn a_rename_that_changes_nothing_keeps_the_selection() {
+        let mut session = noted("see [smith2020] now", 8);
+        let id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id: id,
+            offset: 1,
+        });
+        session.select_to(Cursor {
+            block_id: id,
+            offset: 4,
+        });
+        let (caret, selection) = (session.caret, session.selection);
+        assert!(selection.is_some());
+        assert_eq!(session.rename_citation("other", "fresh"), 0);
+        assert_eq!((session.caret, session.selection), (caret, selection));
+    }
+
+    #[test]
+    fn a_read_only_or_unsaveable_session_refuses_a_rename() {
+        let mut session = citing_session();
+        let before = texts(&session);
+        session.newer = true;
+        assert_eq!(session.rename_citation("old", "fresh"), 0);
+        assert_eq!(texts(&session), before);
+        session.newer = false;
+        session.save_failed = true;
+        assert_eq!(session.rename_citation("old", "fresh"), 0);
         assert_eq!(texts(&session), before);
     }
 }

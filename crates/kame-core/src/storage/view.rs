@@ -9,14 +9,18 @@
 //! - Any other value it doesn't know falls back to its field's default, where the field has one,
 //!   and otherwise its block is one this build doesn't know.
 //!
-//! Damage isn't taken for something newer: JSON that doesn't parse, a value of the wrong type or a
-//! required field missing, anywhere, makes no view, as it makes no document.
+//! A block's kind, a span's style and a note's kind are read first, on their own, so that one this
+//! build doesn't know makes its piece unknown whatever else the piece holds: a new kind can bring
+//! fields of new shapes. Otherwise damage isn't taken for something newer: JSON that doesn't parse,
+//! a value of the wrong type or a required field missing, anywhere, makes no view, as it makes no
+//! document.
 
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::model::{Annotation, Block, BlockKind, Document, Span};
+use crate::model::{Annotation, AnnotationKind, Block, BlockKind, Document, Span, SpanStyle};
 
 /// What a block of a kind this build doesn't know says in its place.
 pub const NEWER_PART: &str = "A newer version of kame wrote this part. Update kame to see it.";
@@ -34,7 +38,15 @@ pub(crate) fn view_of(json: &str) -> Option<Document> {
         }
     }
     if let Some(Value::Array(annotations)) = document.get_mut("annotations") {
-        *annotations = known_only::<Annotation>(std::mem::take(annotations), &mut newer)?;
+        let mut kept = Vec::new();
+        for mut annotation in std::mem::take(annotations) {
+            match known::<AnnotationKind, Annotation>(&mut annotation, &mut newer) {
+                Reading::Read(_) => kept.push(annotation),
+                Reading::Unknown => {}
+                Reading::Damaged => return None,
+            }
+        }
+        *annotations = kept;
     }
     if !newer {
         return None;
@@ -48,13 +60,28 @@ pub(crate) fn is_newer(json: &str) -> bool {
     serde_json::from_str::<Document>(json).is_err() && view_of(json).is_some()
 }
 
-/// A block as this build can show it, or `None` if it's damaged.
+/// A block as this build can show it, or `None` if it's damaged. Its kind is read first, on its
+/// own, since a kind this build doesn't know may bring text or spans of a shape it doesn't know.
 fn block_view(block: &Value, newer: &mut bool) -> Option<Block> {
     let mut block = block.clone();
-    if let Some(Value::Array(spans)) = block.get_mut("spans") {
-        *spans = known_only::<Span>(std::mem::take(spans), newer)?;
-    }
-    match read::<Block>(&block, newer) {
+    let reading = match read_tag::<BlockKind>(&mut block, newer) {
+        Reading::Read(()) => {
+            if let Some(Value::Array(spans)) = block.get_mut("spans") {
+                let mut kept = Vec::new();
+                for mut span in std::mem::take(spans) {
+                    match known::<SpanStyle, Span>(&mut span, newer) {
+                        Reading::Read(_) => kept.push(span),
+                        Reading::Unknown => {}
+                        Reading::Damaged => return None,
+                    }
+                }
+                *spans = kept;
+            }
+            read::<Block>(&block, newer)
+        }
+        other => other.unread(),
+    };
+    match reading {
         Reading::Read(read) => Some(read),
         Reading::Unknown => {
             let id: Uuid = serde_json::from_value(block.get("id")?.clone()).ok()?;
@@ -69,18 +96,55 @@ fn block_view(block: &Value, newer: &mut bool) -> Option<Block> {
     }
 }
 
-/// Those of `values` this build can read as a `T`, leaving out any it doesn't know. `None` if one
-/// is damaged.
-fn known_only<T: DeserializeOwned>(values: Vec<Value>, newer: &mut bool) -> Option<Vec<Value>> {
-    let mut kept = Vec::new();
-    for value in values {
-        match read::<T>(&value, newer) {
-            Reading::Read(_) => kept.push(value),
-            Reading::Unknown => {}
-            Reading::Damaged => return None,
-        }
+/// Reads a span or an annotation, `T`, whose tag, a `K`, is read first and on its own: one of a
+/// kind this build doesn't know is unknown, whatever else it holds and in whatever order.
+fn known<K, T>(piece: &mut Value, newer: &mut bool) -> Reading<T>
+where
+    K: DeserializeOwned + Serialize + Tag,
+    T: DeserializeOwned,
+{
+    match read_tag::<K>(piece, newer) {
+        Reading::Read(()) => read::<T>(piece, newer),
+        other => other.unread(),
     }
-    Some(kept)
+}
+
+/// Which field of its piece a tag is.
+trait Tag {
+    const FIELD: &'static str;
+}
+
+impl Tag for BlockKind {
+    const FIELD: &'static str = "kind";
+}
+
+impl Tag for SpanStyle {
+    const FIELD: &'static str = "style";
+}
+
+impl Tag for AnnotationKind {
+    const FIELD: &'static str = "kind";
+}
+
+/// Reads the tag of `piece` as a `K`, and puts it back as this build writes it, with any value in
+/// it that this build doesn't know taking its default. A piece with no tag is damaged.
+fn read_tag<K: DeserializeOwned + Serialize + Tag>(
+    piece: &mut Value,
+    newer: &mut bool,
+) -> Reading<()> {
+    let Some(tag) = piece.get_mut(K::FIELD) else {
+        return Reading::Damaged;
+    };
+    match read::<K>(tag, newer) {
+        Reading::Read(known) => match serde_json::to_value(known) {
+            Ok(known) => {
+                *tag = known;
+                Reading::Read(())
+            }
+            Err(_) => Reading::Damaged,
+        },
+        other => other.unread(),
+    }
 }
 
 enum Reading<T> {
@@ -88,6 +152,16 @@ enum Reading<T> {
     /// It holds something only a newer version knows, and can't be read without it.
     Unknown,
     Damaged,
+}
+
+impl<T> Reading<T> {
+    /// A reading that wasn't [`Reading::Read`], as one of another type.
+    fn unread<U>(self) -> Reading<U> {
+        match self {
+            Reading::Read(_) | Reading::Damaged => Reading::Damaged,
+            Reading::Unknown => Reading::Unknown,
+        }
+    }
 }
 
 /// Reads `value` as a `T`, letting any field holding a value this build doesn't know fall back to
@@ -211,6 +285,20 @@ mod tests {
         );
     }
 
+    /// What a kind this build doesn't know holds can be of any shape: it's the newer version's.
+    #[test]
+    fn a_kind_this_build_does_not_know_is_unknown_whatever_else_its_piece_holds() {
+        let spans = r#"{"start":"no","end":2,"style":"Bold"}"#;
+        let view = view_of(&document(&block(r#""Table""#, spans), "")).unwrap();
+        assert_eq!(view.blocks[0].text, NEWER_PART);
+        let note = r#"{"anchor":{"at":3},"id":7,"kind":"Bookmark"}"#;
+        let view = view_of(&document(&block(r#""Paragraph""#, ""), note)).unwrap();
+        assert!(view.annotations.is_empty());
+        let span = r#"{"start":[0,1],"end":2,"style":"Strike"}"#;
+        let view = view_of(&document(&block(r#""Paragraph""#, span), "")).unwrap();
+        assert!(view.blocks[0].spans.is_empty());
+    }
+
     #[test]
     fn damage_makes_no_view() {
         for json in [
@@ -218,9 +306,10 @@ mod tests {
             document(&block(r#""Table""#, ""), "").replace("\"title\":\"t\",", ""),
             document(&block(r#""Table""#, ""), "").replace(&format!("\"id\":\"{ID}\","), ""),
             document(
-                &block(r#""Table""#, r#"{"start":"no","end":2,"style":"Bold"}"#),
+                &block(r#""Paragraph""#, r#"{"start":"no","end":2,"style":"Bold"}"#),
                 "",
             ),
+            document(&block(r#""Table""#, ""), r#"{"kind":7}"#),
             document(&block(r#""Paragraph""#, ""), r#"{"kind":"Comment"}"#)
                 .replace("\"blocks\":", "\"blocks\":7,\"x\":"),
         ] {

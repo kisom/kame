@@ -236,6 +236,68 @@ fn a_value_this_build_does_not_know_falls_back_to_its_default() {
     nothing_is_written(&path);
 }
 
+/// A newer kind can bring new shapes with it. The kind is what says it's newer, whatever else the
+/// note or block holds and in whatever order its fields come.
+#[test]
+fn a_note_of_a_kind_this_build_does_not_know_is_left_out_whatever_its_anchor() {
+    let (path, _) = written_by_a_newer_build("newer-note-anchor", |head| {
+        head.replacen(r#""kind":"Note""#, r#""kind":"Bookmark""#, 1)
+            .replacen(r#""start":0,"end":4}"#, r#""at":3}"#, 1)
+    });
+    let session = Session::open(&path).unwrap();
+    says_it_is_from_a_newer_version(&session);
+    assert!(session.document().annotations.is_empty());
+    drop(session);
+    nothing_is_written(&path);
+}
+
+#[test]
+fn a_block_of_a_kind_this_build_does_not_know_is_shown_as_newer_whatever_its_spans() {
+    let (path, ids) = written_by_a_newer_build("newer-kind-spans", |head| {
+        head.replacen(
+            r#""kind":"Paragraph","text":"The last words.","spans":[]"#,
+            r#""kind":"Table","text":"The last words.","spans":[{"start":[0,1],"end":[0,2],"style":"Bold"}]"#,
+            1,
+        )
+    });
+    let session = Session::open(&path).unwrap();
+    says_it_is_from_a_newer_version(&session);
+    let block = &session.document().blocks[2];
+    assert_eq!(block.id, ids.last);
+    assert_eq!(block.text, NEWER_PART);
+    drop(session);
+    nothing_is_written(&path);
+}
+
+/// The value is looked for where it was, not wherever the same words are.
+#[test]
+fn a_value_falls_back_to_its_default_whatever_else_says_the_same() {
+    let (path, ids) = written_by_a_newer_build("newer-value-twice", |head| {
+        head.replacen(
+            r#""align":"Center"}},"text":"""#,
+            r#""align":"Diagonal"}},"text":"Diagonal""#,
+            1,
+        )
+    });
+    let session = Session::open(&path).unwrap();
+    says_it_is_from_a_newer_version(&session);
+    let image = &session.document().blocks[1];
+    assert_eq!(image.id, ids.image);
+    assert!(
+        matches!(
+            image.kind,
+            BlockKind::Image {
+                align: ImageAlign::Left,
+                ..
+            }
+        ),
+        "{:?}",
+        image.kind
+    );
+    drop(session);
+    nothing_is_written(&path);
+}
+
 #[test]
 fn several_things_this_build_does_not_know_are_all_shown_as_it_can() {
     let (path, ids) = written_by_a_newer_build("newer-several", |head| {

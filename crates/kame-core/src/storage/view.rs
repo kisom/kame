@@ -9,6 +9,10 @@
 //! - Any other value it doesn't know falls back to its field's default, where the field has one,
 //!   and otherwise its block is one this build doesn't know.
 //!
+//! What reads a closed document and never writes it, such as a site build or a notebook's search,
+//! takes it with those blocks left out instead, and the notes on them, so that nothing stands in
+//! their place.
+//!
 //! A block's kind, a span's style and a note's kind are read first, on their own, so that one this
 //! build doesn't know makes its piece unknown whatever else the piece holds: a new kind can bring
 //! fields of new shapes. Otherwise damage isn't taken for something newer: JSON that doesn't parse,
@@ -32,12 +36,33 @@ pub(crate) fn view_of(json: &str) -> Option<Document> {
 }
 
 /// [`view_of`], for a document already read as JSON.
-pub(crate) fn view_from(mut value: Value) -> Option<Document> {
+pub(crate) fn view_from(value: Value) -> Option<Document> {
+    shown(value).map(|(document, _)| document)
+}
+
+/// The document in `json` for what reads it and never writes it, such as a site build or a
+/// notebook's search: [`view_of`], with each block of a kind this build doesn't know left out, and
+/// the notes on it, rather than a paragraph standing in its place. `None` as for [`view_of`].
+pub(crate) fn readable_of(json: &str) -> Option<Document> {
+    let (mut document, unknown) = shown(serde_json::from_str(json).ok()?)?;
+    document.blocks.retain(|block| !unknown.contains(&block.id));
+    document
+        .annotations
+        .retain(|annotation| !unknown.contains(&annotation.anchor.block_id()));
+    Some(document)
+}
+
+/// [`view_from`], with the ids of the blocks of a kind this build doesn't know.
+fn shown(mut value: Value) -> Option<(Document, Vec<Uuid>)> {
     let mut newer = false;
+    let mut unknown = Vec::new();
     let document = value.as_object_mut()?;
     if let Some(Value::Array(blocks)) = document.get_mut("blocks") {
         for block in blocks.iter_mut() {
-            let view = block_view(block, &mut newer)?;
+            let (view, known) = block_view(block, &mut newer)?;
+            if !known {
+                unknown.push(view.id);
+            }
             *block = serde_json::to_value(view).ok()?;
         }
     }
@@ -55,7 +80,7 @@ pub(crate) fn view_from(mut value: Value) -> Option<Document> {
     if !newer {
         return None;
     }
-    serde_json::from_value(value).ok()
+    Some((serde_json::from_value(value).ok()?, unknown))
 }
 
 /// Whether `json` holds something from a newer version of kame: a field this build would drop by
@@ -72,9 +97,10 @@ pub(crate) fn is_newer(json: &str) -> bool {
     }
 }
 
-/// A block as this build can show it, or `None` if it's damaged. Its kind is read first, on its
-/// own, since a kind this build doesn't know may bring text or spans of a shape it doesn't know.
-fn block_view(block: &Value, newer: &mut bool) -> Option<Block> {
+/// A block as this build can show it, and whether it's of a kind this build knows, or `None` if
+/// it's damaged. Its kind is read first, on its own, since a kind this build doesn't know may bring
+/// text or spans of a shape it doesn't know.
+fn block_view(block: &Value, newer: &mut bool) -> Option<(Block, bool)> {
     let mut block = block.clone();
     let reading = match read_tag::<BlockKind>(&mut block, newer) {
         Reading::Read(()) => {
@@ -94,15 +120,16 @@ fn block_view(block: &Value, newer: &mut bool) -> Option<Block> {
         other => other.unread(),
     };
     match reading {
-        Reading::Read(read) => Some(read),
+        Reading::Read(read) => Some((read, true)),
         Reading::Unknown => {
             let id: Uuid = serde_json::from_value(block.get("id")?.clone()).ok()?;
-            Some(Block {
+            let placeholder = Block {
                 id,
                 kind: BlockKind::Paragraph,
                 text: NEWER_PART.to_string(),
                 spans: Vec::new(),
-            })
+            };
+            Some((placeholder, false))
         }
         Reading::Damaged => None,
     }

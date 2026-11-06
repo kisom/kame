@@ -487,12 +487,7 @@ impl Db {
     /// drop by saving, a kind, style or other value it doesn't know in the head, or a step of
     /// history it can't read.
     pub fn holds_newer(&self) -> bool {
-        let row =
-            |sql: &str| -> Option<String> { self.conn.query_row(sql, [], |row| row.get(0)).ok() };
-        if row("SELECT json FROM documents WHERE id = 1").is_some_and(|json| view::is_newer(&json))
-            || row("SELECT json FROM metadata WHERE id = 1")
-                .is_some_and(|json| drops_something::<crate::model::Metadata>(&json))
-        {
+        if self.leaves_out_newer() {
             return true;
         }
         let Ok(mut statement) = self.conn.prepare("SELECT json FROM ops") else {
@@ -546,6 +541,44 @@ impl Db {
             doc.fit();
             doc
         }))
+    }
+
+    /// The stored document for whatever reads it and never writes it back, such as a site build
+    /// or a notebook's lists and search. It's [`Db::load_document`], or, for a head holding a kind,
+    /// style or value only a newer version of kame knows, what this build can read of it: what it
+    /// doesn't know is left out, with nothing standing in its place, and so are the notes on a
+    /// block it doesn't know. [`Db::leaves_out_newer`] says whether anything was. Damage is still
+    /// an error.
+    pub fn load_readable(&self) -> Result<Document, DbError> {
+        match self.load_document() {
+            Err(DbError::Json(err)) => {
+                let json: Option<String> = self
+                    .conn
+                    .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                match json.and_then(|json| view::readable_of(&json)) {
+                    Some(mut doc) => {
+                        doc.fit();
+                        Ok(doc)
+                    }
+                    None => Err(DbError::Json(err)),
+                }
+            }
+            read => read,
+        }
+    }
+
+    /// Whether reading this file's document and properties here leaves out something a newer
+    /// version of kame wrote into them: a field, or a kind, style or other value this build doesn't
+    /// know. Unlike [`Db::holds_newer`], its history isn't looked at, since no reader shows it.
+    pub fn leaves_out_newer(&self) -> bool {
+        let row =
+            |sql: &str| -> Option<String> { self.conn.query_row(sql, [], |row| row.get(0)).ok() };
+        row("SELECT json FROM documents WHERE id = 1").is_some_and(|json| view::is_newer(&json))
+            || row("SELECT json FROM metadata WHERE id = 1")
+                .is_some_and(|json| drops_something::<crate::model::Metadata>(&json))
     }
 
     /// Writes the document in a single transaction, replacing any prior one.

@@ -529,3 +529,110 @@ fn a_snapshot_from_a_newer_version_is_not_restored() {
     assert_eq!(everything_in(&path), before);
     assert!(session.restore(1), "one of its own is restored as ever");
 }
+
+/// Whatever reads a document without ever writing it, such as a site build or a notebook's search,
+/// takes what this build can read of one from a newer version. What it doesn't know is left out,
+/// with nothing standing in its place, and so are the notes on a block it doesn't know.
+#[test]
+fn a_reader_takes_what_it_can_and_nothing_in_place_of_the_rest() {
+    let (path, ids) = written_by_a_newer_build("newer-reading", |head| {
+        head.replacen(
+            r#""kind":"Paragraph","text":"The last words.""#,
+            r#""kind":"Table","text":"The last words.""#,
+            1,
+        )
+        .replacen(r#""style":"Bold""#, r#""style":"Strike""#, 1)
+    });
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let mut head: serde_json::Value = serde_json::from_str(&head_of(&path)).unwrap();
+    head["annotations"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+        "id": Uuid::new_v4(), "kind": "Footnote",
+        "anchor": {"block_id": ids.last.to_string(), "start": 0, "end": 3},
+        "body": "A footnote on the table."}));
+    connection
+        .execute(
+            "UPDATE documents SET json = ?1 WHERE id = 1",
+            [head.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let before = everything_in(&path);
+
+    let db = Db::open_read_only(&path).unwrap();
+    assert!(db.leaves_out_newer());
+    let read = db.load_readable().unwrap();
+    let blocks: Vec<Uuid> = read.blocks.iter().map(|block| block.id).collect();
+    assert_eq!(blocks, [ids.bold, ids.image], "the table is left out");
+    assert_eq!(read.blocks[0].text, "Some bold words.");
+    assert!(read.blocks[0].spans.is_empty(), "so is the style");
+    assert_eq!(read.annotations.len(), 1, "and the note on the table");
+    assert_eq!(read.annotations[0].body, "a note");
+    assert!(!format!("{read:?}").contains(NEWER_PART));
+    drop(db);
+    assert_eq!(everything_in(&path), before);
+}
+
+/// A field only a newer version knows is left out by reading, and a reader can tell, whether it's
+/// in the document or in its properties.
+#[test]
+fn a_reader_can_tell_it_leaves_out_a_newer_field() {
+    let (path, _) = written_by_a_newer_build("newer-reading-field", |head| {
+        head.replacen(
+            r#""text":"The last words.""#,
+            r#""text":"The last words.","colour":"red""#,
+            1,
+        )
+    });
+    let db = Db::open_read_only(&path).unwrap();
+    assert!(db.leaves_out_newer());
+    let read = db.load_readable().unwrap();
+    assert_eq!(read, db.load_document().unwrap());
+    assert_eq!(read.blocks.len(), 3);
+
+    let (path, _) = written_by_a_newer_build("newer-reading-metadata", |head| {
+        head.replacen(r#""title":"t""#, r#""title":"u""#, 1)
+    });
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE metadata SET json = replace(json, '\"title\":\"Kept\"', '\"title\":\"Kept\",\"mood\":\"calm\"')",
+            [],
+        )
+        .unwrap();
+    assert!(Db::open_read_only(&path).unwrap().leaves_out_newer());
+}
+
+/// A reader shows no history, so a step only a newer version can read leaves nothing out, and this
+/// build's own document is read whole.
+#[test]
+fn a_reader_leaves_out_nothing_from_a_document_this_build_reads_whole() {
+    let (path, _) = written_by_a_newer_build("newer-reading-op", |head| {
+        head.replacen(r#""title":"t""#, r#""title":"u""#, 1)
+    });
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            r#"INSERT INTO ops (json) VALUES ('{"Transpose":{"block_id":"x"}}')"#,
+            [],
+        )
+        .unwrap();
+    let db = Db::open_read_only(&path).unwrap();
+    assert!(db.holds_newer(), "a newer step makes it read-only to open");
+    assert!(!db.leaves_out_newer());
+    assert_eq!(db.load_readable().unwrap(), db.load_document().unwrap());
+}
+
+/// Damage isn't taken for something newer by a reader either.
+#[test]
+fn a_reader_still_refuses_a_damaged_head() {
+    let (path, _) = written_by_a_newer_build("newer-reading-damage", |head| {
+        head.replacen(r#""style":"Bold""#, r#""style":"Strike""#, 1)
+            .replacen(r#""text":"The last words.""#, r#""text":5"#, 1)
+    });
+    let db = Db::open_read_only(&path).unwrap();
+    assert!(db.load_readable().is_err());
+    assert!(!db.leaves_out_newer());
+}

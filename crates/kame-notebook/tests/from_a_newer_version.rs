@@ -322,7 +322,7 @@ fn a_conflict_copy_from_a_newer_version_is_found_and_not_merged() {
         let (in_doc, in_copy) = (everything_in(&doc), everything_in(&copy));
 
         let mut session = Session::open(&doc).unwrap();
-        assert_eq!(conflict_copies(&doc), [copy.clone()], "{name}");
+        assert_eq!(conflict_copies(&doc), std::slice::from_ref(&copy), "{name}");
         let said = merge_copy_into(&mut session, &copy)
             .err()
             .unwrap_or_else(|| panic!("{name} merged"))

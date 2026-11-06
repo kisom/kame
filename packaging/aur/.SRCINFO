@@ -1,6 +1,6 @@
 pkgbase = kame
 	pkgdesc = Kyle's marginalia editor: a WYSIWYG prose editor for writing ideas and thinking
-	pkgver = 0.1.1
+	pkgver = 0.1.2
 	pkgrel = 1
 	url = https://github.com/kisom/kame
 	arch = x86_64
@@ -20,7 +20,7 @@ pkgbase = kame
 	optdepends = vulkan-driver: draws the window; any Vulkan driver will do
 	optdepends = perl-file-mimeinfo: lets xdg-open recognise .kame files
 	options = !lto
-	source = kame-0.1.1.tar.gz::https://github.com/kisom/kame/archive/refs/tags/v0.1.1.tar.gz
-	sha256sums = 4af41981f6e7fe6e25b4083bc23a26285662118f838adb469df2eac9dcedec05
+	source = kame-0.1.2.tar.gz::https://github.com/kisom/kame/archive/refs/tags/v0.1.2.tar.gz
+	sha256sums = 3a2e7d04cab85607f7be089a8b942dd472b358bbe471bec0895320d1494bcee3
 
 pkgname = kame

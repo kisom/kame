@@ -1,7 +1,7 @@
 # Maintainer: Kyle Isom
 
 pkgname=kame
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Kyle's marginalia editor: a WYSIWYG prose editor for writing ideas and thinking"
 arch=('x86_64' 'aarch64')
@@ -16,7 +16,7 @@ options=('!lto')
 optdepends=('vulkan-driver: draws the window; any Vulkan driver will do'
             'perl-file-mimeinfo: lets xdg-open recognise .kame files')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/kisom/kame/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('4af41981f6e7fe6e25b4083bc23a26285662118f838adb469df2eac9dcedec05')
+sha256sums=('3a2e7d04cab85607f7be089a8b942dd472b358bbe471bec0895320d1494bcee3')
 
 prepare() {
   cd "$pkgname-$pkgver"

@@ -32,6 +32,22 @@ jobs:
           fi
           [ "$ok" = 1 ] || exit 1
           echo "tag $TAG matches Cargo.toml and Info.plist"
+      # What this release writes, every later build's tests read, so it has to be there before the tag.
+      - name: The release has samples for later builds to read
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          samples="crates/kame-core/tests/samples/${TAG#v}"
+          missing=0
+          for f in essay.kame essay.md essay.html essay.json logged.json logged/.kame-logs; do
+            [ -e "$samples/$f" ] || { echo "::error::$samples/$f is missing"; missing=1; }
+          done
+          if [ "$missing" = 1 ]; then
+            echo "::error::run 'cargo run -p kame-sync --example write_samples' at the release commit, commit what it writes, and tag that"
+            exit 1
+          fi
+          echo "$samples is there"
 
   macos:
     needs: check

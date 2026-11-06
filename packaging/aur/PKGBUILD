@@ -16,8 +16,7 @@ options=('!lto')
 optdepends=('vulkan-driver: draws the window; any Vulkan driver will do'
             'perl-file-mimeinfo: lets xdg-open recognise .kame files')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/kisom/kame/archive/refs/tags/v$pkgver.tar.gz")
-# The controller fills this in after tagging v0.1.1, with the tarball's sum.
-sha256sums=('SKIP')
+sha256sums=('4af41981f6e7fe6e25b4083bc23a26285662118f838adb469df2eac9dcedec05')
 
 prepare() {
   cd "$pkgname-$pkgver"

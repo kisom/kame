@@ -197,7 +197,7 @@ Inserting an image from outside copies it into the notebook first, at `images/PA
 2. If it differs, try `plate-2.jpg`, `plate-3.jpg` and so on. Nothing already there is replaced.
 3. Copy under a hidden name, `.NAME.copying-PID`, and rename into place, so that a failure can't leave half a picture.
 
-An image already inside the notebook isn't copied.
+An image already inside the notebook isn't copied. If `images/`, or a folder below it on the way to the copy's, holds a `notebook.yaml`, it's another notebook (section 1.2), and the image isn't inserted: kame says which folder that is, and copies nothing.
 
 ## 6. Search
 
@@ -229,7 +229,7 @@ Each notebook is its own site, built by `kame-site`. A folder holding both `note
 | A reference in `references/` | Only as an entry in the References section of a published document citing it, never as a file |
 | The site's own pages | Archive and tag pages, and a feed when `url` is set, generated from what publishes |
 
-Hidden files, hidden folders, conflict copies and symbolic links under `static/` don't publish. Nor does anything in another notebook below the root (section 1.2), even under `static/`, `images/` or `theme/`: its documents aren't listed, a link to one publishes as its words, and an image in one is outside the notebook.
+Hidden files, hidden folders, conflict copies and symbolic links under `static/` don't publish. Nor does anything in another notebook below the root (section 1.2), even under `static/`, `images/` or `theme/`, or with one of those folders itself another notebook's root: its documents aren't listed, its files aren't copied, a link to one publishes as its words, and an image in one is outside the notebook.
 
 **What goes public is decided by the mark on a document, by `static/`, and by what a published document shows.** An implementation must not publish anything else.
 

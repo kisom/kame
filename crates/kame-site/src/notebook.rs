@@ -306,6 +306,14 @@ fn files_under(from: &Path, inside: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// Everything in a folder of the notebook's own, as [`files_under`] finds it, or nothing if that
+/// folder is itself another notebook's root.
+fn files_under_own(folder: &Path, found: &mut Vec<PathBuf>) {
+    if !is_notebook_root(folder) {
+        files_under(folder, Path::new(""), found);
+    }
+}
+
 /// Lays out the theme a notebook's build reads: the standard one, with whatever the notebook's
 /// `theme/` folder holds taking its place file by file.
 fn lay_out_theme(notebook: &Notebook, site_dir: &Path) -> std::io::Result<()> {
@@ -321,7 +329,7 @@ fn lay_out_theme(notebook: &Notebook, site_dir: &Path) -> std::io::Result<()> {
         }
     }
     let mut own = Vec::new();
-    files_under(&notebook.root.join("theme"), Path::new(""), &mut own);
+    files_under_own(&notebook.root.join("theme"), &mut own);
     for relative in own {
         let target = theme.join(&relative);
         std::fs::create_dir_all(target.parent().unwrap_or(&theme))?;
@@ -388,7 +396,7 @@ pub fn plan_notebook(
     }
     let mut plan = plan_site(site_dir, &config, sources, &loaded.references, problems)?;
     let mut statics = Vec::new();
-    files_under(&notebook.root.join("static"), Path::new(""), &mut statics);
+    files_under_own(&notebook.root.join("static"), &mut statics);
     for relative in statics {
         plan.add(
             Path::new("static").join(&relative),
@@ -1996,6 +2004,38 @@ mod tests {
         let inner = made_at(&nb.root.join("inner"), &nb.build.join("inner"));
         let (plan, _) = inner.plan();
         assert!(page(&plan, "b/index.html").contains("Inner words."));
+    }
+
+    #[test]
+    fn static_or_theme_as_another_notebook_publishes_nothing() {
+        let nb = made("nbinnerroot", "title: Outer\n");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.file("static/notebook.yaml", "");
+        nb.file("static/private.txt", "theirs");
+        nb.file("static/diary.kame", "theirs");
+        nb.file("theme/notebook.yaml", "");
+        nb.file("theme/static/theirs.css", "theirs");
+
+        let (plan, problems) = nb.plan();
+        assert!(problems.errors.is_empty(), "{:?}", problems.errors);
+        for (path, output) in &plan.files {
+            let shown = path.display().to_string();
+            assert!(
+                !shown.contains("private")
+                    && !shown.contains("diary")
+                    && !shown.contains("notebook.yaml")
+                    && !shown.contains("theirs"),
+                "{shown} publishes"
+            );
+            if let Output::Copy(from) = output {
+                assert!(
+                    !from.starts_with(nb.root.join("static"))
+                        && !from.starts_with(nb.root.join("theme")),
+                    "{} publishes",
+                    from.display()
+                );
+            }
+        }
     }
 
     fn made_at(root: &Path, build: &Path) -> Made {

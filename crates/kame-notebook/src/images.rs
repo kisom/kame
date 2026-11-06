@@ -14,7 +14,8 @@ pub const IMAGES: &str = "images";
 /// `/n/maritain/essay.kame` gets `/n/images/maritain/essay/plate.jpg`.
 ///
 /// Nothing already there is replaced: the same picture is used again, and a different one with
-/// that name leaves this one as `plate-2.jpg`.
+/// that name leaves this one as `plate-2.jpg`. Nothing is copied if that folder is in another
+/// notebook.
 pub fn bring_in(notebook: &Notebook, document: &Path, file: &Path) -> Result<PathBuf, String> {
     let said = |err: std::io::Error| format!("could not copy {}: {err}", file.display());
     let real = file.canonicalize().map_err(said)?;
@@ -25,6 +26,19 @@ pub fn bring_in(notebook: &Notebook, document: &Path, file: &Path) -> Result<Pat
         .root
         .join(IMAGES)
         .join(document_folder(notebook, document)?);
+    // What's in another notebook is that one's, so nothing is written there.
+    let theirs = folder
+        .ancestors()
+        .take_while(|above| *above != notebook.root)
+        .find(|above| crate::is_notebook_root(above));
+    if let Some(theirs) = theirs {
+        let place = theirs.strip_prefix(&notebook.root).unwrap_or(theirs);
+        return Err(format!(
+            "{}/ holds a notebook.yaml, so it's another notebook, and {} can't be copied into it",
+            place.display(),
+            file.display()
+        ));
+    }
     std::fs::create_dir_all(&folder).map_err(said)?;
     for candidate in names(file) {
         let target = folder.join(candidate);

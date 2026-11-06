@@ -1150,4 +1150,22 @@ mod a_notebook_inside {
         .unwrap();
         assert_eq!(brought, root.join("images/a/plate.jpg"));
     }
+
+    #[test]
+    fn an_image_is_not_copied_into_images_when_that_is_another_notebook() {
+        let root = outer("inside-images-root");
+        let found = notebook(&root);
+        std::fs::create_dir_all(root.join("images")).unwrap();
+        std::fs::write(root.join("images/notebook.yaml"), "").unwrap();
+        let outside = super::folder("inside-images-root-outside");
+        std::fs::write(outside.join("plate.jpg"), "a plate").unwrap();
+        let refused = kame_notebook::images::bring_in(
+            &found,
+            &root.join("a.kame"),
+            &outside.join("plate.jpg"),
+        )
+        .unwrap_err();
+        assert!(refused.contains("another notebook"), "{refused}");
+        assert!(!root.join("images/a").exists());
+    }
 }

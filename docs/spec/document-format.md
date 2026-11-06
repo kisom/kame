@@ -97,9 +97,11 @@ Another program can rename a new file over an open one. kame compares the device
 
 ### 1.7 Saving under a new name
 
-Saving as another file must not expose a partial or wider-readable copy, or one that says its paths from the old place. kame creates a hidden `.NAME.saving-UUID` beside the target with mode `0600`, runs `VACUUM INTO` to it and opens it. In the copy it forgets the sync state, and says each relative link and image path again for the new location, in the head, every op and every snapshot, in one transaction that isn't an edit. It then puts all of the copy's `-wal` into the file, failing if it can't, sets its final mode, removes any `-wal` and `-shm` at the target and renames it into place. The final mode is the stricter of the target's and the current file's. It's `0600` if either can't be read, and the system default only when neither exists.
+Saving as another file must not expose a partial or wider-readable copy, or one that says its paths from the old place. kame creates a hidden `.NAME.saving-UUID` beside the target with mode `0600`, runs `VACUUM INTO` to it and opens it. In the copy it forgets the sync state, then writes the head, the whole log, the cursor and the metadata as they are in memory, which after a failed write is more than the old file's log holds, with each relative link and image path said again for the new location, in them and in every snapshot, in one transaction that isn't an edit. The old file isn't written first, apart from its metadata, at best, so one that can't be written can still be saved elsewhere. It then puts all of the copy's `-wal` into the file, failing if it can't, sets its final mode, removes any `-wal` and `-shm` at the target and renames it into place. The final mode is the stricter of the target's and the current file's. It's `0600` if either can't be read, and the system default only when neither exists.
 
-An image whose file can be found is said relative inside a notebook and whole otherwise. A link to the document itself follows its new name. If the paths can't be said again, as when the history won't read, the copy goes into place as it was copied, and kame says so, since the words matter more.
+An image whose file can be found is said relative inside a notebook and whole otherwise. A link to the document itself follows its new name. If the snapshots can't be read, they're kept as they were and kame says so, since the words matter more. If the transaction fails, the Save As fails, as a failed copy does.
+
+Saving as the document's own file writes nothing, unless a write has failed. Then it's a retry, as the error strip's is: the head, the whole log, the cursor and the metadata from memory, in one transaction.
 
 ## 2. The document
 
@@ -389,7 +391,7 @@ The head is stored whole, so nothing needs replaying to open a file. The log is 
 
 ## 6. Snapshots
 
-A snapshot is a complete document in the `json` column, with `timestamp` in Unix seconds and an optional `label`. `timestamp` and `json` must not be NULL, though the schema allows it: a NULL `timestamp` makes kame's list of snapshots fail. It's independent of the head and log, and undo and redo can't touch it. A Save As to another folder says a snapshot's relative links and image paths again, in place, keeping its `id`, `label` and `timestamp` (section 1.7), and leaves one this build can't read whole as it is. Lists show the newest first, by `timestamp` and then `id`.
+A snapshot is a complete document in the `json` column, with `timestamp` in Unix seconds and an optional `label`. `timestamp` and `json` must not be NULL, though the schema allows it: a NULL `timestamp` makes kame's list of snapshots fail. It's independent of the head and log, and undo and redo can't touch it. A Save As, to any folder, says a snapshot's relative links and image paths again, in place, keeping its `id`, `label` and `timestamp` (section 1.7), and leaves one this build can't read whole as it is. Lists show the newest first, by `timestamp` and then `id`.
 
 Restoring isn't an edit. It starts a new history (section 5) and leaves metadata alone. A snapshot with no blocks can't be restored.
 
@@ -417,3 +419,5 @@ These describe the code as it stands, and aren't rules to copy.
 - **The rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
 - **Older files can hold text in an image block,** from before typing on one started a new paragraph. It isn't shown, and nothing removes it.
 - **Paths aren't portable by themselves.** A whole image path or a `~/` link only works where it was made. Only relative forms hold on another machine.
+- **Save As says what exists on this machine.** A relative `Link` is said again for the new place only if what it names is there, on disk or as revision logs, and nothing limits that to the notebook or the document's folder. A document from elsewhere that comes back after a Save As to another depth shows which of its paths existed here. No contents are read.
+- **A crash during a Save As leaves its copy.** The hidden `.NAME.saving-UUID`, and its `-wal` and `-shm` once it's open for the paths to be said again, stay beside the target after a crash, and nothing removes them. No words are lost, and the UUID keeps a log from pairing with the wrong file, but each is a whole private copy of the document.

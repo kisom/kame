@@ -1287,3 +1287,60 @@ fn a_check_finding_the_logs_gone_holds_a_sync_off() {
     assert_eq!(Store::load(&folder).unwrap().revision_count(), before);
     assert!(logged.stranded_check().is_none(), "it's held off");
 }
+
+/// A damaged document, already in the logs as it is in the file, as a build that didn't fit offsets
+/// wrote it. Both are read fitted, so they're the same, and opening it here writes nothing.
+#[test]
+fn opening_a_damaged_document_already_in_the_logs_writes_no_revision() {
+    use kame_core::model::{Anchor, Annotation, AnnotationKind, Document, Span, SpanStyle};
+    use kame_sync::revlog::Replica;
+    let root = common::test_folder("damaged-logged");
+    std::fs::write(root.join(MARKER), "").unwrap();
+    let path = root.join("essay.kame");
+    let mut doc = Document::new("Damaged");
+    let block = &mut doc.blocks[0];
+    block.text = "Café au lait.".to_string();
+    block.spans = vec![Span {
+        start: 6,
+        end: 40,
+        style: SpanStyle::Bold,
+    }];
+    doc.annotations = vec![Annotation {
+        id: uuid::Uuid::new_v4(),
+        kind: AnnotationKind::Note,
+        anchor: Anchor::range(doc.blocks[0].id, 4, 8),
+        body: "a note".to_string(),
+    }];
+    let metadata = kame_core::model::Metadata {
+        title: "Damaged".to_string(),
+        ..Default::default()
+    };
+    let mut db = Db::open(&path).unwrap();
+    db.save_document(&doc).unwrap();
+    db.save_metadata(&metadata).unwrap();
+    drop(db);
+    let older = Replica {
+        folder: log_folder(&path),
+        device: "older-cccc".to_string(),
+    };
+    let mut store = Store::load(&older.folder).unwrap();
+    older.sync_in(&mut store, &doc, &metadata, None, 1).unwrap();
+    older.flush(&mut store).unwrap();
+    let logs_before = std::fs::read_dir(log_folder(&path)).unwrap().count();
+
+    let mut session = Session::open(&path).unwrap();
+    let outcome = Machine {
+        path: path.clone(),
+        device: "talos-aaaa".to_string(),
+    }
+    .sync(&mut session, 2);
+
+    assert_eq!(outcome.written, 0);
+    assert!(!outcome.merged);
+    assert_eq!(revisions(&path), 1);
+    assert_eq!(
+        std::fs::read_dir(log_folder(&path)).unwrap().count(),
+        logs_before,
+        "no log of this machine's"
+    );
+}

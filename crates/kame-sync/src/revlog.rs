@@ -316,7 +316,7 @@ impl Store {
                 .collect(),
             annotations: revision.annotations.clone(),
         };
-        doc.fit_offsets();
+        doc.fit();
         doc
     }
 

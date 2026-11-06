@@ -2,7 +2,9 @@
 //! span and anchor in range and on a character boundary, but a damaged or hand-made file needn't,
 //! and slicing text at such an offset panics.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use uuid::Uuid;
 
 use crate::model::document::{Anchor, Block, BlockId, Document};
 
@@ -47,23 +49,27 @@ impl Block {
 }
 
 impl Document {
-    /// Makes every span and range anchor fit its block's text, for a document just read from a
-    /// file. Spans are as [`Block::fit_spans`] has them. An anchor is brought into its block's text
-    /// and down to character boundaries, and one left reversed becomes a point at its start, as a
-    /// footnote's is. An anchor whose block is gone, a whole-block anchor and anything that already
-    /// fits are left as they are, so a document kame wrote comes back unchanged.
-    pub fn fit_offsets(&mut self) {
+    /// Makes a document just read from a file fit the rules its readers rely on, for one that's
+    /// damaged or hand-made. A document kame wrote comes back unchanged.
+    ///
+    /// - A block repeating an earlier block's id is given an id of its own ([`Document::fit_ids`]).
+    /// - Spans are as [`Block::fit_spans`] has them.
+    /// - An anchor is brought into its block's text and down to character boundaries, and one left
+    ///   reversed becomes a point at its start, as a footnote's is. An anchor whose block is gone,
+    ///   a whole-block anchor and one that already fits are left as they are.
+    pub fn fit(&mut self) {
+        self.fit_ids();
         for block in &mut self.blocks {
             block.fit_spans();
         }
         if self.annotations.is_empty() {
             return;
         }
-        // Lookups take the first block with an id, which matters only in a file that repeats one.
-        let mut texts: HashMap<BlockId, &str> = HashMap::new();
-        for block in &self.blocks {
-            texts.entry(block.id).or_insert(block.text.as_str());
-        }
+        let texts: HashMap<BlockId, &str> = self
+            .blocks
+            .iter()
+            .map(|block| (block.id, block.text.as_str()))
+            .collect();
         for annotation in &mut self.annotations {
             let Anchor::Range {
                 block_id,
@@ -78,12 +84,37 @@ impl Document {
             }
         }
     }
+
+    /// Gives each block that repeats an earlier block's id one of its own, so that every block,
+    /// and its words, can be told apart: a merge keeps blocks by id. The first keeps the id, and
+    /// with it the notes anchored there, as lookups take the first. The new id is worked out from
+    /// the old one and where the block is, so every reading of the same document gives the same.
+    pub fn fit_ids(&mut self) {
+        let mut taken: HashSet<BlockId> = self.blocks.iter().map(|block| block.id).collect();
+        if taken.len() == self.blocks.len() {
+            return;
+        }
+        let mut seen: HashSet<BlockId> = HashSet::with_capacity(self.blocks.len());
+        for (at, block) in self.blocks.iter_mut().enumerate() {
+            if seen.insert(block.id) {
+                continue;
+            }
+            let mut id = block.id.as_u128().wrapping_add(at as u128 + 1);
+            while taken.contains(&Uuid::from_u128(id)) {
+                id = id.wrapping_add(1);
+            }
+            block.id = Uuid::from_u128(id);
+            taken.insert(block.id);
+            seen.insert(block.id);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::model::{Anchor, Annotation, AnnotationKind, Block, BlockKind, Document, Span};
     use crate::model::{BlockId, SpanStyle};
+    use std::collections::HashSet;
     use uuid::Uuid;
 
     fn document(text: &str) -> Document {
@@ -103,7 +134,7 @@ mod tests {
     fn spans_after(text: &str, spans: Vec<Span>) -> Vec<(usize, usize)> {
         let mut doc = document(text);
         doc.blocks[0].spans = spans;
-        doc.fit_offsets();
+        doc.fit();
         doc.blocks[0]
             .spans
             .iter()
@@ -123,7 +154,7 @@ mod tests {
     fn anchor_after(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
         let mut doc = document(text);
         doc.annotations.push(note(doc.blocks[0].id, start, end));
-        doc.fit_offsets();
+        doc.fit();
         doc.annotations[0].anchor.byte_range()
     }
 
@@ -182,7 +213,7 @@ mod tests {
             ..note(doc.blocks[0].id, 0, 0)
         });
         let before = doc.clone();
-        doc.fit_offsets();
+        doc.fit();
         assert_eq!(doc, before);
     }
 
@@ -194,8 +225,52 @@ mod tests {
         twin.text = "Café au lait".to_string();
         doc.blocks.push(twin);
         doc.annotations.push(note(doc.blocks[0].id, 4, 8));
-        doc.fit_offsets();
+        doc.fit();
         assert_eq!(doc.annotations[0].anchor.byte_range(), Some((3, 5)));
+    }
+
+    #[test]
+    fn a_block_repeating_an_id_gets_its_own_the_same_way_each_time() {
+        let mut doc = document("One.");
+        let id = doc.blocks[0].id;
+        for text in ["Two.", "Three."] {
+            let mut twin = doc.blocks[0].clone();
+            twin.text = text.to_string();
+            doc.blocks.push(twin);
+        }
+        doc.annotations.push(note(id, 0, 3));
+        let mut again = doc.clone();
+        doc.fit();
+        again.fit();
+
+        assert_eq!(doc, again);
+        let ids: Vec<BlockId> = doc.blocks.iter().map(|block| block.id).collect();
+        assert_eq!(ids[0], id);
+        assert!(ids[1] != id && ids[2] != id && ids[1] != ids[2]);
+        let texts: Vec<&str> = doc.blocks.iter().map(|block| block.text.as_str()).collect();
+        assert_eq!(texts, ["One.", "Two.", "Three."]);
+        assert_eq!(doc.annotations[0].anchor.block_id(), id);
+    }
+
+    #[test]
+    fn a_new_id_is_never_one_already_there() {
+        let mut doc = document("One.");
+        let id = doc.blocks[0].id;
+        let mut twin = doc.blocks[0].clone();
+        twin.text = "Two.".to_string();
+        doc.blocks.push(twin);
+        let mut next = doc.blocks[0].clone();
+        // Where the repeat at 1 would go first.
+        let own = Uuid::from_u128(id.as_u128().wrapping_add(2));
+        next.id = own;
+        doc.blocks.push(next);
+        doc.fit();
+        assert_eq!(
+            doc.blocks[2].id, own,
+            "a block that didn't repeat keeps its id"
+        );
+        let ids: HashSet<BlockId> = doc.blocks.iter().map(|block| block.id).collect();
+        assert_eq!(ids.len(), 3);
     }
 
     #[test]
@@ -211,7 +286,7 @@ mod tests {
         });
         doc.annotations = vec![note(id, 3, 7), note(id, 13, 13), note(id, 0, 0)];
         let before = doc.clone();
-        doc.fit_offsets();
+        doc.fit();
         assert_eq!(doc, before);
     }
 }

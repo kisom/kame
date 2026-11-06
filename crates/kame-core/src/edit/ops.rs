@@ -218,19 +218,19 @@ impl Op {
     }
 
     /// Makes what this carries fit the text it carries, as a head read from a file is
-    /// ([`Document::fit_offsets`]), so that undo brings back what fits, and redo then finds what it
+    /// ([`Document::fit`]), so that undo brings back what fits, and redo then finds what it
     /// expects in a head that was fitted too: the documents, a block's spans, the notes on a deleted
     /// block, and the notes a delete took, which lie in the text it took.
     ///
     /// Anything given against a block's text at some point in history that the op doesn't carry
-    /// is left as it is here, and fitted to the document when it's applied ([`apply`]): a delete's
+    /// is left as it is here, and fitted to the document when `apply` applies it: a delete's
     /// old spans and the notes it cut short, the spans `SetSpans` sets, and the note
     /// `AddAnnotation` adds.
-    pub fn fit_offsets(&mut self) {
+    pub fn fit(&mut self) {
         match self {
             Op::ReplaceDocument { old, new } => {
-                old.fit_offsets();
-                new.fit_offsets();
+                old.fit();
+                new.fit();
             }
             Op::InsertBlock { block, .. } => block.fit_spans(),
             Op::DeleteBlock {
@@ -278,7 +278,7 @@ impl Op {
                     (*start, *end) = (*from + start_in, *from + end_in);
                 }
             }
-            Op::Batch { ops } => ops.iter_mut().for_each(Op::fit_offsets),
+            Op::Batch { ops } => ops.iter_mut().for_each(Op::fit),
             _ => {}
         }
     }

@@ -311,7 +311,7 @@ fn undo_reopen_and_redo(name: &str, was: &Document, step: Op, now: &Document) {
     let mut session = Session::open(&path).unwrap();
     assert!(session.undo(), "{:?}", session.last_error);
     let mut fitted = was.clone();
-    fitted.fit_offsets();
+    fitted.fit();
     assert_eq!(session.document().blocks, fitted.blocks);
     assert_eq!(anchors_of(session.document()), [(3, 8)]);
     drop(session);

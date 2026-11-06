@@ -63,7 +63,7 @@ pub fn merge(base: Option<&Document>, one: Side, other: Side) -> Merged {
     // brought back from its history as it was recorded.
     let fit = |doc: &Document| {
         let mut doc = doc.clone();
-        doc.fit_offsets();
+        doc.fit();
         doc
     };
     let (base, one_doc, other_doc) = (base.map(fit), fit(one.doc), fit(other.doc));

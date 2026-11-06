@@ -505,7 +505,7 @@ impl Db {
     /// Only `QueryReturnedNoRows` becomes [`DbError::NoDocument`]; every other
     /// failure (missing table, I/O, locking) is propagated unchanged.
     ///
-    /// Its spans and anchors are made to fit its text ([`Document::fit_offsets`]), since a
+    /// Its spans and anchors are made to fit its text ([`Document::fit`]), since a
     /// damaged file's needn't. That's only in memory, and the file keeps what it had until the
     /// head is next written.
     pub fn load_document(&self) -> Result<Document, DbError> {
@@ -519,7 +519,7 @@ impl Db {
                 other => DbError::Sqlite(other),
             })?;
         let mut doc: Document = serde_json::from_str(&json)?;
-        doc.fit_offsets();
+        doc.fit();
         Ok(doc)
     }
 
@@ -549,7 +549,7 @@ impl Db {
     }
 
     /// Reads the whole op log in application order: `(seq, op)`, oldest first. A document or block
-    /// an op carries is made to fit as the head is ([`Op::fit_offsets`]).
+    /// an op carries is made to fit as the head is ([`Op::fit`]).
     pub fn load_ops(&self) -> Result<Vec<(i64, Op)>, DbError> {
         let mut stmt = self
             .conn
@@ -561,7 +561,7 @@ impl Db {
         for row in rows {
             let (seq, json) = row?;
             let mut op: Op = serde_json::from_str(&json)?;
-            op.fit_offsets();
+            op.fit();
             ops.push((seq, op));
         }
         Ok(ops)
@@ -838,7 +838,7 @@ impl Db {
                 other => DbError::Sqlite(other),
             })?;
         let mut doc: Document = serde_json::from_str(&json)?;
-        doc.fit_offsets();
+        doc.fit();
         Ok(doc)
     }
 }

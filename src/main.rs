@@ -2706,6 +2706,10 @@ impl KameApp {
             egui::Visuals::light()
         });
         install_fonts(&cc.egui_ctx);
+        // egui otherwise zooms the whole window on Ctrl + / Ctrl - / Ctrl-0, page and all, as
+        // well as kame changing the type size on them.
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
         external::set_waker(cc.egui_ctx.clone());
         let mut session = session;
         session.apply_default_author(&default_author);
@@ -12501,5 +12505,43 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         assert!(coloured(&page.app.layout_of(&block)));
         assert_ne!(painting(&page), as_text);
         assert_eq!(page.app.session.document().blocks[0], block, "only drawn");
+    }
+
+    /// A key pressed and let go with `modifiers`, in two frames.
+    fn chord(page: &mut Headless, key: egui::Key, modifiers: egui::Modifiers) {
+        for pressed in [true, false] {
+            page.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            }]);
+        }
+        page.frame(Vec::new());
+    }
+
+    #[test]
+    fn the_type_size_keys_change_the_type_and_nothing_else() {
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.frame(Vec::new());
+        let command = egui::Modifiers::COMMAND;
+        let shift = command | egui::Modifiers::SHIFT;
+
+        chord(&mut page, egui::Key::Plus, shift);
+        assert_eq!(page.app.body_size, DEFAULT_BODY_SIZE + FONT_SIZE_STEP);
+        assert_eq!(
+            page.ctx.zoom_factor(),
+            1.0,
+            "the window isn't zoomed as well"
+        );
+
+        chord(&mut page, egui::Key::Equals, command);
+        assert_eq!(page.ctx.zoom_factor(), 1.0, "nor by Ctrl-=");
+
+        chord(&mut page, egui::Key::Minus, command);
+        chord(&mut page, egui::Key::Minus, command);
+        assert_eq!(page.app.body_size, DEFAULT_BODY_SIZE - FONT_SIZE_STEP);
+        assert_eq!(page.ctx.zoom_factor(), 1.0);
     }
 }

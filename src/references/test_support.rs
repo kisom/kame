@@ -212,7 +212,7 @@ pub(super) fn ctrl_k(page: &mut Headless) {
 }
 
 /// A rename that never finishes until `send` says so, of `knuth1981`.
-pub(super) fn rename_held_open(
+pub(crate) fn rename_held_open(
     page: &mut Headless,
 ) -> std::sync::mpsc::Sender<Result<Renamed, String>> {
     let (send, coming) = channel();

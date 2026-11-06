@@ -18,7 +18,7 @@ mod notice;
 mod page;
 mod rename;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub(crate) use browser::{draw_browser_references, BrowserReference, BROWSER_SECTION};
 pub(crate) use page::Page;

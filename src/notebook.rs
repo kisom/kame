@@ -1536,6 +1536,10 @@ impl KameApp {
             self.notice = Some("finish or close the open dialog first".to_string());
             return;
         }
+        // A rename writes documents a move or delete could take, as it holds each one.
+        if self.held_by_rename() {
+            return;
+        }
         if let FileOp::Path { from, .. } = &op {
             if self.say_if_move_refused(from) {
                 return;
@@ -1662,7 +1666,7 @@ impl KameApp {
 
     fn move_document(&mut self, notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String> {
         let moving_open = same_document(self.session.path(), Some(from));
-        if self.say_if_move_refused(from) {
+        if self.held_by_rename() || self.say_if_move_refused(from) {
             return Ok(());
         }
         // This has to go before the document is left, or leaving would take away a new document
@@ -1794,6 +1798,9 @@ impl KameApp {
     /// Deletes a document, for good. If it's open it's left first, since a session's connection
     /// would otherwise go on writing to a file with no name, and leave a -wal beside nothing.
     fn delete_from_notebook(&mut self, path: &Path, title: &str) {
+        if self.held_by_rename() {
+            return;
+        }
         self.save_position_now();
         self.sync_logs();
         if same_document(self.session.path(), Some(path)) && !self.leave_to_delete(path) {
@@ -2876,6 +2883,46 @@ mod tests {
             Some(".X.retired.kame is open in this window")
         );
         assert_eq!(page.app.session.path(), Some(retired.as_path()));
+    }
+
+    /// The rename's thread holds each document as it rewrites it, so either would find one taken.
+    #[test]
+    fn moving_and_deleting_wait_for_a_reference_rename() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-file-op-renaming")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let notebook = Notebook::open(&root).unwrap();
+        let (open, other) = (root.join("a.kame"), root.join("b.kame"));
+        Session::open(&other).unwrap().insert("B.");
+        let mut session = Session::open(&open).unwrap();
+        session.insert("A.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+        let _send = crate::references::test_support::rename_held_open(&mut page);
+
+        page.app.delete_from_notebook(&other, "b");
+        assert!(other.is_file());
+        assert!(page
+            .app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("being renamed"));
+        page.app.notice = None;
+        page.app
+            .move_document(&notebook, &other, &root.join("c.kame"))
+            .unwrap();
+        assert!(other.is_file());
+        assert!(!root.join("c.kame").exists());
+        assert!(page
+            .app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("being renamed"));
     }
 
     #[test]

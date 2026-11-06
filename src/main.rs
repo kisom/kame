@@ -272,6 +272,12 @@ fn launch_open(path: &Path) -> Result<Launched, String> {
     let _ = kame_sync::logs::build_from_logs(path);
     let (session, note) = Session::open_any(path)
         .map_err(|err| format!("could not open {} — {err}", path.display()))?;
+    // A file the open has just made had nothing to lock before. Another kame making it at the
+    // same moment may have it now, and then this one leaves it.
+    let claimed = match (claimed, session.path()) {
+        (None, Some(made)) => claim(made)?,
+        (claimed, _) => claimed,
+    };
     Ok((session, note, claimed))
 }
 
@@ -3245,8 +3251,9 @@ impl KameApp {
         self.document_lock = None;
         match claim(&path) {
             Ok(lock) => self.document_lock = lock,
-            // Only when another kame took a file this one has just made, before it could.
-            Err(held) => self.session.last_error = Some(held),
+            // Only when another kame took a file this one has just made, before it could. This
+            // stops writing it, and the words wait in memory for a Save As.
+            Err(held) => self.session.mark_held_elsewhere(held),
         }
     }
 
@@ -6510,6 +6517,19 @@ impl KameApp {
         }
         match Session::open_any(&path) {
             Ok((session, note)) => {
+                // A file the open has just made had nothing to lock before. Another kame making it
+                // at the same moment may have it now, and then this one leaves it.
+                let claimed = match (claimed, session.path()) {
+                    (None, Some(made)) => match self.claim_document(made) {
+                        Ok(claimed) => claimed,
+                        Err(held) => {
+                            self.notice = None;
+                            self.session.last_error = Some(held);
+                            return;
+                        }
+                    },
+                    (claimed, _) => claimed,
+                };
                 self.adopt_holding(session, claimed);
                 // An import has no file yet, so it is like a new document.
                 if self.session.is_anonymous() {
@@ -6596,15 +6616,19 @@ impl KameApp {
         // Found from where it's going, which needn't exist yet, since only its folders are looked in.
         let notebook = kame_notebook::Notebook::find(path).ok().flatten();
         let root = notebook.as_ref().map(|nb| nb.root.as_path());
-        match self
-            .session
-            .save_as(path, root, kame_sync::logs::names_logs_only)
-        {
+        // The copy's lock is taken before it's renamed into place, where another kame could open it.
+        let mut copy_lock = None;
+        let saved =
+            self.session
+                .save_as_holding(path, root, kame_sync::logs::names_logs_only, |copy| {
+                    copy_lock = claim(copy)?;
+                    Ok(())
+                });
+        match saved {
             Ok(()) => {
-                // What was at `path` has been replaced, so its lock goes, and the new file's is
-                // taken.
+                // What was at `path` has been replaced, so its lock goes, and the copy's is kept.
                 drop(claimed);
-                self.hold_document(None);
+                self.hold_document(copy_lock);
                 // They're kept by the paths the document held, which led from where it was.
                 self.image_textures.clear();
                 self.notice = Some(format!("saved {}", path.display()));
@@ -7231,7 +7255,14 @@ impl eframe::App for KameApp {
                 self.clear_left_fresh(true);
             }
         }
-        self.document_lock = None;
+        // The document closes before its lock goes, so that nobody opens it while this still
+        // has it. Otherwise the lock goes with the app, after the session.
+        if self.document_lock.is_some() {
+            if let Ok(empty) = Session::anonymous() {
+                self.session = empty;
+                self.document_lock = None;
+            }
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -9456,6 +9487,33 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let (session, _, claimed) = launch_open(&path).unwrap();
         assert!(claimed.is_some_and(|lock| lock.is_for(&path)));
         drop(session);
+        assert!(!is_held(&path));
+    }
+
+    #[test]
+    fn a_document_another_kame_took_first_is_written_no_more() {
+        let path = written_document("doc.kame");
+        let mut page = Headless::new(open(&path));
+        // As when another kame takes a file this one has only just made.
+        let _other = held_elsewhere_lock(&path);
+        page.app.hold_document(None);
+        assert!(page.app.session.replaced && page.app.session.save_failed);
+        assert_eq!(
+            page.app.session.last_error.as_deref(),
+            Some("doc.kame is open in another kame window")
+        );
+        let before = on_disk(&path);
+        page.app.session.insert(" more");
+        assert_eq!(on_disk(&path), before);
+    }
+
+    #[test]
+    fn quitting_closes_the_document_before_letting_it_go() {
+        let path = written_document("doc.kame");
+        let mut page = page_holding(&path);
+        eframe::App::on_exit(&mut page.app);
+        assert_eq!(page.app.session.path(), None);
+        assert!(page.app.document_lock.is_none());
         assert!(!is_held(&path));
     }
 

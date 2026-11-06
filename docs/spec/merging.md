@@ -220,7 +220,7 @@ Read every `*.log` in the folder, in sorted order:
 2. Skip any line that won't parse, or whose `id` doesn't match its revision's digest as read back.
 3. Index each block by its digest, also as read back, and each revision by `id`.
 
-Reads can resume where the last stopped, past lines that failed to parse. A log that has got shorter is read from its start, which is harmless since everything is addressed by content. Readers don't check `revision.document` (section 9).
+Reads can resume where the last stopped, past lines that failed to parse. A log that has got shorter is read from its start, which is harmless since everything is addressed by content. Every revision is read, whatever document it's of, and a sync uses only those of its own (section 6.4).
 
 **Usable revisions** have all their blocks here and all their parents usable. A log can arrive before the one holding what it builds on, and then that revision waits.
 
@@ -234,16 +234,19 @@ Reads can resume where the last stopped, past lines that failed to parse. A log 
 
 The `sync` key in the file's `meta` table holds the id of the revision this machine last settled on, called `last` here. To sync an open document with the logs:
 
-1. Refresh from the logs. Forget `last` unless it's usable. It may not be in them, as after Save As, or a log it needs may have been cut short. A revision built on an unusable one couldn't be read either, so what's typed would be left out of the document.
-2. If there's no `last`, use any head with the same document digest and metadata.
-3. If there's still none, **write checkpoints** (below) and use the latest.
-4. If the document or metadata differ from `last`, append a revision with `last` as its parent.
-5. While there are two or more heads, take the first two. Merge them against their shared ancestor (section 4), or with no base if they have none, using their labels and `when`s. Merge their metadata (section 5) the same way, with the greater `(when, id)` as later. Append the result with both as parents, no device, and the later `when`. If that revision already exists with all its blocks here, nothing is written. If it's there but waiting on blocks in a log that hasn't arrived, write the line again with the blocks missing here, which this machine has just worked out. Repeat.
-6. If there's no head at all, fail.
+1. Refresh from the logs. If they aren't this document's (below), write nothing, merge nothing and say so.
+2. Forget `last` unless it's usable. It may not be in them, as after Save As, or a log it needs may have been cut short. A revision built on an unusable one couldn't be read either, so what's typed would be left out of the document.
+3. If there's no `last`, use any head with the same document digest and metadata.
+4. If there's still none, **write checkpoints** (below) and use the latest.
+5. If the document or metadata differ from `last`, append a revision with `last` as its parent.
+6. While there are two or more heads of this document, take the first two. Merge them against their shared ancestor (section 4), or with no base if they have none, using their labels and `when`s. Merge their metadata (section 5) the same way, with the greater `(when, id)` as later. Append the result with both as parents, no device, and the later `when`. If that revision already exists with all its blocks here, nothing is written. If it's there but waiting on blocks in a log that hasn't arrived, write the line again with the blocks missing here, which this machine has just worked out. Repeat.
+7. If there's no head at all, fail.
 
 Appending writes only blocks that no log here has, and does nothing if the id is already there and no blocks are missing.
 
 The app skips all this if no log has changed size and the document and metadata match the last sync.
+
+**Whose logs they are.** The logs are this document's if no head in them is another document's, by `revision.document`, and either they hold `last`, even in a line that fails its check, or a line in them says it's of this document, or nothing is there. A line that fails its check, or one that doesn't parse but whose JSON can still be read, still says whose it is. This holds whether or not the document has synced before. A head of another document is what's left when a document is deleted on one machine and another is made at its name while the old one's log lives on, as a sync tool brings back a log changed on one machine while it was deleted on another. Merging it would bring in that document's words and, if it were the later, its id. Another document's revisions in a head's past don't count: a kame from before this rule merged two documents made at one name on two machines, and the merge took the later one's id. A sync of logs that aren't its own writes nothing, so its words don't reach another document's logs on every machine, and the app says the logs at this path may be another document's, and that Save As gives this one logs of its own. Nothing in the logs is changed or removed. Merging, in step 6, only ever takes this document's heads.
 
 **Checkpoints** give two machines a shared past from the start. Undoing back through the applied ops, take the document's state at each op count divisible by 50, and at every count after the last of those. Write them oldest first, each the parent of the next, with no device, default metadata and the op count as `when`. Machines with the same history write the same ones, so a merge has an ancestor near where they really parted. The interval is part of what machines agree on. If the history can't be undone any further, there are no checkpoints before that point.
 
@@ -261,7 +264,7 @@ Skip the sync if the session can't save, or if its file has been replaced. Somet
 
 ### 6.6 Building from logs
 
-A document with logs and no database can be built, even with no `.kame-logs` above it, since it would otherwise open blank where the logs have the text: write to `NAME.building` beside it, with the first head's document and metadata and `sync` set to that head, then remove any `-wal` and `-shm` and rename into place. If the logs hold no whole document, write nothing. Other heads merge once it's open.
+A document with logs and no database can be built, even with no `.kame-logs` above it, since it would otherwise open blank where the logs have the text: write to `NAME.building` beside it, with the first head's document and metadata and `sync` set to that head, then remove any `-wal` and `-shm` and rename into place. If the logs hold no whole document, write nothing. Other heads of that document merge once it's open. If the heads are of two documents, the one built doesn't sync with them (section 6.4).
 
 ### 6.7 Timing
 
@@ -304,7 +307,6 @@ Everything a merge adds is a `Note`, which never publishes. A merged document ca
 
 These describe the code as it stands, and aren't rules to copy.
 
-- **Nothing checks `revision.document`.** Logs from a different document at the same name merge in, and the result takes the id of ours.
 - **A newer build's revisions stop an older one following.** Digests and ids are recomputed from what a reader parsed, and readers drop fields they don't know. So when a newer build writes a field an older one doesn't know, the older one's digest differs: with a new field in a block, the line is read but the revision never becomes usable, and with one in metadata, the line is skipped. Everything built on that revision waits too. Section 6.8 makes that visible, but the older machine can't follow until it's updated.
 - **A new field must be left out when empty, or old revisions break.** If a new field were always written, a reader would add it when re-serializing old lines. In a revision or its metadata, the ids would stop matching and the lines would be skipped. In a block, the digest would change and the revision would stay unusable. `Metadata` writes all its fields, so a new metadata field needs a `skip_serializing_if`. Any change to how the JSON is written has the same effect. Golden tests at the end of `crates/kame-sync/src/revlog.rs` pin the bytes written today for a revision and its blocks, so a field added without that fails them.
 - **Sentences are English-shaped.** Abbreviations such as `e.g.` end a sentence if a space follows, which only makes conflicts coarser or finer and loses nothing. Text without those marks, such as Chinese with `。`, counts as one sentence until a line feed.

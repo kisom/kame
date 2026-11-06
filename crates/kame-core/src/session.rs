@@ -660,8 +660,8 @@ impl Session {
         }
         // Onto its own file, this is a retry of whatever write failed.
         if self.path.as_deref() == Some(path) {
-            if self.save_failed && !self.write_all() {
-                return Err("it still can't be written".into());
+            if self.save_failed {
+                self.write_all()?;
             }
             return Ok(());
         }
@@ -989,7 +989,7 @@ impl Session {
     /// permanently painted strip. Those messages are dismissed instead.
     pub fn retry_or_dismiss(&mut self) -> bool {
         if self.save_failed {
-            self.write_all()
+            self.write_all().is_ok()
         } else {
             self.last_error = None;
             true
@@ -998,11 +998,15 @@ impl Session {
 
     /// Writes the head, the whole history, the cursor and the metadata as they are in memory, in
     /// one transaction, for a retry. A write that failed may have left the log short of what's in
-    /// memory, so the head and cursor alone would describe a step the log doesn't have.
-    fn write_all(&mut self) -> bool {
+    /// memory, so the head and cursor alone would describe a step the log doesn't have. Says why
+    /// if it can't.
+    fn write_all(&mut self) -> AppResult<()> {
         self.check_file();
-        if self.replaced || self.newer {
-            return false;
+        if self.replaced {
+            return Err("that file changed on disk, so this needs another name".into());
+        }
+        if self.newer {
+            return Err("this document has changes from a newer version of kame".into());
         }
         let written = self.db.replace_history(
             self.editor.document(),
@@ -1014,11 +1018,11 @@ impl Session {
         match written {
             Ok(()) => {
                 self.clear_save_error();
-                true
+                Ok(())
             }
             Err(err) => {
-                self.mark_save_failed(err);
-                false
+                self.mark_save_failed(&err);
+                Err(err.into())
             }
         }
     }
@@ -5106,6 +5110,24 @@ mod tests {
         assert_agrees_with_its_file(&session);
         drop(session);
         undoes_the_heading(&mut open(&path));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_onto_its_own_file_that_still_cant_write_says_why() {
+        let root = scratch_dir("failedsamelocked").canonicalize().unwrap();
+        let mut session = session_after_a_failed_edit(&root);
+        let path = root.join("one/a.kame");
+        let outside = rusqlite::Connection::open(&path).unwrap();
+        outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+        session
+            .db
+            .set_busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        let said = session.save_as(&path, None, |_, _| false).unwrap_err();
+        outside.execute_batch("COMMIT").unwrap();
+        assert!(said.to_string().contains("locked"), "{said}");
+        assert!(session.save_failed);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

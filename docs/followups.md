@@ -34,12 +34,6 @@ Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-0
   `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
   X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.
 
-## References
-
-Built and driven by hand, with these left. See `docs/superpowers/specs/2026-11-04-references-design.md`.
-
-- [ ] **`src/references.rs` could split,** and `ReferenceForm` could go in a library, out of the app.
-
 ## Performance
 
 Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a

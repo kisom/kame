@@ -1,6 +1,6 @@
 # Merging kame documents
 
-As built in kame 0.1.2. This covers how one person's diverged copies of a document become one again: the merge itself, the revision logs that carry changes between machines, and conflict copies. Why it's built this way is in `docs/superpowers/specs/2026-11-03-sync-design.md`. Revision logs are still in trial, opted into by folder.
+As the code beside this document builds it. This covers how one person's diverged copies of a document become one again: the merge itself, the revision logs that carry changes between machines, and conflict copies. Why it's built this way is in `docs/superpowers/specs/2026-11-03-sync-design.md`. Revision logs are still in trial, opted into by folder.
 
 This builds on the [document format](document-format.md). Sections 2 to 6 are precise because machines have to reach the same bytes separately. **Reuse `kame-sync` rather than reimplementing this.** A second implementation has to match it byte for byte, down to Unicode character classes and JSON escaping, or it will write different revisions from the same inputs.
 

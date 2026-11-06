@@ -1,6 +1,6 @@
 # The kame notebook
 
-As built in kame 0.1.2. A notebook is a folder of documents with a settings file in it, which can be moved through, searched and published. This describes what it is on disk and the rules a program must follow to agree with kame. Keystrokes and screen layouts are left to `docs/guide.md`, and the reasons behind the design to `docs/superpowers/specs/2026-11-03-notebook-design.md`.
+As the code beside this document builds it. A notebook is a folder of documents with a settings file in it, which can be moved through, searched and published. This describes what it is on disk and the rules a program must follow to agree with kame. Keystrokes and screen layouts are left to `docs/guide.md`, and the reasons behind the design to `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
 Documents are in [document-format.md](document-format.md), and revision logs are in [merging.md](merging.md).
 

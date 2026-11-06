@@ -180,17 +180,17 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
     (!store.corrupt_lines()).then_some(true)
 }
 
-/// Whether what's beside a database can be taken for its logs: there's nothing there, they hold the
-/// revision it remembers, or a line in them says it's of this document. Otherwise they're another
-/// document's, or can't be shown not to be, which may be so even when it isn't stranded, as when it
-/// isn't where it last synced, or that can't be told. Nothing retires it for that. But writing its
-/// history there could bring one document's words into another's logs, on every machine, so it
-/// doesn't sync, and they aren't its to delete or move. A folder or a log that can't be read shows
-/// nothing either.
+/// Whether what's beside a database can be taken for its logs, as [`Store::can_be_its_own`] says:
+/// there's nothing there, they hold the revision it remembers, or a line in them says it's of this
+/// document, and none of their heads is another document's. Otherwise they're another document's,
+/// or can't be shown not to be, which may be so even when it isn't stranded, as when it isn't where
+/// it last synced, or that can't be told, or when a document was deleted on one machine and another
+/// made at its name while the old one's log lived on. Nothing retires it for that. But writing its
+/// history there could bring one document's words into another's logs, on every machine, and
+/// merging could bring another's words into it, so it doesn't sync, and they aren't its to delete or
+/// move. A folder or a log that can't be read shows nothing either.
 ///
-/// `revision` is `None` for a database that has never synced. Its first sync merges its words with
-/// what's there, whoever's that is, as documents created through a link on two machines rely on, and
-/// that's an accepted limit. But what's there still isn't its to take away.
+/// `revision` is `None` for a database that has never synced, which is held to the same rule.
 pub fn logs_can_be_its_own(path: &Path, document: uuid::Uuid, revision: Option<&str>) -> bool {
     let folder = log_folder(path);
     if !folder.exists() {
@@ -199,9 +199,7 @@ pub fn logs_can_be_its_own(path: &Path, document: uuid::Uuid, revision: Option<&
     if std::fs::read_dir(&folder).is_err() {
         return false;
     }
-    Store::load(&folder).is_ok_and(|store| {
-        revision.is_some_and(|revision| store.could_hold(revision)) || store.can_be_for(document)
-    })
+    Store::load(&folder).is_ok_and(|store| store.can_be_its_own(document, revision))
 }
 
 /// What a sync did.
@@ -445,11 +443,7 @@ impl Logged {
         let mut local = session.document().clone();
         local.fit();
         let metadata = session.metadata.clone();
-        if self
-            .last
-            .as_ref()
-            .is_some_and(|last| !self.store.could_hold(last) && !self.store.can_be_for(local.id))
-        {
+        if !self.store.can_be_its_own(local.id, self.last.as_deref()) {
             let held_off = HeldOff {
                 stranded: false,
                 logs,
@@ -713,7 +707,9 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
     }
     let store = Store::load(&log_folder(path))?;
     let heads = store.heads();
-    // Several heads merge once the document is open, so any of them is a fair place to start.
+    // Several heads of one document merge once it's open, so any of them is a fair place to start.
+    // Heads of two documents, as a name used again can leave them, don't, and the one built here
+    // then holds off its logs, saying they may be another document's.
     let Some(head) = heads.first() else {
         return Ok(false);
     };
@@ -838,9 +834,11 @@ mod tests {
         session.insert("Typed here.");
         let folder = log_folder(&path);
         std::fs::create_dir_all(&folder).unwrap();
+        // Of this document, as another document's logs aren't synced with at all.
+        let id = session.document().id;
         std::fs::write(
             folder.join("new-0000.log"),
-            "{\"id\":\"x\",\"revision\":{\"parents\":[],\"device\":\"new-0000\",\"when\":1,\"document\":\"00000000-0000-0000-0000-000000000001\",\"title\":\"t\",\"order\":[],\"annotations\":[],\"metadata\":{},\"future\":1},\"blocks\":[]}\n",
+            format!("{{\"id\":\"x\",\"revision\":{{\"parents\":[],\"device\":\"new-0000\",\"when\":1,\"document\":\"{id}\",\"title\":\"t\",\"order\":[],\"annotations\":[],\"metadata\":{{}},\"future\":1}},\"blocks\":[]}}\n"),
         )
         .unwrap();
 

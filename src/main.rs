@@ -12147,6 +12147,51 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         assert_eq!(page.app.notice, None, "once is enough");
     }
 
+    /// A document deleted on another machine and made again at its name, with the old one's log
+    /// come back beside the new one's: nothing of the old one comes in, and the page says why this
+    /// one has stopped syncing.
+    #[test]
+    fn another_documents_log_beside_the_open_ones_is_said_and_not_merged() {
+        use kame_sync::logs::{log_folder, Logged, MARKER};
+        let root = kame_test_dir::folder("app-others-log-beside")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        std::fs::write(root.join(MARKER), "").unwrap();
+        let synced = |path: &Path, words: &str| {
+            let mut session = Session::open(path).unwrap();
+            session.insert(words);
+            Logged::open(&session, "titan-bbbb")
+                .unwrap()
+                .sync(&mut session, 5)
+                .unwrap();
+        };
+        let (old, new) = (root.join("old.kame"), root.join("essay.kame"));
+        synced(&old, "The deleted one's words.");
+        synced(&new, "This one's words.");
+        std::fs::copy(
+            log_folder(&old).join("titan-bbbb.log"),
+            log_folder(&new).join("talos-aaaa.log"),
+        )
+        .unwrap();
+        let mut page = Headless::new(Session::open(&new).unwrap());
+        page.app.device = "titan-bbbb".to_string();
+        let id = page.app.session.document().id;
+        page.app.session.insert(" Typed here.");
+
+        page.app.sync_logs();
+        let notice = page
+            .app
+            .notice
+            .take()
+            .expect("it says why it isn't syncing");
+        assert!(notice.contains("may be another document's"), "{notice}");
+        assert!(notice.contains("isn't syncing"), "{notice}");
+        assert_eq!(page.app.session.document().id, id);
+        let text = &page.app.session.document().blocks[0].text;
+        assert!(!text.contains("deleted"), "{text}");
+    }
+
     /// Another machine's words arriving in the open document's logs take reading every log to see
     /// that the logs haven't left it, which is for another thread, with the sync waiting on it.
     #[test]

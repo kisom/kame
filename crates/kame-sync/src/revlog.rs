@@ -432,6 +432,27 @@ impl Store {
     pub fn can_be_for(&self, document: Uuid) -> bool {
         self.names(document) || (!self.names_anyone() && !self.dropped.corrupt)
     }
+
+    /// The heads of this document, sorted: the only ones a sync of it merges. Another document's
+    /// revisions can be here when a document was deleted on one machine and another made at its name,
+    /// and merging one of them would bring in that document's words and, being later, its id.
+    pub fn heads_of(&self, document: Uuid) -> Vec<String> {
+        let mut heads = self.heads();
+        heads.retain(|head| self.revisions[head].document == document);
+        heads
+    }
+
+    /// Whether these logs can be taken as this document's, by one that last synced with them at
+    /// `revision`, if it has: they hold that revision, or [`Store::can_be_for`] says so, and no head
+    /// in them is another document's. Another document's revisions in what a head was made from are
+    /// history, as where an older kame merged two documents made at one name on two machines.
+    pub fn can_be_its_own(&self, document: Uuid, revision: Option<&str>) -> bool {
+        (revision.is_some_and(|revision| self.could_hold(revision)) || self.can_be_for(document))
+            && self
+                .heads()
+                .iter()
+                .all(|head| self.revisions[head].document == document)
+    }
 }
 
 /// Merges two sets of document properties field by field: a field only one side changed takes
@@ -634,7 +655,8 @@ impl Replica {
     }
 
     /// Records `local` if it has changed since `last`, the revision this machine last settled
-    /// on, and merges with whatever else is in the folder until one revision remains.
+    /// on, and merges with whatever else of this document is in the folder until one revision
+    /// remains. Another document's revisions there are left as they are.
     pub fn sync(&self, local: &Document, last: Option<&str>, now: i64) -> Result<Synced> {
         let mut store = Store::load(&self.folder)?;
         self.sync_in(&mut store, local, &Metadata::default(), last, now)
@@ -668,7 +690,7 @@ impl Replica {
         }
         let mut notes = 0;
         loop {
-            let heads = store.heads();
+            let heads = store.heads_of(local.id);
             if heads.len() < 2 {
                 let head = heads
                     .into_iter()
@@ -1253,6 +1275,69 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    /// A document's logs as another machine leaves them after deleting it and making a new one of the
+    /// same name: the old one's log beside the new one's.
+    fn logs_of_two_documents(name: &str) -> (PathBuf, Document, Document) {
+        let folder = kame_test_dir::folder(name);
+        let ours = document_saying("This one's words.");
+        let mut theirs = document_saying("The deleted one's words.");
+        theirs.id = Uuid::from_u128(9);
+        let elsewhere = kame_test_dir::folder(&format!("{name}-elsewhere"));
+        replica(&elsewhere, "there").sync(&theirs, None, 5).unwrap();
+        std::fs::copy(elsewhere.join("there.log"), folder.join("there.log")).unwrap();
+        (folder, ours, theirs)
+    }
+
+    /// The later side's id is the one a merge keeps, so this one would have become the other.
+    #[test]
+    fn another_documents_revisions_are_never_merged_in() {
+        let (folder, ours, theirs) = logs_of_two_documents("revlog-another-document");
+        let synced = replica(&folder, "here").sync(&ours, None, 1).unwrap();
+        assert_eq!(synced.doc, ours);
+        assert_eq!(synced.notes, 0);
+        let store = Store::load(&folder).unwrap();
+        assert_eq!(store.heads().len(), 2, "nothing merged them");
+        assert!(store
+            .heads()
+            .iter()
+            .any(|head| store.document(head) == theirs));
+    }
+
+    #[test]
+    fn logs_holding_a_head_of_another_document_are_not_its_own() {
+        let (folder, ours, theirs) = logs_of_two_documents("revlog-not-its-own");
+        let store = Store::load(&folder).unwrap();
+        assert!(!store.can_be_its_own(ours.id, None));
+        assert!(store.can_be_its_own(theirs.id, None));
+
+        let mut alone = Store::default();
+        let head = add(&mut alone, revision(Vec::new(), 1));
+        assert!(alone.can_be_its_own(ours.id, Some(&head)));
+        assert!(!alone.can_be_its_own(theirs.id, Some(&head)));
+        assert!(!alone.can_be_its_own(theirs.id, None));
+        assert!(Store::default().can_be_its_own(theirs.id, None));
+    }
+
+    /// Two documents made at one path on two machines, merged by a kame from before this was
+    /// checked, so that one took the other's id. Only heads count: what the merge was made from is
+    /// its history.
+    #[test]
+    fn another_documents_revisions_in_its_history_still_leave_the_logs_its_own() {
+        let mut store = Store::default();
+        let foreign = add(
+            &mut store,
+            Revision {
+                document: Uuid::from_u128(9),
+                ..revision(Vec::new(), 0)
+            },
+        );
+        let own = add(&mut store, revision(Vec::new(), 1));
+        let merged = add(&mut store, revision(vec![foreign, own], 2));
+        assert!(store.can_be_its_own(Uuid::from_u128(1), Some(&merged)));
+        assert!(store.can_be_its_own(Uuid::from_u128(1), None));
+        assert_eq!(store.heads_of(Uuid::from_u128(1)), vec![merged]);
     }
 
     /// Every kind of block, with every field it has present, for the golden tests below.

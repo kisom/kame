@@ -344,17 +344,16 @@ pub(crate) fn is_stranded_database(path: &Path) -> bool {
     )
 }
 
-/// Whether a database with a history sits on logs that can't be shown to be its own, as read from
-/// its file. A file that can't say whose it is can't show that either.
+/// Whether a database sits on logs that can't be shown to be its own, as read from its file, whether
+/// or not it has synced. A file that can't say whose it is can't show that either.
 pub(crate) fn is_on_others_logs_database(path: &Path) -> bool {
     let Ok(db) = Db::open_read_only(path) else {
         return true;
     };
     let revision = db.load_sync_state();
-    revision.is_some()
-        && db.load_readable().map_or(true, |document| {
-            !logs_can_be_its_own(path, document.id, revision.as_deref())
-        })
+    db.load_readable().map_or(true, |document| {
+        !logs_can_be_its_own(path, document.id, revision.as_deref())
+    })
 }
 
 /// Whether what's at a database's log folder can be taken for its logs, to read, delete or move. With
@@ -428,8 +427,7 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
     if is_stranded(path, revision.as_deref(), place.as_deref()) {
         return Err("it was moved or deleted on another machine, and isn't syncing".to_string());
     }
-    if revision.is_some() && !logs_can_be_its_own(path, session.document().id, revision.as_deref())
-    {
+    if !logs_can_be_its_own(path, session.document().id, revision.as_deref()) {
         return Err(OTHERS_LOGS.to_string());
     }
     let logged = Logged::open(&session, device).ok_or("could not read its logs")?;

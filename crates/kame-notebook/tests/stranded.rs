@@ -1989,6 +1989,23 @@ fn a_hand_copy_of_another_document_at_a_new_home_leaves_the_stale_one_alone() {
     assert_eq!(std::fs::read(&b).unwrap(), before);
 }
 
+/// The same for another document there that has never synced, as one made at that name before the
+/// logs came: it won't sync with logs that aren't its, so it isn't the moved one opened there.
+#[test]
+fn another_document_that_never_synced_at_a_new_home_leaves_the_stale_one_alone() {
+    let (root, nb) = logged_notebook("stranded-never-synced-at-home");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words of a.");
+    Session::open(&b).unwrap().insert("Never synced.");
+    move_logs(&a, &b);
+    let before = std::fs::read(&b).unwrap();
+
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+    assert_eq!(std::fs::read(&b).unwrap(), before);
+}
+
 #[test]
 fn a_step_is_skipped_if_the_place_it_found_has_changed() {
     let (root, nb) = logged_notebook("stranded-changed-place");
@@ -2590,8 +2607,8 @@ fn a_line_that_names_no_document_beside_its_own_lines_changes_nothing() {
     assert!(listed(&nb).is_empty());
 }
 
-/// Its first sync merges its words with them, as documents created through a link on two machines rely
-/// on. Until then it hasn't been shown to be the same document, so those logs aren't its to take away.
+/// It hasn't been shown to be the same document, so it doesn't sync with those logs, merging
+/// nothing from them and writing nothing to them, and they aren't its to take away.
 #[test]
 fn a_database_that_never_synced_keeps_its_hands_off_another_documents_logs() {
     let (root, nb) = logged_notebook("stranded-never-synced-others");
@@ -2604,11 +2621,14 @@ fn a_database_that_never_synced_keeps_its_hands_off_another_documents_logs() {
     let copy = root.join("copy.kame");
     std::fs::copy(&a, &copy).unwrap();
     copy_logs(&a, &copy);
+    let before = words_in_logs(&log_folder(&copy));
     let mut session = Session::open(&copy).unwrap();
     let outcome = sync(&mut session);
-    assert!(!outcome.others_logs);
-    assert!(outcome.merged);
+    assert!(outcome.others_logs);
+    assert!(!outcome.merged);
+    assert_eq!(outcome.written, 0);
     drop(session);
+    assert_eq!(words_in_logs(&log_folder(&copy)), before);
 
     assert_logs_are_kept(&nb, &a, "another document's");
 }

@@ -1242,6 +1242,85 @@ fn a_document_on_another_documents_logs_reads_them_only_when_they_change() {
     });
 }
 
+/// Every file in a document's log folder, with what's in it.
+fn log_files(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(log_folder(path))
+        .unwrap()
+        .flatten()
+        .map(|entry| (entry.path(), std::fs::read(entry.path()).unwrap()))
+        .collect();
+    files.sort();
+    files
+}
+
+/// What's left when a document is deleted on one machine and another made at its name, and the
+/// old one's log comes back, as a sync tool brings back a file changed on one machine while it was
+/// deleted on another. Merging it would bring in the old document's words and, being the later,
+/// its id, so this one holds off and says why, and nothing in the logs changes.
+#[test]
+fn another_documents_log_beside_its_own_is_not_merged_and_it_says_so() {
+    let (talos, _) = two_machines();
+    let mut old = talos.session();
+    talos.append(&mut old, 0, " The old one's words.");
+    talos.sync(&mut old, 5);
+    drop(old);
+    let new = Machine {
+        path: another_document(&talos, "different.kame"),
+        device: talos.device.clone(),
+    };
+    std::fs::copy(
+        log_folder(&talos.path).join("talos-aaaa.log"),
+        log_folder(&new.path).join("titan-bbbb.log"),
+    )
+    .unwrap();
+    let before = log_files(&new.path);
+
+    let mut session = new.session();
+    let id = session.document().id;
+    new.append(&mut session, 0, " Typed here.");
+    let typed = session.document().clone();
+    let outcome = new.sync(&mut session, 9);
+
+    assert!(outcome.others_logs, "{outcome:?}");
+    assert!(!outcome.stranded);
+    assert!(!outcome.merged);
+    assert_eq!(outcome.written, 0);
+    assert_eq!(session.document(), &typed);
+    assert_eq!(session.document().id, id);
+    drop(session);
+    assert_eq!(log_files(&new.path), before);
+}
+
+/// A new document at a name whose logs are another's, as when one was deleted outside kame and its
+/// logs left. Its first sync used to merge with them.
+#[test]
+fn a_document_that_never_synced_leaves_another_documents_logs_alone() {
+    let (talos, _) = two_machines();
+    let mut old = talos.session();
+    talos.sync(&mut old, 5);
+    drop(old);
+    let new = Machine {
+        path: talos.path.with_file_name("new.kame"),
+        device: talos.device.clone(),
+    };
+    std::fs::rename(log_folder(&talos.path), log_folder(&new.path)).unwrap();
+    std::fs::remove_file(&talos.path).unwrap();
+    let before = log_files(&new.path);
+
+    let mut session = new.session();
+    session.insert("Never synced.");
+    let typed = session.document().clone();
+    let outcome = new.sync(&mut session, 9);
+
+    assert!(outcome.others_logs, "{outcome:?}");
+    assert!(!outcome.merged);
+    assert_eq!(outcome.written, 0);
+    assert_eq!(session.document(), &typed);
+    assert_eq!(session.sync_state(), None);
+    drop(session);
+    assert_eq!(log_files(&new.path), before);
+}
+
 /// What a sync held off is remembered only while the logs are as they were.
 #[test]
 fn a_document_whose_logs_come_back_syncs_again() {

@@ -145,3 +145,139 @@ fn a_pass_does_not_stamp_a_document_from_a_newer_version() {
     assert_eq!(Db::open_read_only(&a).unwrap().load_sync_place(), None);
     assert_eq!(everything_in(&a), file);
 }
+
+/// A notebook with no logs, holding `kinds.kame`, with a block of a kind only a newer kame knows,
+/// and `fields.kame`, with a field only a newer kame knows. Each says something about otters, links
+/// to `target.kame` and cites `knuth1981` in a footnote, in what this build can read of it.
+fn notebook_with_newer_documents(name: &str) -> (PathBuf, Notebook) {
+    use kame_core::model::{
+        Anchor, Annotation, AnnotationKind, Block, BlockKind, Document, Metadata, Span, SpanStyle,
+    };
+    let root = kame_test_dir::folder(name).canonicalize().unwrap();
+    std::fs::write(root.join("notebook.yaml"), "").unwrap();
+    std::fs::create_dir_all(root.join("references")).unwrap();
+    std::fs::write(
+        root.join("references/knuth1981.yaml"),
+        "kind: article\ntitle: Breaking paragraphs into lines\nauthors: [D. E. Knuth]\nyear: 1981\n",
+    )
+    .unwrap();
+    drop(Session::open(&root.join("target.kame")).unwrap());
+    for (stem, title) in [("kinds", "Newer kinds"), ("fields", "Newer fields")] {
+        let words = "Otters hold hands. See target.";
+        let first = Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: words.to_string(),
+            spans: vec![Span {
+                start: words.len() - "target.".len(),
+                end: words.len() - 1,
+                style: SpanStyle::DocumentLink {
+                    target: "target.kame".to_string(),
+                },
+            }],
+        };
+        let mut doc = Document::new(title);
+        doc.annotations = vec![Annotation {
+            id: uuid::Uuid::new_v4(),
+            kind: AnnotationKind::Footnote,
+            anchor: Anchor::block(first.id),
+            body: "As in [knuth1981].".to_string(),
+        }];
+        doc.blocks = vec![
+            first,
+            Block {
+                id: uuid::Uuid::new_v4(),
+                kind: BlockKind::Paragraph,
+                text: "A table of otters.".to_string(),
+                spans: Vec::new(),
+            },
+        ];
+        let path = root.join(format!("{stem}.kame"));
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&doc).unwrap();
+        db.save_metadata(&Metadata {
+            title: title.to_string(),
+            ..Metadata::default()
+        })
+        .unwrap();
+    }
+    let newer = |path: &Path, from: &str, to: &str| {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        let head: String = connection
+            .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let newer = head.replacen(from, to, 1);
+        assert_ne!(newer, head);
+        connection
+            .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&newer])
+            .unwrap();
+    };
+    newer(
+        &root.join("kinds.kame"),
+        r#""kind":"Paragraph","text":"A table of otters.""#,
+        r#""kind":"Table","text":"A table of otters.""#,
+    );
+    newer(
+        &root.join("fields.kame"),
+        r#""text":"A table of otters.""#,
+        r#""text":"A table of otters.","colour":"red""#,
+    );
+    (root.clone(), Notebook::open(&root).unwrap())
+}
+
+/// Lists, search, what links here and the references' citing read what they can of a document from
+/// a newer kame, and say nothing of the rest, which the document says itself when it's opened.
+#[test]
+fn a_notebook_finds_what_it_can_read_of_documents_from_a_newer_version() {
+    use std::sync::atomic::AtomicBool;
+    let (root, nb) = notebook_with_newer_documents("newer-views");
+    let (kinds, fields) = (root.join("kinds.kame"), root.join("fields.kame"));
+    let before = (everything_in(&kinds), everything_in(&fields));
+    let cancel = AtomicBool::new(false);
+
+    let titles: Vec<String> = kame_notebook::list::listed(&nb)
+        .into_iter()
+        .map(|listed| listed.title)
+        .collect();
+    assert!(titles.contains(&"Newer kinds".to_string()), "{titles:?}");
+    assert!(titles.contains(&"Newer fields".to_string()), "{titles:?}");
+
+    let mut found = Vec::new();
+    kame_notebook::search::search(&nb, "otters", None, &cancel, |hit| found.push(hit));
+    let mut where_found: Vec<(String, String)> = found
+        .iter()
+        .map(|hit| (hit.relative.clone(), hit.title.clone()))
+        .collect();
+    where_found.sort();
+    assert_eq!(
+        where_found,
+        [
+            ("fields.kame".to_string(), "Newer fields".to_string()),
+            ("fields.kame".to_string(), "Newer fields".to_string()),
+            ("kinds.kame".to_string(), "Newer kinds".to_string()),
+        ],
+        "the table's words in kinds.kame aren't read, and the rest is"
+    );
+    let mut placeholder = Vec::new();
+    kame_notebook::search::search(&nb, "newer version", None, &cancel, |hit| {
+        placeholder.push(hit)
+    });
+    assert!(placeholder.is_empty(), "nothing stands in for the table");
+
+    let mut linking: Vec<String> =
+        kame_notebook::links::linking_to(&nb, &root.join("target.kame"), None, &cancel)
+            .into_iter()
+            .map(|from| from.relative)
+            .collect();
+    linking.sort();
+    assert_eq!(linking, ["fields.kame", "kinds.kame"]);
+
+    let citing = kame_notebook::references::citing(&nb);
+    let mut cite = citing.get("knuth1981").cloned().unwrap_or_default();
+    cite.sort();
+    assert_eq!(cite, [fields.clone(), kinds.clone()]);
+
+    assert_eq!((everything_in(&kinds), everything_in(&fields)), before);
+}

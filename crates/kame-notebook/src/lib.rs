@@ -149,10 +149,33 @@ pub fn init(root: &Path) -> Result<Notebook, String> {
 }
 
 /// A document's text and properties, read and never changed, whatever form it's in: a database,
-/// Markdown, or only revision logs, as on a machine that hasn't opened it yet.
+/// Markdown, or only revision logs, as on a machine that hasn't opened it yet. One holding
+/// something only a newer version of kame knows is read as far as this build can, leaving the rest
+/// out ([`kame_core::storage::Db::load_readable`]), and [`read_noting_newer`] says when that is.
 pub fn read_document(
     path: &Path,
 ) -> Option<(kame_core::model::Document, kame_core::model::Metadata)> {
+    read(path, false).map(|read| (read.document, read.metadata))
+}
+
+/// What [`read_noting_newer`] read of a document.
+#[derive(Clone, Debug)]
+pub struct Read {
+    pub document: kame_core::model::Document,
+    pub metadata: kame_core::model::Metadata,
+    /// Whether what was read leaves out something a newer version of kame wrote: in the document's
+    /// file, or in its logs, whose revisions from a newer version can't be read here at all.
+    pub newer: bool,
+}
+
+/// [`read_document`], saying too whether it left out something a newer version of kame wrote.
+pub fn read_noting_newer(path: &Path) -> Option<Read> {
+    read(path, true)
+}
+
+/// Reads the document at `path`, asking whether it left something out only if `noting`, since
+/// that reads it again.
+fn read(path: &Path, noting: bool) -> Option<Read> {
     if path.is_file() {
         if kame_core::session::is_markdown_path(path) {
             let source = std::fs::read_to_string(path).ok()?;
@@ -162,14 +185,26 @@ pub fn read_document(
                 path.parent().unwrap_or(Path::new("")),
                 &stem,
             );
-            return Some((imported.document, imported.metadata));
+            return Some(Read {
+                document: imported.document,
+                metadata: imported.metadata,
+                newer: false,
+            });
         }
         let db = kame_core::storage::Db::open_read_only(path).ok()?;
-        let doc = db.load_document().ok()?;
+        let document = db.load_readable().ok()?;
         let metadata = db.load_metadata().ok()?.unwrap_or_default();
-        return Some((doc, metadata));
+        return Some(Read {
+            document,
+            metadata,
+            newer: noting && db.leaves_out_newer(),
+        });
     }
     let store = kame_sync::revlog::Store::load(&kame_sync::logs::log_folder(path)).ok()?;
     let head = store.heads().into_iter().next()?;
-    Some((store.document(&head), store.metadata(&head)))
+    Some(Read {
+        document: store.document(&head),
+        metadata: store.metadata(&head),
+        newer: store.holds_newer(),
+    })
 }

@@ -20,6 +20,16 @@ fn fits(text: &str, start: usize, end: usize) -> bool {
     start <= end && end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
 }
 
+/// Fits an anchor's `start..end` to `text`: each brought into it and down to a character boundary,
+/// and `end` up to `start` if that leaves it reversed. One that fits is left as it is.
+pub(crate) fn fit_range(text: &str, start: &mut usize, end: &mut usize) {
+    if fits(text, *start, *end) {
+        return;
+    }
+    *start = fitted(text, *start);
+    *end = fitted(text, *end).max(*start);
+}
+
 impl Block {
     /// Brings each span into the text, down to character boundaries, and drops one that's left
     /// empty or reversed. A span that already fits is left as it is.
@@ -63,14 +73,9 @@ impl Document {
             else {
                 continue;
             };
-            let Some(text) = texts.get(block_id) else {
-                continue;
-            };
-            if fits(text, *start, *end) {
-                continue;
+            if let Some(text) = texts.get(block_id) {
+                fit_range(text, start, end);
             }
-            *start = fitted(text, *start);
-            *end = fitted(text, *end).max(*start);
         }
     }
 }

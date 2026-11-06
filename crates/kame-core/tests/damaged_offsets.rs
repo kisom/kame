@@ -301,43 +301,59 @@ fn a_damaged_document_in_the_history_is_fitted_when_undone_or_redone_to() {
     assert_eq!(spans_of(session.document()), spans_fitted());
 }
 
-/// A history recorded against the damaged text, as the program that damaged it might have left.
-/// Undoing it brings back what it took, as it took it, and a step that no longer fits what was read
-/// is refused, with nothing changed.
+/// Writes a file whose head is `now` and whose log holds `step`, recorded against `was` by the
+/// program that damaged it. Undoing the step brings back what it took, fitted to the text it took
+/// it from, and after reading the file again redo still finds what it expects.
+fn undo_reopen_and_redo(name: &str, was: &Document, step: Op, now: &Document) {
+    let path = file(name);
+    Db::open(&path).unwrap().record_edit(now, &step).unwrap();
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(session.undo(), "{:?}", session.last_error);
+    let mut fitted = was.clone();
+    fitted.fit_offsets();
+    assert_eq!(session.document().blocks, fitted.blocks);
+    assert_eq!(anchors_of(session.document()), [(3, 8)]);
+    drop(session);
+
+    let mut session = Session::open(&path).unwrap();
+    assert_eq!(anchors_of(session.document()), [(3, 8)]);
+    assert!(session.redo(), "{:?}", session.last_error);
+    assert_eq!(session.document(), now);
+    assert!(session.insert("!"), "editing carries on");
+}
+
+/// The note a delete took started inside "é".
 #[test]
-fn a_history_recorded_against_damaged_text_is_undone_or_refused_without_panicking() {
-    let path = file("history");
+fn a_delete_of_damaged_text_undoes_and_redoes_after_reading_it_again() {
     let mut was = Document::new("Damaged");
-    was.blocks = vec![paragraph(CAFE, vec![span(0, 4, SpanStyle::Bold)])];
+    was.blocks = vec![paragraph(CAFE, Vec::new())];
     let note = annotation(AnnotationKind::Note, &was.blocks[0], 4, 8);
     was.annotations = vec![note.clone()];
     let block_id = was.blocks[0].id;
-    let delete = Op::delete_text(&was, block_id, 0, CAFE.len());
+    let delete = Op::delete_text(&was, block_id, 1, CAFE.len());
     let Op::DeleteText { removed, .. } = &delete else {
         unreachable!()
     };
     assert_eq!(removed, std::slice::from_ref(&note));
     let mut now = was.clone();
-    now.blocks[0].text.clear();
-    now.blocks[0].spans.clear();
+    now.blocks[0].text = "C".to_string();
     now.annotations.clear();
-    Db::open(&path).unwrap().record_edit(&now, &delete).unwrap();
+    undo_reopen_and_redo("deleted-text", &was, delete, &now);
+}
 
-    let mut session = Session::open(&path).unwrap();
-    assert!(session.undo(), "{:?}", session.last_error);
-    assert_eq!(session.document().blocks[0].text, CAFE);
-    assert_eq!(anchors_of(session.document()), [(4, 8)]);
-    drop(session);
-
-    // Read again, the note is fitted, and no longer the one the delete took.
-    let mut session = Session::open(&path).unwrap();
-    assert_eq!(anchors_of(session.document()), [(3, 8)]);
-    let before = session.document().clone();
-    assert!(!session.redo());
-    assert!(session
-        .last_error
-        .as_deref()
-        .is_some_and(|error| error.contains("could not redo")));
-    assert_eq!(session.document(), &before);
-    assert!(session.insert("!"), "editing carries on");
+/// The note on a deleted block started inside "é".
+#[test]
+fn a_deleted_damaged_block_undoes_and_redoes_after_reading_it_again() {
+    let mut was = Document::new("Damaged");
+    was.blocks = vec![
+        paragraph("Before.", Vec::new()),
+        paragraph(CAFE, Vec::new()),
+    ];
+    was.annotations = vec![annotation(AnnotationKind::Note, &was.blocks[1], 4, 8)];
+    let delete = Op::delete_block(&was, 1);
+    let mut now = was.clone();
+    now.blocks.truncate(1);
+    now.annotations.clear();
+    undo_reopen_and_redo("deleted-block", &was, delete, &now);
 }

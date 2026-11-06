@@ -1206,8 +1206,8 @@ mod tests {
         assert_eq!(log, vec![(seq1, first), (seq2, second)]);
     }
 
-    /// A block an op brings back is made to fit as the head is, and a delete's payload, given
-    /// against text that's gone, is kept as it was.
+    /// A block an op brings back is made to fit as the head is, and a delete's old spans, given
+    /// against text the op doesn't carry, are kept as they were.
     #[test]
     fn blocks_in_the_log_are_read_fitted() {
         use crate::model::{Block, BlockKind, Span, SpanStyle};
@@ -1262,6 +1262,72 @@ mod tests {
             log.into_iter().map(|(_, op)| op).collect::<Vec<_>>(),
             [read]
         );
+    }
+
+    /// Fitting is for what doesn't fit, so a log kame wrote reads back exactly as it was.
+    #[test]
+    fn a_log_that_fits_reads_back_unchanged() {
+        use crate::model::{Anchor, Annotation, AnnotationKind, Block, BlockKind, Document};
+        use crate::model::{Span, SpanStyle};
+        let span = |start, end| Span {
+            start,
+            end,
+            style: SpanStyle::Italic,
+        };
+        let block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "hi 🙂 café".to_string(),
+            spans: vec![span(3, 7), span(7, 7), span(8, 13)],
+        };
+        let note = |start, end| Annotation {
+            id: Uuid::new_v4(),
+            kind: AnnotationKind::Note,
+            anchor: Anchor::range(block.id, start, end),
+            body: "a note".to_string(),
+        };
+        let mut doc = Document::new("Fits");
+        doc.blocks.push(block.clone());
+        doc.annotations = vec![note(3, 7), note(13, 13)];
+        let log = vec![
+            Op::InsertBlock {
+                index: 1,
+                block: block.clone(),
+            },
+            Op::Batch {
+                ops: vec![
+                    Op::DeleteText {
+                        block_id: block.id,
+                        start: 3,
+                        end: 13,
+                        text: "🙂 café".to_string(),
+                        removed: vec![note(3, 7), note(13, 13)],
+                        old_spans: Some(block.spans.clone()),
+                        clipped: vec![note(0, 7)],
+                    },
+                    Op::DeleteBlock {
+                        index: 1,
+                        block: block.clone(),
+                        annotations: doc.annotations.clone(),
+                    },
+                ],
+            },
+            Op::ReplaceDocument {
+                old: Box::new(doc.clone()),
+                new: Box::new(doc),
+            },
+        ];
+        let mut db = Db::open_in_memory().unwrap();
+        for op in &log {
+            db.append_op(op).unwrap();
+        }
+        let read: Vec<Op> = db
+            .load_ops()
+            .unwrap()
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect();
+        assert_eq!(read, log);
     }
 
     #[test]

@@ -22,7 +22,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    shift_anchors, Anchor, Annotation, AnnotationId, Block, BlockId, BlockKind, Document, Span,
+    fit_range, shift_anchors, Anchor, Annotation, AnnotationId, Block, BlockId, BlockKind,
+    Document, Span,
 };
 
 /// A single invertible mutation of a [`Document`].
@@ -216,17 +217,66 @@ impl Op {
         }
     }
 
-    /// Makes the documents and blocks this carries fit their text, as a head read from a file is
-    /// ([`Document::fit_offsets`]), so that undo and redo bring back what fits. Anything given
-    /// against another block's text, as a delete's notes and old spans are, is left as it is: what
-    /// it fitted is gone, and a step it no longer matches is refused when it's applied.
+    /// Makes what this carries fit the text it carries, as a head read from a file is
+    /// ([`Document::fit_offsets`]), so that undo brings back what fits, and redo then finds what it
+    /// expects in a head that was fitted too: the documents, a block's spans, the notes on a deleted
+    /// block, and the notes a delete took, which lie in the text it took.
+    ///
+    /// Anything given against a block's text at some point in history that the op doesn't carry
+    /// is left as it is: a delete's old spans and the notes it cut short, the spans `SetSpans`
+    /// sets, and the note `AddAnnotation` and `RemoveAnnotation` carry.
     pub fn fit_offsets(&mut self) {
         match self {
             Op::ReplaceDocument { old, new } => {
                 old.fit_offsets();
                 new.fit_offsets();
             }
-            Op::InsertBlock { block, .. } | Op::DeleteBlock { block, .. } => block.fit_spans(),
+            Op::InsertBlock { block, .. } => block.fit_spans(),
+            Op::DeleteBlock {
+                block, annotations, ..
+            } => {
+                block.fit_spans();
+                for annotation in annotations {
+                    if let Anchor::Range {
+                        block_id,
+                        start,
+                        end,
+                    } = &mut annotation.anchor
+                    {
+                        if *block_id == block.id {
+                            fit_range(&block.text, start, end);
+                        }
+                    }
+                }
+            }
+            // A note the delete took lies within `start..end`, whose boundaries are those of `text`
+            // moved along by `start`, as the delete checks that both ends are boundaries.
+            Op::DeleteText {
+                block_id,
+                start: from,
+                end: to,
+                text,
+                removed,
+                ..
+            } => {
+                for annotation in removed {
+                    let Anchor::Range {
+                        block_id: anchored_in,
+                        start,
+                        end,
+                    } = &mut annotation.anchor
+                    else {
+                        continue;
+                    };
+                    let within = |offset: usize| *from <= offset && offset <= *to;
+                    if *anchored_in != *block_id || !within(*start) || !within(*end) {
+                        continue;
+                    }
+                    let (mut start_in, mut end_in) = (*start - *from, *end - *from);
+                    fit_range(text, &mut start_in, &mut end_in);
+                    (*start, *end) = (*from + start_in, *from + end_in);
+                }
+            }
             Op::Batch { ops } => ops.iter_mut().for_each(Op::fit_offsets),
             _ => {}
         }

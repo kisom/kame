@@ -437,7 +437,10 @@ impl Logged {
             return Ok(outcome);
         }
         self.store.refresh(&self.replica.folder)?;
-        let local = session.document().clone();
+        // Fitted as what the logs give back is, or an undo that brought back offsets as an older
+        // history recorded them would look like a merge.
+        let mut local = session.document().clone();
+        local.fit_offsets();
         let metadata = session.metadata.clone();
         if self
             .last

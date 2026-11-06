@@ -1344,3 +1344,40 @@ fn opening_a_damaged_document_already_in_the_logs_writes_no_revision() {
         "no log of this machine's"
     );
 }
+
+/// An undo that brings back a note as an older history recorded it, starting inside "é", isn't
+/// fitted until the document is next read. Writing it down isn't a merge, and nothing arrived.
+#[test]
+fn an_undo_that_brings_back_a_damaged_note_is_not_taken_for_a_merge() {
+    use kame_core::edit::Op;
+    use kame_core::model::{Anchor, Annotation, AnnotationKind, Document};
+    let root = common::test_folder("damaged-undo");
+    std::fs::write(root.join(MARKER), "").unwrap();
+    let path = root.join("essay.kame");
+    let mut doc = Document::new("Damaged");
+    doc.blocks[0].text = "Café au lait.".to_string();
+    let taken = Op::RemoveAnnotation {
+        annotation: Annotation {
+            id: uuid::Uuid::new_v4(),
+            kind: AnnotationKind::Note,
+            anchor: Anchor::range(doc.blocks[0].id, 4, 8),
+            body: "a note".to_string(),
+        },
+    };
+    Db::open(&path).unwrap().record_edit(&doc, &taken).unwrap();
+    let machine = Machine {
+        path: path.clone(),
+        device: "talos-aaaa".to_string(),
+    };
+    let mut session = Session::open(&path).unwrap();
+    let mut logged = machine.logged(&session);
+    logged.sync(&mut session, 1).unwrap();
+
+    assert!(session.undo());
+    let outcome = logged.sync(&mut session, 2).unwrap();
+
+    assert_eq!(outcome.written, 1);
+    assert!(!outcome.merged);
+    assert!(session.redo(), "the undo is still the last step");
+    assert_eq!(logged.sync(&mut session, 3).unwrap().written, 1);
+}

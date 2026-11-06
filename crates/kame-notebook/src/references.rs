@@ -374,9 +374,10 @@ pub fn rename(
         };
         let cites_old =
             |doc: &Document| cited(doc, &loaded, true).iter().any(|(key, _)| *key == old);
-        if !cites_old(&doc) && !versions_in_logs(&path).iter().any(cites_old) {
-            // What this build can't read of it may cite the old key.
-            if newer {
+        let in_logs = versions_in_logs(&path);
+        if !cites_old(&doc) && !in_logs.versions.iter().any(cites_old) {
+            // What this build can't read of it, in its file or in its logs, may cite the old key.
+            if newer || in_logs.newer {
                 renamed.failed.push((path, NEWER_MAY_CITE.to_string()));
             }
             continue;

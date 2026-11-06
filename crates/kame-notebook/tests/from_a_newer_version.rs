@@ -382,3 +382,118 @@ fn a_file_from_a_newer_version_that_replaced_this_one_is_not_merged() {
     drop(old);
     assert_eq!(everything_in(&path), arrived);
 }
+
+/// Another machine, on a newer kame, changes the document with `change` and syncs. Its revision
+/// holds a kind this build doesn't know, so this build can't read it, and the database here is one
+/// revision behind.
+fn a_newer_revision_arrives(path: &Path, change: impl FnOnce(&mut kame_core::model::Document)) {
+    let folder = log_folder(path);
+    let store = Store::load(&folder).unwrap();
+    let heads = store.heads();
+    let mut doc = store.document(&heads[0]);
+    change(&mut doc);
+    let replica = Replica {
+        folder: folder.clone(),
+        device: "talos-aaaa".to_string(),
+    };
+    replica.sync(&doc, Some(&heads[0]), 300).unwrap();
+    let log = folder.join("talos-aaaa.log");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let newer = text.replacen(r#""kind":"Paragraph""#, r#""kind":"Table""#, 1);
+    assert_ne!(newer, text);
+    std::fs::write(&log, newer).unwrap();
+    assert!(Store::load(&folder).unwrap().holds_newer());
+}
+
+/// A revision only the logs hold, from a newer kame, may link to a moving document, so the
+/// document is named, though nothing this build can read of it links there.
+#[test]
+fn a_move_names_a_document_whose_logs_hold_a_newer_revision() {
+    use kame_core::model::{Span, SpanStyle};
+    use kame_notebook::manage::{carry_out, plan_move};
+    let (root, nb) = logged_notebook("newer-logs-move");
+    let a = root.join("a.kame");
+    Session::open(&a).unwrap().insert("A.");
+    let c = root.join("c.kame");
+    synced(&c);
+    a_newer_revision_arrives(&c, |doc| {
+        let block = &mut doc.blocks[0];
+        let start = block.text.len();
+        block.text.push_str(" See a.");
+        block.spans.push(Span {
+            start: start + 5,
+            end: start + 6,
+            style: SpanStyle::DocumentLink {
+                target: "a.kame".to_string(),
+            },
+        });
+    });
+    let (file, logs) = (everything_in(&c), logs_of(&c));
+
+    let plan = plan_move(
+        &nb,
+        &a,
+        &root.join("b.kame"),
+        None,
+        Locks::NONE,
+        DEVICE,
+        400,
+    );
+    let report = carry_out(&nb, plan, None, Locks::NONE, DEVICE, 400).unwrap();
+    let left: Vec<(&str, &str)> = report
+        .left
+        .iter()
+        .map(|left| (left.relative.as_str(), left.why.as_str()))
+        .collect();
+    assert_eq!(
+        left,
+        [(
+            "c.kame",
+            "it was written by a newer version of kame, so it may link here in parts this kame \
+             can't read; update kame to change it"
+        )]
+    );
+    assert_eq!(everything_in(&c), file);
+    assert_eq!(logs_of(&c), logs);
+}
+
+/// The same for a citation that only a newer kame's revision in the logs holds.
+#[test]
+fn a_rename_names_a_document_whose_logs_hold_a_newer_revision() {
+    use kame_notebook::references::{rename, Open};
+    let (root, nb) = logged_notebook("newer-logs-rename");
+    std::fs::create_dir_all(root.join("references")).unwrap();
+    std::fs::write(
+        root.join("references/knuth1981.yaml"),
+        "kind: article\ntitle: Breaking paragraphs into lines\nauthors: [D. E. Knuth]\nyear: 1981\n",
+    )
+    .unwrap();
+    let c = root.join("c.kame");
+    synced(&c);
+    a_newer_revision_arrives(&c, |doc| doc.blocks[0].text.push_str(" As in [knuth1981]."));
+    let (file, logs) = (everything_in(&c), logs_of(&c));
+
+    let renamed = rename(
+        &nb,
+        "knuth1981",
+        "knuth81",
+        Open::Nothing,
+        Locks::NONE,
+        DEVICE,
+        400,
+    )
+    .unwrap();
+    assert!(renamed.rewritten.is_empty());
+    assert_eq!(
+        renamed.failed,
+        [(
+            c.clone(),
+            "it was written by a newer version of kame, so it may cite this in parts this kame \
+             can't read; update kame to change it"
+                .to_string()
+        )]
+    );
+    assert!(renamed.old_kept);
+    assert_eq!(everything_in(&c), file);
+    assert_eq!(logs_of(&c), logs);
+}

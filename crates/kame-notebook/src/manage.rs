@@ -372,23 +372,36 @@ fn logs_are_its_own(path: &Path) -> bool {
     !is_stranded_database(path) && logs_can_be_its_own(path, document.id, revision.as_deref())
 }
 
-/// The latest versions in a logged document's logs. There are none to read if it has no logs, or
-/// if what's at its log folder isn't its logs, since those say nothing about this document.
-pub(crate) fn versions_in_logs(path: &Path) -> Vec<Document> {
+/// What a logged document's logs hold, as far as this build can read them.
+#[derive(Default)]
+pub(crate) struct InLogs {
+    /// The latest versions in them.
+    pub(crate) versions: Vec<Document>,
+    /// Whether they hold revisions from a newer version of kame, which this build can't read, so
+    /// that what they hold may be more than `versions`.
+    pub(crate) newer: bool,
+}
+
+/// What's in a logged document's logs. There's nothing to read if it has no logs, or if what's at
+/// its log folder isn't its logs, since those say nothing about this document.
+pub(crate) fn versions_in_logs(path: &Path) -> InLogs {
     if logging_root(path).is_none() {
-        return Vec::new();
+        return InLogs::default();
     }
     if !logs_are_its_own(path) {
-        return Vec::new();
+        return InLogs::default();
     }
     let Ok(store) = Store::load(&log_folder(path)) else {
-        return Vec::new();
+        return InLogs::default();
     };
-    store
-        .heads()
-        .iter()
-        .map(|head| store.document(head))
-        .collect()
+    InLogs {
+        versions: store
+            .heads()
+            .iter()
+            .map(|head| store.document(head))
+            .collect(),
+        newer: store.holds_newer(),
+    }
 }
 
 /// A closed document, ready to change: built from its logs if it has only those, and with those
@@ -564,7 +577,11 @@ pub fn plan_move(
         let mut targets: BTreeSet<String> = links_leading_to(notebook, document, &entry.path, from)
             .into_iter()
             .collect();
-        let versions = versions_in_logs(&entry.path);
+        let InLogs {
+            versions,
+            newer: newer_in_logs,
+        } = versions_in_logs(&entry.path);
+        let newer = newer || newer_in_logs;
         for version in &versions {
             targets.extend(links_leading_to(notebook, version, &entry.path, from));
         }

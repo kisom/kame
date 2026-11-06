@@ -280,7 +280,10 @@ fn launch_open(path: &Path) -> Result<Launched, String> {
     } else {
         claim(path)?
     };
-    let _ = kame_sync::logs::build_from_logs(path);
+    // Refused as an Open is when it can't be built, since opening would then make an empty
+    // document at a name its logs have.
+    kame_sync::logs::build_from_logs(path)
+        .map_err(|err| format!("could not open {} — {err}", path.display()))?;
     let (session, note) = Session::open_any(path)
         .map_err(|err| format!("could not open {} — {err}", path.display()))?;
     // A file the open has just made had nothing to lock before. Another kame making it at the
@@ -6338,14 +6341,18 @@ impl KameApp {
         let found = match self.follow_in_notebook(path, heading) {
             Some(Some(found)) => found,
             Some(None) => return,
-            None => {
-                let found = kame_sync::logs::find_or_build(path, &self.session.link_base());
-                let Ok(Some(found)) = found else {
+            None => match kame_sync::logs::find_or_build(path, &self.session.link_base()) {
+                Ok(Some(found)) => found,
+                Ok(None) => {
                     self.notice = Some(format!("no document at {path}"));
                     return;
-                };
-                found
-            }
+                }
+                Err(err) => {
+                    self.notice = None;
+                    self.session.last_error = Some(format!("could not open {path} — {err}"));
+                    return;
+                }
+            },
         };
         let same = self
             .session
@@ -7449,6 +7456,54 @@ impl eframe::App for KameApp {
 #[cfg(test)]
 pub(crate) fn test_temp_dir() -> std::path::PathBuf {
     kame_test_dir::root().to_path_buf()
+}
+
+/// `essay.kame` in `root`, a folder with its logs turned on, with no database and only logs as a
+/// newer kame would have written them: every line holds a kind this build doesn't know, so none of
+/// their revisions is one it can use. Returns its path and what each log holds.
+#[cfg(test)]
+pub(crate) fn only_a_newer_kame_s_logs(root: &Path) -> (PathBuf, Vec<(PathBuf, String)>) {
+    use kame_sync::logs::{log_folder, Logged, MARKER};
+    std::fs::write(root.join(MARKER), "").unwrap();
+    let path = root.join("essay.kame");
+    let mut session = Session::open(&path).unwrap();
+    session.insert("Newer words.");
+    Logged::open(&session, "newer-aaaa")
+        .unwrap()
+        .sync(&mut session, 1)
+        .unwrap();
+    drop(session);
+    for side in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{side}", path.display()));
+    }
+    let mut logs = Vec::new();
+    for entry in std::fs::read_dir(log_folder(&path)).unwrap().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        let newer = text.replace(
+            "\"kind\":\"Paragraph\"",
+            "\"kind\":{\"Table\":{\"rows\":2}}",
+        );
+        assert_ne!(newer, text);
+        std::fs::write(entry.path(), &newer).unwrap();
+        logs.push((entry.path(), newer));
+    }
+    logs.sort();
+    (path, logs)
+}
+
+/// What each log of the document at `path` holds, as [`only_a_newer_kame_s_logs`] gives it.
+#[cfg(test)]
+pub(crate) fn logs_of(path: &Path) -> Vec<(PathBuf, String)> {
+    let mut logs: Vec<(PathBuf, String)> = std::fs::read_dir(kame_sync::logs::log_folder(path))
+        .unwrap()
+        .flatten()
+        .map(|entry| {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            (entry.path(), text)
+        })
+        .collect();
+    logs.sort();
+    logs
 }
 
 /// An app with no window, driven one frame at a time. It draws the page and runs what a frame
@@ -9546,6 +9601,42 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         drop(other);
         assert!(launch_open(&held).is_ok());
         assert_ne!(on_disk(&held), before, "an open does write it");
+    }
+
+    /// A document with only logs that a newer kame wrote, which this build can't use, isn't made
+    /// again as an empty document by a launch, an Open or a link, any of which would then send it
+    /// back to the newer machine as the latest of that name. Each says to update kame, and nothing
+    /// is written at its path or to its logs.
+    #[test]
+    fn a_document_with_only_a_newer_kame_s_logs_is_never_made_again_empty() {
+        let root = kame_test_dir::folder("app-newer-logs-only")
+            .canonicalize()
+            .unwrap();
+        let (path, logs) = only_a_newer_kame_s_logs(&root);
+        let says_to_update = |said: &str| {
+            assert!(said.contains("newer version of kame"), "{said}");
+            assert!(said.contains("until kame is updated"), "{said}");
+        };
+
+        let refused = launch_open(&path).map(|_| ()).unwrap_err();
+        says_to_update(&refused);
+        assert!(!path.exists(), "a launch made nothing");
+
+        let here = root.join("other.kame");
+        let mut session = open(&here);
+        session.insert("Here.");
+        let mut page = Headless::new(session);
+        page.app.open_document(path.display().to_string());
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        says_to_update(page.app.session.last_error.as_deref().unwrap_or_default());
+        assert!(!path.exists(), "an Open made nothing");
+
+        page.app.session.last_error = None;
+        page.app.follow_document_link("essay");
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        says_to_update(page.app.session.last_error.as_deref().unwrap_or_default());
+        assert!(!path.exists(), "a link made nothing");
+        assert_eq!(logs_of(&path), logs);
     }
 
     #[test]

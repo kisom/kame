@@ -263,7 +263,7 @@ Skip the sync if the session can't save, or if its file has been replaced. Somet
 
 ### 6.6 Building from logs
 
-A document with logs and no database can be built, even with no `.kame-logs` above it, since it would otherwise open blank where the logs have the text: write to `NAME.building` beside it, with the first head's document and metadata and `sync` set to that head, then remove any `-wal` and `-shm` and rename into place. If the logs hold no whole document, write nothing. Other heads merge once it's open.
+A document with logs and no database can be built, even with no `.kame-logs` above it, since it would otherwise open blank where the logs have the text: write to `NAME.building` beside it, with the first head's document and metadata and `sync` set to that head, then remove any `-wal` and `-shm` and rename into place. If the logs hold no whole document, write nothing. If none of their revisions is one this build can use and they hold something from a newer version (section 6.8), refuse, saying the logs hold only changes from a newer version of kame, so the document can't be opened until kame is updated. Every way the app opens a document refuses with that, a launch, Open and a link, in a notebook or not, and nothing is written at the name or to the logs: an empty document made there would be taken for this one, and its first sync would send it to the newer machine as the latest revision of that name, whose id and properties a merge would then take (section 6.4). Other heads merge once it's open.
 
 ### 6.7 Timing
 

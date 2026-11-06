@@ -787,6 +787,73 @@ fn logs_from_a_newer_version_do_not_count_as_stranded() {
     assert!(!stranded_there(&talos.path, &state));
 }
 
+/// Titan with no database, only talos's logs as a newer kame would have written them, every line
+/// holding a kind this build doesn't know, so that none of their revisions is one it can use.
+fn only_a_newer_kame_s_logs() -> (Machine, Vec<(PathBuf, String)>) {
+    let (talos, titan) = two_machines();
+    let mut session = talos.session();
+    let mut metadata = session.metadata.clone();
+    metadata.author = "Kyle".to_string();
+    metadata.publish = true;
+    session.set_metadata(metadata);
+    talos.sync(&mut session, 1);
+    drop(session);
+    std::fs::remove_file(&titan.path).unwrap();
+    let folder = log_folder(&titan.path);
+    std::fs::create_dir_all(&folder).unwrap();
+    for entry in std::fs::read_dir(log_folder(&talos.path))
+        .unwrap()
+        .flatten()
+    {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        let newer = text.replace(
+            "\"kind\":\"Paragraph\"",
+            "\"kind\":{\"Table\":{\"rows\":2}}",
+        );
+        std::fs::write(folder.join(entry.file_name()), newer).unwrap();
+    }
+    let store = Store::load(&folder).unwrap();
+    assert!(store.holds_newer());
+    assert!(store.heads().is_empty(), "no revision this build can use");
+    let logs = logs_in(&folder);
+    (titan, logs)
+}
+
+/// Every file in a log folder, with what it holds.
+fn logs_in(folder: &Path) -> Vec<(PathBuf, String)> {
+    let mut logs: Vec<(PathBuf, String)> = std::fs::read_dir(folder)
+        .unwrap()
+        .flatten()
+        .map(|entry| {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            (entry.path(), text)
+        })
+        .collect();
+    logs.sort();
+    logs
+}
+
+/// A document with only logs, none of which this build can use since a newer kame wrote them, isn't
+/// made again as an empty document, which its first sync would send back as the latest revision of
+/// a document of that name. Building or following a link to it is refused, saying to update kame,
+/// and nothing is written at its path or to its logs.
+#[test]
+fn a_document_with_only_a_newer_kame_s_logs_is_neither_built_nor_made_again() {
+    let (titan, logs) = only_a_newer_kame_s_logs();
+    let said = build_from_logs(&titan.path)
+        .expect_err("there's nothing here to build it from")
+        .to_string();
+    assert!(said.contains("newer version of kame"), "{said}");
+    assert!(said.contains("until kame is updated"), "{said}");
+    let linking = titan.path.with_file_name("other.kame");
+    let followed = find_or_build("essay", &linking).expect_err("a link to it is refused");
+    assert_eq!(followed.to_string(), said);
+    assert!(!titan.path.exists());
+    let building = titan.path.with_file_name("essay.kame.building");
+    assert!(!building.exists(), "nothing half-built is left");
+    assert_eq!(logs_in(&log_folder(&titan.path)), logs);
+}
+
 /// A newer machine's revision holding a block of a kind this build doesn't know. Its line can't be
 /// read here, so nothing of it is merged into the document, lossily or otherwise: what was typed
 /// here is written down, and the document goes read-only, as it was.

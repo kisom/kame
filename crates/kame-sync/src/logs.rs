@@ -750,10 +750,20 @@ fn database_named(path: &str, base: &Path) -> PathBuf {
     PathBuf::from(with_extension)
 }
 
+/// Why a document with only logs, none of whose revisions this build can use since a newer version
+/// of kame wrote them, can't be opened.
+pub const NEWER_LOGS: &str =
+    "its logs hold only changes from a newer version of kame, so it can't \
+     be opened here until kame is updated";
+
 /// Builds the database of a document that has logs and no file yet, as on a fresh machine,
 /// returning whether it did. Nothing is written unless the logs hold a whole document. This doesn't
 /// need the folder's marker: without it the document won't sync, and says so, but opening it would
 /// otherwise make a blank one where the logs have the text.
+///
+/// Logs holding no revision this build can use, and something from a newer version, are refused
+/// with [`NEWER_LOGS`]: the document is all in what this build can't read, and a blank one made at
+/// its name would be taken for it.
 pub fn build_from_logs(path: &Path) -> Result<bool> {
     if path.exists() {
         return Ok(false);
@@ -762,6 +772,9 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
     let heads = store.heads();
     // Several heads merge once the document is open, so any of them is a fair place to start.
     let Some(head) = heads.first() else {
+        if store.holds_newer() {
+            return Err(NEWER_LOGS.into());
+        }
         return Ok(false);
     };
     // Written beside the path and moved into place, so that a failure can't leave half a document.

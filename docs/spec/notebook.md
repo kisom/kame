@@ -306,7 +306,7 @@ A notebook doesn't need syncing, and syncing doesn't need a notebook. `.kame-log
 
 kame only syncs the open document. A closed one can be behind what another machine wrote until it's next opened, and search, the links list and `kame-site` all read what this machine has.
 
-A document with only logs is read from them, and its database is built when it's opened.
+A document with only logs is read from them, and its database is built when it's opened. One whose logs only a newer version of kame can read isn't opened, and kame says to update it ([merging, section 6.6](merging.md)).
 
 To delete a document in a logged folder, remove both `X.kame` and `.X.kame.sync/`. Removing only the database gets it rebuilt from its logs.
 

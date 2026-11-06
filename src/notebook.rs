@@ -2871,6 +2871,34 @@ mod tests {
         drop(held);
     }
 
+    /// In a notebook, a link to a document with only logs that a newer kame wrote, which this
+    /// build can't use, makes nothing and says to update kame.
+    #[test]
+    fn a_link_to_a_document_with_only_a_newer_kame_s_logs_makes_nothing() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-notebook-newer-logs-only")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let (path, logs) = crate::only_a_newer_kame_s_logs(&root);
+        let here = root.join("a.kame");
+        let mut session = Session::open(&here).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+        assert!(page.app.nb.notebook.is_some());
+
+        page.app.session.last_error = None;
+        page.app.follow_document_link("essay");
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        let said = page.app.session.last_error.clone().unwrap_or_default();
+        assert!(said.contains("newer version of kame"), "{said}");
+        assert!(said.contains("until kame is updated"), "{said}");
+        assert!(!path.exists());
+        assert_eq!(crate::logs_of(&path), logs);
+    }
+
     #[test]
     fn a_link_into_another_notebook_inside_opens_it_there_and_makes_nothing() {
         use kame_core::session::Session;

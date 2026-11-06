@@ -21,9 +21,6 @@ unless daily writing finds something that fails it.
 Releases now put different versions on different machines (Homebrew, the GitHub release and the AUR), so a file or a log
 written by one version has to be safe in another.
 
-- [ ] **Unknown kinds and styles make a document unreadable.** One block kind, style or annotation kind from a newer build
-  stops an older one opening the document. An older build should open it and keep what it doesn't know, or say exactly why
-  it can't. See `docs/spec/document-format.md`, section 8.
 - [ ] **Read-only tools don't check for newer fields.** A site build or a notebook's lists on an older machine leave out what
   they don't know, and say nothing. See `docs/spec/document-format.md`, section 8.
 - [ ] **A newer build's revisions stop an older one following.** Readers drop fields they don't know and recompute digests and

@@ -85,8 +85,9 @@ An `undo_cursor` that isn't a non-negative integer is corruption, and the file m
 ### 1.5 Opening a document
 
 - **No head row:** a new document. Write `Document::new` with the file's stem as its title.
-- **Head unreadable:** refuse to open. The file must not be overwritten.
-- **Anything from a newer version:** open read-only and say so (section 7). That means a field in the head or metadata that would be lost by saving, or an op of a kind this build doesn't know. Nothing may be written over the document, including by retrying, Save As, restoring a snapshot or changing metadata.
+- **Head unreadable:** refuse to open, unless all it holds that this build can't read is from a newer version (below). The file must not be overwritten.
+- **Anything from a newer version:** open read-only and say so (section 7). That means a field in the head or metadata that would be lost by saving, a kind, style or other value in the head that this build doesn't know, or an op of a kind it doesn't know. Nothing may be written over the document, including by retrying, Save As, restoring a snapshot or changing metadata, and missing metadata isn't filled in.
+- **A kind, style or value this build doesn't know:** show what it can of the head, which is only a view (section 7). A block of a kind it doesn't know shows as a paragraph, with the block's id, saying `A newer version of kame wrote this part. Update kame to see it.` A span with a style it doesn't know is left out, and so is an annotation of a kind it doesn't know. Any other value it doesn't know takes its field's default, where the field has one, and otherwise its block shows as one of a kind it doesn't know. The view has no history. Since writing it would lose what it leaves out, nothing at all is written from it: no snapshot, position or sync state either, no revision to the logs (merging, section 6.8), and Save As is refused.
 - **Ops otherwise unreadable:** the text is what matters, so open anyway and warn. In one transaction, keep the head, set the cursor to 0 and empty the log, since a later edit would otherwise fall out of step with it. So one damaged row, from any program, costs the whole history.
 - **No blocks in the head:** refuse to open.
 - **Metadata missing or unreadable:** use defaults, and try to save them: the title, unless it's `Untitled`, and the file's creation date as `created`. Unreadable metadata is therefore replaced.
@@ -181,7 +182,7 @@ A kind with no fields is written as a string. A kind with fields is written as a
 
 Verbatim text keeps its line feeds and spacing exactly, and a line break within it is a `\n`. Prose text normally holds no line feeds, because a pasted line break makes a new block, but importing a Markdown hard break can put a `\n` in one, so readers must accept it.
 
-An unknown kind fails the whole document, because Rust's reader rejects it. See section 8.
+A kind this build doesn't know opens the document read-only, with that block shown as a paragraph saying a newer version wrote it (section 1.5).
 
 ### 2.3 Spans
 
@@ -411,14 +412,15 @@ A change that older readers could misread must raise `user_version`. Older build
 
 An older build opening a file with a new field goes read-only until it's updated (section 1.5), which is how a new optional field stays safe. To tell, compare the JSON as written with the JSON after reading and writing it again. A field missing from what was written is only one added since, and doesn't count.
 
+A new kind of block, style, kind of annotation, or value of any other field of that sort is safe the same way: an older build goes read-only, showing what it can (section 1.5). It tells one from damage by reading the head as plain JSON. A value it reports as an unknown variant is newer: the field holding it is taken out, so that it takes its default, and where the field is required, the block, span or annotation holding it is one this build doesn't know. Anything else that stops it reading, such as JSON that doesn't parse, a value of the wrong type or a missing required field, anywhere in the head, is damage, and the document doesn't open. An anchor in neither form counts as damage too, since it can't be told from it. kame 0.1.2 and earlier refuse such a file as damaged, and write nothing.
+
 A new optional field must be left out when it holds its default. Revision logs hash these bytes, and [merging, section 9](merging.md) sets out what happens otherwise.
 
 ## 8. Known weak points
 
 These describe the code as it stands, and aren't rules to copy.
 
-- **Read-only tools don't check for newer fields.** A site build or a notebook's lists read such a document and leave out what they don't know, so a site built on an older machine can lack a newer feature.
-- **Unknown kinds and styles aren't skipped.** One unknown block kind, style or annotation kind makes the head unreadable, so the document won't open, with a message saying it may be from a different version. A new variant in the head should raise `user_version`.
+- **Read-only tools don't check for newer fields.** A site build or a notebook's lists read such a document and leave out what they don't know, so a site built on an older machine can lack a newer feature. One holding a kind, style or value they don't know they can't read at all: a site build reports it as unreadable, and a notebook reads neither its text nor its properties.
 - **A head and its log damaged differently can disagree.** Fitting makes a head and the steps in its log agree where they hold the same damaged offsets, as when the program that damaged the file also wrote its history. It doesn't for a repeated block id: the head's repeat gets an id of its own, but a step that holds the block, as the `InsertBlock` that made the repeat does, keeps the old one, so undoing or redoing that step is refused, with nothing changed. Where they hold different damage, as with a head edited by hand under a history kame wrote, a step whose payload no longer matches what was read is refused at undo or redo, with nothing changed.
 - **Builds that do and don't fit offsets merge a damaged revision differently.** A merge revision is the same whichever machine writes it only if both merge the same documents. Where a revision in the logs holds offsets that don't fit, an older build merges it as it is and this one fitted, so the two write different merges of the same parents, which then merge again, and their checkpoints can differ. It settles once every machine fits offsets. No revision already written changes.
 - **The other rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.

@@ -9544,6 +9544,62 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(on_disk(&path), before);
     }
 
+    /// A document holding a kind of block only a newer kame knows opens read-only and says so, with
+    /// that block saying a newer version wrote it.
+    #[test]
+    fn a_document_from_a_newer_version_opens_read_only_and_says_so() {
+        let path = scratch_dir("newer").join("doc.kame");
+        let mut doc = model::Document::new("doc");
+        doc.blocks[0].text = "Only a newer kame shows this.".to_string();
+        storage::Db::open(&path)
+            .unwrap()
+            .save_document(&doc)
+            .unwrap();
+        // As a newer build would write it. SQLite keeps the head as text, so a kind of the same
+        // length can take the place of the one there in the file itself.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (from, to) = (br#""kind":"Paragraph""#, br#""kind":"Pullquote""#);
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .unwrap();
+        bytes[at..at + from.len()].copy_from_slice(to);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut page = Headless::new(open(&path));
+        assert!(page.app.session.lossy);
+        // The status row, where the window says it.
+        for _ in 0..2 {
+            page.time += 0.02;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(page.width, page.height),
+                )),
+                time: Some(page.time),
+                ..Default::default()
+            };
+            let app = &mut page.app;
+            let mut output = page.ctx.run_ui(input, |ui| app.show_status(ui));
+            page.drawn = output.platform_output.accesskit_update.take();
+            output.drop_without_applying_deltas();
+        }
+        assert!(page.sees(
+            "this document has changes from a newer version of kame, so it's read-only here \
+             until kame is updated"
+        ));
+        assert_eq!(
+            page.app.session.document().blocks[0].text,
+            storage::NEWER_PART
+        );
+        drop(page);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "and nothing was written"
+        );
+    }
+
     #[test]
     fn the_prompt_for_a_file_another_kame_took_says_so() {
         let path = written_document("doc.kame");

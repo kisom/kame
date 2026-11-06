@@ -13,6 +13,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::view;
 use crate::edit::Op;
 use crate::model::Document;
 
@@ -476,12 +477,13 @@ impl Db {
     }
 
     /// Whether this file holds something from a newer version of kame: a field this build would
-    /// drop by saving, or a step of history it can't read.
+    /// drop by saving, a kind, style or other value it doesn't know in the head, or a step of
+    /// history it can't read.
     pub fn holds_newer(&self) -> bool {
         let row =
             |sql: &str| -> Option<String> { self.conn.query_row(sql, [], |row| row.get(0)).ok() };
         if row("SELECT json FROM documents WHERE id = 1")
-            .is_some_and(|json| drops_something::<Document>(&json))
+            .is_some_and(|json| drops_something::<Document>(&json) || view::is_newer(&json))
             || row("SELECT json FROM metadata WHERE id = 1")
                 .is_some_and(|json| drops_something::<crate::model::Metadata>(&json))
         {
@@ -521,6 +523,23 @@ impl Db {
         let mut doc: Document = serde_json::from_str(&json)?;
         doc.fit();
         Ok(doc)
+    }
+
+    /// What this build can show of a head it can't read only because it holds something from a
+    /// newer version of kame, made to fit as the head is. `None` when there's no such head: one
+    /// this build reads whole, a damaged one, or none. It leaves out what it doesn't know, so it's
+    /// never to be written back.
+    pub fn load_view(&self) -> Result<Option<Document>, DbError> {
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(json.and_then(|json| view::view_of(&json)).map(|mut doc| {
+            doc.fit();
+            doc
+        }))
     }
 
     /// Writes the document in a single transaction, replacing any prior one.

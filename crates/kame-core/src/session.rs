@@ -67,6 +67,11 @@ pub struct Session {
     /// Whether this document holds something from a newer version of kame. Saving would lose it,
     /// so nothing is saved until kame is updated.
     pub newer: bool,
+    /// Whether what's on the screen leaves out something in the file that this build doesn't know,
+    /// a kind of block, a style or a kind of note, so that it's only a view of the document.
+    /// Implies `newer`. Nothing at all is written from such a session, not even a snapshot or
+    /// where the author is, since what it would write could stand for what it left out.
+    pub lossy: bool,
 }
 
 /// Where SQLite keeps the log of writes to the database at `path`.
@@ -110,6 +115,7 @@ impl Session {
         let mut reset_error: Option<DbError> = None;
         let mut fresh = false;
         let newer = db.holds_newer();
+        let mut lossy = false;
         let editor = match db.load_document() {
             Ok(document) => match db.load_ops() {
                 Ok(ops) => {
@@ -154,6 +160,15 @@ impl Session {
                 db.save_document(&document)?;
                 Editor::new(document)
             }
+            // A kind, style or other value only a newer version knows. What it can show of it is
+            // only for reading, and without history, which was of the document as it is.
+            Err(DbError::Json(err)) => match db.load_view() {
+                Ok(Some(view)) if newer => {
+                    lossy = true;
+                    Editor::new(view)
+                }
+                _ => return Err(Box::new(open_error(path, DbError::Json(err)))),
+            },
             Err(err) => return Err(Box::new(open_error(path, err))),
         };
 
@@ -194,10 +209,13 @@ impl Session {
         let metadata = match db.load_metadata() {
             Ok(Some(metadata)) => metadata,
             // Missing or unreadable: the text is what matters, so fall back, and
-            // keep the defaults for next time if the file will take them.
+            // keep the defaults for next time if the file will take them, and is this build's
+            // to write.
             _ => {
                 let metadata = default_metadata(&editor.document().title, path);
-                let _ = db.save_metadata(&metadata);
+                if !newer {
+                    let _ = db.save_metadata(&metadata);
+                }
                 metadata
             }
         };
@@ -219,6 +237,7 @@ impl Session {
             replaced: false,
             held_elsewhere: false,
             newer: false,
+            lossy,
         };
         if newer {
             session.mark_newer();
@@ -279,6 +298,7 @@ impl Session {
             replaced: false,
             held_elsewhere: false,
             newer: false,
+            lossy: false,
         })
     }
 
@@ -318,6 +338,7 @@ impl Session {
             replaced: false,
             held_elsewhere: false,
             newer: false,
+            lossy: false,
         })
     }
 
@@ -398,6 +419,7 @@ impl Session {
             replaced: false,
             held_elsewhere: false,
             newer: false,
+            lossy: false,
         };
         Ok((session, note))
     }
@@ -477,10 +499,11 @@ impl Session {
             .map(Path::to_path_buf)
     }
 
-    /// Records where the author is, for a document with a file to keep it in. Losing
-    /// this costs nothing but the place, so a failed write is not reported.
+    /// Records where the author is, for a document with a file to keep it in, unless it's only a
+    /// view of a newer version's ([`Session::lossy`]). Losing this costs nothing but the place, so
+    /// a failed write is not reported.
     pub fn save_position(&mut self, scroll: f32) {
-        if self.path.is_some() {
+        if self.path.is_some() && !self.lossy {
             let _ = self.db.save_position(&storage::Position {
                 block_id: self.caret.block_id,
                 offset: self.caret.offset,
@@ -497,13 +520,17 @@ impl Session {
     /// Records this for a sync tool. Losing it only costs that tool some work, so a failed write
     /// is not reported.
     pub fn set_sync_state(&mut self, state: &str) {
-        let _ = self.db.save_sync_state(state);
+        if !self.lossy {
+            let _ = self.db.save_sync_state(state);
+        }
     }
 
     /// Records what a sync tool got to and where, together. A failed write isn't reported, as with
     /// the state, and leaves both as they were.
     pub fn set_sync(&mut self, state: &str, place: &str) {
-        let _ = self.db.save_sync(state, place);
+        if !self.lossy {
+            let _ = self.db.save_sync(state, place);
+        }
     }
 
     /// Where a sync tool last synced this document, in its own terms.
@@ -513,7 +540,9 @@ impl Session {
 
     /// Records this for a sync tool. A failed write isn't reported, as with the state.
     pub fn set_sync_place(&mut self, place: &str) {
-        let _ = self.db.save_sync_place(place);
+        if !self.lossy {
+            let _ = self.db.save_sync_place(place);
+        }
     }
 
     /// What the first save suggests calling the file: the source's name for an
@@ -822,8 +851,19 @@ impl Session {
     ///
     /// The snapshot is the inverse of [`Session::restore`]: it captures the
     /// text exactly as it stands, independent of the head document and the op
-    /// log, so undo and redo cannot move it.
+    /// log, so undo and redo cannot move it. One showing only what this build can of a newer
+    /// version's document ([`Session::lossy`]) takes none.
     pub fn snapshot(&mut self, label: Option<&str>) -> Option<i64> {
+        // What's on the screen leaves out what this build doesn't know, so restoring it would lose
+        // that.
+        if self.lossy {
+            self.last_error = Some(
+                "snapshot failed — this document has changes from a newer version of kame, so \
+                 it's read-only here until kame is updated"
+                    .to_string(),
+            );
+            return None;
+        }
         let label = label.map(str::trim).filter(|label| !label.is_empty());
         match self.db.create_snapshot(self.editor.document(), label) {
             Ok(id) => {

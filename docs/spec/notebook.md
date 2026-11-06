@@ -127,7 +127,9 @@ Reading a document for a list, a search or a site must change nothing:
 
 A document that can't be read stays in the list under its file name. Search and the links list skip it with no message, and publishing skips it with a warning.
 
-Search reads what's on the screen in place of the file for the open document, since that can be ahead of the disk. The links list reads files only, and is worked out when a document opens, not as it's edited.
+A document holding something only a newer version of kame knows is read as far as this build can, and what it doesn't know is left out, with nothing in its place ([document format, section 7](document-format.md)). Lists, search and the links list say nothing of it, as the document says so itself when it's opened. Publishing warns (section 7.1).
+
+Search reads what's on the screen in place of the file for the open document, since that can be ahead of the disk, but for the paragraphs standing for what a newer version wrote, which aren't the document's words. The links list reads files only, and is worked out when a document opens, not as it's edited.
 
 Opening a Markdown document is an import. The result has no file of its own and the original is never written. The first save asks where the `.kame` file goes, and until then links resolve against the Markdown file.
 
@@ -222,6 +224,7 @@ Each notebook is its own site, built by `kame-site`. A folder holding both `note
 | `Notebook.kame` in the root | Always publishes, as the home page |
 | Any other document | Only if `metadata.publish` is true. In Markdown, that's `publish: true` in the front matter |
 | A document that can't be read | Not published, with a warning, because a marked one can't be told from an unmarked one |
+| A marked document from a newer kame | What this build can read of it publishes, with nothing in place of the rest, and a warning: `"NAME": it was written by a newer version of kame, so it may be missing parts; update kame to publish all of it` |
 | Everything under `static/` | Publishes at `/static/`, whether or not anything links to it, except hidden files and conflict copies |
 | An image under `images/` | Publishes at `/static/images/…` only if a published document shows it |
 | Any other file in the notebook that a published image block shows | Publishes beside that page, including from `papers/` or `static/` |

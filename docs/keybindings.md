@@ -345,7 +345,8 @@ If a sync tool leaves a conflict copy beside the open document, the status row s
 Merge Conflict Copies merges it. Sentences both versions changed keep the words on screen, with the
 other version in a note. A merge is one undo, after a snapshot, and the copy stays beside the document
 with `.merged` added to its name. A copy another kame window has open isn't merged, and kame says "could not merge — NAME is open in
-another kame window". Nor is a copy written by a newer version of kame, which stays as it is, and kame says to update kame to merge it.
+another kame window". Nor is a copy written by a newer version of kame, which stays as it is, and kame says to update kame to merge it, nor a copy into a
+document from a newer version.
 
 If the file itself is replaced while open, kame stops saving to it and asks whether to merge the two,
 save this version under a new name, or open the one on disk.
@@ -389,7 +390,8 @@ A rename or move rewrites the links to the document in every other document, inc
 revision logs, and fixes its own relative links and images if it changed folders. A title that was only the file's name follows the new
 name. `.md` and `.markdown` documents are imported rather than edited, so links in them are left as they are. Those, and any other document
 that couldn't be changed, are named in a report when it's done. A document written by a newer version of kame is never changed, and is
-named, with "it was written by a newer version of kame; update kame to change it", even if nothing this kame can read of it links there. If another kame window has the document open, a conflict or retired copy
+named, with "it was written by a newer version of kame; update kame to change it", or, if nothing this kame can read of it links there,
+"…so it may link here in parts this kame can't read; update kame to change it". So is one whose logs hold a newer version's revision. If another kame window has the document open, a conflict or retired copy
 of it, or any document whose links it would change, the dialog says "NAME is open in another kame window", and no file moves and no link is
 rewritten. A copy of it open in this window is refused the same way, as "NAME is open in this window".
 
@@ -409,7 +411,7 @@ another machine the stale one is dealt with once kame has seen it stranded for 1
 If the document was deleted, or has already been opened there, the old database is retired. It's only ever renamed, to `.X.retired.kame`
 beside where it was (`.X.retired-2.kame` if that's taken), and a notice says where and whether it holds words that never synced. Those files
 start with a dot, so the browser doesn't show them. `ls -a` finds them, and File > Open Path opens one. A database open in this window or
-another kame window is left until it has been closed.
+another kame window is left until it has been closed. One written by a newer version of kame is left as it is, for an updated kame.
 
 If a log that could be its home can't all be read, a document with nowhere to go isn't retired, and a notice says which logs are in the way.
 

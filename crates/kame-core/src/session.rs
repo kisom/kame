@@ -659,6 +659,20 @@ impl Session {
         root: Option<&Path>,
         there: impl Fn(&str, &Path) -> bool,
     ) -> AppResult<()> {
+        self.save_as_holding(path, root, there, |_| Ok(()))
+    }
+
+    /// [`Session::save_as`], showing `hold` the finished copy just before it's renamed into place,
+    /// as the file it will be, so that the caller can take a lock on it before anyone can open it
+    /// at `path`. If `hold` refuses, nothing is saved and the copy goes. A Save As onto the
+    /// document's own file makes no copy, and doesn't call it.
+    pub fn save_as_holding(
+        &mut self,
+        path: &Path,
+        root: Option<&Path>,
+        there: impl Fn(&str, &Path) -> bool,
+        hold: impl FnOnce(&Path) -> AppResult<()>,
+    ) -> AppResult<()> {
         if self.newer {
             return Err("this document has changes from a newer version of kame".into());
         }
@@ -736,6 +750,7 @@ impl Session {
             });
             copy.close()?;
             std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(mode))?;
+            hold(&partial)?;
             for suffix in ["-wal", "-shm"] {
                 let mut stale = path.as_os_str().to_owned();
                 stale.push(suffix);
@@ -973,6 +988,16 @@ impl Session {
             "{name} changed on disk, so nothing more is being saved to it"
         ));
         true
+    }
+
+    /// Stops writing to this document's file, because another kame has it open, as when that one
+    /// took a file this one had only just made. It's as if the file had been replaced: the words
+    /// stay in memory, a retry or a Save As onto that file is refused, and a Save As to another
+    /// name is the way out.
+    pub fn mark_held_elsewhere(&mut self, message: String) {
+        self.replaced = true;
+        self.save_failed = true;
+        self.last_error = Some(message);
     }
 
     /// A failed write makes the session read-only: the in-memory history can
@@ -10287,6 +10312,79 @@ mod tests {
         Session::open(path).unwrap().document().blocks[0]
             .text
             .clone()
+    }
+
+    #[test]
+    fn a_document_another_kame_holds_is_written_no_more() {
+        let dir = guard_dir();
+        let path = dir.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("mine");
+        session.mark_held_elsewhere("a.kame is open in another kame window".to_string());
+        assert!(session.replaced && session.save_failed);
+        assert_eq!(
+            session.last_error.as_deref(),
+            Some("a.kame is open in another kame window")
+        );
+        session.insert(" more");
+        assert!(!session.retry_or_dismiss());
+        assert!(session.save_as(&path, None, |_, _| false).is_err());
+        assert_eq!(text_in(&path), "mine");
+        // Saving elsewhere is the way out, with what's in memory.
+        let elsewhere = dir.join("b.kame");
+        session.save_as(&elsewhere, None, |_, _| false).unwrap();
+        assert!(!session.replaced && !session.save_failed);
+        let words = session.document().blocks[0].text.clone();
+        drop(session);
+        assert_eq!(text_in(&elsewhere), words);
+        assert_eq!(text_in(&path), "mine");
+    }
+
+    #[test]
+    fn a_save_as_shows_its_copy_before_it_is_renamed_into_place() {
+        let dir = guard_dir();
+        let mut session = Session::open(&dir.join("a.kame")).unwrap();
+        session.insert("mine");
+        let target = dir.join("b.kame");
+        let mut shown = None;
+        session
+            .save_as_holding(
+                &target,
+                None,
+                |_, _| false,
+                |copy| {
+                    assert!(!target.exists());
+                    shown = file_identity(copy);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(shown.is_some());
+        assert_eq!(file_identity(&target), shown, "the copy is the file");
+    }
+
+    #[test]
+    fn a_save_as_its_copy_refuses_leaves_nothing() {
+        let dir = guard_dir();
+        let mut session = Session::open(&dir.join("a.kame")).unwrap();
+        session.insert("mine");
+        let target = dir.join("b.kame");
+        another_copy(&target, "theirs");
+        let refused = session.save_as_holding(
+            &target,
+            None,
+            |_, _| false,
+            |_| Err("someone else has it".into()),
+        );
+        assert_eq!(refused.unwrap_err().to_string(), "someone else has it");
+        assert_eq!(text_in(&target), "theirs");
+        assert_eq!(session.path(), Some(dir.join("a.kame").as_path()));
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".saving-"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[test]

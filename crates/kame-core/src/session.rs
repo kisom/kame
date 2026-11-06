@@ -1678,6 +1678,10 @@ impl Session {
             line += words.matches('\n').count();
             text.push_str(words);
         }
+        // All of it stood for what a newer version wrote, so nothing was taken.
+        if !begun {
+            return None;
+        }
         let clipped = Clipped {
             text,
             spans,

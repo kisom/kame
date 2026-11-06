@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use kame_core::edit::Cursor;
 use kame_core::model::{
     Anchor, Annotation, AnnotationKind, Block, BlockKind, Document, ImageAlign, Metadata, Span,
     SpanStyle,
@@ -335,6 +336,29 @@ fn an_export_or_a_copy_leaves_out_what_a_newer_version_wrote() {
     assert!(clipped.left_out);
     drop(session);
     nothing_is_written(&path);
+}
+
+/// A selection lying wholly in what stands for a newer version's block takes nothing, so a copy of
+/// it leaves the clipboard as it was.
+#[test]
+fn a_copy_of_only_what_a_newer_version_wrote_is_nothing() {
+    let (path, ids) = written_by_a_newer_build("newer-copy-placeholder", |head| {
+        head.replacen(
+            r#""kind":"Paragraph","text":"The last words.""#,
+            r#""kind":"Table","text":"The last words.""#,
+            1,
+        )
+    });
+    let mut session = Session::open(&path).unwrap();
+    session.set_caret(Cursor {
+        block_id: ids.last,
+        offset: 2,
+    });
+    session.select_to(Cursor {
+        block_id: ids.last,
+        offset: 10,
+    });
+    assert!(session.clipped().is_none());
 }
 
 /// Notes on a block a newer version wrote go with it, out of every export.

@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{bare_link_ranges, AnnotationKind, Block, BlockKind, Document, Span, SpanStyle};
 
+pub mod form;
 mod ieee;
 
 pub use ieee::{entry, plain, Run, RunStyle};

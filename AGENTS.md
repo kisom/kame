@@ -50,7 +50,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `edit/` — `Op` log + `Editor` (undo/redo, commands)
 - `export/` — `to_markdown`, `to_html` (deterministic), and `html_body` with `Publish` hooks for a tool that knows where links and images end up
 - `links.rs` — where a link between documents leads, and how a document keeps an image's path
-- `references/` — a notebook's sources: the `Reference` type, key rules, finding `[key]` citations, IEEE formatting and the text of the References section, which exports take as input
+- `references/` — a notebook's sources: the `Reference` type, key rules, finding `[key]` citations, IEEE formatting and the text of the References section, which exports take as input, and `form`, what the windows for a new reference and for editing one hold
 - `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
 - `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk
 - `text.rs` — moving through text by character and word

@@ -282,7 +282,8 @@ pub struct MoveReport {
     pub left: Vec<Left>,
 }
 
-const NEWER: &str = "it was written by a newer version of kame; update kame to change it";
+/// What's said of a document from a newer version of kame that a move or rename would change.
+pub const NEWER: &str = "it was written by a newer version of kame; update kame to change it";
 /// What's said of a document from a newer version whose links, as far as this build can read
 /// them, don't change. What it can't read may hold some that would.
 const NEWER_MAY_LINK: &str = "it was written by a newer version of kame, so it may link here in \
@@ -845,6 +846,7 @@ pub fn carry_out(
             .as_deref_mut()
             .filter(|session| session.path().is_some_and(|open| same_file(open, &path)));
         let result = match on_screen {
+            Some(session) if session.newer => Err(NEWER.to_string()),
             Some(session) => rewrite(session),
             None => edit_closed(&path, device, now, rewrite),
         };

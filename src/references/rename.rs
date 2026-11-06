@@ -169,7 +169,17 @@ impl KameApp {
     fn rename_in_open_document(&mut self, old: &str, new: &str) -> Result<bool, String> {
         let mut only_old = References::new();
         only_old.insert(old.to_string(), Reference::default());
-        if cited(self.session.document(), &only_old, true).is_empty() {
+        let cites = !cited(self.session.document(), &only_old, true).is_empty();
+        // Said as for a closed one, and what this kame can't read of it may cite the key.
+        if self.session.newer {
+            let why = if cites {
+                kame_notebook::manage::NEWER
+            } else {
+                kame_notebook::references::NEWER_MAY_CITE
+            };
+            return Err(why.to_string());
+        }
+        if !cites {
             return Ok(false);
         }
         // The rename can be in memory with nothing written, which returns no count.
@@ -238,6 +248,36 @@ mod tests {
         ask_to_rename(page, new);
         press_key(page, egui::Key::Enter);
         wait_for_rename(page);
+    }
+
+    /// The open document from a newer kame isn't renamed in, on the screen or on disk, and is named
+    /// as a closed one is, whether or not what this kame can read of it cites the key.
+    #[test]
+    fn renaming_leaves_an_open_document_from_a_newer_kame_as_it_is_and_says_why() {
+        for (text, why) in [
+            (
+                "see [knuth1981]",
+                "it was written by a newer version of kame; update kame to change it",
+            ),
+            (
+                "nothing cited",
+                "it was written by a newer version of kame, so it may cite this in parts this \
+                 kame can't read; update kame to change it",
+            ),
+        ] {
+            let mut page = page_in_notebook(text);
+            let path = page.app.session.path().unwrap().to_path_buf();
+            page.app.session.mark_newer();
+            let bytes = std::fs::read(&path).unwrap();
+            open_list(&mut page);
+
+            rename_only_key(&mut page, "plass1981");
+
+            assert_eq!(only_text(&page), text, "the screen is as it was");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert!(reference_file(&page, "knuth1981").exists(), "{text}");
+            assert!(page.sees(&format!("doc.kame: {why}")), "{text}");
+        }
     }
 
     #[test]

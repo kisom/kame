@@ -251,7 +251,8 @@ pub fn citing(notebook: &Notebook) -> BTreeMap<String, Vec<PathBuf>> {
 
 /// What a rename says of a document from a newer version of kame that doesn't cite the old key as
 /// far as this build can read it.
-const NEWER_MAY_CITE: &str = "it was written by a newer version of kame, so it may cite this in \
+pub const NEWER_MAY_CITE: &str =
+    "it was written by a newer version of kame, so it may cite this in \
      parts this kame can't read; update kame to change it";
 
 /// What a rename did to the documents that cite the old key.

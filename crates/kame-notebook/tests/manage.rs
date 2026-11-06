@@ -2186,3 +2186,37 @@ fn a_retired_copy_moves_with_a_document_from_a_newer_kame() {
     assert!(!root.join(".a.retired.kame").exists());
     assert_eq!(std::fs::read(root.join(".b.retired.kame")).unwrap(), copy);
 }
+
+/// The open document, from a newer kame, whose links would change is left with the same reason as
+/// a closed one.
+#[test]
+fn an_open_document_from_a_newer_kame_is_named_as_a_closed_one_is() {
+    let (root, nb) = plain_notebook("move-open-newer");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    make_newer(&linker);
+    let bytes = std::fs::read(&linker).unwrap();
+    let mut session = Session::open(&linker).unwrap();
+    assert!(session.newer);
+    let plan = plan_move(
+        &nb,
+        &a,
+        &root.join("b.kame"),
+        Some((linker.as_path(), session.document())),
+        Locks::NONE,
+        DEVICE,
+        NOW,
+    );
+    let report = carry_out(&nb, plan, Some(&mut session), Locks::NONE, DEVICE, NOW).unwrap();
+    let left: Vec<(&str, &str)> = report
+        .left
+        .iter()
+        .map(|left| (left.relative.as_str(), left.why.as_str()))
+        .collect();
+    assert_eq!(left, [("linker.kame", NEWER_LEFT)]);
+    drop(session);
+    assert_eq!(std::fs::read(&linker).unwrap(), bytes);
+}

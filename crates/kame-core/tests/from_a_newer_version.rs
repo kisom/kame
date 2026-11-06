@@ -337,6 +337,46 @@ fn an_export_or_a_copy_leaves_out_what_a_newer_version_wrote() {
     nothing_is_written(&path);
 }
 
+/// Notes on a block a newer version wrote go with it, out of every export.
+#[test]
+fn an_export_leaves_out_the_notes_on_what_a_newer_version_wrote() {
+    let (path, ids) = written_by_a_newer_build("newer-export-notes", |head| {
+        head.replacen(
+            r#""kind":"Paragraph","text":"The last words.""#,
+            r#""kind":"Table","text":"The last words.""#,
+            1,
+        )
+    });
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let mut head: serde_json::Value = serde_json::from_str(&head_of(&path)).unwrap();
+    let last = ids.last.to_string();
+    head["annotations"].as_array_mut().unwrap().extend([
+        serde_json::json!({"id": Uuid::new_v4(), "kind": "Footnote",
+            "anchor": {"block_id": last, "start": 0, "end": 3}, "body": "A footnote on the table."}),
+        serde_json::json!({"id": Uuid::new_v4(), "kind": "Marginal",
+            "anchor": last, "body": "A marginal on the table."}),
+    ]);
+    connection
+        .execute(
+            "UPDATE documents SET json = ?1 WHERE id = 1",
+            [head.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let mut session = Session::open(&path).unwrap();
+    assert!(session.lossy);
+    let folder = path.parent().unwrap();
+    let (markdown, html) = (folder.join("out.md"), folder.join("out.html"));
+    session
+        .export_markdown_to(&markdown, &References::new())
+        .unwrap();
+    session.export_html_to(&html, &References::new()).unwrap();
+    for written in [&markdown, &html] {
+        let written = std::fs::read_to_string(written).unwrap();
+        assert!(!written.contains("on the table"), "{written}");
+    }
+}
+
 #[test]
 fn several_things_this_build_does_not_know_are_all_shown_as_it_can() {
     let (path, ids) = written_by_a_newer_build("newer-several", |head| {

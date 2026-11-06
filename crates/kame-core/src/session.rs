@@ -651,10 +651,22 @@ impl Session {
 
     /// The document as an export sees it. An export can land anywhere, where a path from this
     /// document's folder would lead nowhere, so its images go by their whole paths. The paragraphs
-    /// standing for what a newer version wrote are left out, as they aren't the document's words.
+    /// standing for what a newer version wrote are left out, as they aren't the document's words,
+    /// and the notes on them go with them, as they would with any block.
     fn exported_document(&self) -> Document {
         let mut document = self.editor.document().clone();
-        document.blocks.retain(|block| !self.is_newer_part(block));
+        let left_out: Vec<BlockId> = document
+            .blocks
+            .iter()
+            .filter(|block| self.is_newer_part(block))
+            .map(|block| block.id)
+            .collect();
+        document
+            .blocks
+            .retain(|block| !left_out.contains(&block.id));
+        document
+            .annotations
+            .retain(|annotation| !left_out.contains(&annotation.anchor.block_id()));
         for block in &mut document.blocks {
             if let BlockKind::Image { path, .. } = &mut block.kind {
                 if let Some(whole) = whole_image_path(path, self.path.as_deref()) {

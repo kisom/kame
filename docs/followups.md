@@ -21,8 +21,6 @@ unless daily writing finds something that fails it.
 Releases now put different versions on different machines (Homebrew, the GitHub release and the AUR), so a file or a log
 written by one version has to be safe in another.
 
-- [ ] **Say which version is running.** Nothing shows it: no `kame --version`, no `kame-site --version`, and nothing in Help.
-  Without it, there's no telling which build wrote what.
 - [ ] **Unknown kinds and styles make a document unreadable.** One block kind, style or annotation kind from a newer build
   stops an older one opening the document. An older build should open it and keep what it doesn't know, or say exactly why
   it can't. See `docs/spec/document-format.md`, section 8.

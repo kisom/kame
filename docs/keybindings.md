@@ -425,6 +425,10 @@ ln -sf ~/Applications/kame.app/Contents/MacOS/kame ~/.local/bin/kame-site
 
 A file named `site` opens as `kame ./site`.
 
+`kame --version` (or `-V`) prints `kame VERSION` and exits, opening no window and reading no settings; `kame-site --version` and
+`kame site --version` print `kame-site VERSION`. The Help window (F1) starts with `kame VERSION` too. A document named
+`--version` opens as `kame ./--version`.
+
 ### Publishing a notebook
 
 `kame-site build FOLDER` builds it as its own site, in an `output/` folder in the notebook, which the browser and search leave out. In a

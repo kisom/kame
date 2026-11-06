@@ -205,6 +205,17 @@ fn site_arguments(program: &Path, args: &[String]) -> Option<Vec<String>> {
     (args.first().map(String::as_str) == Some("site")).then(|| args[1..].to_vec())
 }
 
+/// The line `--version` prints, and Help starts with: this build's version.
+fn version_line() -> String {
+    format!("kame {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Whether the command line asks for the version: `--version` or `-V` as the first argument. A
+/// document of that name opens as `./--version`.
+fn version_asked(args: &[String]) -> bool {
+    matches!(args.first().map(String::as_str), Some("--version" | "-V"))
+}
+
 /// The file named on the command line, as a full path. A relative one would later be read against
 /// whichever document was open, so coming back to it could open or make the wrong file.
 fn launch_path(argument: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -1960,6 +1971,10 @@ fn main() -> eframe::Result {
     let rest: Vec<String> = arguments.collect();
     if let Some(site) = site_arguments(Path::new(&program), &rest) {
         std::process::exit(kame_site::run(&site));
+    }
+    if version_asked(&rest) {
+        println!("{}", version_line());
+        std::process::exit(0);
     }
     // The type size and theme are kame preferences, read once here and applied
     // to every document the app opens.
@@ -5778,6 +5793,8 @@ impl KameApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_width(inner);
+                ui.label(egui::RichText::new(version_line()).monospace());
+                ui.add_space(4.0);
                 egui::ScrollArea::vertical()
                     .id_salt("kame-help-rows")
                     .max_height(scroll_height)
@@ -9826,6 +9843,32 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             "a file named site, said plainly"
         );
         assert_eq!(site_args("kame", &["essay.kame", "site"]), None);
+    }
+
+    #[test]
+    fn version_is_asked_for_only_as_the_first_argument() {
+        let ask = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            version_asked(&args)
+        };
+        assert!(ask(&["--version"]));
+        assert!(ask(&["-V"]));
+        assert!(!ask(&[]));
+        assert!(
+            !ask(&["./--version"]),
+            "a document of that name, said plainly"
+        );
+        assert!(!ask(&["essay.kame", "--version"]));
+        assert!(!ask(&["site", "--version"]), "that one is the site tool's");
+    }
+
+    #[test]
+    fn the_version_line_names_the_crate_version() {
+        assert_eq!(
+            version_line(),
+            format!("kame {}", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(version_line().starts_with("kame 1.") || version_line().starts_with("kame 0."));
     }
 
     #[test]

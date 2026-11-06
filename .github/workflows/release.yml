@@ -169,6 +169,8 @@ jobs:
           test -d "$app" || { echo "::error::brew install kisom/tap/kame left no $app"; exit 1; }
           got="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
           [ "$got" = "$want" ] || { echo "::error::the tap installed kame.app $got, not $want"; exit 1; }
+          ran="$("$app/Contents/MacOS/kame" --version)"
+          [ "$ran" = "kame $want" ] || { echo "::error::the installed kame says \"$ran\", not \"kame $want\""; exit 1; }
           codesign --verify --deep "$app"
           if xattr -p com.apple.quarantine "$app" >/dev/null 2>&1; then
             echo "::error::kame.app is still quarantined, so macOS would refuse to open it"

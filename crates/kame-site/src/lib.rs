@@ -34,13 +34,26 @@ pub fn build(site_dir: &std::path::Path, include_drafts: bool) -> Problems {
 }
 
 const USAGE: &str =
-    "usage:\n  kame-site new DIR\n  kame-site new-notebook DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site sync [--yes] [DIR]\n  kame-site regen-theme [DIR]";
+    "usage:\n  kame-site new DIR\n  kame-site new-notebook DIR\n  kame-site build [--no-drafts] [DIR]\n  kame-site sync [--yes] [DIR]\n  kame-site regen-theme [DIR]\n  kame-site --version";
+
+/// What `--version` prints: the tool and the version of this build.
+pub fn version_line() -> String {
+    format!("kame-site {}", env!("CARGO_PKG_VERSION"))
+}
 
 /// The command line, without its program name. Returns the exit code: 1 when the work
 /// failed, and 2 when the command wasn't understood.
 pub fn run(args: &[String]) -> i32 {
     let mut args = args.iter().map(String::as_str);
     match args.next() {
+        Some("--version" | "-V") => {
+            if args.next().is_some() {
+                eprintln!("{USAGE}");
+                return 2;
+            }
+            println!("{}", version_line());
+            0
+        }
         Some("new") => {
             let (Some(dir), None) = (args.next(), args.next()) else {
                 eprintln!("{USAGE}");
@@ -170,4 +183,33 @@ fn finish_notebook(output: Option<std::path::PathBuf>, problems: Problems) -> i3
         println!("Built in {}", output.display());
     }
     i32::from(output.is_none() || !problems.errors.is_empty())
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn version_flags_succeed() {
+        assert_eq!(run(&["--version".to_string()]), 0);
+        assert_eq!(run(&["-V".to_string()]), 0);
+    }
+
+    #[test]
+    fn the_version_line_names_the_tool_and_its_version() {
+        assert_eq!(
+            version_line(),
+            format!("kame-site {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn usage_mentions_the_flag() {
+        assert!(USAGE.contains("--version"));
+    }
+
+    #[test]
+    fn version_takes_no_other_arguments() {
+        assert_eq!(run(&["--version".to_string(), "x".to_string()]), 2);
+    }
 }

@@ -16,7 +16,7 @@
 //! document.
 
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -28,7 +28,11 @@ pub const NEWER_PART: &str = "A newer version of kame wrote this part. Update ka
 /// The document in `json` as this build can show it, if it holds something only a newer version
 /// knows and is otherwise sound. `None` for JSON this build reads whole, and for damage.
 pub(crate) fn view_of(json: &str) -> Option<Document> {
-    let mut value: Value = serde_json::from_str(json).ok()?;
+    view_from(serde_json::from_str(json).ok()?)
+}
+
+/// [`view_of`], for a document already read as JSON.
+pub(crate) fn view_from(mut value: Value) -> Option<Document> {
     let mut newer = false;
     let document = value.as_object_mut()?;
     if let Some(Value::Array(blocks)) = document.get_mut("blocks") {
@@ -54,10 +58,18 @@ pub(crate) fn view_of(json: &str) -> Option<Document> {
     serde_json::from_value(value).ok()
 }
 
-/// Whether `json` is a document this build can't read only because it holds something a newer
-/// version knows.
+/// Whether `json` holds something from a newer version of kame: a field this build would drop by
+/// writing it again, or a kind, style or other value it doesn't know. JSON that's damaged, or isn't
+/// a document at all, holds nothing newer. It's read once, which matters when opening a long one.
 pub(crate) fn is_newer(json: &str) -> bool {
-    serde_json::from_str::<Document>(json).is_err() && view_of(json).is_some()
+    let Ok(written) = serde_json::from_str::<Value>(json) else {
+        return false;
+    };
+    match Document::deserialize(&written) {
+        Ok(read) => serde_json::to_value(read)
+            .is_ok_and(|known| crate::model::has_unknown_fields(&written, &known)),
+        Err(_) => view_from(written).is_some(),
+    }
 }
 
 /// A block as this build can show it, or `None` if it's damaged. Its kind is read first, on its

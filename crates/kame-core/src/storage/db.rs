@@ -489,8 +489,7 @@ impl Db {
     pub fn holds_newer(&self) -> bool {
         let row =
             |sql: &str| -> Option<String> { self.conn.query_row(sql, [], |row| row.get(0)).ok() };
-        if row("SELECT json FROM documents WHERE id = 1")
-            .is_some_and(|json| drops_something::<Document>(&json) || view::is_newer(&json))
+        if row("SELECT json FROM documents WHERE id = 1").is_some_and(|json| view::is_newer(&json))
             || row("SELECT json FROM metadata WHERE id = 1")
                 .is_some_and(|json| drops_something::<crate::model::Metadata>(&json))
         {
@@ -864,7 +863,7 @@ impl Db {
                 rusqlite::Error::QueryReturnedNoRows => DbError::SnapshotNotFound(id),
                 other => DbError::Sqlite(other),
             })?;
-        if drops_something::<Document>(&json) || view::is_newer(&json) {
+        if view::is_newer(&json) {
             return Err(DbError::Newer);
         }
         let mut doc: Document = serde_json::from_str(&json)?;

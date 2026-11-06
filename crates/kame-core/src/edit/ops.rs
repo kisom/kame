@@ -725,7 +725,12 @@ pub fn apply(doc: &mut Document, op: &Op) {
         } => {
             block_mut(doc, *block_id).spans = spans.clone();
         }
-        Op::AddAnnotation { annotation } => doc.annotations.push(annotation.clone()),
+        // Fitted to the block it lands in, as a note read from a file is: a damaged history can
+        // add one that doesn't fit, and a later delete is read expecting it fitted.
+        Op::AddAnnotation { annotation } => {
+            let annotation = fitted_to(doc, annotation);
+            doc.annotations.push(annotation);
+        }
         Op::RemoveAnnotation { annotation } => {
             doc.annotations
                 .retain(|existing| existing.id != annotation.id);
@@ -961,6 +966,23 @@ fn annotations_cut_short(
         })
         .cloned()
         .collect()
+}
+
+/// `annotation` with its range fitted to the first block with its id ([`fit_range`]). A note that
+/// fits, a whole-block note and one whose block is gone are as they were.
+fn fitted_to(doc: &Document, annotation: &Annotation) -> Annotation {
+    let mut annotation = annotation.clone();
+    if let Anchor::Range {
+        block_id,
+        start,
+        end,
+    } = &mut annotation.anchor
+    {
+        if let Some(block) = doc.blocks.iter().find(|block| block.id == *block_id) {
+            fit_range(&block.text, start, end);
+        }
+    }
+    annotation
 }
 
 fn block(doc: &Document, block_id: BlockId) -> &Block {

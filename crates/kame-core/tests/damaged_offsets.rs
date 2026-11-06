@@ -357,3 +357,55 @@ fn a_deleted_damaged_block_undoes_and_redoes_after_reading_it_again() {
     now.annotations.clear();
     undo_reopen_and_redo("deleted-block", &was, delete, &now);
 }
+
+/// A log in which the note was added, inside "é", and then deleted with its words, both recorded
+/// by the program that damaged it. Undoing both and redoing both, in one sitting, puts the note
+/// back where the delete expects it.
+fn add_delete_undo_both_redo_both(name: &str, was: &Document, delete: Op, now: &Document) {
+    let path = file(name);
+    let note = was.annotations[0].clone();
+    let mut bare = was.clone();
+    bare.annotations.clear();
+    let mut db = Db::open(&path).unwrap();
+    db.save_document(&bare).unwrap();
+    db.record_edit(was, &Op::AddAnnotation { annotation: note })
+        .unwrap();
+    db.record_edit(now, &delete).unwrap();
+    drop(db);
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(session.undo(), "{:?}", session.last_error);
+    assert!(session.undo(), "{:?}", session.last_error);
+    assert!(session.document().annotations.is_empty());
+    assert!(session.redo(), "{:?}", session.last_error);
+    assert_eq!(anchors_of(session.document()), [(3, 8)]);
+    assert!(session.redo(), "{:?}", session.last_error);
+    assert_eq!(session.document(), now);
+}
+
+#[test]
+fn a_damaged_note_added_and_deleted_with_its_text_redoes_both() {
+    let mut was = Document::new("Damaged");
+    was.blocks = vec![paragraph(CAFE, Vec::new())];
+    was.annotations = vec![annotation(AnnotationKind::Note, &was.blocks[0], 4, 8)];
+    let delete = Op::delete_text(&was, was.blocks[0].id, 1, CAFE.len());
+    let mut now = was.clone();
+    now.blocks[0].text = "C".to_string();
+    now.annotations.clear();
+    add_delete_undo_both_redo_both("added-deleted-text", &was, delete, &now);
+}
+
+#[test]
+fn a_damaged_note_added_and_deleted_with_its_block_redoes_both() {
+    let mut was = Document::new("Damaged");
+    was.blocks = vec![
+        paragraph("Before.", Vec::new()),
+        paragraph(CAFE, Vec::new()),
+    ];
+    was.annotations = vec![annotation(AnnotationKind::Note, &was.blocks[1], 4, 8)];
+    let delete = Op::delete_block(&was, 1);
+    let mut now = was.clone();
+    now.blocks.truncate(1);
+    now.annotations.clear();
+    add_delete_undo_both_redo_both("added-deleted-block", &was, delete, &now);
+}

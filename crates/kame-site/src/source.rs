@@ -80,6 +80,15 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
         .and_then(|db| Ok((db.load_document()?, db.load_metadata()?)));
     let (doc, metadata) = match loaded {
         Ok(loaded) => loaded,
+        // One from a newer kame is for that kame to publish, and opening it in this one changes
+        // nothing.
+        Err(_) if kame_core::storage::Db::open_read_only(path).is_ok_and(|db| db.holds_newer()) => {
+            problems.errors.push(format!(
+                "\"{slug}\": could not read {}: it has changes from a newer version of kame. Update kame to publish it.",
+                path.display()
+            ));
+            return None;
+        }
         Err(err) => {
             problems.errors.push(format!(
                 "\"{slug}\": could not read {}: {err}. If it was last saved by an older kame, open it in kame once.",
@@ -399,6 +408,28 @@ mod tests {
             "{:?}",
             problems.errors
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opening it in this kame changes nothing, so that isn't what to say.
+    #[test]
+    fn a_document_from_a_newer_kame_says_to_update_kame() {
+        let dir = temp_dir("newerkind");
+        let path = dir.join("a.kame");
+        write_kame(&path, &doc("A"), Some(&metadata("A", "2026-11-02", &[])));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE documents SET json = replace(json, '\"kind\":\"Paragraph\"', '\"kind\":\"Table\"')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let mut problems = Problems::default();
+        assert!(read(&entry("a", path), false, &mut problems).is_none());
+        let said = &problems.errors[0];
+        assert!(said.contains("a newer version of kame"), "{said}");
+        assert!(said.contains("Update kame"), "{said}");
+        assert!(!said.contains("open it in kame"), "{said}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

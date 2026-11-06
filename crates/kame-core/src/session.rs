@@ -499,11 +499,11 @@ impl Session {
             .map(Path::to_path_buf)
     }
 
-    /// Records where the author is, for a document with a file to keep it in, unless it's only a
-    /// view of a newer version's ([`Session::lossy`]). Losing this costs nothing but the place, so
-    /// a failed write is not reported.
+    /// Records where the author is, for a document with a file to keep it in, unless it holds
+    /// something from a newer version ([`Session::newer`]), which nothing is written into. Losing
+    /// this costs nothing but the place, so a failed write is not reported.
     pub fn save_position(&mut self, scroll: f32) {
-        if self.path.is_some() && !self.lossy {
+        if self.path.is_some() && !self.newer {
             let _ = self.db.save_position(&storage::Position {
                 block_id: self.caret.block_id,
                 offset: self.caret.offset,
@@ -874,12 +874,12 @@ impl Session {
     ///
     /// The snapshot is the inverse of [`Session::restore`]: it captures the
     /// text exactly as it stands, independent of the head document and the op
-    /// log, so undo and redo cannot move it. One showing only what this build can of a newer
-    /// version's document ([`Session::lossy`]) takes none.
+    /// log, so undo and redo cannot move it. One holding something from a newer version
+    /// ([`Session::newer`]) takes none.
     pub fn snapshot(&mut self, label: Option<&str>) -> Option<i64> {
-        // What's on the screen leaves out what this build doesn't know, so restoring it would lose
-        // that.
-        if self.lossy {
+        // What's on the screen leaves out what this build doesn't know, a field or more, so the
+        // newer version restoring it would lose that.
+        if self.newer {
             self.last_error = Some(
                 "snapshot failed — this document has changes from a newer version of kame, so \
                  it's read-only here until kame is updated"
@@ -8359,6 +8359,19 @@ mod tests {
     #[test]
     fn nothing_writes_over_a_document_from_a_newer_build() {
         let (path, written) = from_a_newer_build();
+        let taken = Db::open(&path)
+            .unwrap()
+            .create_snapshot(&Document::new("before"), Some("before"))
+            .unwrap();
+        let before = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT count(*) FROM snapshots), \
+                 (SELECT count(*) FROM meta WHERE key = 'position')",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
         let mut session = open(&path);
         assert!(!session.insert("more"));
         assert!(!session.undo());
@@ -8369,13 +8382,28 @@ mod tests {
             title: "Changed".to_string(),
             ..Metadata::default()
         });
-        let snapshot = session.snapshot(Some("kept")).unwrap();
-        assert!(!session.restore(snapshot));
+        // A snapshot taken here would leave out the newer field, and the newer build would
+        // restore it without a word.
+        assert_eq!(session.snapshot(Some("kept")), None);
+        let said = session.last_error.clone().unwrap_or_default();
+        assert!(said.contains("until kame is updated"), "{said}");
+        assert!(!session.restore(taken));
+        session.save_position(12.0);
         let elsewhere = temp_db_path();
         assert!(session.save_as(&elsewhere, None, |_, _| false).is_err());
         assert!(!elsewhere.exists());
         drop(session);
         assert_eq!(head_of(&path), written);
+        let after = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT count(*) FROM snapshots), \
+                 (SELECT count(*) FROM meta WHERE key = 'position')",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after, before, "no snapshot taken and no place saved");
         let reopened = open(&path);
         assert_ne!(reopened.metadata.title, "Changed");
     }

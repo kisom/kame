@@ -3,14 +3,36 @@
 //! key, narrowed by typing as the jump list is, and Enter runs the one chosen as the menu would.
 
 use eframe::egui;
+use kame_core::model::BlockKind;
 use kame_notebook::list::rank;
 
 use super::interface::Change;
 use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window};
 use super::{
-    menu_entry, shortcut_label, AnnotationKind, BarMenu, FileCommand, KameApp, MenuAction,
+    menu_entry, shortcut_label, AnnotationKind, BarMenu, Command, FileCommand, KameApp, MenuAction,
     ModeCommand, FONT_SIZE_STEP,
 };
+
+/// What the Edit menu does, each the same as its key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditCommand {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Find,
+    /// Makes the caret's block a heading of this level, or with none, body text.
+    Kind(Option<u8>),
+    Link,
+    MoveItem {
+        up: bool,
+    },
+    IndentItem {
+        indent: bool,
+    },
+}
 
 /// One command on the menu bar, as its menu shows it and the palette lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +97,7 @@ impl MenuCommand {
 pub(crate) fn menu_name(menu: BarMenu) -> &'static str {
     match menu {
         BarMenu::File => "File",
+        BarMenu::Edit => "Edit",
         BarMenu::Annotate => "Annotate",
         BarMenu::View => "View",
         BarMenu::Site => "Site",
@@ -193,6 +216,8 @@ impl KameApp {
             ),
             item(File, "Document Properties…", None, MenuAction::Properties).after_rule(),
         ]);
+
+        commands.extend(self.edit_commands());
 
         commands.extend([
             item(
@@ -344,6 +369,128 @@ impl KameApp {
         commands
     }
 
+    /// The Edit menu. What would change the document is greyed out where its key is refused, in
+    /// a document that can't be written, and the rest where it would do nothing: an undo with
+    /// nothing to undo, a cut or copy with nothing selected, a link with nothing to link, and the
+    /// list items' commands outside a list. Whether there's anything to paste isn't known without
+    /// asking the system, so Paste always can be chosen.
+    fn edit_commands(&self) -> Vec<MenuCommand> {
+        use EditCommand::*;
+        let item = |label, key, command| {
+            MenuCommand::new(BarMenu::Edit, label, Some(key), MenuAction::Edit(command))
+        };
+        let session = &self.session;
+        let refused = session.save_failed.then_some(if session.newer {
+            "This document is read-only until kame is updated."
+        } else {
+            "The last save failed, so retry it first."
+        });
+        // Those that write: refused as their keys are, or else greyed out unless `can`.
+        let writes = |command: MenuCommand, can: bool, why_not: Option<&'static str>| match refused
+        {
+            Some(why) => command.enabled(false, Some(why)),
+            None => command.enabled(can, why_not),
+        };
+        let (undo, redo) = session.history();
+        let selected = session
+            .ordered_selection()
+            .is_some_and(|(start, end)| start != end);
+        let nothing_selected = Some("Select some words first.");
+        let in_list = session.tabbed_blocks().iter().any(|id| {
+            session.block_index(*id).is_some_and(|at| {
+                matches!(
+                    session.document().blocks[at].kind,
+                    BlockKind::ListItem { .. }
+                )
+            })
+        });
+        let not_in_list = Some("The caret isn't in a list.");
+        let heading = |level, label, key| writes(item(label, key, Kind(Some(level))), true, None);
+        vec![
+            writes(
+                item("Undo", "Ctrl-Z", Undo),
+                undo > 0,
+                Some("Nothing to undo."),
+            ),
+            writes(
+                item("Redo", "Ctrl-Shift-Z", Redo),
+                redo > 0,
+                Some("Nothing to redo."),
+            ),
+            writes(item("Cut", "Ctrl-X", Cut), selected, nothing_selected).after_rule(),
+            item("Copy", "Ctrl-C", Copy).enabled(selected, nothing_selected),
+            writes(item("Paste", "Ctrl-V", Paste), true, None),
+            item("Select All", "Ctrl-A", SelectAll),
+            item("Find", "Ctrl-F", Find).after_rule(),
+            heading(1, "Heading 1", "Ctrl-Shift-1").after_rule(),
+            heading(2, "Heading 2", "Ctrl-Shift-2"),
+            heading(3, "Heading 3", "Ctrl-Shift-3"),
+            writes(item("Body Text", "Ctrl-Shift-0", Kind(None)), true, None),
+            writes(
+                item("Link…", "Ctrl-K", Link),
+                session.link_target().is_some(),
+                Some("Select words to link, or put the caret in a link."),
+            )
+            .after_rule(),
+            writes(
+                item("Move Item Up", "Ctrl-Shift-Up", MoveItem { up: true }),
+                in_list,
+                not_in_list,
+            )
+            .after_rule(),
+            writes(
+                item("Move Item Down", "Ctrl-Shift-Down", MoveItem { up: false }),
+                in_list,
+                not_in_list,
+            ),
+            writes(
+                item("Indent Item", "Tab", IndentItem { indent: true }),
+                in_list,
+                not_in_list,
+            ),
+            writes(
+                item("Outdent Item", "Shift-Tab", IndentItem { indent: false }),
+                in_list,
+                not_in_list,
+            ),
+        ]
+    }
+
+    /// Runs an Edit menu command through the code its key runs. A cut, a copy or a paste is asked
+    /// of the window, which brings it back next frame as the event its key makes, so what reaches
+    /// the page, kame's own clipboard with it, is just what the key's would.
+    pub(crate) fn run_edit_command(&mut self, ctx: &egui::Context, command: EditCommand) {
+        let ask = |request| {
+            ctx.send_viewport_cmd(request);
+            ctx.request_repaint();
+        };
+        match command {
+            EditCommand::Undo => self.run_command(ctx, Command::Undo),
+            EditCommand::Redo => self.run_command(ctx, Command::Redo),
+            EditCommand::Cut => ask(egui::ViewportCommand::RequestCut),
+            EditCommand::Copy => ask(egui::ViewportCommand::RequestCopy),
+            EditCommand::Paste => ask(egui::ViewportCommand::RequestPaste),
+            EditCommand::SelectAll => self.run_command(ctx, Command::SelectAll),
+            EditCommand::Find => self.toggle_find(),
+            EditCommand::Kind(level) => {
+                let kind = match level {
+                    Some(level) => BlockKind::Heading {
+                        level,
+                        centered: false,
+                    },
+                    None => BlockKind::Paragraph,
+                };
+                self.run_command(ctx, Command::SetBlockKind(kind));
+            }
+            EditCommand::Link => self.begin_link(),
+            EditCommand::MoveItem { up } => self.run_command(ctx, Command::MoveListItem { up }),
+            EditCommand::IndentItem { indent } => {
+                self.follow_caret = true;
+                self.session.indent_list_item(indent);
+            }
+        }
+    }
+
     /// Ctrl-P: opens the palette, or closes it, waiting behind another dialog as the other lists
     /// do.
     pub(crate) fn toggle_commands(&mut self) {
@@ -404,6 +551,8 @@ impl KameApp {
 mod tests {
     use super::*;
     use crate::{test_temp_dir, Headless};
+    use kame_core::edit::Cursor;
+    use kame_core::model::{BlockId, BlockKind};
     use kame_core::session::Session;
 
     fn page() -> Headless {
@@ -631,24 +780,430 @@ mod tests {
         );
     }
 
+    /// One frame of the menu bar alone, with `events` having just happened. What it asks of the
+    /// window comes back in the page's next frame, as eframe brings it.
+    fn bar_frame(page: &mut Headless, events: Vec<egui::Event>) {
+        page.time += 0.02;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(page.width, page.height),
+            )),
+            time: Some(page.time),
+            events,
+            ..Default::default()
+        };
+        let app = &mut page.app;
+        let mut output = page.ctx.run_ui(input, |ui| app.show_status(ui));
+        page.drawn = output.platform_output.accesskit_update.take();
+        page.answer(&output);
+        output.drop_without_applying_deltas();
+    }
+
     /// Draws the menu bar with `menu` open, for a few frames, as the window does.
     fn open_menu(page: &mut Headless, menu: BarMenu) {
         page.app.pending_menu = Some(menu);
         for _ in 0..3 {
-            page.time += 0.02;
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::Vec2::new(page.width, page.height),
-                )),
-                time: Some(page.time),
-                ..Default::default()
-            };
-            let app = &mut page.app;
-            let mut output = page.ctx.run_ui(input, |ui| app.show_status(ui));
-            page.drawn = output.platform_output.accesskit_update.take();
-            output.drop_without_applying_deltas();
+            bar_frame(page, Vec::new());
         }
+    }
+
+    /// Where the last frame drew something saying exactly `label`, at its middle.
+    fn middle_of(page: &Headless, label: &str) -> Option<egui::Pos2> {
+        page.drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .find_map(|(_, node)| node.bounds().filter(|_| node.label() == Some(label)))
+            .map(|bounds| {
+                egui::Pos2::new(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                )
+            })
+    }
+
+    /// What `menu`'s row for the command called `label` says: its words, then its key.
+    fn row(page: &Headless, menu: BarMenu, label: &str) -> String {
+        let commands = page.app.commands();
+        let command = commands
+            .iter()
+            .find(|command| command.menu == menu && command.label == label)
+            .unwrap_or_else(|| panic!("{menu:?} has no {label:?}"));
+        match command.key {
+            Some(key) => format!("{label} {}", shortcut_label(key, cfg!(target_os = "macos"))),
+            None => label.to_string(),
+        }
+    }
+
+    /// Opens `menu` and clicks its row for `label`, as a hand would, then gives the page the
+    /// frame after, which is when what the click asked of the window comes back.
+    fn choose(page: &mut Headless, menu: BarMenu, label: &str) {
+        let row = row(page, menu, label);
+        open_menu(page, menu);
+        let at = middle_of(page, &row).unwrap_or_else(|| panic!("no row saying {row:?}"));
+        assert!(page.can_press(&row), "{row:?} can be chosen");
+        bar_frame(page, vec![egui::Event::PointerMoved(at)]);
+        for pressed in [true, false] {
+            bar_frame(
+                page,
+                vec![egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        page.frame(Vec::new());
+    }
+
+    /// "Some words.", then a list of two items, with the caret at the end of the second.
+    fn list_page() -> (Headless, BlockId, BlockId) {
+        let mut page = page();
+        let item = BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+        };
+        let session = &mut page.app.session;
+        let mut ids = Vec::new();
+        for words in ["First", "Second"] {
+            session.split();
+            session.insert(words);
+            let id = session.valid_caret().block_id;
+            session.set_block_kind(id, item.clone());
+            ids.push(id);
+        }
+        page.frame(Vec::new());
+        (page, ids[0], ids[1])
+    }
+
+    fn select(page: &mut Headless, block: usize, start: usize, end: usize) {
+        let block_id = page.app.session.document().blocks[block].id;
+        page.app.session.set_caret(Cursor {
+            block_id,
+            offset: start,
+        });
+        page.app.session.select_to(Cursor {
+            block_id,
+            offset: end,
+        });
+    }
+
+    fn texts(page: &Headless) -> Vec<String> {
+        let document = page.app.session.document();
+        document
+            .blocks
+            .iter()
+            .map(|block| block.text.clone())
+            .collect()
+    }
+
+    /// The Edit menu's command called `label`.
+    fn edit_command(page: &Headless, label: &str) -> MenuCommand {
+        page.app
+            .commands()
+            .into_iter()
+            .find(|command| command.menu == BarMenu::Edit && command.label == label)
+            .unwrap_or_else(|| panic!("the Edit menu has no {label:?}"))
+    }
+
+    const EDIT_ROWS: [&str; 16] = [
+        "Undo",
+        "Redo",
+        "Cut",
+        "Copy",
+        "Paste",
+        "Select All",
+        "Find",
+        "Heading 1",
+        "Heading 2",
+        "Heading 3",
+        "Body Text",
+        "Link…",
+        "Move Item Up",
+        "Move Item Down",
+        "Indent Item",
+        "Outdent Item",
+    ];
+
+    #[test]
+    fn the_edit_menu_comes_after_file() {
+        let mut page = page();
+        bar_frame(&mut page, Vec::new());
+        let x = |name: &str| middle_of(&page, name).expect(name).x;
+        assert!(x("File") < x("Edit"));
+        assert!(x("Edit") < x("Annotate"));
+    }
+
+    #[test]
+    fn the_edit_menu_holds_its_commands_in_their_groups() {
+        let page = page();
+        let commands = page.app.commands();
+        let edit: Vec<&MenuCommand> = commands
+            .iter()
+            .filter(|command| command.menu == BarMenu::Edit)
+            .collect();
+        let labels: Vec<&str> = edit.iter().map(|command| command.label).collect();
+        assert_eq!(labels, EDIT_ROWS);
+        let rules: Vec<&str> = edit
+            .iter()
+            .filter(|command| command.rule)
+            .map(|command| command.label)
+            .collect();
+        assert_eq!(rules, ["Cut", "Find", "Heading 1", "Link…", "Move Item Up"]);
+        let keys: Vec<Option<&str>> = edit.iter().map(|command| command.key).collect();
+        assert_eq!(
+            keys,
+            [
+                Some("Ctrl-Z"),
+                Some("Ctrl-Shift-Z"),
+                Some("Ctrl-X"),
+                Some("Ctrl-C"),
+                Some("Ctrl-V"),
+                Some("Ctrl-A"),
+                Some("Ctrl-F"),
+                Some("Ctrl-Shift-1"),
+                Some("Ctrl-Shift-2"),
+                Some("Ctrl-Shift-3"),
+                Some("Ctrl-Shift-0"),
+                Some("Ctrl-K"),
+                Some("Ctrl-Shift-Up"),
+                Some("Ctrl-Shift-Down"),
+                Some("Tab"),
+                Some("Shift-Tab"),
+            ]
+        );
+        // Nothing in it is in another menu as well.
+        for command in &edit {
+            let elsewhere = commands
+                .iter()
+                .filter(|other| other.menu != BarMenu::Edit)
+                .any(|other| other.action == command.action || other.label == command.label);
+            assert!(!elsewhere, "{} is only in Edit", command.label);
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_from_the_menu_step_the_history() {
+        let mut page = page();
+        page.app.session.split();
+        page.app.session.insert("More.");
+        let before = texts(&page);
+        let (undo, _) = page.app.session.history();
+
+        choose(&mut page, BarMenu::Edit, "Undo");
+        assert_eq!(page.app.session.history(), (undo - 1, 1));
+        assert_ne!(texts(&page), before);
+
+        choose(&mut page, BarMenu::Edit, "Redo");
+        assert_eq!(page.app.session.history(), (undo, 0));
+        assert_eq!(texts(&page), before);
+    }
+
+    /// The menu asks the window for a copy, a cut or a paste, which comes back as the keys' do,
+    /// so what kame copied, its notes and formatting, goes with the words as it does with them.
+    #[test]
+    fn cut_copy_and_paste_from_the_menu_keep_what_kame_copied() {
+        let mut page = page();
+        select(&mut page, 0, 0, "Some".len());
+        assert!(page
+            .app
+            .session
+            .add_annotation(AnnotationKind::Footnote)
+            .is_some());
+        select(&mut page, 0, 0, "Some".len());
+
+        choose(&mut page, BarMenu::Edit, "Copy");
+        assert_eq!(page.clipboard, "Some");
+        assert_eq!(texts(&page), ["Some words."]);
+
+        let end = Cursor {
+            block_id: page.app.session.document().blocks[0].id,
+            offset: "Some words.".len(),
+        };
+        page.app.session.set_caret(end);
+        choose(&mut page, BarMenu::Edit, "Paste");
+        assert_eq!(texts(&page), ["Some words.Some"]);
+        assert_eq!(
+            page.app.session.document().annotations.len(),
+            2,
+            "the footnote came with the words"
+        );
+
+        select(&mut page, 0, "Some words.".len(), "Some words.Some".len());
+        page.clipboard.clear();
+        choose(&mut page, BarMenu::Edit, "Cut");
+        assert_eq!(page.clipboard, "Some");
+        assert_eq!(texts(&page), ["Some words."]);
+        assert_eq!(page.app.session.document().annotations.len(), 1);
+    }
+
+    #[test]
+    fn select_all_from_the_menu_takes_the_block_then_the_document() {
+        let (mut page, _, second) = list_page();
+        let first = page.app.session.document().blocks[0].id;
+
+        choose(&mut page, BarMenu::Edit, "Select All");
+        let (start, end) = page.app.session.ordered_selection().unwrap();
+        assert_eq!((start.block_id, start.offset), (second, 0));
+        assert_eq!((end.block_id, end.offset), (second, "Second".len()));
+
+        choose(&mut page, BarMenu::Edit, "Select All");
+        let (start, end) = page.app.session.ordered_selection().unwrap();
+        assert_eq!((start.block_id, start.offset), (first, 0));
+        assert_eq!((end.block_id, end.offset), (second, "Second".len()));
+    }
+
+    #[test]
+    fn find_from_the_menu_opens_the_find_bar() {
+        let mut page = page();
+        choose(&mut page, BarMenu::Edit, "Find");
+        assert!(page.app.find.is_some());
+    }
+
+    #[test]
+    fn the_block_kinds_from_the_menu_change_the_carets_block() {
+        let mut page = page();
+        let heading = |level| BlockKind::Heading {
+            level,
+            centered: false,
+        };
+        for (label, kind) in [
+            ("Heading 1", heading(1)),
+            ("Heading 2", heading(2)),
+            ("Heading 3", heading(3)),
+            ("Body Text", BlockKind::Paragraph),
+        ] {
+            choose(&mut page, BarMenu::Edit, label);
+            assert_eq!(page.app.session.document().blocks[0].kind, kind, "{label}");
+        }
+    }
+
+    #[test]
+    fn link_from_the_menu_asks_for_the_selections_address() {
+        let mut page = page();
+        select(&mut page, 0, 0, "Some".len());
+        choose(&mut page, BarMenu::Edit, "Link…");
+        let prompt = page.app.link_prompt.as_ref().expect("the link prompt");
+        assert_eq!(prompt.words, "Some");
+    }
+
+    #[test]
+    fn the_list_items_from_the_menu_move_the_carets_item() {
+        let (mut page, first, second) = list_page();
+        let depth = |page: &Headless, id: BlockId| {
+            let document = page.app.session.document();
+            match document
+                .blocks
+                .iter()
+                .find(|block| block.id == id)
+                .unwrap()
+                .kind
+            {
+                BlockKind::ListItem { depth, .. } => depth,
+                _ => panic!("not a list item"),
+            }
+        };
+
+        choose(&mut page, BarMenu::Edit, "Move Item Up");
+        assert_eq!(texts(&page), ["Some words.", "Second", "First"]);
+        choose(&mut page, BarMenu::Edit, "Move Item Down");
+        assert_eq!(texts(&page), ["Some words.", "First", "Second"]);
+
+        choose(&mut page, BarMenu::Edit, "Indent Item");
+        assert_eq!((depth(&page, first), depth(&page, second)), (0, 1));
+        choose(&mut page, BarMenu::Edit, "Outdent Item");
+        assert_eq!((depth(&page, first), depth(&page, second)), (0, 0));
+    }
+
+    #[test]
+    fn what_the_edit_menu_cant_do_here_is_greyed_out() {
+        let folder = test_temp_dir().join(format!("commands-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut page = Headless::new(Session::open(&folder.join("doc.kame")).unwrap());
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.history(), (0, 0));
+
+        let can = |page: &Headless, label| edit_command(page, label).enabled;
+        for label in [
+            "Undo",
+            "Redo",
+            "Cut",
+            "Copy",
+            "Link…",
+            "Move Item Up",
+            "Move Item Down",
+            "Indent Item",
+            "Outdent Item",
+        ] {
+            assert!(!can(&page, label), "{label} can't act here");
+        }
+        for label in ["Paste", "Select All", "Find", "Heading 1", "Body Text"] {
+            assert!(can(&page, label), "{label} can");
+        }
+        // As the menu draws them.
+        open_menu(&mut page, BarMenu::Edit);
+        let undo = row(&page, BarMenu::Edit, "Undo");
+        let paste = row(&page, BarMenu::Edit, "Paste");
+        assert!(middle_of(&page, &undo).is_some() && !page.can_press(&undo));
+        assert!(page.can_press(&paste));
+
+        // Something to undo, words chosen and the caret in a list, and they can.
+        let (mut page, _, _) = list_page();
+        select(&mut page, 2, 0, "Se".len());
+        for label in EDIT_ROWS.iter().filter(|label| **label != "Redo") {
+            assert!(can(&page, label), "{label} can now");
+        }
+    }
+
+    #[test]
+    fn a_read_only_document_greys_out_what_would_change_it() {
+        let (mut page, _, _) = list_page();
+        select(&mut page, 2, 0, "Se".len());
+        page.app.session.mark_newer();
+
+        for label in ["Copy", "Select All", "Find"] {
+            assert!(
+                edit_command(&page, label).enabled,
+                "{label} changes nothing"
+            );
+        }
+        for label in EDIT_ROWS
+            .iter()
+            .filter(|label| !["Copy", "Select All", "Find"].contains(label))
+        {
+            let command = edit_command(&page, label);
+            assert!(!command.enabled, "{label} is refused");
+            assert!(
+                command.why_not.is_some_and(|why| why.contains("updated")),
+                "{label} says why"
+            );
+        }
+    }
+
+    #[test]
+    fn the_palette_finds_the_edit_commands_and_runs_them() {
+        let (mut page, _, second) = list_page();
+        let commands = page.app.commands();
+        let first = narrow_commands("move item up", &commands)[0];
+        assert_eq!(commands[first].full_name(), "Edit: Move Item Up");
+
+        palette_chord(&mut page);
+        type_text(&mut page, "select all");
+        page.frame(Vec::new());
+        assert!(page.can_press("Edit: Select All"));
+        press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
+
+        let (start, end) = page.app.session.ordered_selection().unwrap();
+        assert_eq!((start.block_id, start.offset), (second, 0));
+        assert_eq!((end.block_id, end.offset), (second, "Second".len()));
+
+        // What can't act here isn't listed.
+        let page = self::page();
+        let commands = page.app.commands();
+        assert!(!narrow_commands("move item", &commands)
+            .iter()
+            .any(|at| commands[*at].menu == BarMenu::Edit));
     }
 
     #[test]
@@ -656,6 +1211,7 @@ mod tests {
         let mut page = page();
         for menu in [
             BarMenu::File,
+            BarMenu::Edit,
             BarMenu::Annotate,
             BarMenu::View,
             BarMenu::Help,

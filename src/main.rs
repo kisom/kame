@@ -1662,6 +1662,7 @@ impl NoticeTracker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BarMenu {
     File,
+    Edit,
     Annotate,
     View,
     Site,
@@ -1692,6 +1693,7 @@ fn take_menu_chord(events: &mut Vec<egui::Event>, mac: bool) -> Option<BarMenu> 
         }
         let (menu, letter) = match key {
             egui::Key::F => (BarMenu::File, "f"),
+            egui::Key::E => (BarMenu::Edit, "e"),
             egui::Key::A => (BarMenu::Annotate, "a"),
             egui::Key::V => (BarMenu::View, "v"),
             egui::Key::S => (BarMenu::Site, "s"),
@@ -1742,6 +1744,7 @@ enum MenuAction {
     ImportMarkdown,
     Properties,
     File(FileCommand),
+    Edit(commands::EditCommand),
     Annotate(AnnotationKind),
     Cite,
     References,
@@ -3795,100 +3798,105 @@ impl KameApp {
             let Some(command) = prefixed.or_else(|| command_for_event(event)) else {
                 continue;
             };
-            self.follow_caret = true;
-            match command {
-                Command::DeleteWordBack => {
-                    self.session.delete_word_back();
+            self.run_command(ctx, command);
+        }
+    }
+
+    /// Carries out what a key on the page means, or a menu command that's one of those.
+    fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        self.follow_caret = true;
+        match command {
+            Command::DeleteWordBack => {
+                self.session.delete_word_back();
+            }
+            Command::MoveDocumentStart | Command::MoveDocumentEnd => {
+                let end = matches!(command, Command::MoveDocumentEnd);
+                if let Some(edge) = self.session.document_edge(end) {
+                    self.session.set_caret(edge);
+                    self.reveal_caret = true;
                 }
-                Command::MoveDocumentStart | Command::MoveDocumentEnd => {
-                    let end = matches!(command, Command::MoveDocumentEnd);
-                    if let Some(edge) = self.session.document_edge(end) {
-                        self.session.set_caret(edge);
-                        self.reveal_caret = true;
+            }
+            Command::Insert(text) => {
+                if self.session.insert(&text) {
+                    self.session.apply_markdown_shortcut();
+                    self.session.apply_inline_markdown();
+                    self.session.apply_markdown_link();
+                    if text == "]" {
+                        self.note_closed_citation();
                     }
                 }
-                Command::Insert(text) => {
-                    if self.session.insert(&text) {
-                        self.session.apply_markdown_shortcut();
-                        self.session.apply_inline_markdown();
-                        self.session.apply_markdown_link();
-                        if text == "]" {
-                            self.note_closed_citation();
-                        }
+            }
+            Command::Paste(text) => {
+                self.session.paste_clipped(&text, self.clipped.as_ref());
+            }
+            // With nothing selected these leave the clipboard as it was.
+            Command::Copy | Command::Cut => {
+                let clipped = if matches!(command, Command::Cut) {
+                    self.session.cut()
+                } else {
+                    self.session.clipped()
+                };
+                if let Some(clipped) = clipped {
+                    ctx.copy_text(clipped.text.clone());
+                    if clipped.left_out {
+                        self.notice = Some(NEWER_LEFT_OUT.to_string());
                     }
+                    self.clipped = Some(clipped);
                 }
-                Command::Paste(text) => {
-                    self.session.paste_clipped(&text, self.clipped.as_ref());
+            }
+            Command::Backspace => {
+                self.session.backspace();
+            }
+            Command::Delete => {
+                self.session.delete_forward();
+            }
+            Command::SplitParagraph => {
+                self.session.split();
+            }
+            Command::LineBreak => {
+                self.session.line_break();
+            }
+            Command::Undo => {
+                // Undo can rewrite this note's body (and can remove the note
+                // outright), so the open popover is reseeded from the
+                // document rather than left holding stale prose.
+                if self.session.undo() {
+                    self.set_open_note(self.open_note);
                 }
-                // With nothing selected these leave the clipboard as it was.
-                Command::Copy | Command::Cut => {
-                    let clipped = if matches!(command, Command::Cut) {
-                        self.session.cut()
-                    } else {
-                        self.session.clipped()
-                    };
-                    if let Some(clipped) = clipped {
-                        ctx.copy_text(clipped.text.clone());
-                        if clipped.left_out {
-                            self.notice = Some(NEWER_LEFT_OUT.to_string());
-                        }
-                        self.clipped = Some(clipped);
-                    }
+            }
+            Command::Redo => {
+                if self.session.redo() {
+                    self.set_open_note(self.open_note);
                 }
-                Command::Backspace => {
-                    self.session.backspace();
-                }
-                Command::Delete => {
-                    self.session.delete_forward();
-                }
-                Command::SplitParagraph => {
-                    self.session.split();
-                }
-                Command::LineBreak => {
-                    self.session.line_break();
-                }
-                Command::Undo => {
-                    // Undo can rewrite this note's body (and can remove the note
-                    // outright), so the open popover is reseeded from the
-                    // document rather than left holding stale prose.
-                    if self.session.undo() {
-                        self.set_open_note(self.open_note);
-                    }
-                }
-                Command::Redo => {
-                    if self.session.redo() {
-                        self.set_open_note(self.open_note);
-                    }
-                }
-                Command::MoveLeft => self.session.move_left(false),
-                Command::SelectLeft => self.session.move_left(true),
-                Command::MoveRight => self.session.move_right(false),
-                Command::SelectRight => self.session.move_right(true),
-                Command::MoveWordLeft => self.session.move_left_word(false),
-                Command::SelectWordLeft => self.session.move_left_word(true),
-                Command::MoveWordRight => self.session.move_right_word(false),
-                Command::SelectWordRight => self.session.move_right_word(true),
-                Command::MoveUp => self.move_vertically(false, false),
-                Command::SelectUp => self.move_vertically(false, true),
-                Command::MoveDown => self.move_vertically(true, false),
-                Command::SelectDown => self.move_vertically(true, true),
-                Command::MovePageUp => self.page_key = Some((false, false)),
-                Command::SelectPageUp => self.page_key = Some((false, true)),
-                Command::MovePageDown => self.page_key = Some((true, false)),
-                Command::SelectPageDown => self.page_key = Some((true, true)),
-                Command::MoveLineStart => self.move_to_line_edge(false, false),
-                Command::SelectLineStart => self.move_to_line_edge(false, true),
-                Command::MoveLineEnd => self.move_to_line_edge(true, false),
-                Command::SelectLineEnd => self.move_to_line_edge(true, true),
-                Command::SelectAll => self.select_all(),
-                Command::SetBlockKind(kind) => {
-                    let caret = self.session.valid_caret();
-                    self.session.set_block_kind(caret.block_id, kind);
-                }
-                Command::AddAnnotation(kind) => self.add_annotation(kind),
-                Command::MoveListItem { up } => {
-                    self.session.move_list_item(up);
-                }
+            }
+            Command::MoveLeft => self.session.move_left(false),
+            Command::SelectLeft => self.session.move_left(true),
+            Command::MoveRight => self.session.move_right(false),
+            Command::SelectRight => self.session.move_right(true),
+            Command::MoveWordLeft => self.session.move_left_word(false),
+            Command::SelectWordLeft => self.session.move_left_word(true),
+            Command::MoveWordRight => self.session.move_right_word(false),
+            Command::SelectWordRight => self.session.move_right_word(true),
+            Command::MoveUp => self.move_vertically(false, false),
+            Command::SelectUp => self.move_vertically(false, true),
+            Command::MoveDown => self.move_vertically(true, false),
+            Command::SelectDown => self.move_vertically(true, true),
+            Command::MovePageUp => self.page_key = Some((false, false)),
+            Command::SelectPageUp => self.page_key = Some((false, true)),
+            Command::MovePageDown => self.page_key = Some((true, false)),
+            Command::SelectPageDown => self.page_key = Some((true, true)),
+            Command::MoveLineStart => self.move_to_line_edge(false, false),
+            Command::SelectLineStart => self.move_to_line_edge(false, true),
+            Command::MoveLineEnd => self.move_to_line_edge(true, false),
+            Command::SelectLineEnd => self.move_to_line_edge(true, true),
+            Command::SelectAll => self.select_all(),
+            Command::SetBlockKind(kind) => {
+                let caret = self.session.valid_caret();
+                self.session.set_block_kind(caret.block_id, kind);
+            }
+            Command::AddAnnotation(kind) => self.add_annotation(kind),
+            Command::MoveListItem { up } => {
+                self.session.move_list_item(up);
             }
         }
     }
@@ -4075,6 +4083,10 @@ impl KameApp {
                         .weak(),
                     );
                 });
+                let edit_menu = ui.menu_button("Edit", |ui| {
+                    ui.set_min_width(interface::room(ui.ctx(), 200.0));
+                    commands::command_rows(ui, in_menu(BarMenu::Edit), &mut action);
+                });
                 let annotate_menu = ui.menu_button("Annotate", |ui| {
                     ui.set_min_width(interface::room(ui.ctx(), 200.0));
                     commands::command_rows(ui, in_menu(BarMenu::Annotate), &mut action);
@@ -4134,6 +4146,7 @@ impl KameApp {
                 });
                 for (menu, response) in [
                     (BarMenu::File, &file_menu.response),
+                    (BarMenu::Edit, &edit_menu.response),
                     (BarMenu::Annotate, &annotate_menu.response),
                     (BarMenu::View, &view_menu.response),
                     (BarMenu::Help, &help_menu.response),
@@ -4230,6 +4243,7 @@ impl KameApp {
             MenuAction::ImportMarkdown => self.import_markdown(),
             MenuAction::Properties => self.begin_properties(),
             MenuAction::File(command) => self.run_file_command(command),
+            MenuAction::Edit(command) => self.run_edit_command(ctx, command),
             MenuAction::Annotate(kind) => self.add_annotation(kind),
             MenuAction::Cite => self.begin_cite(),
             MenuAction::References => self.open_references(),
@@ -7659,6 +7673,11 @@ pub(crate) struct Headless {
     height: f32,
     /// The screen's pixels per point, if a test names one. egui takes 1 otherwise.
     pub(crate) scale: Option<f32>,
+    /// What the system's clipboard holds, as far as the page knows: what it last copied, or what a
+    /// test put there.
+    pub(crate) clipboard: String,
+    /// What the window brings back next frame, for what the last one asked of it.
+    asked: Vec<egui::Event>,
 }
 
 #[cfg(test)]
@@ -7680,12 +7699,42 @@ impl Headless {
             width: Self::WIDTH,
             height: Self::HEIGHT,
             scale: None,
+            clipboard: String::new(),
+            asked: Vec::new(),
+        }
+    }
+
+    /// Does what eframe does with what a frame asks of the window: keeps what it copied, and
+    /// brings back the cut, copy or paste it asked for in the next frame's events.
+    pub(crate) fn answer(&mut self, output: &egui::FullOutput) {
+        for command in &output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                self.clipboard = text.clone();
+            }
+        }
+        let asked = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .into_iter()
+            .flat_map(|viewport| &viewport.commands);
+        for command in asked {
+            match command {
+                egui::ViewportCommand::RequestCut => self.asked.push(egui::Event::Cut),
+                egui::ViewportCommand::RequestCopy => self.asked.push(egui::Event::Copy),
+                egui::ViewportCommand::RequestPaste if !self.clipboard.is_empty() => {
+                    self.asked.push(egui::Event::Paste(self.clipboard.clone()));
+                }
+                _ => {}
+            }
         }
     }
 
     /// One frame, in the order `logic` and `ui` run things, with `events` having just happened.
     pub(crate) fn frame(&mut self, events: Vec<egui::Event>) {
         self.time += 0.02;
+        let mut asked = std::mem::take(&mut self.asked);
+        asked.extend(events);
+        let events = asked;
         let mut input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
@@ -7731,6 +7780,7 @@ impl Headless {
         });
         self.drawn = output.platform_output.accesskit_update.take();
         self.ime = output.platform_output.ime;
+        self.answer(&output);
         output.drop_without_applying_deltas();
     }
 
@@ -8319,6 +8369,7 @@ mod tests {
     fn alt_letters_open_their_menus() {
         for (key, menu) in [
             (egui::Key::F, BarMenu::File),
+            (egui::Key::E, BarMenu::Edit),
             (egui::Key::A, BarMenu::Annotate),
             (egui::Key::V, BarMenu::View),
             (egui::Key::H, BarMenu::Help),

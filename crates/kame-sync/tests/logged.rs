@@ -839,6 +839,112 @@ fn a_revision_with_a_kind_this_build_does_not_know_is_not_merged_and_stops_the_d
     );
 }
 
+/// A revision as a newer kame writes one, on `parent`, of `doc` with its first block saying `text`:
+/// `block_extra` in that block and `metadata_extra` in its metadata, each `,"name":value` or empty,
+/// with the block's digest and the revision's id taken over what it wrote, as that kame takes them.
+fn line_from_a_newer_kame(
+    doc: &kame_core::model::Document,
+    parent: &str,
+    text: &str,
+    block_extra: &str,
+    metadata_extra: &str,
+) -> String {
+    let with = |json: String, extra: &str| format!("{}{extra}}}", &json[..json.len() - 1]);
+    let (mut blocks, mut order) = (Vec::new(), Vec::new());
+    for (at, block) in doc.blocks.iter().enumerate() {
+        let mut block = block.clone();
+        let json = if at == 0 {
+            block.text = text.to_string();
+            with(serde_json::to_string(&block).unwrap(), block_extra)
+        } else {
+            serde_json::to_string(&block).unwrap()
+        };
+        order.push(format!("\"{}\"", kame_sync::digest(json.as_bytes())));
+        blocks.push(json);
+    }
+    let metadata = with(
+        serde_json::to_string(&kame_core::model::Metadata::default()).unwrap(),
+        metadata_extra,
+    );
+    let revision = format!(
+        r#"{{"parents":["{parent}"],"device":"future-cccc","when":3,"document":"{}","title":{},"order":[{}],"annotations":{},"metadata":{metadata}}}"#,
+        doc.id,
+        serde_json::to_string(&doc.title).unwrap(),
+        order.join(","),
+        serde_json::to_string(&doc.annotations).unwrap(),
+    );
+    let id = kame_sync::digest(revision.as_bytes());
+    format!(
+        "{{\"id\":\"{id}\",\"revision\":{revision},\"blocks\":[{}]}}\n",
+        blocks.join(",")
+    )
+}
+
+/// A newer machine's revision with a field this build doesn't know, in a block or in its metadata.
+/// This build reads it without the field, so its digest isn't the one the newer kame wrote: with the
+/// field in a block, the revision waits on a block it never finds, and with it in metadata, the line
+/// fails its check. That's the rule, not a fault: what was typed here goes in the logs, nothing of
+/// the newer revision is merged, and the document goes read-only, saying to update kame.
+#[test]
+fn a_revision_with_a_field_this_build_does_not_know_is_not_merged_and_stops_the_document() {
+    // Without the field it's a line this build would have written, and it merges.
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    let mut logged = talos.logged(&session);
+    logged.sync(&mut session, 1).unwrap();
+    let last = session.sync_state().unwrap();
+    let line = line_from_a_newer_kame(session.document(), &last, "A newer opening.", "", "");
+    std::fs::write(log_folder(&talos.path).join("future-cccc.log"), line).unwrap();
+    assert!(logged.sync(&mut session, 2).unwrap().merged);
+    assert_eq!(session.document().blocks[0].text, "A newer opening.");
+    assert!(!session.newer);
+
+    for (case, block_extra, metadata_extra) in [
+        ("block", r#","future":true"#, ""),
+        ("metadata", "", r#","future":1"#),
+    ] {
+        let (talos, _) = two_machines();
+        let mut session = talos.session();
+        let mut logged = talos.logged(&session);
+        logged.sync(&mut session, 1).unwrap();
+        let last = session.sync_state().unwrap();
+        let folder = log_folder(&talos.path);
+        std::fs::write(
+            folder.join("future-cccc.log"),
+            line_from_a_newer_kame(
+                session.document(),
+                &last,
+                "A newer opening.",
+                block_extra,
+                metadata_extra,
+            ),
+        )
+        .unwrap();
+
+        talos.append(&mut session, 1, " Typed here.");
+        let typed = session.document().clone();
+        let outcome = logged.sync(&mut session, 2).unwrap();
+
+        assert!(!outcome.merged, "{case}");
+        assert!(outcome.written > 0, "{case}: what was typed went out");
+        assert!(session.newer, "{case}: read-only until kame is updated");
+        assert!(
+            !session.lossy,
+            "{case}: what's on the screen is all its own"
+        );
+        let said = session.last_error.clone().unwrap_or_default();
+        assert!(said.contains("newer version of kame"), "{case}: {said}");
+        assert!(said.contains("until kame is updated"), "{case}: {said}");
+        assert_eq!(session.document(), &typed, "{case}");
+        let store = Store::load(&folder).unwrap();
+        assert!(store.holds_newer(), "{case}");
+        let heads = store.heads();
+        assert_eq!(heads, vec![session.sync_state().unwrap()], "{case}");
+        assert_eq!(store.document(&heads[0]), typed, "{case}");
+        assert!(!session.insert("Refused."), "{case}");
+    }
+}
+
 #[test]
 fn logs_going_while_open_stop_all_writing() {
     let (talos, _) = two_machines();

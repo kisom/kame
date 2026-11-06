@@ -145,7 +145,8 @@ Each stage is useful alone.
 1. **Merge conflict copies.** Built. kame notices a `.sync-conflict-` file beside the document and
    File > Merge Conflict Copies merges it, and a file replaced under an open document offers Merge
    Them. Words on the screen stay in the text and the other version goes in a note. Each merge is one
-   undo step after a snapshot, and a merged copy is renamed `.merged`, not deleted. No format change.
+   undo step after a snapshot, and a merged copy is renamed `.merged`, not deleted. A copy another kame
+   has open isn't merged, and its lock is held until it's renamed. No format change.
    `kame-sync merge A.kame B.kame OUT.kame` does the same from the command line.
 2. **Revision logs in the app**, opt-in per folder, as section 13 sets out.
 3. **The notebook.** The same logs per document give a binder its sync with nothing further.

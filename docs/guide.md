@@ -170,7 +170,7 @@ Links are how a notebook grows. Following a link to a document that isn't there 
 
 Below the footnotes, "Linked from" lists the documents that link to this one. It's only drawn on screen, and never reaches an export or a site.
 
-To rename, move or delete a document in a notebook, right-click it in the browser. Links to it follow a rename or a move, and its published address changes with it. Move or rename the file by hand and links to it don't follow. A document open in another kame window can't be moved or deleted, and nor can one whose links a move would change; close it there first.
+To rename, move or delete a document in a notebook, right-click it in the browser. Links to it follow a rename or a move, and its published address changes with it. Move or rename the file by hand and links to it don't follow. A document open in another kame window can't be moved or deleted, and a document can't be moved while one linking to it is open in another kame window; close it there first.
 
 ## References
 

@@ -91,15 +91,19 @@ too: the back stack (`BackStack::forget`), the recent list, `last_document` and 
 
 The root `Notebook.kame` can be deleted like any other document. Home then says the notebook has none, as it does now.
 
-A document another kame has open is refused, with nothing removed, and the app says "NAME is open in another kame window". Its lock
-(`kame_core::lock`) is held while it goes, so that nobody opens it halfway. A document open in this window has been left first,
-which lets go of its lock.
+A document another kame has open is refused, with nothing removed, and the app says "NAME is open in another kame window". So is
+one with a conflict, retired or moving copy another kame has open, naming the copy, as those go with it. Their locks
+(`kame_core::lock`) are held while they go, so that nobody opens one halfway. A document open in this window has been left first,
+which lets go of its lock, and a copy of it open in this window is refused: "NAME is open in this window".
 
 ### Renaming and moving
 
 1. **Refuse** if the open document is the one moving and has a failed save, or if it's read-only from a newer version.
-   Refuse too, before anything moves or changes, if another kame has the moving document open, or any document whose links
-   the plan would rewrite: "NAME is open in another kame window", NAME from the notebook's root, for the first of them.
+   Refuse too, before any file moves or any link is rewritten, if another kame has the moving document open, a copy of it
+   that would be renamed with it, or any document whose links the plan would rewrite: "NAME is open in another kame window",
+   NAME from the notebook's root, for the first of them. A copy open in this window is refused as "NAME is open in this
+   window". By then the plan may have made the new path's folders and synced documents behind their logs, which changes
+   nothing a person wrote.
    Their locks are taken here and held until the move is done, so that none is opened halfway, and the moving document's
    lock holds across its rename, since a lock is for the file. The document this window has open is its own, and so is
    the one it's moving, whose lock it keeps while it leaves it. The plan's sync of a document behind its logs skips one

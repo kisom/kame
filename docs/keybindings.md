@@ -337,7 +337,8 @@ it is resolved.
 If a sync tool leaves a conflict copy beside the open document, the status row says so and File >
 Merge Conflict Copies merges it. Sentences both versions changed keep the words on screen, with the
 other version in a note. A merge is one undo, after a snapshot, and the copy stays beside the document
-with `.merged` added to its name.
+with `.merged` added to its name. A copy another kame window has open isn't merged, and kame says "could not merge — NAME is open in
+another kame window".
 
 If the file itself is replaced while open, kame stops saving to it and asks whether to merge the two,
 save this version under a new name, or open the one on disk.
@@ -380,14 +381,16 @@ path, or it isn't a place a document can be, the dialog says why and stays open.
 A rename or move rewrites the links to the document in every other document, including closed ones and any with links only in their
 revision logs, and fixes its own relative links and images if it changed folders. A title that was only the file's name follows the new
 name. `.md` and `.markdown` documents are imported rather than edited, so links in them are left as they are. Those, and any other document
-that couldn't be changed, are named in a report when it's done. If another kame window has the document open, or any document whose links
-it would change, the dialog says "NAME is open in another kame window" and nothing moves or changes.
+that couldn't be changed, are named in a report when it's done. If another kame window has the document open, a conflict or retired copy
+of it, or any document whose links it would change, the dialog says "NAME is open in another kame window", and no file moves and no link is
+rewritten. A copy of it open in this window is refused the same way, as "NAME is open in this window".
 
 Delete asks once, and it's permanent. It takes the document, its logs, and any conflict or retired copies of it. A retired copy is told by
 the document's id, as a conflict copy is, so a `.X.retired.kame` holding some other document, left when the path was reused, stays, whether
 you delete `X` or move it. Links to it stay, and following one offers to create it again. If it was open, you land on the contents page, or a
-new document if it was the contents page. A document another kame window has open isn't deleted, and kame says "NAME is open in another kame
-window".
+new document if it was the contents page. A document another kame window has open, or a copy of it, isn't deleted, and kame says "NAME is
+open in another kame window", or "NAME is open in this window" for a copy open here. While a reference is being renamed, Rename…, Move… and
+Delete… wait for it to finish.
 
 Deleting a stale copy, one left behind when its document was moved or deleted on another machine, leaves any logs at its path, since those may
 belong to whatever document is there now, and the notice says so. The row stays in the browser for those logs. Deleting it again removes

@@ -352,6 +352,13 @@ pub fn plan_notebook(
             .push(format!("could not lay out the theme: {err}"));
         return None;
     }
+    for theirs in notebook.other_notebooks() {
+        let relative = theirs.strip_prefix(&notebook.root).unwrap_or(&theirs);
+        problems.warnings.push(format!(
+            "{}/ holds a notebook.yaml, so it's another notebook, and nothing in it publishes here",
+            relative.display()
+        ));
+    }
     let mut sources = read_sources(notebook, problems);
     let published: Vec<PathBuf> = sources
         .iter()
@@ -2000,6 +2007,19 @@ mod tests {
         assert!(warned("a.kame", "inner/b"), "{:?}", problems.warnings);
         assert!(warned("shows.kame", "outside"), "{:?}", problems.warnings);
         assert!(warned("kept.kame", "outside"), "{:?}", problems.warnings);
+        for folder in [
+            "deep/er/",
+            "images/inner/",
+            "inner/",
+            "static/inner/",
+            "theme/static/inner/",
+        ] {
+            assert!(
+                warned(folder, "another notebook"),
+                "{folder}: {:?}",
+                problems.warnings
+            );
+        }
 
         let inner = made_at(&nb.root.join("inner"), &nb.build.join("inner"));
         let (plan, _) = inner.plan();
@@ -2018,6 +2038,16 @@ mod tests {
 
         let (plan, problems) = nb.plan();
         assert!(problems.errors.is_empty(), "{:?}", problems.errors);
+        for folder in ["static/", "theme/"] {
+            assert!(
+                problems
+                    .warnings
+                    .iter()
+                    .any(|said| said.starts_with(folder) && said.contains("another notebook")),
+                "{folder}: {:?}",
+                problems.warnings
+            );
+        }
         for (path, output) in &plan.files {
             let shown = path.display().to_string();
             assert!(

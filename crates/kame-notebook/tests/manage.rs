@@ -1755,7 +1755,10 @@ fn another_notebook_inside_is_outside_for_a_move() {
     std::fs::write(root.join("inner/notebook.yaml"), "").unwrap();
 
     let refused = check_new_path(&nb, &a, "inner/a").unwrap_err();
-    assert!(refused.contains("outside"), "{refused}");
+    assert!(
+        refused.contains("inner/") && refused.contains("another notebook"),
+        "{refused}"
+    );
     let to = root.join("z.kame");
     let report = make_move(&nb, &a, &to);
     assert_eq!(report.changed, ["mine.kame"]);

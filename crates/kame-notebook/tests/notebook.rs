@@ -1039,6 +1039,26 @@ mod a_notebook_inside {
     }
 
     #[test]
+    fn the_outer_one_says_which_folders_are_other_notebooks() {
+        let root = outer("inside-others");
+        std::fs::create_dir_all(root.join("static/theirs")).unwrap();
+        std::fs::write(root.join("static/theirs/notebook.yaml"), "").unwrap();
+        std::fs::create_dir_all(root.join("inner/deeper")).unwrap();
+        std::fs::write(root.join("inner/deeper/notebook.yaml"), "").unwrap();
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        std::fs::write(root.join(".hidden/notebook.yaml"), "").unwrap();
+        assert_eq!(
+            notebook(&root).other_notebooks(),
+            [
+                root.join("a/b"),
+                root.join("inner"),
+                root.join("static/theirs")
+            ],
+            "not one inside another, or in a hidden folder"
+        );
+    }
+
+    #[test]
     fn the_inner_one_is_as_it_was() {
         let root = outer("inside-inner");
         let inner = Notebook::find(&root.join("inner/deep/c.kame"))

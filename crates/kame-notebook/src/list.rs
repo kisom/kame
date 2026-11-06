@@ -52,9 +52,19 @@ impl Notebook {
     /// root is passed over, as outside it.
     pub fn entries(&self) -> Vec<Entry> {
         let mut found = Vec::new();
-        self.walk(&self.root, true, &mut found);
+        self.walk(&self.root, true, &mut found, &mut Vec::new());
         found.sort_by(|one, other| one.relative.cmp(&other.relative));
         found
+    }
+
+    /// The roots of the other notebooks below this one that [`Notebook::entries`] passes over, in
+    /// order by path, so that what leaves them out can say so. One inside another is that one's
+    /// business, and isn't among them.
+    pub fn other_notebooks(&self) -> Vec<PathBuf> {
+        let mut others = Vec::new();
+        self.walk(&self.root, true, &mut Vec::new(), &mut others);
+        others.sort();
+        others
     }
 
     /// Only the documents.
@@ -85,7 +95,13 @@ impl Notebook {
         }
     }
 
-    fn walk(&self, folder: &Path, documents_here: bool, found: &mut Vec<Entry>) {
+    fn walk(
+        &self,
+        folder: &Path,
+        documents_here: bool,
+        found: &mut Vec<Entry>,
+        others: &mut Vec<PathBuf>,
+    ) {
         let Ok(entries) = std::fs::read_dir(folder) else {
             return;
         };
@@ -120,10 +136,11 @@ impl Notebook {
                     continue;
                 }
                 if crate::is_notebook_root(&path) {
+                    others.push(path);
                     continue;
                 }
                 let leaves_documents = at_root && NOT_DOCUMENTS.contains(&name.as_str());
-                self.walk(&path, documents_here && !leaves_documents, found);
+                self.walk(&path, documents_here && !leaves_documents, found, others);
             } else if !is_working_file(&name) {
                 if name == crate::SETTINGS && folder == self.root {
                     continue;

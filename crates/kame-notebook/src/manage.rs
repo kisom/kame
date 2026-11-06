@@ -62,6 +62,13 @@ pub fn check_new_path(
     if name.contains(".sync-conflict-") {
         return Err("that name is the sync tool's, for a conflicting copy".to_string());
     }
+    if let Some(theirs) = notebook.other_notebook_at(&path) {
+        let relative = theirs.strip_prefix(&notebook.root).unwrap_or(theirs);
+        return Err(format!(
+            "{}/ holds a notebook.yaml, so it's another notebook",
+            relative.display()
+        ));
+    }
     if !notebook.holds(&path) {
         return Err("that leads outside the notebook".to_string());
     }

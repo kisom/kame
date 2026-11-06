@@ -98,9 +98,16 @@ impl Notebook {
 
     /// Whether `path`, under the root, is another notebook's root or in one.
     fn in_another_notebook(&self, path: &Path) -> bool {
+        self.other_notebook_at(path).is_some()
+    }
+
+    /// The root of the other notebook that `path`, under the root as written, is in or is, taking
+    /// the outermost if there are several.
+    pub(crate) fn other_notebook_at<'a>(&self, path: &'a Path) -> Option<&'a Path> {
         path.ancestors()
             .take_while(|folder| *folder != self.root)
-            .any(crate::is_notebook_root)
+            .filter(|folder| crate::is_notebook_root(folder))
+            .last()
     }
 
     /// Whether what's at `path`, inside the notebook, could be a document, going by where it is.

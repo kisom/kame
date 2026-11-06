@@ -658,8 +658,11 @@ impl Session {
         if self.replaced && self.path.as_deref() == Some(path) {
             return Err("that file changed on disk, so this needs another name".into());
         }
+        // Onto its own file, this is a retry of whatever write failed.
         if self.path.as_deref() == Some(path) {
-            self.clear_save_error();
+            if self.save_failed && !self.write_all() {
+                return Err("it still can't be written".into());
+            }
             return Ok(());
         }
         // The copy is given what's in memory, so the old file needn't be written first, and one
@@ -963,7 +966,7 @@ impl Session {
     /// A later successful write re-establishes the head/log relationship.
     /// "A later successful write" here means `record`/`save_state`; commands
     /// are suppressed while the flag is set, so the recovery path is the
-    /// error strip's retry (`save_state`) — and the window refuses to close
+    /// error strip's retry (`write_all`) — and the window refuses to close
     /// until it lands.
     pub fn clear_save_error(&mut self) {
         if self.save_failed && !self.replaced && !self.newer {
@@ -981,10 +984,37 @@ impl Session {
     /// permanently painted strip. Those messages are dismissed instead.
     pub fn retry_or_dismiss(&mut self) -> bool {
         if self.save_failed {
-            self.save_state()
+            self.write_all()
         } else {
             self.last_error = None;
             true
+        }
+    }
+
+    /// Writes the head, the whole history, the cursor and the metadata as they are in memory, in
+    /// one transaction, for a retry. A write that failed may have left the log short of what's in
+    /// memory, so the head and cursor alone would describe a step the log doesn't have.
+    fn write_all(&mut self) -> bool {
+        self.check_file();
+        if self.replaced || self.newer {
+            return false;
+        }
+        let written = self.db.replace_history(
+            self.editor.document(),
+            &self.editor.log(),
+            self.editor.cursor(),
+            &self.metadata,
+            &[],
+        );
+        match written {
+            Ok(()) => {
+                self.clear_save_error();
+                true
+            }
+            Err(err) => {
+                self.mark_save_failed(err);
+                false
+            }
         }
     }
 
@@ -4985,6 +5015,33 @@ mod tests {
             undoes_the_heading(&mut reopened);
             std::fs::remove_dir_all(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn a_retried_write_after_a_failed_edit_logs_it() {
+        let root = scratch_dir("failedretry").canonicalize().unwrap();
+        let mut session = session_after_a_failed_edit(&root);
+        assert!(session.retry_or_dismiss());
+        assert!(!session.save_failed);
+        assert_agrees_with_its_file(&session);
+        drop(session);
+        let mut reopened = open(&root.join("one/a.kame"));
+        assert_eq!(reopened.history(), (3, 0));
+        undoes_the_heading(&mut reopened);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_onto_its_own_file_after_a_failed_edit_logs_it() {
+        let root = scratch_dir("failedsame").canonicalize().unwrap();
+        let mut session = session_after_a_failed_edit(&root);
+        let path = root.join("one/a.kame");
+        session.save_as(&path, None, |_, _| false).unwrap();
+        assert!(!session.save_failed);
+        assert_agrees_with_its_file(&session);
+        drop(session);
+        undoes_the_heading(&mut open(&path));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

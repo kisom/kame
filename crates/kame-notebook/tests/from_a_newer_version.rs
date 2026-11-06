@@ -497,3 +497,27 @@ fn a_rename_names_a_document_whose_logs_hold_a_newer_revision() {
     assert_eq!(everything_in(&c), file);
     assert_eq!(logs_of(&c), logs);
 }
+
+/// A document with only logs is read from them, and when they hold a revision from a newer kame,
+/// which can't be read here, reading it says so.
+#[test]
+fn a_document_with_only_logs_says_when_they_hold_a_newer_revision() {
+    let (root, _nb) = logged_notebook("newer-logs-only");
+    let c = root.join("c.kame");
+    synced(&c);
+    for side in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{side}", c.display()));
+    }
+    assert!(!c.exists());
+    let read = kame_notebook::read_noting_newer(&c).unwrap();
+    assert!(!read.newer);
+    assert_eq!(read.document.blocks[0].text, "Words.");
+
+    a_newer_revision_arrives(&c, |doc| doc.blocks[0].text.push_str(" More."));
+    let read = kame_notebook::read_noting_newer(&c).unwrap();
+    assert!(read.newer);
+    assert_eq!(
+        read.document.blocks[0].text, "Words.",
+        "what this build can read"
+    );
+}

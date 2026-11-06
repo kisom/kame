@@ -420,6 +420,34 @@ mod tests {
         }
     }
 
+    /// Code running past the end of the text, and a link starting inside "é", from a damaged file,
+    /// are read as what fits, and still keep the checker off their words.
+    #[test]
+    fn a_damaged_files_spans_still_skip_their_words() {
+        let text = "Café indispensible, then sintax";
+        let mut damaged = block(BlockKind::Paragraph, text);
+        let span = |start, end, style| Span { start, end, style };
+        damaged.spans = vec![
+            span(
+                4,
+                18,
+                SpanStyle::Link {
+                    url: "https://a.b".to_string(),
+                },
+            ),
+            span(26, 99, SpanStyle::Code),
+        ];
+        let mut doc = kame_core::model::Document::new("Damaged");
+        doc.blocks = vec![damaged];
+        let mut db = kame_core::storage::Db::open_in_memory().unwrap();
+        db.save_document(&doc).unwrap();
+        let read = db.load_document().unwrap().blocks.remove(0);
+        let fitted: Vec<_> = read.spans.iter().map(|s| (s.start, s.end)).collect();
+        assert_eq!(fitted, [(3, 18), (26, text.len())]);
+        assert_eq!(check_block(&read), Vec::new());
+        assert_eq!(check_block(&block(BlockKind::Paragraph, text)).len(), 2);
+    }
+
     fn finding(text: &str, word: &str, rule: &str) -> Finding {
         let start = text.find(word).unwrap();
         Finding {

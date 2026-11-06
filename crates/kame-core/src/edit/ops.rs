@@ -215,6 +215,22 @@ impl Op {
             spans,
         }
     }
+
+    /// Makes the documents and blocks this carries fit their text, as a head read from a file is
+    /// ([`Document::fit_offsets`]), so that undo and redo bring back what fits. Anything given
+    /// against another block's text, as a delete's notes and old spans are, is left as it is: what
+    /// it fitted is gone, and a step it no longer matches is refused when it's applied.
+    pub fn fit_offsets(&mut self) {
+        match self {
+            Op::ReplaceDocument { old, new } => {
+                old.fit_offsets();
+                new.fit_offsets();
+            }
+            Op::InsertBlock { block, .. } | Op::DeleteBlock { block, .. } => block.fit_spans(),
+            Op::Batch { ops } => ops.iter_mut().for_each(Op::fit_offsets),
+            _ => {}
+        }
+    }
 }
 
 /// `previous` and `next` as one edit, if `next` carries on the same word.

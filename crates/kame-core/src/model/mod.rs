@@ -2,6 +2,7 @@ mod date;
 pub use date::Date;
 mod anchor;
 mod document;
+mod offsets;
 
 pub use anchor::shift_anchors;
 // `Span` is named only in `#[cfg(test)]` code (the layout and export tests

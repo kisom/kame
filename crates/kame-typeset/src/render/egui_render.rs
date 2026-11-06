@@ -1296,6 +1296,71 @@ mod tests {
         assert!(glyphs.iter().all(|glyph| glyph.font_id == bold_italic));
     }
 
+    /// A document read from a damaged file, with bold running past the end of its text, a note
+    /// starting inside "é" and a footnote past the end, is drawn as it fits.
+    #[test]
+    fn a_damaged_document_is_drawn_as_it_fits() {
+        let mut doc = crate::model::Document::new("Damaged");
+        let mut block = paragraph("Café au lait");
+        block.spans = vec![Span {
+            start: 6,
+            end: 40,
+            style: SpanStyle::Bold,
+        }];
+        let range = |kind, start, end| crate::model::Annotation {
+            id: Uuid::new_v4(),
+            kind,
+            anchor: crate::model::Anchor::range(block.id, start, end),
+            body: String::new(),
+        };
+        doc.annotations = vec![
+            range(AnnotationKind::Note, 4, 8),
+            range(AnnotationKind::Footnote, 40, 40),
+        ];
+        doc.blocks = vec![block];
+        let mut db = kame_core::storage::Db::open_in_memory().unwrap();
+        db.save_document(&doc).unwrap();
+        let doc = db.load_document().unwrap();
+        let block = &doc.blocks[0];
+        let anchor = |kind| {
+            doc.annotations
+                .iter()
+                .find(|annotation| annotation.kind == kind)
+                .and_then(|annotation| annotation.anchor.byte_range())
+                .unwrap()
+        };
+        let (start, end) = anchor(AnnotationKind::Note);
+        assert_eq!((start, end), (3, 8));
+        let mark = anchor(AnnotationKind::Footnote).1;
+        assert_eq!(mark, block.text.len());
+
+        let mut renderer = GlyphRenderer::new(config());
+        let layout = renderer.layout_marked(block, &[mark]);
+        let bold = face(&renderer, "EB Garamond", Weight::BOLD, Style::Normal);
+        let glyphs: Vec<_> = layout
+            .runs
+            .iter()
+            .flat_map(|run| {
+                let base = layout.line_start(run.line_i);
+                run.glyphs
+                    .iter()
+                    .map(move |glyph| (base + glyph.start, glyph))
+            })
+            .collect();
+        assert_eq!(glyphs.len(), "Café au lait".chars().count());
+        for (offset, glyph) in glyphs {
+            assert_eq!(glyph.font_id == bold, offset >= 6, "at {offset}");
+        }
+        let (image, _, _) = renderer.rasterize(
+            &layout,
+            [0, 0, 0],
+            [255, 255, 255],
+            &[(start, end, [250, 240, 200])],
+            2.0,
+        );
+        assert!(image.size[0] > 0 && image.size[1] > 0);
+    }
+
     fn face(renderer: &GlyphRenderer, family: &str, weight: Weight, style: Style) -> fontdb::ID {
         renderer
             .font_system

@@ -301,9 +301,12 @@ impl Store {
         heads
     }
 
+    /// The document a revision holds, its spans and anchors made to fit its text as a head read
+    /// from a file is, since another machine's needn't. The revision itself is kept as it was read,
+    /// so its id still checks.
     pub fn document(&self, id: &str) -> Document {
         let revision = &self.revisions[id];
-        Document {
+        let mut doc = Document {
             id: revision.document,
             title: revision.title.clone(),
             blocks: revision
@@ -312,7 +315,9 @@ impl Store {
                 .map(|block| self.blocks[block].clone())
                 .collect(),
             annotations: revision.annotations.clone(),
-        }
+        };
+        doc.fit_offsets();
+        doc
     }
 
     pub fn metadata(&self, id: &str) -> Metadata {

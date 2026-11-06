@@ -4,7 +4,9 @@ mod common;
 
 use std::path::Path;
 
-use kame_core::model::{Block, BlockKind, Document};
+use kame_core::model::{
+    Anchor, Annotation, AnnotationKind, Block, BlockKind, Document, Span, SpanStyle,
+};
 use kame_sync::merge::document_digest;
 use kame_sync::revlog::{Replica, Store};
 use uuid::Uuid;
@@ -126,6 +128,83 @@ fn two_machines_merge_separately_and_write_the_same_revision() {
         .filter(|line| line.contains(&format!("\"id\":\"{two}\"")))
         .count();
     assert_eq!(merges_in_titans_log, 1);
+}
+
+/// A revision written by a machine that kept a damaged file's offsets as they were, a note starting
+/// inside "é" and bold running past the end. What's read from it fits, so the merge can map them.
+#[test]
+fn a_revision_whose_offsets_dont_fit_is_read_fitted_and_merges() {
+    let root = common::test_folder("damaged");
+    let (mut talos, mut titan) = (Machine::new(&root, "talos"), Machine::new(&root, "titan"));
+    talos.sync();
+    titan.sync();
+    exchange(&[&talos, &titan]);
+    talos.sync();
+    titan.sync();
+    let block = &mut titan.doc.blocks[0];
+    // "é" is bytes 9..11, and "paragraph" starts at 12.
+    block.text = "First café paragraph. Second sentence here.".to_string();
+    block.spans = vec![Span {
+        start: 22,
+        end: 99,
+        style: SpanStyle::Bold,
+    }];
+    let note = Annotation {
+        id: Uuid::from_u128(7),
+        kind: AnnotationKind::Note,
+        anchor: Anchor::range(block.id, 10, 15),
+        body: "a note".to_string(),
+    };
+    titan.doc.annotations.push(note);
+    titan.sync();
+    assert_eq!(
+        titan.doc.annotations[0].anchor,
+        Anchor::range(Uuid::from_u128(1), 9, 15)
+    );
+    assert_eq!(titan.doc.blocks[0].spans[0].end, 44, "the end of the text");
+    let log = std::fs::read_to_string(titan.replica.folder.join("titan.log")).unwrap();
+    assert!(
+        log.contains(r#""start":10,"end":15"#),
+        "the revision is kept as written"
+    );
+    exchange(&[&talos, &titan]);
+    talos.sync();
+    assert_eq!(talos.doc, titan.doc);
+
+    talos.append(0, " On talos.");
+    // The block changes on both machines, so its text is merged and each offset in it mapped.
+    titan.doc.blocks[0].text = "First café paragraph. Another sentence here.".to_string();
+    talos.sync();
+    titan.sync();
+    exchange(&[&talos, &titan]);
+    assert_eq!(talos.sync(), titan.sync());
+    assert_eq!(talos.doc, titan.doc);
+    let doc = &talos.doc;
+    assert_eq!(
+        doc.blocks[0].text,
+        "First café paragraph. Second sentence here. On talos."
+    );
+    assert_eq!(
+        doc.annotations[0].anchor,
+        Anchor::range(Uuid::from_u128(1), 9, 15)
+    );
+    assert_eq!(doc.annotations[1].body, "On titan: Another sentence here.");
+    let text = &doc.blocks[0].text;
+    let fits = |start: usize, end: usize| {
+        start <= end
+            && end <= text.len()
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end)
+    };
+    assert!(doc.blocks[0]
+        .spans
+        .iter()
+        .all(|span| fits(span.start, span.end)));
+    assert!(doc
+        .annotations
+        .iter()
+        .filter_map(|note| note.anchor.byte_range())
+        .all(|(start, end)| fits(start, end)));
 }
 
 #[test]

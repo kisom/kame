@@ -111,6 +111,37 @@ mod tests {
         }
     }
 
+    /// A document from a damaged file, with bold running past the end of its text and a footnote
+    /// past it, is published as what fits.
+    #[test]
+    fn a_damaged_documents_page_shows_what_fits() {
+        use kame_core::model::{Anchor, Annotation, AnnotationKind, Span, SpanStyle};
+        let dir = site("damaged");
+        let mut doc = Document::new("D");
+        let mut block = paragraph("Café au lait");
+        block.spans = vec![Span {
+            start: 6,
+            end: 40,
+            style: SpanStyle::Bold,
+        }];
+        doc.annotations = vec![Annotation {
+            id: uuid::Uuid::new_v4(),
+            kind: AnnotationKind::Footnote,
+            anchor: Anchor::range(block.id, 40, 40),
+            body: "Milk.".to_string(),
+        }];
+        doc.blocks = vec![block];
+        let meta = metadata("Doc A", "2026-11-02", &["t"]);
+        write_kame(&dir.join("docs/a.kame"), &doc, Some(&meta));
+
+        let problems = build(&dir, true);
+
+        assert!(problems.errors.is_empty(), "{:?}", problems.errors);
+        let page = std::fs::read_to_string(dir.join("output/k/a/index.html")).unwrap();
+        assert!(page.contains("Café <strong>au lait</strong><sup"), "{page}");
+        assert!(page.contains("Milk."), "{page}");
+    }
+
     #[test]
     fn a_new_site_builds_with_no_other_steps() {
         let parent = temp_dir("fresh");

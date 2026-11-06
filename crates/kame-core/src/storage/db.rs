@@ -504,6 +504,10 @@ impl Db {
     ///
     /// Only `QueryReturnedNoRows` becomes [`DbError::NoDocument`]; every other
     /// failure (missing table, I/O, locking) is propagated unchanged.
+    ///
+    /// Its spans and anchors are made to fit its text ([`Document::fit_offsets`]), since a
+    /// damaged file's needn't. That's only in memory, and the file keeps what it had until the
+    /// head is next written.
     pub fn load_document(&self) -> Result<Document, DbError> {
         let json: String = self
             .conn
@@ -514,7 +518,8 @@ impl Db {
                 rusqlite::Error::QueryReturnedNoRows => DbError::NoDocument,
                 other => DbError::Sqlite(other),
             })?;
-        let doc = serde_json::from_str(&json)?;
+        let mut doc: Document = serde_json::from_str(&json)?;
+        doc.fit_offsets();
         Ok(doc)
     }
 
@@ -543,7 +548,8 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Reads the whole op log in application order: `(seq, op)`, oldest first.
+    /// Reads the whole op log in application order: `(seq, op)`, oldest first. A document or block
+    /// an op carries is made to fit as the head is ([`Op::fit_offsets`]).
     pub fn load_ops(&self) -> Result<Vec<(i64, Op)>, DbError> {
         let mut stmt = self
             .conn
@@ -554,7 +560,9 @@ impl Db {
         let mut ops = Vec::new();
         for row in rows {
             let (seq, json) = row?;
-            ops.push((seq, serde_json::from_str(&json)?));
+            let mut op: Op = serde_json::from_str(&json)?;
+            op.fit_offsets();
+            ops.push((seq, op));
         }
         Ok(ops)
     }
@@ -815,7 +823,8 @@ impl Db {
     /// returned document (e.g. via [`Db::save_document`] or
     /// [`Db::save_state`]).
     ///
-    /// Returns [`DbError::SnapshotNotFound`] when no such snapshot exists.
+    /// Returns [`DbError::SnapshotNotFound`] when no such snapshot exists. The document is made to
+    /// fit as the head is.
     pub fn restore_snapshot(&self, id: i64) -> Result<Document, DbError> {
         let json: String = self
             .conn
@@ -828,7 +837,8 @@ impl Db {
                 rusqlite::Error::QueryReturnedNoRows => DbError::SnapshotNotFound(id),
                 other => DbError::Sqlite(other),
             })?;
-        let doc = serde_json::from_str(&json)?;
+        let mut doc: Document = serde_json::from_str(&json)?;
+        doc.fit_offsets();
         Ok(doc)
     }
 }
@@ -1194,6 +1204,64 @@ mod tests {
 
         let log = db.load_ops().unwrap();
         assert_eq!(log, vec![(seq1, first), (seq2, second)]);
+    }
+
+    /// A block an op brings back is made to fit as the head is, and a delete's payload, given
+    /// against text that's gone, is kept as it was.
+    #[test]
+    fn blocks_in_the_log_are_read_fitted() {
+        use crate::model::{Block, BlockKind, Span, SpanStyle};
+        let mut db = Db::open_in_memory().unwrap();
+        let bold = |start, end| Span {
+            start,
+            end,
+            style: SpanStyle::Bold,
+        };
+        let block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "Café".to_string(),
+            spans: vec![bold(0, 4), bold(9, 2)],
+        };
+        let delete = Op::DeleteText {
+            block_id: block.id,
+            start: 0,
+            end: 5,
+            text: "Café".to_string(),
+            removed: Vec::new(),
+            old_spans: Some(vec![bold(0, 40)]),
+            clipped: Vec::new(),
+        };
+        db.append_op(&Op::Batch {
+            ops: vec![
+                Op::InsertBlock {
+                    index: 1,
+                    block: block.clone(),
+                },
+                delete.clone(),
+            ],
+        })
+        .unwrap();
+
+        let log = db.load_ops().unwrap();
+
+        let fitted = Block {
+            spans: vec![bold(0, 3)],
+            ..block
+        };
+        let read = Op::Batch {
+            ops: vec![
+                Op::InsertBlock {
+                    index: 1,
+                    block: fitted,
+                },
+                delete,
+            ],
+        };
+        assert_eq!(
+            log.into_iter().map(|(_, op)| op).collect::<Vec<_>>(),
+            [read]
+        );
     }
 
     #[test]

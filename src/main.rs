@@ -9571,6 +9571,11 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let path = scratch_dir("newer").join("doc.kame");
         let mut doc = model::Document::new("doc");
         doc.blocks[0].text = "Only a newer kame shows this.".to_string();
+        // Words of its own, for a copy to take.
+        let mut own = doc.blocks[0].clone();
+        own.id = uuid::Uuid::new_v4();
+        own.text = "Words of its own.".to_string();
+        doc.blocks.push(own);
         storage::Db::open(&path)
             .unwrap()
             .save_document(&doc)

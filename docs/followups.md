@@ -10,8 +10,9 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
 - [ ] **What a kame writes into documents it doesn't have open ignores the lock another holds on them.** A rename's or move's link
-  rewrites (kame-notebook `manage`), a reference's rename, and `stranded` recording a database's place write into closed
-  documents, and another kame may have one open.
+  rewrites (kame-notebook `manage`), the title a move writes into the moved document, a reference's rename, and `stranded`
+  recording a database's place write into closed documents, and another kame may have one open. A notebook move or delete of a
+  document another kame has open renames or removes the file under it, which that kame then finds changed on disk.
 
 ## Notebook
 

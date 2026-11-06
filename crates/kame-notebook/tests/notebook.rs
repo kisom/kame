@@ -447,6 +447,52 @@ mod linking {
     }
 
     #[test]
+    fn a_document_comes_before_a_folder_of_the_same_name() {
+        let (root, found) = with_notebook("before-folder");
+        let from = root.join("Notebook.kame");
+        document(&root.join("b.kame"), "B.");
+        // Moving something into `b/` makes the folder.
+        document(&root.join("b/a.kame"), "A.");
+        assert_eq!(found.follow("b", &from), Follow::Open(root.join("b.kame")));
+        assert_eq!(
+            found.follow("b#Part", &from),
+            Follow::Open(root.join("b.kame"))
+        );
+        assert_eq!(
+            found.follow("b/", &from),
+            Follow::Create(root.join("b/Notebook.kame")),
+            "the slash says the folder"
+        );
+        document(&root.join("b/Notebook.kame"), "Contents.");
+        assert_eq!(found.follow("b", &from), Follow::Open(root.join("b.kame")));
+        assert_eq!(
+            found.follow("b/", &from),
+            Follow::Open(root.join("b/Notebook.kame"))
+        );
+
+        // A document that has only logs here yet is there already.
+        std::fs::create_dir(root.join("c")).unwrap();
+        logs_for(&root.join("c.kame"), "C.");
+        assert_eq!(found.follow("c", &from), Follow::Open(root.join("c.kame")));
+    }
+
+    #[test]
+    fn a_folder_with_no_document_of_its_name_beside_it_is_where_its_name_leads() {
+        let (root, found) = with_notebook("folder-alone");
+        let from = root.join("Notebook.kame");
+        document(&root.join("b/Notebook.kame"), "Contents.");
+        assert_eq!(
+            found.follow("b", &from),
+            Follow::Open(root.join("b/Notebook.kame"))
+        );
+        std::fs::create_dir(root.join("c")).unwrap();
+        assert_eq!(
+            found.follow("c", &from),
+            Follow::Create(root.join("c/Notebook.kame"))
+        );
+    }
+
+    #[test]
     fn a_relative_link_is_told_from_a_web_address_by_its_scheme_alone() {
         use kame_notebook::links::is_relative;
         for link in [

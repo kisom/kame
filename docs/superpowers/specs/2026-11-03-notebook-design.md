@@ -151,7 +151,8 @@ with any folders it needs, and opens it. Ctrl-[ comes back. Four rules keep this
   it's edited, so there's nothing to take back from another machine.
 - **A heading in the link** becomes the new document's first heading, so that the link then leads somewhere.
 
-**A link to a folder.** It opens the folder's `Notebook.kame`.
+**A link to a folder.** It opens the folder's `Notebook.kame`. A document comes first: a link `b` leads to `b.kame` when there
+is one, even with a folder `b/` beside it, and `b/`, with the slash, is the folder.
 
 **A link to a paper or image.** Inside a notebook, following a relative link to a file that isn't a document opens it in
 the system's viewer. Today, kame would try to open it as a document.

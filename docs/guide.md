@@ -166,7 +166,7 @@ Getting around takes four keys, also in the View menu:
 - **Ctrl-R** searches every document, including margin notes, footnotes and private notes, and lists every match.
 - **Ctrl-Shift-O** opens the browser, a folder tree on the left, with the notebook's references below it. If the page doesn't fit beside it, the page hides until you choose something or close it.
 
-Links are how a notebook grows. Following a link to a document that isn't there creates it, with any folders it needs, and if you leave it unwritten it's removed again. So you can type `[[maritain/materialism]]`, click it and start writing. A link to a folder opens or creates that folder's own `Notebook.kame`. Links can only create documents inside the notebook.
+Links are how a notebook grows. Following a link to a document that isn't there creates it, with any folders it needs, and if you leave it unwritten it's removed again. So you can type `[[maritain/materialism]]`, click it and start writing. A link to a folder opens or creates that folder's own `Notebook.kame`. A document of the same name comes first, so `[[b]]` stays on `b.kame` once there's a folder `b/` beside it, and `[[b/]]` is the folder. Links can only create documents inside the notebook.
 
 Below the footnotes, "Linked from" lists the documents that link to this one. It's only drawn on screen, and never reaches an export or a site.
 

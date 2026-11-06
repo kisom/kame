@@ -357,6 +357,7 @@ Both lists take the arrows, Enter and Escape. The browser and the jump list noti
 
 Following a link to a document that isn't there creates it, inside the notebook only, as a `.kame` with any folders it needs. A heading in
 the link becomes its first heading, and a link to a folder makes that folder's `Notebook.kame`. Leave it unwritten and it's removed again.
+A document comes before a folder of the same name: `b` leads to `b.kame` if there is one, beside a folder `b/` or not, and `b/` to the folder.
 A link to any other kind of file opens it in the system's viewer, and a missing one says so.
 
 Below the footnotes, "Linked from" lists the documents linking to this one. It's only drawn, and never reaches an export or a site.

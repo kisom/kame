@@ -135,6 +135,17 @@ impl Notebook {
         if !self.holds(&named) {
             return Follow::Rotted;
         }
+        // A document comes before a folder of the same name, which moving something into `b/`
+        // makes beside `b.kame`. A link ending in `/` names the folder.
+        if named.is_dir() && !is_folder {
+            let mut document = named.clone().into_os_string();
+            document.push(".kame");
+            let document = PathBuf::from(document);
+            let there = document.is_file() || kame_sync::logs::log_folder(&document).is_dir();
+            if there && self.holds(&document) && self.in_documents_area(&document) {
+                return Follow::Open(document);
+            }
+        }
         if named.is_dir() || is_folder {
             let index = named.join(INDEX);
             if !self.holds(&index) {

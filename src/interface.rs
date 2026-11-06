@@ -90,8 +90,8 @@ pub(crate) fn room(ctx: &egui::Context, points: f32) -> f32 {
 }
 
 /// What `event` does to a size, if anything: Ctrl + / Ctrl - / Ctrl-0 change the type size, and
-/// with Alt as well, the interface's text. `+` is Shift-= on most layouts, so the type takes
-/// either, and the interface takes = with or without Shift. It goes by the key, as egui-winit
+/// with Alt as well, the interface's text. `+` is Shift-= on most layouts, so = with or without
+/// Shift does what + does, for either. It goes by the key, as egui-winit
 /// has it with Ctrl or Cmd down, and not by the text, which Option changes on a Mac.
 pub(crate) fn size_key(event: &egui::Event) -> Option<(Sized, Change)> {
     let egui::Event::Key {
@@ -108,8 +108,7 @@ pub(crate) fn size_key(event: &egui::Event) -> Option<(Sized, Change)> {
         return None;
     }
     let change = match key {
-        egui::Key::Plus => Change::Larger,
-        egui::Key::Equals if modifiers.shift || modifiers.alt => Change::Larger,
+        egui::Key::Plus | egui::Key::Equals => Change::Larger,
         egui::Key::Minus => Change::Smaller,
         egui::Key::Num0 if !modifiers.shift => Change::Reset,
         _ => return None,
@@ -308,6 +307,11 @@ mod tests {
             (
                 egui::Key::Equals,
                 shift,
+                Some((Sized::Type, Change::Larger)),
+            ),
+            (
+                egui::Key::Equals,
+                command,
                 Some((Sized::Type, Change::Larger)),
             ),
             (

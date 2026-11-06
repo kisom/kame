@@ -598,7 +598,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("[text](url)", "a hyperlink, typed around the anchor text"),
     ("[[target]]", "a link to another document, typed"),
     ("Ctrl-K", "add or edit a link on the selection"),
-    ("Ctrl +  Ctrl -", "larger / smaller type"),
+    ("Ctrl = or +  Ctrl -", "larger / smaller type"),
     ("Ctrl-0", "type back to its usual size"),
     ("Ctrl-Alt +  Ctrl-Alt -", "larger / smaller interface text"),
     ("Ctrl-Alt-0", "interface text back to its usual size"),
@@ -12623,9 +12623,12 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             "the window isn't zoomed as well"
         );
 
+        // = is + without Shift, and does what + does.
         chord(&mut page, egui::Key::Equals, command);
+        assert_eq!(page.app.body_size, DEFAULT_BODY_SIZE + 2.0 * FONT_SIZE_STEP);
         assert_eq!(page.ctx.zoom_factor(), 1.0, "nor by Ctrl-=");
 
+        chord(&mut page, egui::Key::Minus, command);
         chord(&mut page, egui::Key::Minus, command);
         chord(&mut page, egui::Key::Minus, command);
         assert_eq!(page.app.body_size, DEFAULT_BODY_SIZE - FONT_SIZE_STEP);

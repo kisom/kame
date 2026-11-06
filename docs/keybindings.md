@@ -26,7 +26,7 @@ macOS (`Modifiers::command`).
 | Ctrl-A | select the caret's whole block (again for the whole document) |
 | Ctrl-Shift-Up / Ctrl-Shift-Down | move the caret's list item, or the selected items, a place up / down in its list, with the items nested under it |
 | Ctrl-F | find — open the find bar |
-| Ctrl + / Ctrl - / Ctrl-0 | increase / decrease / reset the type size |
+| Ctrl-= or Ctrl-+ / Ctrl - / Ctrl-0 | increase / decrease / reset the type size |
 | Ctrl-Alt + / Ctrl-Alt - / Ctrl-Alt-0 | increase / decrease / reset the interface's text: the menus, title and status row, the notebook's browser and lists, the palette, the help and the dialogs, but not the page. Ctrl-Alt-= works as Ctrl-Alt-+ does. On a Mac these are Cmd-Option-+, Cmd-Option-- and Cmd-Option-0 |
 | drag, shift-click, Shift-arrows | select / extend the selection |
 | Escape | close the find bar, a dialog, or the note popover |

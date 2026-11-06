@@ -9,6 +9,9 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **Save As tells a saved document what exists on this machine (accepted for now).** A relative `Link` is rewritten only if what it names is there, and
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
+- [ ] **What a kame writes into documents it doesn't have open ignores the lock another holds on them.** A rename's or move's link
+  rewrites (kame-notebook `manage`), a reference's rename, and `stranded` recording a database's place write into closed
+  documents, and another kame may have one open.
 
 ## Notebook
 
@@ -72,9 +75,10 @@ i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame hold
   stack and drift, and on narrow screens they'd have to fold back into the text. Worth trying if
   footnotes on the live site start to feel like they belong in the margin, most likely as a
   `site.yaml` setting, changing only how a page lays them out and not what kame stores.
-- [ ] **Several windows open at once.** Needs a design. kame runs as one instance today, held by `instance.lock`, so the
-  choice is between windows in one process, as egui's viewports allow, and several processes. Then what they share: the
-  notebook, settings, sync and the checks for files changing on disk. And what happens when the same document is open in two.
+- [ ] **Several windows open at once.** Needs a design. Each kame has one window today, and several can run, each holding
+  the document it has open so that no other opens it; `instance.lock` only keeps a later one from going back to the last
+  document. The choice is between windows in one process, as egui's viewports allow, and several processes. Then what they
+  share: the notebook, settings, sync and the checks for files changing on disk.
 - [ ] **An essay's thesis and arguments in the left gutter.** The margin on the right holds marginals beside their blocks;
   the gutter on the left could hold what the essay argues, its thesis and the arguments for it, to keep in view while
   writing. Needs a design: what's kept there, whether it belongs to blocks or to the document, and whether it exports.

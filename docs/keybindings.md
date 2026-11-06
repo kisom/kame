@@ -223,8 +223,12 @@ back to its place in the text. Clicking the footnote's words opens it for editin
 
 Launching kame without naming a file reopens the last file you had open, if it is
 still there. After Ctrl-N, or after importing Markdown, it starts empty instead, until
-that document is saved or another file is opened. A second kame started while one is running begins empty instead, because two
-windows on one file would overwrite each other's edits.
+that document is saved or another file is opened. A second kame started while one is running begins empty instead, as the
+first most likely has that document.
+
+A document is only ever open in one kame. Opening one that another kame window has, by any route, from the command line or
+the desktop to a link, leaves the document on the screen as it was and says "NAME is open in another kame window", and a
+launch onto one starts empty with the same words. A Save As onto it, or a merge with it, is refused the same way.
 
 Each document keeps its caret and scroll position in its own file, and returns to them
 whenever it is opened.

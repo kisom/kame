@@ -236,3 +236,216 @@ fn how_long_the_page_takes() {
     lines.extend(measure(&bigger, "ten times over"));
     eprintln!("\n{}\n", lines.join("\n"));
 }
+
+/// A paragraph of at least `words` words, made of the document's own paragraphs one after another.
+fn long_paragraph_from(document: &Document, words: usize) -> kame_core::model::Block {
+    let mut text = String::new();
+    for block in document
+        .blocks
+        .iter()
+        .cycle()
+        .take(document.blocks.len() * 4)
+    {
+        if block.kind != BlockKind::Paragraph || block.text.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&block.text);
+        if text.split_whitespace().count() >= words {
+            break;
+        }
+    }
+    kame_core::model::Block {
+        id: uuid::Uuid::new_v4(),
+        kind: BlockKind::Paragraph,
+        text,
+        spans: Vec::new(),
+    }
+}
+
+/// The paragraph nearest `words` words long.
+fn paragraph_of_about(document: &Document, words: usize) -> uuid::Uuid {
+    document
+        .blocks
+        .iter()
+        .filter(|block| block.kind == BlockKind::Paragraph)
+        .min_by_key(|block| block.text.split_whitespace().count().abs_diff(words))
+        .expect("a paragraph")
+        .id
+}
+
+/// Types into the middle of `block_id`, timing each frame and, apart from it, drawing the
+/// paragraph's image as the frame did and shaping it.
+fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
+    let mut session = Session::open(path).unwrap();
+    let find = |document: &Document| {
+        document
+            .blocks
+            .iter()
+            .find(|block| block.id == block_id)
+            .unwrap()
+            .clone()
+    };
+    let block = find(session.document());
+    let mut offset = block.text.len() / 2;
+    while !block.text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    session.set_caret(Cursor { block_id, offset });
+    let words = block.text.split_whitespace().count();
+    let mut page = Headless::new(session);
+    page.scale = Some(scale);
+    for _ in 0..5 {
+        page.frame(Vec::new());
+    }
+    let mut frames = Spread::new("  a frame typing one letter");
+    let mut drawing = Spread::new("  drawing its image");
+    let mut shaping = Spread::new("  shaping it");
+    let mut size = [0, 0];
+    for letter in "the quick brown fox jumps over the lazy dog "
+        .chars()
+        .cycle()
+        .take(300)
+    {
+        frames.time(|| page.frame(vec![egui::Event::Text(letter.to_string())]));
+        let app = &mut page.app;
+        let highlights = crate::highlight_map(app.session.document(), &app.palette);
+        let paper = app.palette.background;
+        let paper = [paper.r(), paper.g(), paper.b()];
+        let layout = app.layouts.get(block_id).unwrap();
+        let block = find(app.session.document());
+        let ink = app.palette.body_ink;
+        let renderer = &mut app.renderer;
+        drawing.time(|| {
+            let hl = highlights.get(&block_id).map(Vec::as_slice).unwrap_or(&[]);
+            size = renderer.rasterize(layout, ink, paper, hl, scale).0.size;
+        });
+        shaping.time(|| {
+            renderer.layout(&block);
+        });
+    }
+    vec![
+        format!(
+            "{words} words at {scale}x, an image {}x{} pixels",
+            size[0], size[1]
+        ),
+        frames.report(),
+        drawing.report(),
+        shaping.report(),
+    ]
+}
+
+#[test]
+#[ignore = "needs KAME_PERF_DOC, and a while"]
+fn how_long_a_keystroke_draws_its_paragraph() {
+    let Some(named) = named_document() else {
+        eprintln!("KAME_PERF_DOC names no document, so there is nothing to measure");
+        return;
+    };
+    let path = copy_of(&named, "drawing");
+    let (short, long) = {
+        let mut session = Session::open(&path).unwrap();
+        let mut document = session.document().clone();
+        let long = long_paragraph_from(&document, 350);
+        let long_id = long.id;
+        let half = document.blocks.len() / 2;
+        document.blocks.insert(half, long);
+        let short = paragraph_of_about(&document, 50);
+        assert!(session.replace_document(document));
+        (short, long_id)
+    };
+    let mut lines = Vec::new();
+    for scale in [2.0, 1.0] {
+        for (what, block) in [("a short paragraph", short), ("a long paragraph", long)] {
+            lines.push(format!("{what}:"));
+            lines.extend(time_drawing(&copy_of(&path, "typed"), block, scale));
+        }
+    }
+    eprintln!("\n{}\n", lines.join("\n"));
+}
+
+/// What a future gives, waiting for it. wgpu's native futures are ready at once.
+fn wait_for<T>(future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        std::thread::yield_now();
+    }
+}
+
+/// How long the graphics card takes to be given a long paragraph's image, as the app gives it
+/// one when a letter is typed: a new texture of the whole image, or a band of it in place.
+#[test]
+#[ignore = "needs a graphics card, and a while"]
+fn how_long_an_image_takes_to_reach_the_graphics_card() {
+    use eframe::egui_wgpu::{wgpu, Renderer, RendererOptions};
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let Ok(adapter) = wait_for(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        eprintln!("no graphics card to measure");
+        return;
+    };
+    let (device, queue) =
+        wait_for(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let mut renderer = Renderer::new(
+        &device,
+        wgpu::TextureFormat::Bgra8Unorm,
+        RendererOptions::default(),
+    );
+    let finish = |queue: &wgpu::Queue| {
+        queue.submit([]);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    };
+    let options = egui::TextureOptions::NEAREST;
+    let image = |width, height| {
+        egui::ColorImage::filled([width, height], egui::Color32::from_black_alpha(128))
+    };
+    // A 390-word paragraph at 2x, and three lines of it.
+    let (width, height, band) = (1285, 1137, 150);
+    let mut lines = vec![format!(
+        "{} on {:?}",
+        adapter.get_info().name,
+        adapter.get_info().backend
+    )];
+    let mut whole = Spread::new("a new texture of the whole image");
+    let mut next = 0;
+    let mut id = egui::TextureId::Managed(next);
+    renderer.update_texture(
+        &device,
+        &queue,
+        id,
+        &egui::epaint::ImageDelta::full(image(width, height), options),
+    );
+    finish(&queue);
+    for _ in 0..200 {
+        let delta = egui::epaint::ImageDelta::full(image(width, height), options);
+        whole.time(|| {
+            next += 1;
+            let new = egui::TextureId::Managed(next);
+            renderer.update_texture(&device, &queue, new, &delta);
+            renderer.free_texture(&id);
+            id = new;
+            finish(&queue);
+        });
+    }
+    lines.push(whole.report());
+    let mut part = Spread::new("three lines of it, in place");
+    for at in 0..200 {
+        let delta = egui::epaint::ImageDelta::partial(
+            [0, (at * 7) % (height - band)],
+            image(width, band),
+            options,
+        );
+        part.time(|| {
+            renderer.update_texture(&device, &queue, id, &delta);
+            finish(&queue);
+        });
+    }
+    lines.push(part.report());
+    eprintln!("\n{}\n", lines.join("\n"));
+}

@@ -7238,6 +7238,8 @@ pub(crate) struct Headless {
     width: f32,
     /// How tall the window is. It is `HEIGHT` unless a test shrinks it.
     height: f32,
+    /// The screen's pixels per point, if a test names one. egui takes 1 otherwise.
+    pub(crate) scale: Option<f32>,
 }
 
 #[cfg(test)]
@@ -7258,13 +7260,14 @@ impl Headless {
             ime: None,
             width: Self::WIDTH,
             height: Self::HEIGHT,
+            scale: None,
         }
     }
 
     /// One frame, in the order `logic` and `ui` run things, with `events` having just happened.
     pub(crate) fn frame(&mut self, events: Vec<egui::Event>) {
         self.time += 0.02;
-        let input = egui::RawInput {
+        let mut input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
                 Vec2::new(self.width, self.height),
@@ -7273,6 +7276,13 @@ impl Headless {
             events,
             ..Default::default()
         };
+        if let Some(scale) = self.scale {
+            input
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(scale);
+        }
         let app = &mut self.app;
         app.handle_os_requests(&self.ctx, external::Requests::default());
         app.notebook_tick(&self.ctx);

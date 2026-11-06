@@ -40,8 +40,9 @@ i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame hold
 
 - [ ] **Spell checking holds about 130 MB,** 117 MB of it Harper's dictionary as Harper builds it. It's loaded only while checking
   is on. A smaller footprint would mean a lighter dictionary from Harper, or our own.
-- [ ] **A keystroke redraws its whole paragraph's image.** Drawing only the lines that changed would save most of it in a long
-  paragraph.
+- [ ] **A keystroke sets its whole paragraph again.** It redraws only the lines whose drawing changed, so in a 390-word paragraph
+  at 2x shaping it and choosing its lines is now 2.2 ms of a 2.8 ms keystroke. Lines are chosen a line ahead, so those before
+  the one above the edit should stay as they were, but they are set again all the same.
 - [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs
   far from the screen would make opening independent of length.
 

@@ -88,18 +88,23 @@ impl Document {
     /// Gives each block that repeats an earlier block's id one of its own, so that every block,
     /// and its words, can be told apart: a merge keeps blocks by id. The first keeps the id, and
     /// with it the notes anchored there, as lookups take the first. The new id is worked out from
-    /// the old one and where the block is, so every reading of the same document gives the same.
+    /// the old one and which repeat of it the block is, first, second and so on, so every reading
+    /// of the same document gives the same, and a block put in or taken out elsewhere, as on
+    /// another machine, changes nothing.
     pub fn fit_ids(&mut self) {
         let mut taken: HashSet<BlockId> = self.blocks.iter().map(|block| block.id).collect();
         if taken.len() == self.blocks.len() {
             return;
         }
         let mut seen: HashSet<BlockId> = HashSet::with_capacity(self.blocks.len());
-        for (at, block) in self.blocks.iter_mut().enumerate() {
+        let mut repeats: HashMap<BlockId, u128> = HashMap::new();
+        for block in &mut self.blocks {
             if seen.insert(block.id) {
                 continue;
             }
-            let mut id = block.id.as_u128().wrapping_add(at as u128 + 1);
+            let repeat = repeats.entry(block.id).or_insert(0);
+            *repeat += 1;
+            let mut id = block.id.as_u128().wrapping_add(*repeat);
             while taken.contains(&Uuid::from_u128(id)) {
                 id = id.wrapping_add(1);
             }
@@ -253,6 +258,22 @@ mod tests {
     }
 
     #[test]
+    fn a_repeats_new_id_is_the_same_with_a_block_put_in_elsewhere() {
+        let mut doc = document("One.");
+        let mut twin = doc.blocks[0].clone();
+        twin.text = "Two.".to_string();
+        doc.blocks.push(twin);
+        let mut edited = doc.clone();
+        let mut other = doc.blocks[0].clone();
+        other.id = Uuid::new_v4();
+        other.text = "Put in.".to_string();
+        edited.blocks.insert(0, other);
+        doc.fit();
+        edited.fit();
+        assert_eq!(edited.blocks[2].id, doc.blocks[1].id);
+    }
+
+    #[test]
     fn a_new_id_is_never_one_already_there() {
         let mut doc = document("One.");
         let id = doc.blocks[0].id;
@@ -260,8 +281,8 @@ mod tests {
         twin.text = "Two.".to_string();
         doc.blocks.push(twin);
         let mut next = doc.blocks[0].clone();
-        // Where the repeat at 1 would go first.
-        let own = Uuid::from_u128(id.as_u128().wrapping_add(2));
+        // Where the first repeat would go first.
+        let own = Uuid::from_u128(id.as_u128().wrapping_add(1));
         next.id = own;
         doc.blocks.push(next);
         doc.fit();

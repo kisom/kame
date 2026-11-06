@@ -972,6 +972,10 @@ pub enum Command {
     /// Add an annotation at the selection or the word under the caret. A note
     /// starts as a bare highlight (empty body) and its comment is added later.
     AddAnnotation(AnnotationKind),
+    /// Move the caret's list item, or the selected ones, a place up or down in the list.
+    MoveListItem {
+        up: bool,
+    },
 }
 
 /// How long after Escape the next key still counts as following it.
@@ -1155,6 +1159,9 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::ArrowLeft if !command => Some(Command::MoveLeft),
         Key::ArrowRight if modifiers.shift && !command => Some(Command::SelectRight),
         Key::ArrowRight if !command => Some(Command::MoveRight),
+        // Ctrl-Shift-Up/Down move the caret's list item, or the selected ones, in the list.
+        Key::ArrowUp if command && modifiers.shift => Some(Command::MoveListItem { up: true }),
+        Key::ArrowDown if command && modifiers.shift => Some(Command::MoveListItem { up: false }),
         Key::ArrowUp if modifiers.shift && !command => Some(Command::SelectUp),
         Key::ArrowUp if !command => Some(Command::MoveUp),
         Key::ArrowDown if modifiers.shift && !command => Some(Command::SelectDown),
@@ -2376,6 +2383,41 @@ visual form, and thus with an independent existence.";
             None
         );
         assert_eq!(command_for_key(Key::F5, none), None);
+    }
+
+    #[test]
+    fn ctrl_shift_up_and_down_move_a_list_item() {
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            command_for_key(Key::ArrowUp, ctrl_shift),
+            Some(Command::MoveListItem { up: true })
+        );
+        assert_eq!(
+            command_for_key(Key::ArrowDown, ctrl_shift),
+            Some(Command::MoveListItem { up: false })
+        );
+        // Cmd on a Mac.
+        let cmd_shift = Modifiers {
+            mac_cmd: true,
+            shift: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            command_for_key(Key::ArrowUp, cmd_shift),
+            Some(Command::MoveListItem { up: true })
+        );
+        let ctrl = Modifiers {
+            shift: false,
+            ..ctrl_shift
+        };
+        assert_eq!(command_for_key(Key::ArrowUp, ctrl), None);
+        assert_eq!(command_for_key(Key::ArrowDown, ctrl), None);
     }
 
     #[test]

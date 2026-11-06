@@ -532,6 +532,10 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ),
     ("Tab / Shift-Tab", "move a list item in / out"),
     (
+        "Ctrl-Shift-Up / Down",
+        "move a list item up / down in its list",
+    ),
+    (
         "Ctrl-Backspace, Alt-Backspace",
         "delete the word before the caret",
     ),
@@ -3786,6 +3790,9 @@ impl KameApp {
                     self.session.set_block_kind(caret.block_id, kind);
                 }
                 Command::AddAnnotation(kind) => self.add_annotation(kind),
+                Command::MoveListItem { up } => {
+                    self.session.move_list_item(up);
+                }
             }
         }
     }
@@ -11511,6 +11518,55 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         page
     }
 
+    /// A page of list items `0` to `count - 1`, its caret at the start of item `at`.
+    fn page_of_items(count: usize, at: usize) -> Headless {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "- 0");
+        for item in 1..count {
+            session.split();
+            typed(&mut session, &item.to_string());
+        }
+        let block_id = session.document().blocks[at].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        let mut page = Headless::new(session);
+        page.frame(Vec::new());
+        page
+    }
+
+    fn item_texts(page: &Headless) -> Vec<String> {
+        let blocks = &page.app.session.document().blocks;
+        blocks.iter().map(|block| block.text.clone()).collect()
+    }
+
+    #[test]
+    fn ctrl_shift_up_and_down_move_a_list_item() {
+        let mut page = page_of_items(3, 1);
+        let caret = page.app.session.caret;
+        press_chord(&mut page, egui::Key::ArrowUp);
+        assert_eq!(item_texts(&page), ["1", "0", "2"]);
+        assert_eq!(page.app.session.caret, caret);
+        press_chord(&mut page, egui::Key::ArrowDown);
+        press_chord(&mut page, egui::Key::ArrowDown);
+        assert_eq!(item_texts(&page), ["0", "2", "1"]);
+        press_chord(&mut page, egui::Key::ArrowDown);
+        assert_eq!(item_texts(&page), ["0", "2", "1"], "it's the last");
+        assert_eq!(page.app.session.caret, caret);
+    }
+
+    #[test]
+    fn a_list_item_moved_off_the_page_brings_the_page_along() {
+        let mut page = page_of_items(80, 79);
+        page.frame(Vec::new());
+        assert_eq!(page.app.page_scroll, 0.0, "the caret is below the page");
+        press_chord(&mut page, egui::Key::ArrowUp);
+        page.frame(Vec::new());
+        assert_eq!(item_texts(&page)[78], "79");
+        assert!(page.app.page_scroll > 0.0);
+    }
+
     #[test]
     fn ctrl_shift_m_adds_a_marginal_on_the_page() {
         let mut page = page_with_a_word();
@@ -12088,6 +12144,7 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             "Arrows",
             "Alt-Left",
             "Tab",
+            "Ctrl-Shift-Up",
             "Ctrl-Enter",
             "Escape",
             "[[target]]",

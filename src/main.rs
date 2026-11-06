@@ -2235,7 +2235,7 @@ fn document_title(path: &Path) -> String {
     if is_markdown_path(path) {
         return stem();
     }
-    let Ok(db) = Db::open(path) else {
+    let Ok(db) = Db::open_read_only(path) else {
         return stem();
     };
     db.load_metadata()
@@ -2243,7 +2243,7 @@ fn document_title(path: &Path) -> String {
         .flatten()
         .map(|metadata| metadata.title)
         .into_iter()
-        .chain(db.load_document().ok().map(|document| document.title))
+        .chain(db.load_readable().ok().map(|document| document.title))
         .find(|title| !title.is_empty() && title != "Untitled")
         .unwrap_or_else(stem)
 }
@@ -10370,6 +10370,28 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         session.set_metadata(metadata);
         drop(session);
         assert_eq!(document_title(&path), "The Essay");
+    }
+
+    /// What this build can read of a document from a newer kame still has its title, and reading
+    /// it changes nothing.
+    #[test]
+    fn a_document_from_a_newer_version_goes_by_its_title() {
+        let path = scratch_dir("newer-title").join("file name.kame");
+        storage::Db::open(&path)
+            .unwrap()
+            .save_document(&model::Document::new("The Essay"))
+            .unwrap();
+        // A kind of the same length, as a newer build would write it, in the file itself.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (from, to) = (br#""kind":"Paragraph""#, br#""kind":"Pullquote""#);
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .unwrap();
+        bytes[at..at + from.len()].copy_from_slice(to);
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(document_title(&path), "The Essay");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[test]

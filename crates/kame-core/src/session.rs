@@ -5022,6 +5022,66 @@ mod tests {
         }
     }
 
+    /// A session at `path` with "one", then a new paragraph, then "two" typed into it, the last two
+    /// steps undone, so redoing them depends on their order.
+    fn session_with_two_steps_to_redo(path: &Path) -> Session {
+        let mut session = open(path);
+        session.insert("one");
+        assert!(session.split());
+        session.insert("two");
+        assert_eq!(session.history(), (3, 0));
+        assert!(session.undo());
+        assert!(session.undo());
+        assert_eq!(session.history(), (1, 2));
+        session
+    }
+
+    /// That `session` redoes both steps, in order.
+    fn redoes_both(session: &mut Session) {
+        assert_eq!(session.history(), (1, 2));
+        assert!(session.redo());
+        assert!(session.redo());
+        let texts: Vec<&str> = session
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect();
+        assert_eq!(texts, ["one", "two"]);
+    }
+
+    #[test]
+    fn a_save_as_and_a_retry_keep_what_can_be_redone_in_order() {
+        let root = scratch_dir("redotail").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("three")).unwrap();
+        for (to, reopened) in [
+            ("b.kame", false),
+            ("b.kame", true),
+            ("three/a.kame", false),
+            ("three/a.kame", true),
+        ] {
+            let mut session = session_with_two_steps_to_redo(&root.join("a.kame"));
+            let to = root.join(to);
+            session.save_as(&to, None, |_, _| false).unwrap();
+            if reopened {
+                drop(session);
+                redoes_both(&mut open(&to));
+            } else {
+                redoes_both(&mut session);
+            }
+            std::fs::remove_file(root.join("a.kame")).unwrap();
+            std::fs::remove_file(&to).unwrap();
+        }
+        let path = root.join("retried.kame");
+        let mut session = session_with_two_steps_to_redo(&path);
+        // As a failed write leaves it.
+        session.save_failed = true;
+        assert!(session.retry_or_dismiss());
+        drop(session);
+        redoes_both(&mut open(&path));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn a_retried_write_after_a_failed_edit_logs_it() {
         let root = scratch_dir("failedretry").canonicalize().unwrap();

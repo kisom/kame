@@ -27,6 +27,7 @@ macOS (`Modifiers::command`).
 | Ctrl-Shift-Up / Ctrl-Shift-Down | move the caret's list item, or the selected items, a place up / down in its list, with the items nested under it |
 | Ctrl-F | find — open the find bar |
 | Ctrl + / Ctrl - / Ctrl-0 | increase / decrease / reset the type size |
+| Ctrl-Alt + / Ctrl-Alt - / Ctrl-Alt-0 | increase / decrease / reset the interface's text: the menus, title and status row, the notebook's browser and lists, the palette, the help and the dialogs, but not the page. Ctrl-Alt-= works as Ctrl-Alt-+ does. On a Mac these are Cmd-Option-+, Cmd-Option-- and Cmd-Option-0 |
 | drag, shift-click, Shift-arrows | select / extend the selection |
 | Escape | close the find bar, a dialog, or the note popover |
 | F1 | toggle the help dialog: every command in columns as wide as the window allows, scrolling when the window is short |
@@ -325,8 +326,14 @@ there is one.
 ## The menu bar and status row
 
 The menu bar holds every command with its shortcut: File (open, save, import,
-export, snapshots, document properties, and the document's counts), Annotate, View (type size, dark
-mode, hyphenation, spelling, a notebook's commands and the view modes) and Help.
+export, snapshots, document properties, and the document's counts), Annotate, View (type size,
+interface text, dark mode, hyphenation, spelling, a notebook's commands and the view modes) and Help.
+
+The View menu's first two rows are the type size and the interface's text, each with buttons to
+step it that leave the menu open, so either can be walked to taste. The interface text goes from 80%
+to 200% in steps of 10%, and Reset puts it back at 100%, as egui draws it. Both are kame settings,
+kept for the next launch, and neither is kept in a document. The page and its margin, and what
+links here below them, follow the type size, and everything else follows the interface text.
 
 On Linux, Alt-F, Alt-A, Alt-V, Alt-S (in a notebook) and Alt-H open those menus; arrows and Enter then
 choose an item, and Escape closes it. There are no such chords on macOS, where

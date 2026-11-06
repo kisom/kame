@@ -116,7 +116,7 @@ When you want less on the screen, each of these is a toggle, and none of them ch
 - Ctrl-Shift-P: dim everything but the current paragraph.
 - Ctrl-Shift-T: typewriter mode, which keeps your line at the middle of the window.
 
-Ctrl-Shift-D is dark mode, and Ctrl-plus, Ctrl-minus and Ctrl-0 change the type size. View > Check spelling marks likely mistakes in red, and other things worth a look in blue. Right-click a mark for suggestions, or to accept it, add the word or turn the rule off. F7 goes to the next mark.
+Ctrl-Shift-D is dark mode, and Ctrl-plus, Ctrl-minus and Ctrl-0 change the type size. With Alt as well (Option on a Mac), they change the size of everything around the page instead: the menus, the title and status row, the notebook's browser and lists, and the dialogs. Both are also in the View menu, and both are remembered. View > Check spelling marks likely mistakes in red, and other things worth a look in blue. Right-click a mark for suggestions, or to accept it, add the word or turn the rule off. F7 goes to the next mark.
 
 ## History and snapshots
 

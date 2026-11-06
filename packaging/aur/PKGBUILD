@@ -1,0 +1,56 @@
+# Maintainer: Kyle Isom
+
+pkgname=kame
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Kyle's marginalia editor: a WYSIWYG prose editor for writing ideas and thinking"
+arch=('x86_64' 'aarch64')
+url="https://github.com/kisom/kame"
+license=('Apache-2.0' 'OFL-1.1')
+# The windowing and graphics libraries are loaded at run time, so nothing
+# links against them, but kame does not start without them.
+depends=('gcc-libs' 'glibc' 'libx11' 'libxcursor' 'libxi' 'libxkbcommon' 'libxrandr' 'vulkan-icd-loader' 'wayland')
+makedepends=('cargo')
+# zstd-sys and the bundled SQLite are C code, which GCC's LTO fails to link with Rust's (see the Arch Rust guidelines).
+options=('!lto')
+optdepends=('vulkan-driver: draws the window; any Vulkan driver will do'
+            'perl-file-mimeinfo: lets xdg-open recognise .kame files')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/kisom/kame/archive/refs/tags/v$pkgver.tar.gz")
+# The controller fills this in after tagging v0.1.0, with the tarball's sum.
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # kame is the root package and kame-site is a workspace member.
+  cargo build --frozen --release -p kame -p kame-site
+}
+
+# The full suite is long, so check runs the two crates that hold the document
+# model and the site generator, which is what a packaging mistake would break.
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen -p kame-core -p kame-site
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm0755 -t "$pkgdir/usr/bin/" target/release/kame target/release/kame-site
+  sed 's|@PREFIX@|/usr/bin|g' packaging/kame.desktop > kame.desktop
+  install -Dm0644 kame.desktop "$pkgdir/usr/share/applications/kame.desktop"
+  install -Dm0644 packaging/kame.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/kame.png"
+  install -Dm0644 packaging/kame.xml "$pkgdir/usr/share/mime/packages/kame.xml"
+  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE \
+    crates/kame-typeset/fonts/CrimsonPro-OFL.txt \
+    crates/kame-typeset/fonts/EBGaramond-OFL.txt \
+    crates/kame-typeset/fonts/IBMPlexMono-OFL.txt \
+    crates/kame-typeset/fonts/SourceSerif4-OFL.txt
+}

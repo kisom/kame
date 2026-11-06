@@ -329,6 +329,11 @@ impl Store {
         &self.revisions[id].device
     }
 
+    /// The id of the document a revision is of.
+    pub fn document_of(&self, id: &str) -> Uuid {
+        self.revisions[id].document
+    }
+
     /// When a revision was written, by its machine's clock.
     pub fn when(&self, id: &str) -> i64 {
         self.revisions[id].when

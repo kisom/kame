@@ -424,13 +424,19 @@ impl BackStack {
     }
 }
 
-/// What to say when another machine's words have arrived through the logs.
-fn logs_notice(from: Option<&str>, notes: usize) -> String {
+/// What to say when another machine's words have arrived through the logs, and whether they were
+/// another document's, made at this name.
+fn logs_notice(from: Option<&str>, notes: usize, another_document: bool) -> String {
     let from = from.unwrap_or("another machine");
+    let merged = if another_document {
+        format!("merged with another document of this name from {from}")
+    } else {
+        format!("merged from {from}")
+    };
     match notes {
-        0 => format!("merged from {from}"),
-        1 => format!("merged from {from}, with 1 note to look at"),
-        notes => format!("merged from {from}, with {notes} notes to look at"),
+        0 => merged,
+        1 => format!("{merged}, with 1 note to look at"),
+        notes => format!("{merged}, with {notes} notes to look at"),
     }
 }
 
@@ -6810,7 +6816,11 @@ impl KameApp {
                     if outcome.merged {
                         self.set_open_note(None);
                         self.notice_tracker.announced();
-                        self.notice = Some(logs_notice(outcome.from.as_deref(), outcome.notes));
+                        self.notice = Some(logs_notice(
+                            outcome.from.as_deref(),
+                            outcome.notes,
+                            outcome.another_document,
+                        ));
                     }
                 }
                 Err(err) => {
@@ -9984,14 +9994,22 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
 
     #[test]
     fn a_notice_says_where_merged_words_came_from_and_counts_notes() {
-        assert_eq!(logs_notice(Some("titan"), 0), "merged from titan");
+        assert_eq!(logs_notice(Some("titan"), 0, false), "merged from titan");
         assert_eq!(
-            logs_notice(Some("titan"), 1),
+            logs_notice(Some("titan"), 1, false),
             "merged from titan, with 1 note to look at"
         );
         assert_eq!(
-            logs_notice(None, 2),
+            logs_notice(None, 2, false),
             "merged from another machine, with 2 notes to look at"
+        );
+        assert_eq!(
+            logs_notice(Some("titan"), 0, true),
+            "merged with another document of this name from titan"
+        );
+        assert_eq!(
+            logs_notice(None, 1, true),
+            "merged with another document of this name from another machine, with 1 note to look at"
         );
     }
 
@@ -12117,6 +12135,70 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
     fn the_help_is_in_as_many_columns_as_the_window_has_room_for() {
         assert_eq!(help_columns(&help_page_at(800.0, 800.0)), 2);
         assert_eq!(help_columns(&help_page_at(1100.0, 860.0)), 3);
+    }
+
+    /// Two machines follow one link to a document that isn't there yet, and each makes, types and
+    /// syncs it before the other's logs arrive. The page says it merged with another document of
+    /// that name, and from where, the first time only.
+    #[test]
+    fn a_merge_with_another_document_of_this_name_is_said_once() {
+        use kame_sync::logs::{log_folder, Logged, MARKER};
+        let marked = |name: &str| {
+            let root = kame_test_dir::folder(name).canonicalize().unwrap();
+            std::fs::write(root.join("notebook.yaml"), "").unwrap();
+            std::fs::write(root.join(MARKER), "").unwrap();
+            root.join("linked.kame")
+        };
+        let (there, here) = (marked("app-linked-talos"), marked("app-linked-titan"));
+        let carry = |from: &Path, to: &Path| {
+            std::fs::create_dir_all(log_folder(to)).unwrap();
+            for entry in std::fs::read_dir(log_folder(from)).unwrap().flatten() {
+                std::fs::copy(entry.path(), log_folder(to).join(entry.file_name())).unwrap();
+            }
+        };
+        let mut talos = Session::open(&there).unwrap();
+        talos.insert("Written on talos.");
+        let mut logged = Logged::open(&talos, "talos-aaaa").unwrap();
+        logged.sync(&mut talos, 1).unwrap();
+
+        let mut session = Session::open(&here).unwrap();
+        session.insert("Written on titan.");
+        let mut page = Headless::new(session);
+        page.app.device = "titan-bbbb".to_string();
+        page.app.sync_logs();
+        page.app.notice = None;
+        carry(&there, &here);
+
+        page.app.sync_logs();
+        assert_eq!(
+            page.app.notice.take().as_deref(),
+            Some("merged with another document of this name from talos")
+        );
+        let words: Vec<String> = page
+            .app
+            .session
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.text.clone())
+            .collect();
+        assert!(
+            words.contains(&"Written on talos.".to_string()),
+            "{words:?}"
+        );
+        assert!(
+            words.contains(&"Written on titan.".to_string()),
+            "{words:?}"
+        );
+
+        carry(&here, &there);
+        logged.sync(&mut talos, 3).unwrap();
+        talos.insert(" More from talos.");
+        logged.sync(&mut talos, 4).unwrap();
+        carry(&there, &here);
+        page.app.sync_logs();
+        assert_eq!(page.app.notice.take().as_deref(), Some("merged from talos"));
+        assert_eq!(page.app.session.document(), talos.document());
     }
 
     #[test]

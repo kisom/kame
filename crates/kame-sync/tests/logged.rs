@@ -1348,6 +1348,154 @@ fn a_document_on_another_documents_logs_reads_them_only_when_they_change() {
     });
 }
 
+/// Two machines with nothing in common yet, each about to make `name` as a link to it would.
+fn two_machines_without_it(name: &str) -> (Machine, Machine) {
+    let root = common::test_folder("linked");
+    let (talos, titan) = (root.join("talos"), root.join("titan"));
+    for folder in [&talos, &titan] {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(folder.join(MARKER), "").unwrap();
+    }
+    (
+        Machine {
+            path: talos.join(name),
+            device: "talos-aaaa".to_string(),
+        },
+        Machine {
+            path: titan.join(name),
+            device: "titan-bbbb".to_string(),
+        },
+    )
+}
+
+/// Both machines follow a link to a document that isn't there yet, so each makes one with an id of
+/// its own, and each types and syncs before the other's logs arrive. Once they meet, they merge, keep
+/// both sides' words, take one id, and say what happened, once.
+#[test]
+fn two_documents_made_from_one_link_on_two_machines_merge_and_say_so_once() {
+    let (talos, titan) = two_machines_without_it("linked.kame");
+    let mut there = talos.session();
+    there.insert("Written on talos.");
+    let mut here = titan.session();
+    here.insert("Written on titan.");
+    assert_ne!(there.document().id, here.document().id);
+    talos.sync(&mut there, 1);
+    titan.sync(&mut here, 2);
+
+    titan.receive_from(&talos);
+    talos.receive_from(&titan);
+    let on_talos = talos.sync(&mut there, 3);
+    let on_titan = titan.sync(&mut here, 4);
+
+    for (outcome, from) in [(&on_talos, "titan"), (&on_titan, "talos")] {
+        assert!(outcome.merged, "{outcome:?}");
+        assert!(outcome.another_document, "{outcome:?}");
+        assert_eq!(outcome.from.as_deref(), Some(from), "{outcome:?}");
+        assert!(!outcome.others_logs, "{outcome:?}");
+    }
+    assert_eq!(there.document(), here.document(), "they converged");
+    let words: Vec<&str> = here
+        .document()
+        .blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect();
+    assert!(words.contains(&"Written on talos."), "{words:?}");
+    assert!(words.contains(&"Written on titan."), "{words:?}");
+
+    titan.append(&mut here, 0, " More.");
+    titan.sync(&mut here, 5);
+    talos.receive_from(&titan);
+    titan.receive_from(&talos);
+    let on_talos = talos.sync(&mut there, 6);
+    let on_titan = titan.sync(&mut here, 7);
+    assert!(on_talos.merged, "the new words came");
+    assert!(!on_talos.another_document, "once is enough: {on_talos:?}");
+    assert!(!on_titan.another_document, "{on_titan:?}");
+    assert_eq!(there.document(), here.document());
+}
+
+/// Undoing the merge on the machine whose id it changed brings that id back, with the words from
+/// before. That's another revision, which the other machine follows, as for any undone merge. Both
+/// ids are in what each has seen, so nobody is told of another document again, and both go on.
+#[test]
+fn undoing_a_merge_with_another_document_keeps_both_syncing() {
+    let (talos, titan) = two_machines_without_it("linked.kame");
+    let mut there = talos.session();
+    there.insert("Written on talos.");
+    let mut here = titan.session();
+    here.insert("Written on titan.");
+    let talos_id = there.document().id;
+    talos.sync(&mut there, 1);
+    titan.sync(&mut here, 2);
+    titan.receive_from(&talos);
+    talos.receive_from(&titan);
+    talos.sync(&mut there, 3);
+    titan.sync(&mut here, 4);
+    assert_ne!(there.document().id, talos_id, "the later one's id won");
+
+    assert!(there.undo());
+    assert_eq!(there.document().id, talos_id);
+    let on_talos = talos.sync(&mut there, 5);
+    titan.receive_from(&talos);
+    let on_titan = titan.sync(&mut here, 6);
+    for outcome in [&on_talos, &on_titan] {
+        assert!(!outcome.others_logs && !outcome.stranded, "{outcome:?}");
+        assert!(!outcome.another_document, "{outcome:?}");
+    }
+    assert!(on_titan.merged, "it followed the undo");
+    assert_eq!(there.document(), here.document());
+
+    titan.append(&mut here, 0, " Still syncing.");
+    titan.sync(&mut here, 7);
+    talos.receive_from(&titan);
+    let on_talos = talos.sync(&mut there, 8);
+    assert!(
+        on_talos.merged && !on_talos.another_document,
+        "{on_talos:?}"
+    );
+    assert_eq!(there.document(), here.document());
+}
+
+/// A document deleted and made again at its name, with the old one's log come back beside the new
+/// one's. They merge, so the old words come back into the new document, all of them, and it says so.
+#[test]
+fn another_documents_log_beside_its_own_merges_and_says_so() {
+    let (talos, _) = two_machines();
+    let mut old = talos.session();
+    talos.append(&mut old, 0, " The old one's words.");
+    talos.sync(&mut old, 5);
+    drop(old);
+    let new = Machine {
+        path: another_document(&talos, "different.kame"),
+        device: "titan-bbbb".to_string(),
+    };
+    std::fs::copy(
+        log_folder(&talos.path).join("talos-aaaa.log"),
+        log_folder(&new.path).join("old-cccc.log"),
+    )
+    .unwrap();
+
+    let mut session = new.session();
+    new.append(&mut session, 0, " Typed here.");
+    let outcome = new.sync(&mut session, 9);
+
+    assert!(outcome.merged, "{outcome:?}");
+    assert!(outcome.another_document, "{outcome:?}");
+    assert_eq!(outcome.from.as_deref(), Some("talos"));
+    let text: String = session
+        .document()
+        .blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Typed here."), "{text}");
+    assert!(text.contains("The old one's words."), "{text}");
+
+    assert!(!new.sync(&mut session, 10).another_document, "once");
+}
+
 /// What a sync held off is remembered only while the logs are as they were.
 #[test]
 fn a_document_whose_logs_come_back_syncs_again() {

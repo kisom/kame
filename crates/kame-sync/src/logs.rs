@@ -219,8 +219,12 @@ pub struct Outcome {
     pub merged: bool,
     /// Notes that arrived in the document.
     pub notes: usize,
-    /// The machine the newest words came from, if it can be told.
+    /// The machine the newest words came from, if it can be told. For a merge with another document,
+    /// the machine that document's newest words came from.
     pub from: Option<String>,
+    /// Whether what arrived was another document made at this name, merged in, as when two machines
+    /// make a document from one link, or one is deleted and another made at its name.
+    pub another_document: bool,
 }
 
 /// An open document's logs, kept in memory so that a sync reads only what's new.
@@ -517,6 +521,10 @@ impl Logged {
             outcome.merged = true;
             outcome.notes = added;
             outcome.from = self.newest_other_device(&synced.head);
+            if let Some(from) = self.another_document(&synced.head, local.id) {
+                outcome.another_document = true;
+                outcome.from = from;
+            }
         }
         if synced.metadata != metadata {
             session.set_metadata(synced.metadata);
@@ -568,6 +576,45 @@ impl Logged {
             );
         }
         last.ok_or_else(|| "a history always has a start".into())
+    }
+
+    /// Whether `head` brings revisions of a document that neither `document` nor anything this
+    /// machine had seen is of: another document made at this name, merged in. If so, the machine
+    /// that wrote the newest of them, when that can be told. A document that took another's id in
+    /// an earlier merge, or gave it back by undoing one, has both in what it had seen, so it isn't
+    /// told again.
+    fn another_document(&self, head: &str, document: uuid::Uuid) -> Option<Option<String>> {
+        let known = self
+            .last
+            .as_ref()
+            .map(|last| self.store.ancestors(last))
+            .unwrap_or_default();
+        let mut held: std::collections::HashSet<uuid::Uuid> = known
+            .iter()
+            .filter(|id| self.store.contains(id))
+            .map(|id| self.store.document_of(id))
+            .collect();
+        held.insert(document);
+        let theirs: Vec<String> = self
+            .store
+            .ancestors(head)
+            .into_iter()
+            .filter(|id| {
+                !known.contains(id)
+                    && self.store.contains(id)
+                    && !held.contains(&self.store.document_of(id))
+            })
+            .collect();
+        if theirs.is_empty() {
+            return None;
+        }
+        Some(
+            theirs
+                .into_iter()
+                .filter(|id| !self.store.device(id).is_empty())
+                .max_by_key(|id| (self.store.when(id), id.clone()))
+                .map(|id| display_device(self.store.device(&id)).to_string()),
+        )
     }
 
     /// Who wrote the newest revision that `head` has and this machine hadn't seen.

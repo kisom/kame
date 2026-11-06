@@ -6,13 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **A Save As decides it's onto the document's own file by how the paths are spelled.** Unverified beyond reading the code.
-  `Session::save_as` compares the target with the path it has, which is made whole but not canonical, so the same file spelled
-  differently, in another case on APFS or through a symlinked folder such as `/tmp` for `/private/tmp`, takes the copy route. It
-  then removes the `-wal` and `-shm` at the target, which are the open file's, and renames the copy over the file it has open. The
-  new file holds what's in memory, so its words are right, but closing the old connection may checkpoint into the unlinked file
-  and remove the new one's `-wal` by name. Comparing the file's identity, as `check_file` does, would tell.
-
 - [ ] **Save As tells a saved document what exists on this machine (accepted for now).** A relative `Link` is rewritten only if what it names is there, and
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.

@@ -101,7 +101,7 @@ Saving as another file must not expose a partial or wider-readable copy, or one 
 
 An image whose file can be found is said relative inside a notebook and whole otherwise. A link to the document itself follows its new name. If the snapshots can't be read, they're kept as they were and kame says so, since the words matter more. If the transaction fails, the Save As fails, as a failed copy does.
 
-Saving as the document's own file writes nothing, unless a write has failed. Then it's a retry, as the error strip's is: the head, the whole log, the cursor and the metadata from memory, in one transaction.
+Saving as the document's own file writes nothing, unless a write has failed. Its own file is the target spelled as the open path, or the file kame has open, by device and inode, however the target names it: through a symlink, in another case on a disk that ignores case, or by a hard link under another name. Once another file has been put at the open path (section 1.6), saving onto that file, by either spelling, is refused. Then it's a retry, as the error strip's is: the head, the whole log, the cursor and the metadata from memory, in one transaction.
 
 ## 2. The document
 
@@ -419,6 +419,5 @@ These describe the code as it stands, and aren't rules to copy.
 - **The rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
 - **Older files can hold text in an image block,** from before typing on one started a new paragraph. It isn't shown, and nothing removes it.
 - **Paths aren't portable by themselves.** A whole image path or a `~/` link only works where it was made. Only relative forms hold on another machine.
-- **Save As knows its own file by its spelling.** The target is compared with the open path as written, so the same file named another way, by case on a case-insensitive disk or through a symlink, is saved as a copy over the open file. That removes the `-wal` and `-shm` at the target, which belong to the open connection. The copy's contents are right, but what the old connection does on closing hasn't been checked. Comparing the device and inode, as section 1.6 does, would settle it.
 - **Save As says what exists on this machine.** A relative `Link` is said again for the new place only if what it names is there, on disk or as revision logs, and nothing limits that to the notebook or the document's folder. A document from elsewhere that comes back after a Save As to another depth shows which of its paths existed here. No contents are read.
 - **A crash during a Save As leaves its copy.** The hidden `.NAME.saving-UUID`, and its `-wal` and `-shm` once it's open for the paths to be said again, stay beside the target after a crash, and nothing removes them. No words are lost, and the UUID keeps a log from pairing with the wrong file, but each is a whole private copy of the document.

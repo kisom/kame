@@ -646,6 +646,12 @@ impl Session {
     /// address someone wrote, while a link to a document always names one, or one to come. What's
     /// on disk is there, and so is anything `there` says a link, written in the document where it
     /// was, names. An import's links lead from its Markdown file.
+    ///
+    /// Onto the document's own file, this writes nothing, unless a write has failed, when it's a
+    /// retry. Its own file is `path` spelled as the document's, or the file it has open, however
+    /// `path` names it: through a symlink, in another case where the disk ignores case, or by a
+    /// hard link under another name. Once another file has been put at the document's path, a
+    /// Save As onto that file, by either spelling, is refused.
     pub fn save_as(
         &mut self,
         path: &Path,
@@ -655,11 +661,16 @@ impl Session {
         if self.newer {
             return Err("this document has changes from a newer version of kame".into());
         }
-        if self.replaced && self.path.as_deref() == Some(path) {
+        let spelled_the_same = self.path.as_deref() == Some(path);
+        let target = file_identity(path);
+        if self.replaced
+            && (spelled_the_same
+                || target.is_some() && target == self.path.as_deref().and_then(file_identity))
+        {
             return Err("that file changed on disk, so this needs another name".into());
         }
         // Onto its own file, this is a retry of whatever write failed.
-        if self.path.as_deref() == Some(path) {
+        if spelled_the_same || target.is_some() && target == self.on_disk {
             if self.save_failed {
                 self.write_all()?;
             }
@@ -5127,6 +5138,100 @@ mod tests {
         outside.execute_batch("COMMIT").unwrap();
         assert!(said.to_string().contains("locked"), "{said}");
         assert!(session.save_failed);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Opens `from`, writes two paragraphs, saves it as `to`, which names the same file another
+    /// way, and edits it again, then checks that the words, the history and the edit are all in
+    /// the file at `from`, and that its `-wal` and `-shm` stayed while it was open. Nothing is
+    /// copied over it, as it was already saved.
+    fn saving_as_its_own_file_spelled_otherwise(from: &Path, to: &Path) {
+        let mut session = open(from);
+        session.insert("one");
+        assert!(session.split());
+        session.insert("two");
+        assert_eq!(session.history(), (3, 0));
+        let before = file_identity(from);
+        session.save_as(to, None, |_, _| false).unwrap();
+        assert_eq!(file_identity(from), before, "a copy went over it");
+        assert_eq!(session.history(), (3, 0));
+        assert!(session.insert_then_saved(" more"));
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = from.as_os_str().to_owned();
+            sidecar.push(suffix);
+            assert!(
+                Path::new(&sidecar).exists(),
+                "the open file's {suffix} is gone"
+            );
+        }
+        let read = Db::open_read_only(from).unwrap().load_document().unwrap();
+        assert_eq!(&read, session.document(), "another reader sees the edit");
+        drop(session);
+        let mut reopened = open(from);
+        let texts: Vec<&str> = reopened
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect();
+        assert_eq!(texts, ["one", "two more"]);
+        assert_eq!(reopened.history(), (4, 0));
+        assert!(reopened.undo());
+        assert_eq!(reopened.document().blocks[1].text, "two");
+    }
+
+    #[test]
+    fn a_save_as_onto_its_own_file_through_a_symlinked_folder_is_onto_it() {
+        let root = scratch_dir("samethroughlink").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        saving_as_its_own_file_spelled_otherwise(
+            &root.join("real/doc.kame"),
+            &root.join("link/doc.kame"),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_onto_its_own_file_in_another_case_is_onto_it() {
+        let root = scratch_dir("sameinanothercase").canonicalize().unwrap();
+        std::fs::write(root.join("probe"), "").unwrap();
+        if !root.join("PROBE").exists() {
+            // Only a disk that ignores case names one file both ways.
+            std::fs::remove_dir_all(&root).unwrap();
+            return;
+        }
+        saving_as_its_own_file_spelled_otherwise(&root.join("Doc.kame"), &root.join("doc.kame"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_onto_a_hard_link_to_its_own_file_is_onto_it() {
+        let root = scratch_dir("samehardlink").canonicalize().unwrap();
+        let from = root.join("doc.kame");
+        drop(open(&from));
+        std::fs::hard_link(&from, root.join("other.kame")).unwrap();
+        saving_as_its_own_file_spelled_otherwise(&from, &root.join("other.kame"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_over_the_replaced_file_spelled_otherwise_is_refused() {
+        let root = scratch_dir("replacedthroughlink").canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let path = root.join("real/a.kame");
+        let mut session = open(&path);
+        session.insert("mine");
+        another_copy(&root.join("real/b.kame"), "theirs");
+        std::fs::rename(root.join("real/b.kame"), &path).unwrap();
+        session.check_file();
+        let said = session
+            .save_as(&root.join("link/a.kame"), None, |_, _| false)
+            .unwrap_err();
+        assert!(said.to_string().contains("another name"), "{said}");
+        assert!(session.replaced);
+        assert_eq!(text_in(&path), "theirs");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

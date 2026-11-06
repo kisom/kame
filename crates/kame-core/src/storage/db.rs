@@ -485,7 +485,7 @@ impl Db {
 
     /// Whether this file holds something from a newer version of kame: a field this build would
     /// drop by saving, a kind, style or other value it doesn't know in the head, or a step of
-    /// history it can't read.
+    /// history it can't read or would lose a field of by undoing, redoing or copying it.
     pub fn holds_newer(&self) -> bool {
         if self.leaves_out_newer() {
             return true;
@@ -498,8 +498,9 @@ impl Db {
             Err(_) => return false,
         };
         rows.iter().any(|json| {
-            serde_json::from_str::<Op>(json)
-                .is_err_and(|err| err.to_string().contains("unknown variant"))
+            drops_something::<Op>(json)
+                || serde_json::from_str::<Op>(json)
+                    .is_err_and(|err| err.to_string().contains("unknown variant"))
         })
     }
 
@@ -1089,6 +1090,189 @@ mod tests {
             Db::open_read_only(&path),
             Err(DbError::SchemaTooNew { found: 99, .. })
         ));
+    }
+
+    /// Every kind of step of history this build writes, holding every kind of block, style and
+    /// note, with each optional part both set and left at its default. None of it is taken for a
+    /// newer build's, or every file would open read-only.
+    #[test]
+    fn no_step_of_history_this_build_writes_is_taken_for_a_newer_one() {
+        use crate::model::{
+            Anchor, Annotation, AnnotationKind, Block, BlockKind, ImageAlign, Span, SpanStyle,
+        };
+        let kinds = vec![
+            BlockKind::Paragraph,
+            BlockKind::Heading {
+                level: 2,
+                centered: false,
+            },
+            BlockKind::Heading {
+                level: 3,
+                centered: true,
+            },
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 2,
+            },
+            BlockKind::BlockQuote,
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: None,
+                align: ImageAlign::Left,
+            },
+            BlockKind::Image {
+                path: "b.png".to_string(),
+                link: Some("https://b.example/".to_string()),
+                align: ImageAlign::Right,
+            },
+            BlockKind::Rule,
+            BlockKind::Code { language: None },
+            BlockKind::Code {
+                language: Some("rust".to_string()),
+            },
+            BlockKind::Prose,
+        ];
+        let spans = vec![
+            Span {
+                start: 0,
+                end: 1,
+                style: SpanStyle::Bold,
+            },
+            Span {
+                start: 1,
+                end: 2,
+                style: SpanStyle::Italic,
+            },
+            Span {
+                start: 2,
+                end: 3,
+                style: SpanStyle::Code,
+            },
+            Span {
+                start: 3,
+                end: 4,
+                style: SpanStyle::Link {
+                    url: "https://a.example/".to_string(),
+                },
+            },
+            Span {
+                start: 4,
+                end: 5,
+                style: SpanStyle::DocumentLink {
+                    target: "other.kame#Heading".to_string(),
+                },
+            },
+        ];
+        let blocks: Vec<Block> = kinds
+            .into_iter()
+            .map(|kind| Block {
+                id: Uuid::new_v4(),
+                kind,
+                text: "words".to_string(),
+                spans: spans.clone(),
+            })
+            .collect();
+        let block_id = blocks[0].id;
+        let notes: Vec<Annotation> = [
+            (AnnotationKind::Marginal, Anchor::block(block_id)),
+            (AnnotationKind::Note, Anchor::range(block_id, 0, 4)),
+            (AnnotationKind::Footnote, Anchor::range(block_id, 4, 4)),
+        ]
+        .into_iter()
+        .map(|(kind, anchor)| Annotation {
+            id: Uuid::new_v4(),
+            kind,
+            anchor,
+            body: "a note".to_string(),
+        })
+        .collect();
+        let mut document = Document::new("t");
+        document.blocks = blocks.clone();
+        document.annotations = notes.clone();
+        let mut ops = Vec::new();
+        for (index, block) in blocks.iter().enumerate() {
+            ops.push(Op::InsertBlock {
+                index,
+                block: block.clone(),
+            });
+            ops.push(Op::DeleteBlock {
+                index,
+                block: block.clone(),
+                annotations: notes.clone(),
+            });
+            ops.push(Op::SetBlockKind {
+                block_id: block.id,
+                old_kind: BlockKind::Paragraph,
+                kind: block.kind.clone(),
+            });
+        }
+        for note in &notes {
+            ops.push(Op::AddAnnotation {
+                annotation: note.clone(),
+            });
+            ops.push(Op::RemoveAnnotation {
+                annotation: note.clone(),
+            });
+        }
+        ops.extend([
+            Op::InsertText {
+                block_id,
+                offset: 0,
+                text: "é".to_string(),
+            },
+            Op::DeleteText {
+                block_id,
+                start: 0,
+                end: 2,
+                text: "é".to_string(),
+                removed: Vec::new(),
+                old_spans: None,
+                clipped: Vec::new(),
+            },
+            Op::DeleteText {
+                block_id,
+                start: 0,
+                end: 2,
+                text: "é".to_string(),
+                removed: notes.clone(),
+                old_spans: Some(spans.clone()),
+                clipped: notes.clone(),
+            },
+            Op::SetSpans {
+                block_id,
+                old_spans: Vec::new(),
+                spans: spans.clone(),
+            },
+            Op::SetAnnotationBody {
+                annotation_id: notes[0].id,
+                old_body: "a".to_string(),
+                new_body: "b".to_string(),
+            },
+            Op::SetTitle {
+                old: "a".to_string(),
+                new: "b".to_string(),
+            },
+            Op::ReplaceDocument {
+                old: Box::new(Document::new("old")),
+                new: Box::new(document.clone()),
+            },
+        ]);
+        let batch = Op::Batch { ops: ops.clone() };
+        ops.push(batch);
+
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&document).unwrap();
+        for op in &ops {
+            let json = serde_json::to_string(op).unwrap();
+            assert!(!drops_something::<Op>(&json), "{json}");
+            db.append_op(op).unwrap();
+        }
+        assert!(!db.holds_newer());
     }
 
     #[test]

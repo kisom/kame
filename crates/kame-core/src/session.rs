@@ -8406,6 +8406,53 @@ mod tests {
         assert_eq!(rows, 2, "the history is all still there");
     }
 
+    /// A step of a kind this build knows, holding a block with a field only a newer build knows.
+    /// Undoing it here would put the block back without the field, and the next edit would cut the
+    /// only row that still had it.
+    #[test]
+    fn a_field_in_a_step_of_history_from_a_newer_build_makes_it_read_only() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("One.");
+        session.split();
+        session.insert("Two.");
+        drop(session);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let rows: Vec<(i64, String)> = {
+            let mut statement = connection.prepare("SELECT seq, json FROM ops").unwrap();
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let (seq, json) = rows
+            .iter()
+            .find(|(_, json)| json.contains("InsertBlock"))
+            .expect("splitting inserts a block");
+        let newer = json.replacen("\"spans\":[]", "\"spans\":[],\"future\":1", 1);
+        assert_ne!(&newer, json);
+        connection
+            .execute(
+                "UPDATE ops SET json = ?1 WHERE seq = ?2",
+                rusqlite::params![newer, seq],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut session = open(&path);
+        assert!(session.newer, "it opens read-only");
+        assert!(!session.undo());
+        assert!(!session.insert("more"));
+        drop(session);
+        let kept: String = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT json FROM ops WHERE seq = ?1", [seq], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, newer, "the step is kept as the newer build wrote it");
+    }
+
     #[test]
     fn a_document_from_an_older_build_is_not_taken_for_a_newer_one() {
         let path = temp_db_path();

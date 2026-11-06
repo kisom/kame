@@ -968,11 +968,10 @@ impl Session {
         self.last_error = Some(format!("save failed — editing disabled: {err}"));
     }
 
-    /// A later successful write re-establishes the head/log relationship.
-    /// "A later successful write" here means `record`/`save_state`; commands
-    /// are suppressed while the flag is set, so the recovery path is the
-    /// error strip's retry (`write_all`) — and the window refuses to close
-    /// until it lands.
+    /// A write that lands after a failed one ends the failure. While the flag is set, commands
+    /// are suppressed and `record` refuses, since the log may be short of memory, so the ways out
+    /// are the ones that write the whole history: the error strip's retry (`write_all`) and a
+    /// Save As. The window refuses to close until one lands.
     pub fn clear_save_error(&mut self) {
         if self.save_failed && !self.replaced && !self.newer {
             self.save_failed = false;

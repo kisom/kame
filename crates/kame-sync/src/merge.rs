@@ -58,6 +58,24 @@ fn three_way<T: PartialEq + Clone>(base: Option<&T>, ours: &T, theirs: &T) -> T 
 /// Merges two versions against `base`, the latest version both descend from, or `None` if there
 /// is none known. Then only what they already agree on counts as shared.
 pub fn merge(base: Option<&Document>, one: Side, other: Side) -> Merged {
+    // Offsets are mapped through the merged text, which takes them fitting their text. What's read
+    // from a file or a log is fitted already, but a document on the screen can hold what an undo
+    // brought back from its history as it was recorded.
+    let fit = |doc: &Document| {
+        let mut doc = doc.clone();
+        doc.fit_offsets();
+        doc
+    };
+    let (base, one_doc, other_doc) = (base.map(fit), fit(one.doc), fit(other.doc));
+    let base = base.as_ref();
+    let one = Side {
+        doc: &one_doc,
+        ..one
+    };
+    let other = Side {
+        doc: &other_doc,
+        ..other
+    };
     let (one_digest, other_digest) = (document_digest(one.doc), document_digest(other.doc));
     if one_digest == other_digest {
         return unchanged(one.doc);

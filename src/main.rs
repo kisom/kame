@@ -6923,19 +6923,29 @@ impl KameApp {
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let there = path.is_file();
+        // Another kame having the file is no reason to merge or take what's there, which it's
+        // still writing, so only saving these words elsewhere is offered.
+        let held = self.session.held_elsewhere;
+        let there = path.is_file() && !held;
         let mut merge = false;
         let mut save = false;
         let mut open = false;
         let mut later = false;
-        egui::Window::new("File changed on disk")
+        let title = if held {
+            "Open in another kame window"
+        } else {
+            "File changed on disk"
+        };
+        egui::Window::new(title)
             .id(Id::unique("kame-replaced-prompt"))
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                ui.label(if there {
+                ui.label(if held {
+                    format!("{name} is open in another kame window.")
+                } else if there {
                     format!("{name} was replaced, probably by a sync from another machine.")
                 } else {
                     format!("{name} is no longer there.")
@@ -7469,6 +7479,7 @@ impl Headless {
             app.show_reference_windows(ui.ctx());
             app.show_dialogs(ui.ctx());
             app.show_notebook_lists(ui.ctx());
+            app.show_replaced_prompt(ui.ctx());
             app.show_citation(ui.ctx());
         });
         self.drawn = output.platform_output.accesskit_update.take();
@@ -9505,6 +9516,40 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let before = on_disk(&path);
         page.app.session.insert(" more");
         assert_eq!(on_disk(&path), before);
+    }
+
+    #[test]
+    fn the_prompt_for_a_file_another_kame_took_says_so() {
+        let path = written_document("doc.kame");
+        let mut page = Headless::new(open(&path));
+        let _other = held_elsewhere_lock(&path);
+        page.app.hold_document(None);
+        page.app.replaced_prompt = true;
+        for _ in 0..2 {
+            page.frame(Vec::new());
+        }
+        assert!(page.sees("doc.kame is open in another kame window."));
+        assert!(!page.sees("replaced, probably by a sync"));
+        assert!(page.can_press("Save mine as…"));
+        assert!(page.can_press("Not now"));
+        assert!(!page.can_press("Merge them"));
+        assert!(!page.can_press("Open the one on disk"));
+    }
+
+    #[test]
+    fn the_prompt_for_a_file_a_sync_replaced_says_so() {
+        let path = written_document("doc.kame");
+        let mut page = page_holding(&path);
+        replace_with_copy(&path);
+        assert!(page.app.session.check_file());
+        page.app.replaced_prompt = true;
+        for _ in 0..2 {
+            page.frame(Vec::new());
+        }
+        assert!(page.sees("doc.kame was replaced, probably by a sync from another machine."));
+        assert!(!page.sees("is open in another kame window."));
+        assert!(page.can_press("Merge them"));
+        assert!(page.can_press("Open the one on disk"));
     }
 
     #[test]

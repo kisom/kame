@@ -62,6 +62,8 @@ pub struct Session {
     log_on_disk: Option<FileIdentity>,
     /// Set when `path` stopped being that file. Nothing more is written.
     pub replaced: bool,
+    /// Set with `replaced` when the file is still there, but another kame has it open.
+    pub held_elsewhere: bool,
     /// Whether this document holds something from a newer version of kame. Saving would lose it,
     /// so nothing is saved until kame is updated.
     pub newer: bool,
@@ -215,6 +217,7 @@ impl Session {
             on_disk: file_identity(path),
             log_on_disk: file_identity(&wal_path(path)),
             replaced: false,
+            held_elsewhere: false,
             newer: false,
         };
         if newer {
@@ -274,6 +277,7 @@ impl Session {
             on_disk: None,
             log_on_disk: None,
             replaced: false,
+            held_elsewhere: false,
             newer: false,
         })
     }
@@ -312,6 +316,7 @@ impl Session {
             on_disk: None,
             log_on_disk: None,
             replaced: false,
+            held_elsewhere: false,
             newer: false,
         })
     }
@@ -391,6 +396,7 @@ impl Session {
             on_disk: None,
             log_on_disk: None,
             replaced: false,
+            held_elsewhere: false,
             newer: false,
         };
         Ok((session, note))
@@ -787,6 +793,7 @@ impl Session {
         self.on_disk = file_identity(path);
         self.log_on_disk = file_identity(&wal_path(path));
         self.replaced = false;
+        self.held_elsewhere = false;
         self.clear_save_error();
         if let Some(err) = unsaid {
             self.last_error = Some(format!(
@@ -996,6 +1003,7 @@ impl Session {
     /// name is the way out.
     pub fn mark_held_elsewhere(&mut self, message: String) {
         self.replaced = true;
+        self.held_elsewhere = true;
         self.save_failed = true;
         self.last_error = Some(message);
     }
@@ -10321,7 +10329,7 @@ mod tests {
         let mut session = Session::open(&path).unwrap();
         session.insert("mine");
         session.mark_held_elsewhere("a.kame is open in another kame window".to_string());
-        assert!(session.replaced && session.save_failed);
+        assert!(session.replaced && session.save_failed && session.held_elsewhere);
         assert_eq!(
             session.last_error.as_deref(),
             Some("a.kame is open in another kame window")
@@ -10333,7 +10341,7 @@ mod tests {
         // Saving elsewhere is the way out, with what's in memory.
         let elsewhere = dir.join("b.kame");
         session.save_as(&elsewhere, None, |_, _| false).unwrap();
-        assert!(!session.replaced && !session.save_failed);
+        assert!(!session.replaced && !session.save_failed && !session.held_elsewhere);
         let words = session.document().blocks[0].text.clone();
         drop(session);
         assert_eq!(text_in(&elsewhere), words);

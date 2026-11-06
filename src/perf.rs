@@ -277,7 +277,10 @@ fn paragraph_of_about(document: &Document, words: usize) -> uuid::Uuid {
 }
 
 /// Types into the middle of `block_id`, timing each frame and, apart from it, drawing the
-/// paragraph's image as the frame did and shaping it.
+/// paragraph's image as the frame did and shaping it. The frames are headless, so they upload
+/// nothing; `how_long_an_image_takes_to_reach_the_graphics_card` times that. Each keystroke here
+/// paints the paragraph three times, the frame's and the two timed, so the glyph masks are let go
+/// and made again about three times as often as in the app, which makes the frames a little slower.
 fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
     let mut session = Session::open(path).unwrap();
     let find = |document: &Document| {
@@ -300,12 +303,14 @@ fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
     for _ in 0..5 {
         page.frame(Vec::new());
     }
-    let mut frames = Spread::new("  a frame typing one letter");
+    let mut frames = Spread::new("  a frame typing, with no upload");
     let mut drawing = Spread::new("  drawing its image whole");
-    let mut redrawing = Spread::new("  drawing the lines that changed");
+    let mut redrawing = Spread::new("  drawing it as the frame did");
+    let mut in_part = Spread::new("    of those, drawn in part");
+    let mut again = Spread::new("    and drawn whole");
     let mut shaping = Spread::new("  shaping it");
     let mut size = [0, 0];
-    let (mut rows, mut whole) = (0, 0);
+    let mut rows = 0;
     let mut last = None;
     for letter in "the quick brown fox jumps over the lazy dog "
         .chars()
@@ -325,27 +330,31 @@ fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
         drawing.time(|| {
             size = renderer.rasterize(layout, ink, paper, hl, scale).0.size;
         });
-        let mut painting = None;
-        redrawing.time(|| {
-            let after = renderer.painting(layout, ink, paper, hl, scale);
-            match last
-                .as_ref()
-                .and_then(|before| renderer.redraw(before, &after))
-            {
-                Some(patches) => {
-                    rows += patches
-                        .iter()
-                        .map(|patch| patch.image.size[1])
-                        .sum::<usize>()
-                }
-                None => {
-                    whole += 1;
-                    rows += renderer.draw(&after).0.size[1];
-                }
+        let start = Instant::now();
+        let after = renderer.painting(layout, ink, paper, hl, scale);
+        let patches = last
+            .as_ref()
+            .and_then(|before| renderer.redraw(before, &after));
+        let drawn_in_part = patches.is_some();
+        match patches {
+            Some(patches) => {
+                rows += patches
+                    .iter()
+                    .map(|patch| patch.image.size[1])
+                    .sum::<usize>()
             }
-            painting = Some(after);
-        });
-        last = painting;
+            None => {
+                renderer.draw(&after);
+            }
+        }
+        let took = start.elapsed();
+        redrawing.times.push(took);
+        if drawn_in_part {
+            in_part.times.push(took);
+        } else {
+            again.times.push(took);
+        }
+        last = Some(after);
         shaping.time(|| {
             renderer.layout(&block);
         });
@@ -358,12 +367,13 @@ fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
         frames.report(),
         drawing.report(),
         redrawing.report(),
+        in_part.report(),
         format!(
-            "    {:.0} rows a keystroke, of {}; drawn whole {whole} times of {}",
-            rows as f64 / redrawing.times.len() as f64,
+            "      {:.0} rows of {} each, on average",
+            rows as f64 / in_part.times.len().max(1) as f64,
             size[1],
-            redrawing.times.len()
         ),
+        again.report(),
         shaping.report(),
     ]
 }
@@ -436,8 +446,8 @@ fn how_long_an_image_takes_to_reach_the_graphics_card() {
     let image = |width, height| {
         egui::ColorImage::filled([width, height], egui::Color32::from_black_alpha(128))
     };
-    // A 390-word paragraph at 2x, and three lines of it.
-    let (width, height, band) = (1285, 1137, 150);
+    // A 390-word paragraph at 2x.
+    let (width, height) = (1285, 1137);
     let mut lines = vec![format!(
         "{} on {:?}",
         adapter.get_info().name,
@@ -465,18 +475,21 @@ fn how_long_an_image_takes_to_reach_the_graphics_card() {
         });
     }
     lines.push(whole.report());
-    let mut part = Spread::new("three lines of it, in place");
-    for at in 0..200 {
-        let delta = egui::epaint::ImageDelta::partial(
-            [0, (at * 7) % (height - band)],
-            image(width, band),
-            options,
-        );
-        part.time(|| {
-            renderer.update_texture(&device, &queue, id, &delta);
-            finish(&queue);
-        });
+    // About what a letter typed in it redraws, and three lines.
+    for band in [50, 150] {
+        let mut part = Spread::new(&format!("{band} rows of it, in place"));
+        for at in 0..200 {
+            let delta = egui::epaint::ImageDelta::partial(
+                [0, (at * 7) % (height - band)],
+                image(width, band),
+                options,
+            );
+            part.time(|| {
+                renderer.update_texture(&device, &queue, id, &delta);
+                finish(&queue);
+            });
+        }
+        lines.push(part.report());
     }
-    lines.push(part.report());
     eprintln!("\n{}\n", lines.join("\n"));
 }

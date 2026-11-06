@@ -1,6 +1,7 @@
 //! What the page draws of a notebook's references: the copy of the blocks with a link over
 //! each known key, and the entry a click on one opens.
 
+use crate::interface::room;
 use std::borrow::Cow;
 
 use eframe::egui;
@@ -94,7 +95,7 @@ impl KameApp {
             .fixed_pos(at + Vec2::new(0.0, BELOW_CLICK))
             .collapsible(false)
             .resizable(false)
-            .default_width(360.0)
+            .default_width(room(ctx, 360.0))
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 ui.label(plain(reference));

@@ -2,6 +2,7 @@
 //! `kame-site`'s, on a background thread, since a build reads what publishes and sending waits on
 //! the network. See section 7 of `docs/spec/notebook.md`.
 
+use crate::interface::room;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 
@@ -168,7 +169,7 @@ impl KameApp {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
-            .default_width(560.0)
+            .default_width(room(ctx, 560.0))
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 if let Some((remote, files)) = &report.would_delete {
@@ -188,7 +189,7 @@ impl KameApp {
                 };
                 let more = files.map_or(0, |files| files.len().saturating_sub(SHOWN));
                 egui::ScrollArea::vertical()
-                    .max_height(320.0)
+                    .max_height(room(ui.ctx(), 320.0))
                     .show(ui, |ui| {
                         for line in lines {
                             ui.label(line);

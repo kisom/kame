@@ -5,6 +5,7 @@
 use eframe::egui;
 use kame_notebook::list::rank;
 
+use super::interface::Change;
 use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window};
 use super::{
     menu_entry, shortcut_label, AnnotationKind, BarMenu, FileCommand, KameApp, MenuAction,
@@ -232,6 +233,24 @@ impl KameApp {
                 "Larger type",
                 Some("Ctrl +"),
                 MenuAction::TypeSize(FONT_SIZE_STEP),
+            ),
+            item(
+                View,
+                "Smaller interface text",
+                Some("Ctrl-Alt--"),
+                MenuAction::InterfaceText(Change::Smaller),
+            ),
+            item(
+                View,
+                "Larger interface text",
+                Some("Ctrl-Alt-+"),
+                MenuAction::InterfaceText(Change::Larger),
+            ),
+            item(
+                View,
+                "Reset interface text",
+                Some("Ctrl-Alt-0"),
+                MenuAction::InterfaceText(Change::Reset),
             ),
             item(
                 View,
@@ -643,7 +662,11 @@ mod tests {
         ] {
             open_menu(&mut page, menu);
             for command in page.app.commands().iter().filter(|c| c.menu == menu) {
-                if matches!(command.action, MenuAction::TypeSize(_)) {
+                // Those are the buttons of a row of their own.
+                if matches!(
+                    command.action,
+                    MenuAction::TypeSize(_) | MenuAction::InterfaceText(_)
+                ) {
                     continue;
                 }
                 assert!(page.sees(command.label), "{menu:?} shows {}", command.label);
@@ -655,6 +678,49 @@ mod tests {
         open_menu(&mut page, BarMenu::Annotate);
         assert!(page.sees("Cite…"));
         assert!(!page.can_press("Cite…"), "greyed out outside a notebook");
+    }
+
+    #[test]
+    fn the_view_menu_shows_the_interface_text_and_puts_it_back() {
+        let mut page = page();
+        page.app.set_interface_scale(&page.ctx, 1.3);
+        open_menu(&mut page, BarMenu::View);
+        assert!(page.sees("Interface text 130%"));
+        assert!(page.sees("Type size 16"), "beside the type size");
+        let reset = page
+            .drawn
+            .iter()
+            .flat_map(|tree| &tree.nodes)
+            .find_map(|(_, node)| node.bounds().filter(|_| node.label() == Some("Reset")))
+            .expect("a Reset button");
+        let at = egui::Pos2::new(
+            ((reset.x0 + reset.x1) / 2.0) as f32,
+            ((reset.y0 + reset.y1) / 2.0) as f32,
+        );
+        for pressed in [true, false] {
+            page.time += 0.02;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(page.width, page.height),
+                )),
+                time: Some(page.time),
+                events: vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            };
+            let app = &mut page.app;
+            let output = page.ctx.run_ui(input, |ui| app.show_status(ui));
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(page.app.interface_scale, crate::interface::DEFAULT_SCALE);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The References… window: every reference with how many documents cite it, and the rows
 //! that ask before a delete or a rename.
 
+use crate::interface::room;
 use std::sync::mpsc::channel;
 
 use eframe::egui;
@@ -183,7 +184,7 @@ impl KameApp {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
-            .default_width(560.0)
+            .default_width(room(ctx, 560.0))
             .show(ctx, |ui| {
                 for problem in problems {
                     ui.colored_label(error_ink, problem);
@@ -193,7 +194,7 @@ impl KameApp {
                 }
                 ui.add_enabled_ui(!busy, |ui| {
                     egui::ScrollArea::vertical()
-                        .max_height(360.0)
+                        .max_height(room(ui.ctx(), 360.0))
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             for (key, reference) in references.sorted() {
@@ -368,7 +369,7 @@ fn draw_confirming(
                     egui::TextEdit::singleline(new)
                         .hint_text(key)
                         .return_key(None)
-                        .desired_width(200.0),
+                        .desired_width(room(ui.ctx(), 200.0)),
                 );
                 focus_field(&field, focus);
                 let button = egui::Button::new(format!("Rename {key}"));

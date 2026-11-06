@@ -1,5 +1,6 @@
 //! The browser's section for the references, below its folders, and what choosing from it does.
 
+use crate::interface::room;
 use eframe::egui;
 use kame_core::references::form::ReferenceForm;
 use kame_core::references::References;
@@ -74,7 +75,7 @@ pub(crate) fn draw_browser_references(
     let mut chosen = None;
     let indented = |ui: &mut egui::Ui, label: &str| {
         ui.horizontal(|ui| {
-            ui.add_space(BROWSER_INDENT);
+            ui.add_space(room(ui.ctx(), BROWSER_INDENT));
             ui.selectable_label(false, label)
         })
         .inner
@@ -85,7 +86,7 @@ pub(crate) fn draw_browser_references(
             chosen = Some(BrowserReference::Edit(key.to_string()));
         }
         row.context_menu(|ui| {
-            ui.set_min_width(120.0);
+            ui.set_min_width(room(ui.ctx(), 120.0));
             if ui.button("Rename…").clicked() {
                 chosen = Some(BrowserReference::Rename(key.to_string()));
                 ui.close();

@@ -8,6 +8,7 @@
 
 mod commands;
 mod external;
+mod interface;
 #[cfg(target_os = "macos")]
 mod macos;
 mod notebook;
@@ -485,7 +486,8 @@ fn help_id() -> Id {
     Id::unique("kame-help")
 }
 
-/// The most the help dialog is wide, and the room it leaves at the window's edges.
+/// The most the help dialog is wide, and the room it leaves at the window's edges. The sizes here
+/// are at the interface's usual text size, and grow with it.
 const HELP_MAX_WIDTH: f32 = 1040.0;
 const HELP_EDGE: f32 = 16.0;
 /// What a column of the help needs to be worth having another, and what its dialog takes beyond
@@ -598,6 +600,8 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Ctrl-K", "add or edit a link on the selection"),
     ("Ctrl +  Ctrl -", "larger / smaller type"),
     ("Ctrl-0", "type back to its usual size"),
+    ("Ctrl-Alt +  Ctrl-Alt -", "larger / smaller interface text"),
+    ("Ctrl-Alt-0", "interface text back to its usual size"),
     ("Alt-F/A/V/S/H", "open a menu, on Linux"),
     ("Ctrl-Shift-D", "dark mode"),
     ("F11", "fullscreen"),
@@ -1561,7 +1565,7 @@ fn word_count_label(words: usize) -> String {
 /// on macOS (see `Modifiers::command`).
 fn shortcut_label(chord: &str, mac: bool) -> String {
     if mac {
-        chord.replace("Ctrl", "Cmd")
+        chord.replace("Ctrl", "Cmd").replace("Alt", "Option")
     } else {
         chord.to_string()
     }
@@ -1684,6 +1688,7 @@ enum MenuAction {
     Cite,
     References,
     TypeSize(f32),
+    InterfaceText(interface::Change),
     ToggleDark,
     ToggleHyphenate,
     ToggleCheck,
@@ -1855,6 +1860,9 @@ impl CloseFlow {
 struct KameConfig {
     #[serde(default = "default_body_size")]
     body_size: f32,
+    /// How big the interface's text is, as a scale of egui's own.
+    #[serde(default = "default_interface_scale")]
+    interface_scale: f32,
     #[serde(default)]
     dark: bool,
     /// The document open when kame last ran, to reopen on a launch that names none.
@@ -1889,6 +1897,10 @@ fn default_body_size() -> f32 {
     DEFAULT_BODY_SIZE
 }
 
+fn default_interface_scale() -> f32 {
+    interface::DEFAULT_SCALE
+}
+
 fn default_hyphenate() -> bool {
     true
 }
@@ -1897,6 +1909,7 @@ impl Default for KameConfig {
     fn default() -> Self {
         KameConfig {
             body_size: DEFAULT_BODY_SIZE,
+            interface_scale: interface::DEFAULT_SCALE,
             dark: false,
             last_document: None,
             author: String::new(),
@@ -1947,6 +1960,7 @@ fn load_config() -> KameConfig {
         .and_then(|json| serde_json::from_str::<KameConfig>(&json).ok())
         .unwrap_or_default();
     config.body_size = config.body_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+    config.interface_scale = interface::within(config.interface_scale);
     config
 }
 
@@ -1996,6 +2010,7 @@ fn main() -> eframe::Result {
     // to every document the app opens.
     let config = load_config();
     let body_size = config.body_size;
+    let interface_scale = config.interface_scale;
     let dark = config.dark;
     let config_hyphenate = config.hyphenate;
     let config_check = config.check_spelling;
@@ -2051,6 +2066,7 @@ fn main() -> eframe::Result {
                         last_document = None;
                         save_config(&KameConfig {
                             body_size,
+                            interface_scale,
                             dark,
                             last_document: None,
                             author: config_author.clone(),
@@ -2092,6 +2108,7 @@ fn main() -> eframe::Result {
             notice,
             KameConfig {
                 body_size,
+                interface_scale,
                 dark,
                 last_document,
                 author: default_author,
@@ -2601,6 +2618,9 @@ struct KameApp {
     /// whole page. A kame setting — persisted to the app config, never to the
     /// document.
     body_size: f32,
+    /// How big the interface's text is, as a scale of egui's own. A kame setting, like the type
+    /// size.
+    interface_scale: f32,
     /// Dark mode, persisted as a kame setting.
     dark: bool,
     /// The theme colours derived from `dark`.
@@ -2689,6 +2709,7 @@ impl KameApp {
     ) -> KameApp {
         let KameConfig {
             body_size,
+            interface_scale,
             dark,
             last_document,
             author: default_author,
@@ -2710,6 +2731,8 @@ impl KameApp {
         // well as kame changing the type size on them.
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
+        let interface_scale = interface::within(interface_scale);
+        interface::apply(&cc.egui_ctx, interface_scale);
         external::set_waker(cc.egui_ctx.clone());
         let mut session = session;
         session.apply_default_author(&default_author);
@@ -2757,6 +2780,7 @@ impl KameApp {
             page_caret_rect: None,
             modes: Modes::default(),
             body_size,
+            interface_scale,
             dark,
             palette: Palette::for_mode(dark),
             typewriter_anchor: None,
@@ -3064,8 +3088,14 @@ impl KameApp {
 
     /// Writes the current preferences to the app config, best-effort.
     fn persist(&self) {
-        save_config(&KameConfig {
+        save_config(&self.settings());
+    }
+
+    /// The current preferences, as the app config keeps them.
+    fn settings(&self) -> KameConfig {
+        KameConfig {
             body_size: self.body_size,
+            interface_scale: self.interface_scale,
             dark: self.dark,
             last_document: self.last_document.path.clone(),
             author: self.default_author.clone(),
@@ -3076,7 +3106,27 @@ impl KameApp {
             device: self.device.clone(),
             browser_open: self.nb.browser_open,
             browser_folders: self.nb.browser_folders.iter().cloned().collect(),
-        });
+        }
+    }
+
+    /// Sets the interface's text size, within its limits, at once, and keeps it as a kame setting.
+    fn set_interface_scale(&mut self, ctx: &egui::Context, scale: f32) {
+        let scale = interface::within(scale);
+        if scale != self.interface_scale {
+            self.interface_scale = scale;
+            interface::apply(ctx, scale);
+            self.persist();
+        }
+    }
+
+    /// Steps the interface's text size, or puts it back as egui sets it.
+    fn change_interface_text(&mut self, ctx: &egui::Context, change: interface::Change) {
+        let scale = match change {
+            interface::Change::Larger => self.interface_scale + interface::STEP,
+            interface::Change::Smaller => self.interface_scale - interface::STEP,
+            interface::Change::Reset => interface::DEFAULT_SCALE,
+        };
+        self.set_interface_scale(ctx, scale);
     }
 
     /// Notes the current document as the one to come back to. Every way of getting a
@@ -3408,7 +3458,7 @@ impl KameApp {
                         // Enter steps through matches, and shouldn't take the keyboard away.
                         .return_key(None)
                         .hint_text("find")
-                        .desired_width(220.0),
+                        .desired_width(interface::room(ui.ctx(), 220.0)),
                 );
                 changed = field.changed();
                 lost_focus = field.lost_focus();
@@ -3596,44 +3646,28 @@ impl KameApp {
         if ctx.input(|input| input.key_pressed(egui::Key::F7)) && self.check_spelling {
             self.go_to_next_mark();
         }
-        // Ctrl + / Ctrl - / Ctrl 0 step the body font size (every other size is
-        // a ratio of it). `+` is Shift+= on most layouts, so both are accepted.
-        let (font_inc, font_dec, font_reset) = ctx.input(|input| {
-            let mut inc = false;
-            let mut dec = false;
-            let mut reset = false;
-            for event in &input.events {
-                let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    repeat: false,
-                    modifiers,
-                    ..
-                } = event
-                else {
-                    continue;
-                };
-                if !modifiers.command {
-                    continue;
+        // Ctrl + / Ctrl - / Ctrl 0 step the body font size (every other size is a ratio of it),
+        // and with Alt too, the interface's text.
+        let sizes: Vec<_> = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .filter_map(interface::size_key)
+                .collect()
+        });
+        for (sized, change) in sizes {
+            match (sized, change) {
+                (interface::Sized::Interface, change) => self.change_interface_text(ctx, change),
+                (interface::Sized::Type, interface::Change::Reset) => {
+                    self.set_body_size(DEFAULT_BODY_SIZE)
                 }
-                if *key == egui::Key::Plus || (*key == egui::Key::Equals && modifiers.shift) {
-                    inc = true;
+                (interface::Sized::Type, interface::Change::Larger) => {
+                    self.adjust_font_size(FONT_SIZE_STEP)
                 }
-                if *key == egui::Key::Minus {
-                    dec = true;
-                }
-                if *key == egui::Key::Num0 && !modifiers.shift {
-                    reset = true;
+                (interface::Sized::Type, interface::Change::Smaller) => {
+                    self.adjust_font_size(-FONT_SIZE_STEP)
                 }
             }
-            (inc, dec, reset)
-        });
-        if font_reset {
-            self.set_body_size(DEFAULT_BODY_SIZE);
-        } else if font_inc {
-            self.adjust_font_size(FONT_SIZE_STEP);
-        } else if font_dec {
-            self.adjust_font_size(-FONT_SIZE_STEP);
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             // Escape closes help, then the find bar, then a note over a dialog, then a dialog, then
@@ -3969,7 +4003,7 @@ impl KameApp {
         egui::Panel::top("kame-status").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 let file_menu = ui.menu_button("File", |ui| {
-                    ui.set_min_width(260.0);
+                    ui.set_min_width(interface::room(ui.ctx(), 260.0));
                     commands::command_rows(ui, in_menu(BarMenu::File), &mut action);
                     ui.separator();
                     let plural = |n: usize| if n == 1 { "" } else { "s" };
@@ -3984,14 +4018,17 @@ impl KameApp {
                     );
                 });
                 let annotate_menu = ui.menu_button("Annotate", |ui| {
-                    ui.set_min_width(200.0);
+                    ui.set_min_width(interface::room(ui.ctx(), 200.0));
                     commands::command_rows(ui, in_menu(BarMenu::Annotate), &mut action);
                 });
                 let is_size = |command: &&commands::MenuCommand| {
-                    matches!(command.action, MenuAction::TypeSize(_))
+                    matches!(
+                        command.action,
+                        MenuAction::TypeSize(_) | MenuAction::InterfaceText(_)
+                    )
                 };
                 let view_menu = ui.menu_button("View", |ui| {
-                    ui.set_min_width(240.0);
+                    ui.set_min_width(interface::room(ui.ctx(), 240.0));
                     ui.horizontal(|ui| {
                         ui.label(format!("Type size {:.0}", self.body_size));
                         // These stay open, so the size can be walked to taste.
@@ -4005,19 +4042,36 @@ impl KameApp {
                             }
                         }
                     });
+                    ui.horizontal(|ui| {
+                        let percent = (self.interface_scale * 100.0).round();
+                        ui.label(format!("Interface text {percent:.0}%"));
+                        for command in in_menu(BarMenu::View).filter(is_size) {
+                            let MenuAction::InterfaceText(change) = command.action else {
+                                continue;
+                            };
+                            let text = match change {
+                                interface::Change::Smaller => "−",
+                                interface::Change::Larger => "+",
+                                interface::Change::Reset => "Reset",
+                            };
+                            if ui.small_button(text).on_hover_text(command.label).clicked() {
+                                action = Some(command.action);
+                            }
+                        }
+                    });
                     let rest = in_menu(BarMenu::View).filter(|command| !is_size(command));
                     commands::command_rows(ui, rest, &mut action);
                 });
                 let mut site_menu = None;
                 if in_menu(BarMenu::Site).next().is_some() {
                     let menu = ui.menu_button("Site", |ui| {
-                        ui.set_min_width(160.0);
+                        ui.set_min_width(interface::room(ui.ctx(), 160.0));
                         commands::command_rows(ui, in_menu(BarMenu::Site), &mut action);
                     });
                     site_menu = Some(menu.response);
                 }
                 let help_menu = ui.menu_button("Help", |ui| {
-                    ui.set_min_width(160.0);
+                    ui.set_min_width(interface::room(ui.ctx(), 160.0));
                     commands::command_rows(ui, in_menu(BarMenu::Help), &mut action);
                 });
                 for (menu, response) in [
@@ -4122,6 +4176,7 @@ impl KameApp {
             MenuAction::Cite => self.begin_cite(),
             MenuAction::References => self.open_references(),
             MenuAction::TypeSize(step) => self.adjust_font_size(step),
+            MenuAction::InterfaceText(change) => self.change_interface_text(ctx, change),
             MenuAction::ToggleDark => self.apply_dark_toggle(ctx),
             MenuAction::ToggleCheck => {
                 self.check_spelling = !self.check_spelling;
@@ -5421,7 +5476,7 @@ impl KameApp {
         let mut open_link = false;
         let mut edit_link = false;
         response.context_menu(|ui| {
-            ui.set_min_width(180.0);
+            ui.set_min_width(interface::room(ui.ctx(), 180.0));
             let caret = self.session.valid_caret();
             let marginal = self.marginal_menu.and_then(|id| {
                 let annotation = self
@@ -5697,7 +5752,7 @@ impl KameApp {
             .fixed_pos(pos)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(260.0);
+                    ui.set_max_width(interface::room(ui.ctx(), 260.0));
                     ui.label(
                         egui::RichText::new(annotation_kind_label(&annotation.kind))
                             .small()
@@ -5706,7 +5761,7 @@ impl KameApp {
                     let field = ui.add(
                         egui::TextEdit::multiline(&mut buffer)
                             .id(note_body_edit_id())
-                            .desired_width(240.0)
+                            .desired_width(interface::room(ui.ctx(), 240.0))
                             .desired_rows(3)
                             .hint_text("Write the note…"),
                     );
@@ -5819,11 +5874,13 @@ impl KameApp {
             f32::from(margin.left) + f32::from(margin.right),
             f32::from(margin.top) + f32::from(margin.bottom),
         );
-        let width = (screen.width() - HELP_EDGE * 2.0).clamp(160.0, HELP_MAX_WIDTH);
+        let room = |points| interface::room(ctx, points);
+        let width = (screen.width() - HELP_EDGE * 2.0).clamp(160.0, room(HELP_MAX_WIDTH));
         let inner = width - frame.x - 2.0;
         // Room for the title bar, the Close button and the space around them.
-        let scroll_height = (screen.height() - HELP_EDGE * 2.0 - frame.y - HELP_CHROME).max(40.0);
-        let columns = ((inner / HELP_COLUMN_WIDTH) as usize).clamp(1, 3);
+        let scroll_height =
+            (screen.height() - HELP_EDGE * 2.0 - frame.y - room(HELP_CHROME)).max(40.0);
+        let columns = ((inner / room(HELP_COLUMN_WIDTH)) as usize).clamp(1, 3);
         let per_column = HELP_ROWS.len().div_ceil(columns);
         egui::Window::new("kame — help")
             .id(help_id())
@@ -5905,7 +5962,7 @@ impl KameApp {
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut buffer)
                         .id(snapshot_label_edit_id())
-                        .desired_width(260.0)
+                        .desired_width(interface::room(ui.ctx(), 260.0))
                         .hint_text("e.g. before the rewrite"),
                 );
                 if focus {
@@ -5982,7 +6039,7 @@ impl KameApp {
                     let field = ui.add(
                         egui::TextEdit::singleline(&mut buffer)
                             .id(Id::unique("kame-open-path"))
-                            .desired_width(360.0)
+                            .desired_width(interface::room(ui.ctx(), 360.0))
                             .hint_text("~/data/writing/essay.kame"),
                     );
                     if focus {
@@ -6112,7 +6169,7 @@ impl KameApp {
                             ui.label(label);
                             let field = ui.add(
                                 egui::TextEdit::singleline(value)
-                                    .desired_width(320.0)
+                                    .desired_width(interface::room(ui.ctx(), 320.0))
                                     .hint_text(hint),
                             );
                             if focus && index == 0 {
@@ -6126,7 +6183,7 @@ impl KameApp {
                 let mut forget_word = None;
                 egui::ScrollArea::vertical()
                     .id_salt("kame-metadata-words")
-                    .max_height(PROPERTIES_LIST_HEIGHT)
+                    .max_height(interface::room(ui.ctx(), PROPERTIES_LIST_HEIGHT))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         if prompt.words.is_empty() {
@@ -6152,7 +6209,7 @@ impl KameApp {
                     let field = ui.add(
                         egui::TextEdit::singleline(&mut prompt.new_word)
                             .return_key(None)
-                            .desired_width(240.0)
+                            .desired_width(interface::room(ui.ctx(), 240.0))
                             .hint_text("add a word"),
                     );
                     let adding = !prompt.new_word.trim().is_empty();
@@ -6171,7 +6228,7 @@ impl KameApp {
                     let mut forget = None;
                     egui::ScrollArea::vertical()
                         .id_salt("kame-metadata-accepted")
-                        .max_height(PROPERTIES_LIST_HEIGHT)
+                        .max_height(interface::room(ui.ctx(), PROPERTIES_LIST_HEIGHT))
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             for (index, mark) in prompt.accepted.iter().enumerate() {
@@ -7160,14 +7217,14 @@ impl KameApp {
                 ui.add(
                     egui::TextEdit::singleline(&mut words)
                         .id(Id::unique("kame-link-words"))
-                        .desired_width(360.0)
+                        .desired_width(interface::room(ui.ctx(), 360.0))
                         .hint_text("The link itself, if left empty"),
                 );
                 ui.label("Link URL:");
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut buffer)
                         .id(Id::unique("kame-link-url"))
-                        .desired_width(360.0)
+                        .desired_width(interface::room(ui.ctx(), 360.0))
                         .hint_text("https://example.com"),
                 );
                 if focus {
@@ -7401,6 +7458,7 @@ impl eframe::App for KameApp {
                 body_width,
                 margin_width,
                 available,
+                notebook::browser_width(ui.ctx()),
             )
         });
         self.nb.page_left = beside_browser.flatten();
@@ -8090,6 +8148,7 @@ mod tests {
     fn kame_config_round_trips_and_defaults_the_body_size() {
         let config = KameConfig {
             body_size: 21.0,
+            interface_scale: 1.0,
             dark: true,
             last_document: Some(PathBuf::from("/notes/essay.kame")),
             author: "K. Isom".to_string(),
@@ -8702,6 +8761,8 @@ mod tests {
         assert_eq!(shortcut_label("Ctrl-Shift-E", false), "Ctrl-Shift-E");
         assert_eq!(shortcut_label("Ctrl-Shift-E", true), "Cmd-Shift-E");
         assert_eq!(shortcut_label("F11", true), "F11");
+        assert_eq!(shortcut_label("Ctrl-Alt-+", false), "Ctrl-Alt-+");
+        assert_eq!(shortcut_label("Ctrl-Alt-+", true), "Cmd-Option-+");
     }
 
     #[test]
@@ -12172,6 +12233,32 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             );
             assert!(page.sees(keys), "{keys} is not drawn");
         }
+    }
+
+    #[test]
+    fn the_help_fits_the_smallest_window_at_the_largest_interface_text() {
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.width = 560.0;
+        page.height = 360.0;
+        page.app
+            .set_interface_scale(&page.ctx, interface::MAX_SCALE);
+        page.frame(vec![egui::Event::Key {
+            key: egui::Key::F1,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for _ in 0..12 {
+            page.frame(Vec::new());
+        }
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(page.width, page.height));
+        let window = help_window(&page);
+        assert!(
+            screen.contains_rect(window),
+            "{window:?} is not on {screen:?}"
+        );
+        assert!(page.can_press("Close"));
     }
 
     #[test]

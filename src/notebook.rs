@@ -27,17 +27,21 @@ use kame_notebook::stranded::{apply, decide, find_stranded, Done, Healthy, Steps
 use kame_notebook::Notebook;
 
 use super::commands::CommandList;
+use super::interface::room;
 use super::references::{draw_browser_references, BrowserReference, BROWSER_SECTION};
 use super::{follow_move, now_unix, same_document, same_place, BackStop, KameApp};
 
-/// How wide the browser is.
+/// How wide the browser is, at the interface's usual text size.
 const BROWSER_WIDTH: f32 = 200.0;
-/// How far the browser indents each level of its tree.
+/// How far the browser indents each level of its tree, at the interface's usual text size.
 pub(crate) const BROWSER_INDENT: f32 = 14.0;
 /// The least room between the browser and the text.
 const BROWSER_GAP: f32 = 16.0;
+/// How big a list is, at the interface's usual text size.
 const LIST_WIDTH: f32 = 620.0;
 const LIST_HEIGHT: f32 = 380.0;
+/// The least room a list leaves at the window's edges when it would be bigger than the window.
+const LIST_EDGE: f32 = 16.0;
 /// How many recently opened documents the jump list remembers.
 const RECENT: usize = 20;
 /// How often a list on the screen looks for what has arrived, in seconds.
@@ -530,7 +534,7 @@ fn path_field(
             // Enter would take the keyboard away, and a refusal leaves the field there to be
             // corrected.
             .return_key(None)
-            .desired_width(420.0),
+            .desired_width(room(ui.ctx(), 420.0)),
     );
     // And again after, since drawing it can take the keyboard away, and with that the selection: a new
     // window's first frame only measures, with its widgets disabled, and the click that closed the
@@ -551,9 +555,15 @@ pub(crate) fn page_left_beside_browser(
     body_width: f32,
     margin_width: f32,
     window_width: f32,
+    browser_width: f32,
 ) -> Option<f32> {
-    let left = (usual_left - BROWSER_WIDTH).max(BROWSER_GAP);
-    (BROWSER_WIDTH + left + body_width + margin_width <= window_width).then_some(left)
+    let left = (usual_left - browser_width).max(BROWSER_GAP);
+    (browser_width + left + body_width + margin_width <= window_width).then_some(left)
+}
+
+/// How wide the browser is, which grows with the interface's text.
+pub(crate) fn browser_width(ctx: &egui::Context) -> f32 {
+    room(ctx, BROWSER_WIDTH)
 }
 
 /// Opens a file that isn't a document in the system's viewer.
@@ -1033,7 +1043,7 @@ impl KameApp {
                 .show(ui, |ui| {
                     for row in rows(&entries, &self.nb.browser_folders) {
                         ui.horizontal(|ui| {
-                            ui.add_space(row.depth as f32 * BROWSER_INDENT);
+                            ui.add_space(row.depth as f32 * room(ui.ctx(), BROWSER_INDENT));
                             match &row.what {
                                 RowKind::Folder(folder) => {
                                     let mark = if self.nb.browser_folders.contains(folder) {
@@ -1084,7 +1094,7 @@ impl KameApp {
         } else {
             egui::Panel::left("kame-browser")
                 .resizable(false)
-                .exact_size(BROWSER_WIDTH)
+                .exact_size(browser_width(ui.ctx()))
                 .show(ui, show);
         }
         if let Some(folder) = toggle {
@@ -1336,7 +1346,7 @@ impl KameApp {
 
 /// A document row's right-click menu, and the dialog chosen from it.
 fn document_menu(ui: &mut egui::Ui, entry: &Entry, title: &str) -> Option<FileOp> {
-    ui.set_min_width(120.0);
+    ui.set_min_width(room(ui.ctx(), 120.0));
     let path_dialog = |rename| FileOp::Path {
         from: entry.path.clone(),
         field: entry.relative.clone(),
@@ -1387,15 +1397,21 @@ pub(crate) fn focus_field(field: &egui::Response, focus: &mut bool) {
     }
 }
 
+/// A list's window, as big as the interface's text makes it, and no bigger than the window.
 pub(crate) fn list_window(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    const TOP: f32 = 70.0;
+    let screen = ctx.content_rect();
+    let width = room(ctx, LIST_WIDTH).min(screen.width() - LIST_EDGE * 2.0);
+    let height = room(ctx, LIST_HEIGHT).min(screen.height() - TOP - LIST_EDGE * 2.0);
     egui::Window::new(id)
+        .id(egui::Id::unique(id))
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
-        .anchor(egui::Align2::CENTER_TOP, [0.0, 70.0])
-        .fixed_size([LIST_WIDTH, LIST_HEIGHT])
+        .anchor(egui::Align2::CENTER_TOP, [0.0, TOP])
+        .fixed_size([width.max(1.0), height.max(1.0)])
         .show(ctx, |ui| {
-            ui.set_max_width(LIST_WIDTH);
+            ui.set_max_width(width.max(1.0));
             add(ui);
         });
 }
@@ -1906,7 +1922,7 @@ impl KameApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
-            .default_width(560.0)
+            .default_width(room(ctx, 560.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.label(format!(
@@ -1914,7 +1930,7 @@ impl KameApp {
                     documents(report.changed.len())
                 ));
                 egui::ScrollArea::vertical()
-                    .max_height(320.0)
+                    .max_height(room(ui.ctx(), 320.0))
                     .show(ui, |ui| {
                         for left in &report.left {
                             ui.label(format!("{}: {}", left.relative, left.why));
@@ -3021,7 +3037,7 @@ mod tests {
     #[test]
     fn the_text_stays_put_if_the_browser_fits_in_the_gutter() {
         assert_eq!(
-            page_left_beside_browser(400.0, 800.0, 400.0, 1600.0),
+            page_left_beside_browser(400.0, 800.0, 400.0, 1600.0, BROWSER_WIDTH),
             Some(400.0 - BROWSER_WIDTH)
         );
     }
@@ -3029,18 +3045,38 @@ mod tests {
     #[test]
     fn the_text_moves_only_as_far_as_it_has_to() {
         assert_eq!(
-            page_left_beside_browser(200.0, 500.0, 300.0, 1100.0),
+            page_left_beside_browser(200.0, 500.0, 300.0, 1100.0, BROWSER_WIDTH),
             Some(BROWSER_GAP)
         );
     }
 
     #[test]
+    fn a_browser_grown_with_the_interface_text_moves_the_text_further() {
+        let wider = BROWSER_WIDTH * 1.5;
+        assert_eq!(
+            page_left_beside_browser(400.0, 800.0, 400.0, 1600.0, wider),
+            Some(400.0 - wider)
+        );
+        assert_eq!(
+            page_left_beside_browser(200.0, 500.0, 300.0, 1100.0, wider),
+            None,
+            "the text and its margin no longer fit beside it"
+        );
+    }
+
+    #[test]
     fn without_room_for_the_text_and_its_margin_the_page_hides() {
-        assert_eq!(page_left_beside_browser(200.0, 600.0, 400.0, 1100.0), None);
-        assert_eq!(page_left_beside_browser(20.0, 500.0, 0.0, 700.0), None);
-        assert!(page_left_beside_browser(20.0, 500.0, 0.0, 800.0).is_some());
+        assert_eq!(
+            page_left_beside_browser(200.0, 600.0, 400.0, 1100.0, BROWSER_WIDTH),
+            None
+        );
+        assert_eq!(
+            page_left_beside_browser(20.0, 500.0, 0.0, 700.0, BROWSER_WIDTH),
+            None
+        );
+        assert!(page_left_beside_browser(20.0, 500.0, 0.0, 800.0, BROWSER_WIDTH).is_some());
         assert!(
-            page_left_beside_browser(186.0, 365.0, 146.0, 730.0).is_some(),
+            page_left_beside_browser(186.0, 365.0, 146.0, 730.0, BROWSER_WIDTH).is_some(),
             "a window this wide has room"
         );
     }

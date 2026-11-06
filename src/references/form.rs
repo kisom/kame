@@ -1,5 +1,6 @@
 //! The new reference and edit windows, drawing a `ReferenceForm` and saving what it builds.
 
+use crate::interface::room;
 use eframe::egui;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Id, Order, Vec2};
@@ -90,7 +91,7 @@ impl KameApp {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
-            .default_width(480.0)
+            .default_width(room(ctx, 480.0))
             .order(Order::Foreground)
             .interactable(!covered)
             .show(ctx, |ui| {
@@ -188,7 +189,7 @@ fn draw_form(ui: &mut egui::Ui, window: &mut FormWindow, focus: bool, references
                     egui::TextEdit::singleline(&mut form.key)
                         .id_salt("kame-reference-key")
                         .return_key(None)
-                        .desired_width(360.0)
+                        .desired_width(room(ui.ctx(), 360.0))
                         .hint_text("suggested from the author and year"),
                 );
                 if field.changed() {
@@ -218,7 +219,7 @@ fn draw_form(ui: &mut egui::Ui, window: &mut FormWindow, focus: bool, references
                     let mut edit = egui::TextEdit::singleline(value)
                         .id_salt(*name)
                         .return_key(None)
-                        .desired_width(360.0);
+                        .desired_width(room(ui.ctx(), 360.0));
                     if matches!(*name, "authors" | "editors") {
                         edit = edit.hint_text("separated by commas, or ; if a name has a comma");
                     }
@@ -250,7 +251,7 @@ fn draw_form(ui: &mut egui::Ui, window: &mut FormWindow, focus: bool, references
                 egui::TextEdit::multiline(&mut form.reference.text)
                     .id(freeform_text_id())
                     .desired_rows(6)
-                    .desired_width(440.0)
+                    .desired_width(room(ui.ctx(), 440.0))
                     .hint_text("Goes into the References section exactly as typed"),
             );
             if focus && !(form.is_new() && form.key.is_empty()) {

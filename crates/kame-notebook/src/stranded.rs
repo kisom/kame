@@ -391,9 +391,10 @@ fn can_record_place(path: &Path) -> bool {
 
 /// Says where a database is, so that it's recognised if its logs move on before it's next opened, if
 /// that can be done with nothing else happening to it. Otherwise, or if this fails, it's left saying
-/// somewhere else or nothing, and is merely not stranded.
+/// somewhere else or nothing, and is merely not stranded. One holding something from a newer version
+/// of kame is left as it is, since nothing this build does writes to that.
 fn record_place(path: &Path) {
-    if !can_record_place(path) {
+    if !can_record_place(path) || Db::open_read_only(path).map_or(true, |db| db.holds_newer()) {
         return;
     }
     if let (Some(place), Ok(mut db)) = (place_of(path), Db::open(path)) {

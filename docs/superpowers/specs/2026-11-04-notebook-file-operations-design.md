@@ -196,6 +196,8 @@ A database from before places were recorded gets one from a pass. If it has a sy
 beside it, that shows it synced there, so `decide` lists it, and `apply` records the place on the main thread, with the same looks
 again as any other step, never for the open document, and ignoring a failure. Having a place is what stops it being asked again. A
 hand copy with no logs beside it isn't stamped, nor is a database whose revision isn't beside it, whose logs are then read on each pass.
+Neither a stamp nor the place recorded on arrival is written into a database holding something from a newer version of kame, which
+this build writes nothing to, so that one is merely not known to be stranded until it's updated.
 A stamp changes the file's modified time once, which a machine lacking the `**.kame` ignore line would carry, once per document. Neither a
 stamp nor the place recorded on arrival at a home opens a database with a `-wal` or `-shm` beside it, as opening it for writing would fold
 in a `-wal` that may be another machine's, with nobody looking, and it may be open in another process. A stamp is just asked again on the

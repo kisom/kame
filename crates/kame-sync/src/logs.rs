@@ -405,7 +405,10 @@ impl Logged {
     }
 
     fn write_and_merge(&mut self, session: &mut Session, now: i64) -> Result<Outcome> {
-        if session.save_failed || session.replaced {
+        // A view of a newer version's document leaves out what this build doesn't know, so neither
+        // it nor a merge with it may be written anywhere. It can't save either, which covers it,
+        // but it's said here as well, since writing it would lose what the newer version wrote.
+        if session.save_failed || session.replaced || session.lossy {
             return Ok(Outcome::default());
         }
         // Before any reading, so that logs added to meanwhile are read next time.

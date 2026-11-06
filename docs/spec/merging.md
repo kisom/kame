@@ -271,7 +271,9 @@ While a logged document stays open, the app looks at its logs every 3 seconds. I
 
 An older build must notice lines it can't fully read, rather than quietly falling behind. A line is from a newer version if it parses but has a field that's gone after reading and writing it again, or if it fails to parse on a kind this build doesn't know. Half a line, a damaged line and an older line lacking fields added since don't count.
 
-Having noticed, a sync still writes what's on the screen as a revision, so nothing typed is lost, and merges what it can use. Then the document goes read-only, saying that it has changes from a newer version of kame, until kame is updated.
+Having noticed, a sync still writes what's on the screen as a revision, so nothing typed is lost, and merges what it can use. Then the document goes read-only, saying that it has changes from a newer version of kame, until kame is updated. A line holding a block, style or annotation of a kind this build doesn't know doesn't parse, so nothing of its revision is merged, and what's built on it waits.
+
+That's for a document whose own file this build reads whole. One whose file holds something from a newer version is read-only from the moment it opens ([document format, section 1.5](document-format.md)), and a sync of it writes nothing and merges nothing. What's on the screen can be only a view, leaving out kinds and styles this build doesn't know, and written down as a revision it would have every machine lose them.
 
 ## 7. Conflict copies and replaced files
 

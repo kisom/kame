@@ -787,6 +787,58 @@ fn logs_from_a_newer_version_do_not_count_as_stranded() {
     assert!(!stranded_there(&talos.path, &state));
 }
 
+/// A newer machine's revision holding a block of a kind this build doesn't know. Its line can't be
+/// read here, so nothing of it is merged into the document, lossily or otherwise: what was typed
+/// here is written down, and the document goes read-only, as it was.
+#[test]
+fn a_revision_with_a_kind_this_build_does_not_know_is_not_merged_and_stops_the_document() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    let mut logged = talos.logged(&session);
+    logged.sync(&mut session, 1).unwrap();
+    let folder = log_folder(&talos.path);
+    let mut newer = String::new();
+    for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        for line in text
+            .lines()
+            .filter(|line| line.contains("A shared ending."))
+        {
+            let line = line
+                .replace(
+                    "\"kind\":\"Paragraph\"",
+                    "\"kind\":{\"Table\":{\"rows\":2}}",
+                )
+                .replace("\"device\":\"talos-aaaa\"", "\"device\":\"future-cccc\"")
+                .replace("A shared ending.", "A newer ending.");
+            newer.push_str(&line);
+            newer.push('\n');
+        }
+    }
+    assert!(newer.contains("Table"));
+    std::fs::write(folder.join("future-cccc.log"), newer).unwrap();
+
+    talos.append(&mut session, 0, " Typed here.");
+    let before = session.document().clone();
+    let outcome = logged.sync(&mut session, 2).unwrap();
+    assert!(!outcome.merged);
+    assert!(session.newer, "read-only until kame is updated");
+    assert!(!session.lossy, "what's on the screen is all its own");
+    assert_eq!(session.document(), &before);
+    let store = Store::load(&folder).unwrap();
+    let heads = store.heads();
+    assert_eq!(
+        heads.len(),
+        1,
+        "the newer revision isn't one this build can use"
+    );
+    assert_eq!(
+        store.document(&heads[0]),
+        before,
+        "what was typed is in the logs"
+    );
+}
+
 #[test]
 fn logs_going_while_open_stop_all_writing() {
     let (talos, _) = two_machines();

@@ -245,46 +245,39 @@ fn merging_with_a_replaced_file_keeps_the_word_lists_of_both() {
     assert_eq!(session.metadata.words, vec!["theirs", "ours"]);
 }
 
-/// A file whose log took away a note that started inside "é", recorded by the program that
-/// damaged it. Taking the note away records it whole, so undo brings it back as it was, in memory,
-/// where nothing reads it from the file to fit it.
-fn with_a_damaged_note() -> (PathBuf, PathBuf) {
-    use kame_core::edit::Op;
-    use kame_core::model::{Anchor, Annotation, AnnotationKind, Document};
+/// A document, and a copy of it as a sync tool would leave beside it, one sentence long.
+fn with_one_sentence() -> (PathBuf, PathBuf) {
     let dir = common::test_folder("damaged");
     let (path, copy) = (dir.join("doc.kame"), dir.join(COPY));
-    let mut doc = Document::new("Damaged");
-    doc.blocks[0].text = "Café au lait.".to_string();
-    let note = Annotation {
-        id: uuid::Uuid::new_v4(),
-        kind: AnnotationKind::Note,
-        anchor: Anchor::range(doc.blocks[0].id, 4, 8),
-        body: "a note".to_string(),
-    };
-    let taken = Op::RemoveAnnotation { annotation: note };
-    kame_core::storage::Db::open(&path)
-        .unwrap()
-        .record_edit(&doc, &taken)
-        .unwrap();
+    Session::open(&path).unwrap().insert("Café au lait.");
     std::fs::copy(&path, &copy).unwrap();
     (path, copy)
 }
 
+/// Everything read from a file fits, and so does every step of a history as it applies, but
+/// `replace_document` takes whatever it's given, as a tool working on the document might give it:
+/// here a note starting inside "é". A merge then reads the screen as it is.
 #[test]
 fn a_copy_merges_into_a_document_holding_a_note_inside_a_character() {
-    let (path, copy) = with_a_damaged_note();
+    use kame_core::model::{Anchor, Annotation, AnnotationKind};
+    let (path, copy) = with_one_sentence();
     {
         let mut session = Session::open(&copy).unwrap();
-        assert!(session.undo());
         let end = session.document().blocks[0].text.len();
         edit(&mut session, 0, end, " Sweet.");
     }
     let mut session = Session::open(&path).unwrap();
-    assert!(session.undo());
+    let mut damaged = session.document().clone();
+    damaged.annotations.push(Annotation {
+        id: uuid::Uuid::new_v4(),
+        kind: AnnotationKind::Note,
+        anchor: Anchor::range(damaged.blocks[0].id, 4, 8),
+        body: "a note".to_string(),
+    });
+    assert!(session.replace_document(damaged));
     assert_eq!(
         session.document().annotations[0].anchor.byte_range(),
-        Some((4, 8)),
-        "as it was taken"
+        Some((4, 8))
     );
     edit(&mut session, 0, 0, "Oh. ");
 

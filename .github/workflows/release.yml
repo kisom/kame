@@ -10,7 +10,9 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # macOS, as the app job is: the whole workspace builds there with nothing to install, the app
+    # and its tests included, where Linux would need the windowing and graphics libraries first.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Tag matches the versions in the tree
@@ -40,7 +42,8 @@ jobs:
           set -euo pipefail
           samples="crates/kame-core/tests/samples/${TAG#v}"
           missing=0
-          for f in essay.kame essay.md essay.html essay.json logged.json logged/.kame-logs; do
+          for f in essay.kame essay.md essay.html essay.json logged.json logged/.kame-logs \
+            logged/.essay.kame.sync/talos-aaaa.log logged/.essay.kame.sync/titan-bbbb.log; do
             [ -e "$samples/$f" ] || { echo "::error::$samples/$f is missing"; missing=1; }
           done
           if [ "$missing" = 1 ]; then
@@ -48,6 +51,9 @@ jobs:
             exit 1
           fi
           echo "$samples is there"
+      # Every release's samples are read here, this one's among them, along with everything else.
+      - name: Test the workspace
+        run: cargo test
 
   macos:
     needs: check

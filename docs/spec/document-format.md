@@ -430,7 +430,7 @@ An older build opening a file from a newer version opens it read-only, saying "t
 
 ### 7.3 The check
 
-Each release keeps files it wrote, and what reading them gave it, in `crates/kame-core/tests/samples/VERSION/`: a document holding every kind of block, style and annotation, with links, images, metadata, snapshots, and a history with steps to redo, and the revision logs of a document two machines wrote. Every later build's tests open each one and check that it reads as it did, isn't taken for a newer version's, exports the same Markdown and HTML byte for byte, and undoes and redoes its whole history, and that the logs read and merge as they did. A release writes its folder before it's tagged, and the release workflow refuses a tag without one. Nothing in a folder is changed afterwards.
+Each release keeps files it wrote, and what reading them gave it, in `crates/kame-core/tests/samples/VERSION/`: a document holding every kind of block, style and annotation, with links, images, metadata, snapshots, and a history with steps to redo, and the revision logs of a document two machines wrote. Every later build's tests open each one and check that it reads as it did, isn't taken for a newer version's, exports the same Markdown and HTML byte for byte, and undoes and redoes its whole history, and that the logs read and merge as they did. A release writes its folder before it's tagged, and the release workflow refuses a tag without one, or with its logs missing, and runs these tests with the rest before building anything. Nothing in a folder is changed afterwards.
 
 ## 8. Known weak points
 

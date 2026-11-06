@@ -24,4 +24,4 @@ cargo run -p kame-sync --example write_samples
 ```
 
 It writes the folder for the workspace's version, and refuses one that's already here. The release workflow's
-`check` job fails a tag whose version has no folder here.
+`check` job fails a tag whose version has no folder here, or one missing its logs, and runs every test, these among them.

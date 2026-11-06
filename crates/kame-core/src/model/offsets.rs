@@ -49,11 +49,11 @@ impl Document {
         if self.annotations.is_empty() {
             return;
         }
-        let texts: HashMap<BlockId, &str> = self
-            .blocks
-            .iter()
-            .map(|block| (block.id, block.text.as_str()))
-            .collect();
+        // Lookups take the first block with an id, which matters only in a file that repeats one.
+        let mut texts: HashMap<BlockId, &str> = HashMap::new();
+        for block in &self.blocks {
+            texts.entry(block.id).or_insert(block.text.as_str());
+        }
         for annotation in &mut self.annotations {
             let Anchor::Range {
                 block_id,
@@ -179,6 +179,18 @@ mod tests {
         let before = doc.clone();
         doc.fit_offsets();
         assert_eq!(doc, before);
+    }
+
+    /// Block ids should be unique, and where they aren't, a lookup takes the first.
+    #[test]
+    fn an_anchor_fits_the_first_block_with_its_id() {
+        let mut doc = document("Café");
+        let mut twin = doc.blocks[0].clone();
+        twin.text = "Café au lait".to_string();
+        doc.blocks.push(twin);
+        doc.annotations.push(note(doc.blocks[0].id, 4, 8));
+        doc.fit_offsets();
+        assert_eq!(doc.annotations[0].anchor.byte_range(), Some((3, 5)));
     }
 
     #[test]

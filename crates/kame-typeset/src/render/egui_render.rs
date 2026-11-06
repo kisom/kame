@@ -199,8 +199,8 @@ impl Wanted {
 /// Per-block texture cache, rebuilt only when a block's content changes.
 ///
 /// The key is a hash of the block kind, text, and spans: any edit invalidates
-/// just that block, and of its image only the rows of lines drawn differently
-/// are drawn again, where it keeps its size and place. Textures for blocks that
+/// just that block, and only the rows of lines drawn differently are drawn
+/// again, when the image keeps its size and place. Textures for blocks that
 /// left the document are dropped (and their GPU resources released) on the next
 /// [`TextureCache::sync`].
 pub struct TextureCache {
@@ -316,7 +316,8 @@ impl TextureCache {
     }
 
     /// What the image of `block_id` was last painted from, which changes whenever it is drawn
-    /// again, whole or in part.
+    /// again, whole or in part. It's public for the app's tests, which can't otherwise tell a
+    /// texture drawn again in place from one left as it was.
     pub fn painting(&self, block_id: BlockId) -> Option<&Painting> {
         self.entries.get(&block_id).map(|cached| &cached.painting)
     }

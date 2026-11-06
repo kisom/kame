@@ -114,18 +114,8 @@ impl GlyphAtlas {
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
     ) -> (ColorImage, i32, i32) {
-        match self.rasterize_into(
-            fs,
-            layout,
-            ink,
-            background,
-            highlights,
-            scale,
-            Premultiplied::new,
-        ) {
-            Some((canvas, left, top)) => (canvas.image, left, top),
-            None => (ColorImage::filled([1, 1], Color32::TRANSPARENT), 0, 0),
-        }
+        let painting = self.painting(fs, layout, ink, background, highlights, scale);
+        self.draw_premultiplied(fs, &painting)
     }
 
     /// [`GlyphAtlas::rasterize_premultiplied`] with straight alpha, the image it converts.
@@ -139,109 +129,67 @@ impl GlyphAtlas {
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
     ) -> (RgbaImage, i32, i32) {
-        self.rasterize_into(
-            fs,
-            layout,
-            ink,
-            background,
-            highlights,
-            scale,
-            RgbaImage::new,
-        )
-        .unwrap_or_else(|| (RgbaImage::new(1, 1), 0, 0))
+        let painting = self.painting(fs, layout, ink, background, highlights, scale);
+        self.draw_into(fs, &painting, RgbaImage::new)
+            .unwrap_or_else(|| (RgbaImage::new(1, 1), 0, 0))
     }
 
-    /// Paints `layout` into a canvas `make` makes at the size of its ink, or `None` if it has no
-    /// ink.
-    // What it takes to draw is simply this many things; a struct would only rename them.
-    #[allow(clippy::too_many_arguments)]
-    fn rasterize_into<C: Canvas>(
+    /// The image of `painting`, as [`GlyphAtlas::rasterize_premultiplied`] gives it.
+    pub fn draw_premultiplied(
         &mut self,
         fs: &mut FontSystem,
-        layout: &BlockLayout,
-        ink: [u8; 3],
-        background: [u8; 3],
-        highlights: &[(usize, usize, [u8; 3])],
-        scale: f32,
+        painting: &Painting,
+    ) -> (ColorImage, i32, i32) {
+        match self.draw_into(fs, painting, Premultiplied::new) {
+            Some((canvas, left, top)) => (canvas.image, left, top),
+            None => (ColorImage::filled([1, 1], Color32::TRANSPARENT), 0, 0),
+        }
+    }
+
+    /// Paints `painting` into a canvas `make` makes at the size of its ink, or `None` if it has
+    /// no ink.
+    fn draw_into<C: Canvas>(
+        &mut self,
+        fs: &mut FontSystem,
+        painting: &Painting,
         make: impl FnOnce(u32, u32) -> C,
     ) -> Option<(C, i32, i32)> {
-        let (min_x, min_y, max_x, max_y) = self.ink_bounds(fs, layout, scale)?;
-
+        let (min_x, min_y, max_x, max_y) = painting.bounds?;
         let width = (max_x - min_x).max(1) as u32;
         let height = (max_y - min_y).max(1) as u32;
         let mut canvas = make(width, height);
-        self.blit(
+        self.paint(
             fs,
-            layout,
+            painting.lines.iter().flatten(),
             &mut canvas,
             (min_x, min_y),
-            ink,
-            background,
-            highlights,
-            scale,
+            painting.scale,
         );
-
         Some((canvas, min_x, min_y))
     }
 
-    /// Bounding box of every rasterized glyph mask, in block-relative physical
-    /// pixels: `(min_x, min_y, max_x, max_y)` with the maxima exclusive. `None`
-    /// when the layout draws nothing.
-    fn ink_bounds(
+    /// What `layout` paints: every glyph mask, where it lands and in what colours, a line at a
+    /// time, and the bounds of their ink. Glyphs whose byte range falls in one of `highlights`
+    /// are painted over that wash colour instead of the paper.
+    pub fn painting(
         &mut self,
         fs: &mut FontSystem,
         layout: &BlockLayout,
-        scale: f32,
-    ) -> Option<(i32, i32, i32, i32)> {
-        let mut bounds: Option<(i32, i32, i32, i32)> = None;
-        for run in &layout.runs {
-            for glyph in run.glyphs.iter() {
-                let phys = place_glyph(glyph, run.line_y, scale);
-                let Some(image) = self.get_image(fs, phys.cache_key, scale) else {
-                    continue;
-                };
-                if image.placement.width == 0 || image.placement.height == 0 {
-                    continue;
-                }
-                let left = phys.x + image.placement.left;
-                let top = phys.y - image.placement.top;
-                let right = left + image.placement.width as i32;
-                let bottom = top + image.placement.height as i32;
-
-                bounds = Some(match bounds {
-                    None => (left, top, right, bottom),
-                    Some((min_x, min_y, max_x, max_y)) => (
-                        min_x.min(left),
-                        min_y.min(top),
-                        max_x.max(right),
-                        max_y.max(bottom),
-                    ),
-                });
-            }
-        }
-        bounds
-    }
-
-    /// Paint every glyph mask onto `canvas`, whose top-left corner sits at
-    /// block-relative `(origin_x, origin_y)`. Glyphs whose byte range falls in
-    /// a highlight are painted over that wash colour instead of the paper.
-    // What it takes to draw is simply this many things; a struct would only rename them.
-    #[allow(clippy::too_many_arguments)]
-    fn blit(
-        &mut self,
-        fs: &mut FontSystem,
-        layout: &BlockLayout,
-        canvas: &mut impl Canvas,
-        (origin_x, origin_y): (i32, i32),
         ink: [u8; 3],
         background: [u8; 3],
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
-    ) {
-        let (canvas_w, canvas_h) = canvas.size();
-        let (canvas_w, canvas_h) = (canvas_w as i32, canvas_h as i32);
-
+    ) -> Painting {
+        let mut lines: Vec<Vec<Mark>> = Vec::new();
+        let mut bounds: Option<(i32, i32, i32, i32)> = None;
+        let mut line_i = None;
         for run in &layout.runs {
+            if line_i != Some(run.line_i) {
+                lines.push(Vec::new());
+                line_i = Some(run.line_i);
+            }
+            let line = lines.last_mut().expect("a line was just pushed");
+            let base = layout.line_start(run.line_i);
             // `glyph.y` is line-relative: the run's baseline is the anchor.
             for glyph in run.glyphs.iter() {
                 let phys = place_glyph(glyph, run.line_y, scale);
@@ -251,50 +199,112 @@ impl GlyphAtlas {
                 if image.placement.width == 0 || image.placement.height == 0 {
                     continue;
                 }
+                let mark = Mark {
+                    key: phys.cache_key,
+                    left: phys.x + image.placement.left,
+                    top: phys.y - image.placement.top,
+                    width: image.placement.width,
+                    height: image.placement.height,
+                    // A glyph shaped with an explicit colour (a link) keeps it;
+                    // everything else takes the caller's ink.
+                    ink: glyph.color_opt.map_or(ink, |c| [c.r(), c.g(), c.b()]),
+                    // A note/marginal/footnote wash behind this glyph becomes the
+                    // background the subpixel coverage is baked against.
+                    background: highlights
+                        .iter()
+                        .find(|(start, end, _)| {
+                            base + glyph.start < *end && *start < base + glyph.end
+                        })
+                        .map(|(_, _, color)| *color)
+                        .unwrap_or(background),
+                };
+                let (right, bottom) = mark.right_bottom();
+                bounds = Some(match bounds {
+                    None => (mark.left, mark.top, right, bottom),
+                    Some((min_x, min_y, max_x, max_y)) => (
+                        min_x.min(mark.left),
+                        min_y.min(mark.top),
+                        max_x.max(right),
+                        max_y.max(bottom),
+                    ),
+                });
+                line.push(mark);
+            }
+        }
+        Painting {
+            lines,
+            bounds,
+            scale,
+        }
+    }
 
-                // A glyph shaped with an explicit colour (a link) keeps it;
-                // everything else takes the caller's ink.
-                let glyph_ink = glyph.color_opt.map_or(ink, |c| [c.r(), c.g(), c.b()]);
-                // A note/marginal/footnote wash behind this glyph becomes the
-                // background the subpixel coverage is baked against.
-                let base = layout.line_start(run.line_i);
-                let glyph_background = highlights
-                    .iter()
-                    .find(|(start, end, _)| base + glyph.start < *end && *start < base + glyph.end)
-                    .map(|(_, _, color)| *color)
-                    .unwrap_or(background);
-
-                let left = phys.x + image.placement.left - origin_x;
-                let top = phys.y - image.placement.top - origin_y;
-                let mask_w = image.placement.width as i32;
-                let mask_h = image.placement.height as i32;
-
-                for row in 0..mask_h {
-                    let y = top + row;
-                    if y < 0 || y >= canvas_h {
+    /// Paints `marks`, in order, onto `canvas`, whose top-left corner sits at block-relative
+    /// `(origin_x, origin_y)`. What falls outside the canvas is left out.
+    fn paint<'a>(
+        &mut self,
+        fs: &mut FontSystem,
+        marks: impl Iterator<Item = &'a Mark>,
+        canvas: &mut impl Canvas,
+        (origin_x, origin_y): (i32, i32),
+        scale: f32,
+    ) {
+        let (canvas_w, canvas_h) = canvas.size();
+        let (canvas_w, canvas_h) = (canvas_w as i32, canvas_h as i32);
+        for mark in marks {
+            let Some(image) = self.get_image(fs, mark.key, scale) else {
+                continue;
+            };
+            let left = mark.left - origin_x;
+            let top = mark.top - origin_y;
+            let mask_w = image.placement.width as i32;
+            let mask_h = image.placement.height as i32;
+            for row in (-top).max(0)..mask_h.min(canvas_h - top) {
+                let y = top + row;
+                for col in (-left).max(0)..mask_w.min(canvas_w - left) {
+                    let x = left + col;
+                    let index = (row * mask_w + col) as usize;
+                    let (src, alpha) =
+                        sample_pixel(image.content, &image.data, index, mark.ink, mark.background);
+                    if alpha == 0 {
                         continue;
                     }
-                    for col in 0..mask_w {
-                        let x = left + col;
-                        if x < 0 || x >= canvas_w {
-                            continue;
-                        }
-                        let index = (row * mask_w + col) as usize;
-                        let (src, alpha) = sample_pixel(
-                            image.content,
-                            &image.data,
-                            index,
-                            glyph_ink,
-                            glyph_background,
-                        );
-                        if alpha == 0 {
-                            continue;
-                        }
-                        canvas.paint(x as u32, y as u32, src, alpha);
-                    }
+                    canvas.paint(x as u32, y as u32, src, alpha);
                 }
             }
         }
+    }
+}
+
+/// What a block's image is painted from: each glyph mask in the order it's painted, a line at a
+/// time, and the bounds of their ink, in block-relative physical pixels. Two paintings of a
+/// block whose lines differ in only some places differ in their image only in the rows those
+/// lines' ink covers, which is what [`GlyphAtlas::redraw`] repaints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Painting {
+    lines: Vec<Vec<Mark>>,
+    /// `(min_x, min_y, max_x, max_y)` with the maxima exclusive, or `None` if nothing is drawn.
+    bounds: Option<(i32, i32, i32, i32)>,
+    scale: f32,
+}
+
+/// One glyph mask as a block's image paints it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Mark {
+    key: CacheKey,
+    /// The block-relative pixel its mask's top-left corner lands on.
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    ink: [u8; 3],
+    /// What its coverage is baked against: the paper, or a wash.
+    background: [u8; 3],
+}
+
+impl Mark {
+    /// Just past its mask's right and bottom edges.
+    fn right_bottom(&self) -> (i32, i32) {
+        (self.left + self.width as i32, self.top + self.height as i32)
     }
 }
 

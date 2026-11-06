@@ -8,6 +8,7 @@ use kame_core::model::{
     Anchor, Annotation, AnnotationKind, Block, BlockKind, Document, ImageAlign, Metadata, Span,
     SpanStyle,
 };
+use kame_core::references::References;
 use kame_core::session::Session;
 use kame_core::storage::{Db, NEWER_PART};
 use uuid::Uuid;
@@ -294,6 +295,44 @@ fn a_value_falls_back_to_its_default_whatever_else_says_the_same() {
         "{:?}",
         image.kind
     );
+    drop(session);
+    nothing_is_written(&path);
+}
+
+/// What leaves the session, an export or a copy, leaves out the paragraphs standing for what a
+/// newer version wrote, rather than saying that as if it were the document's.
+#[test]
+fn an_export_or_a_copy_leaves_out_what_a_newer_version_wrote() {
+    let (path, _) = written_by_a_newer_build("newer-export", |head| {
+        head.replacen(
+            r#""kind":"Paragraph","text":"The last words.""#,
+            r#""kind":"Table","text":"The last words.""#,
+            1,
+        )
+    });
+    let mut session = Session::open(&path).unwrap();
+    assert!(session.lossy);
+    let folder = path.parent().unwrap();
+    let (markdown, html) = (folder.join("out.md"), folder.join("out.html"));
+    assert!(session
+        .export_markdown_to(&markdown, &References::new())
+        .is_some());
+    assert!(session.export_html_to(&html, &References::new()).is_some());
+    for written in [&markdown, &html] {
+        let written = std::fs::read_to_string(written).unwrap();
+        assert!(written.contains("Some"), "{written}");
+        assert!(!written.contains(NEWER_PART), "{written}");
+    }
+    let (start, end) = (
+        session.document_edge(false).unwrap(),
+        session.document_edge(true).unwrap(),
+    );
+    session.set_caret(start);
+    session.select_to(end);
+    let clipped = session.clipped().unwrap();
+    assert!(clipped.text.contains("Some bold words."));
+    assert!(!clipped.text.contains(NEWER_PART), "{:?}", clipped.text);
+    assert!(clipped.left_out);
     drop(session);
     nothing_is_written(&path);
 }

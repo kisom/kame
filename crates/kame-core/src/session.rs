@@ -640,10 +640,21 @@ impl Session {
         self.write_export(path, &html)
     }
 
+    /// Whether `block` stands, in a view of a newer version's document ([`Session::lossy`]), for
+    /// one of a kind this build doesn't know.
+    pub fn is_newer_part(&self, block: &Block) -> bool {
+        self.lossy
+            && block.kind == BlockKind::Paragraph
+            && block.text == storage::NEWER_PART
+            && block.spans.is_empty()
+    }
+
     /// The document as an export sees it. An export can land anywhere, where a path from this
-    /// document's folder would lead nowhere, so its images go by their whole paths.
+    /// document's folder would lead nowhere, so its images go by their whole paths. The paragraphs
+    /// standing for what a newer version wrote are left out, as they aren't the document's words.
     fn exported_document(&self) -> Document {
         let mut document = self.editor.document().clone();
+        document.blocks.retain(|block| !self.is_newer_part(block));
         for block in &mut document.blocks {
             if let BlockKind::Image { path, .. } = &mut block.kind {
                 if let Some(whole) = whole_image_path(path, self.path.as_deref()) {
@@ -1598,11 +1609,18 @@ impl Session {
         let mut taken = Vec::new();
         // The line of `text` this block's words begin on, a verbatim block holding several.
         let mut line = 0;
+        // Whether any block's words have gone in yet, for the line feed between them.
+        let mut begun = false;
         for (index, block) in blocks[first..=last].iter().enumerate() {
-            if index > 0 {
+            // What stands for a newer version's block isn't the document's, so it's none of this.
+            if self.is_newer_part(block) {
+                continue;
+            }
+            if begun {
                 text.push('\n');
                 line += 1;
             }
+            begun = true;
             let from = if index == 0 { start.offset } else { 0 };
             let to = if first + index == last {
                 end.offset
@@ -1653,6 +1671,7 @@ impl Session {
             spans,
             from: self.link_base(),
             annotations,
+            left_out: self.lossy,
         };
         Some((clipped, taken))
     }
@@ -3002,6 +3021,9 @@ pub struct Clipped {
     pub from: PathBuf,
     /// The notes, footnotes and marginals that go with the words.
     pub annotations: Vec<ClippedAnnotation>,
+    /// Whether this was copied from a view of a newer version's document ([`Session::lossy`]),
+    /// which leaves out what this build doesn't know, the words standing for it included.
+    pub left_out: bool,
 }
 
 /// A note, footnote or marginal that goes with what was copied. Pasted, it's another with the same

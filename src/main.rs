@@ -675,6 +675,9 @@ const LOG_RETURN_SECONDS: f32 = 10.0;
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
 /// The colour of [`LINK_COLOR`] as egui takes it.
 const DOCUMENT_LINK_INK: Color32 = Color32::from_rgb(59, 130, 246);
+/// What an export or a copy from a view of a newer version's document says it left out.
+const NEWER_LEFT_OUT: &str = "parts written by a newer version of kame were left out";
+
 /// How much of the status row's free space a message can take from the title.
 const STATUS_MESSAGE_SHARE: f32 = 0.65;
 /// How much of the page to keep in view past the caret when following it.
@@ -2925,7 +2928,9 @@ impl KameApp {
         self.reload_references();
         let exported = self.session.export_markdown_to(path, &self.refs.list);
         self.notice = exported.map(|path| {
-            self.export_notice(format!("exported Markdown to {}", path.display()), false)
+            let done =
+                self.export_notice(format!("exported Markdown to {}", path.display()), false);
+            self.with_newer_left_out(done)
         });
     }
 
@@ -2934,8 +2939,20 @@ impl KameApp {
     fn export_html_to(&mut self, path: &Path) {
         self.reload_references();
         let exported = self.session.export_html_to(path, &self.refs.list);
-        self.notice = exported
-            .map(|path| self.export_notice(format!("exported HTML to {}", path.display()), true));
+        self.notice = exported.map(|path| {
+            let done = self.export_notice(format!("exported HTML to {}", path.display()), true);
+            self.with_newer_left_out(done)
+        });
+    }
+
+    /// What an export or a copy says, and that parts a newer version wrote were left out, if this
+    /// is only a view of a newer version's document.
+    fn with_newer_left_out(&self, done: String) -> String {
+        if self.session.lossy {
+            format!("{done}; {NEWER_LEFT_OUT}")
+        } else {
+            done
+        }
     }
 
     /// The one entry point for the four file commands, shared by the chords and
@@ -3703,6 +3720,9 @@ impl KameApp {
                     };
                     if let Some(clipped) = clipped {
                         ctx.copy_text(clipped.text.clone());
+                        if clipped.left_out {
+                            self.notice = Some(NEWER_LEFT_OUT.to_string());
+                        }
                         self.clipped = Some(clipped);
                     }
                 }
@@ -9592,6 +9612,36 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             page.app.session.document().blocks[0].text,
             storage::NEWER_PART
         );
+
+        // What leaves the window says what it left out.
+        let exported = path.with_file_name("doc.md");
+        page.app.export_markdown_to(&exported);
+        let said = page.app.notice.clone().unwrap_or_default();
+        assert!(
+            said.contains("parts written by a newer version of kame were left out"),
+            "{said:?}"
+        );
+        assert!(!std::fs::read_to_string(&exported)
+            .unwrap()
+            .contains(storage::NEWER_PART));
+        page.app.notice = None;
+        let (start, end) = (
+            page.app.session.document_edge(false).unwrap(),
+            page.app.session.document_edge(true).unwrap(),
+        );
+        page.app.session.set_caret(start);
+        page.app.session.select_to(end);
+        page.frame(vec![egui::Event::Copy]);
+        let said = page.app.notice.clone().unwrap_or_default();
+        assert!(
+            said.contains("parts written by a newer version of kame were left out"),
+            "{said:?}"
+        );
+
+        // Leaving it, as closing the window does, writes nothing either.
+        page.app.session.set_caret(start);
+        page.close_request();
+        eframe::App::on_exit(&mut page.app);
         drop(page);
         assert_eq!(
             std::fs::read(&path).unwrap(),

@@ -46,7 +46,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 `crates/kame-core` — documents, with no GUI or text engine, which is what lets a command line tool use it:
 
 - `model/` — `Document`/`Block`/`Annotation` types + `anchor` shifting (byte offsets), and `offsets`, which fits a damaged file's spans and anchors to their text, and gives a repeated block id one of its own, as `Db` and the revision logs read them
-- `storage/` — SQLite `Db` (WAL, `PRAGMA user_version` migrations, snapshots)
+- `storage/` — SQLite `Db` (WAL, `PRAGMA user_version` migrations, snapshots), and `view`, what this build can show of a document holding a kind, style or value only a newer kame knows, for reading and never for writing back
 - `edit/` — `Op` log + `Editor` (undo/redo, commands)
 - `export/` — `to_markdown`, `to_html` (deterministic), and `html_body` with `Publish` hooks for a tool that knows where links and images end up
 - `links.rs` — where a link between documents leads, and how a document keeps an image's path

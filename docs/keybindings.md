@@ -216,6 +216,13 @@ Both dialogs take Enter as their primary action and Escape as cancel. Nothing
 auto-repeats: one press is one command, and a held Enter cannot step through
 the restore confirmation.
 
+A document holding something a newer version of kame wrote opens read-only, and the status row says
+to update kame. What this version can't show is left out: a block of a kind it doesn't know reads
+"A newer version of kame wrote this part. Update kame to see it.", and a style or note it doesn't
+know isn't shown. Nothing is written to the document, not even a snapshot or where you were, and
+Save As is refused. An export or a copy leaves those placeholder paragraphs out and says that parts
+were left out. A snapshot taken by a newer version can't be restored here.
+
 Clicking a footnote's number drops down to the footnote, and clicking the number at the start of the footnote goes
 back to its place in the text. Clicking the footnote's words opens it for editing.
 

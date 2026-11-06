@@ -138,7 +138,8 @@ Each is read with `Db::open_read_only` and rendered with `html_body`.
   Markdown export already does, because the theme prints the title. This needs moving somewhere
   `html_body` can share it.
 - A file too old to read without migrating is an error telling you to open it in kame once, since
-  a read-only open can't migrate it.
+  a read-only open can't migrate it. One holding a kind a newer kame wrote is an error telling you
+  to update kame, since opening it in this one changes nothing.
 
 ### Dates
 

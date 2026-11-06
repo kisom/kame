@@ -1,6 +1,7 @@
 [package]
 name = "kame-check"
 version = "0.1.0"
+license = "Apache-2.0"
 edition = "2021"
 description = "Spelling and some grammar for kame documents, offline. See docs/superpowers/specs/2026-11-03-spelling-grammar-design.md."
 

@@ -1,5 +1,6 @@
 [package]
 name = "kame-test-dir"
 version = "0.1.0"
+license = "Apache-2.0"
 edition = "2021"
 description = "Folders for kame's tests, removed when the test process ends. Only ever a dev-dependency."

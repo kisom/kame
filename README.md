@@ -125,3 +125,9 @@ for `make sync`, which rsyncs `output/` there and deletes anything else.
 
 `kame site ...` is the same tool, built into the app. A notebook builds as its own site with
 `kame-site build FOLDER`; see [Publishing a notebook](docs/keybindings.md#publishing-a-notebook).
+
+## License
+
+kame's code is licensed under the [Apache License 2.0](LICENSE). The fonts it
+embeds are licensed under the SIL Open Font License 1.1; their licenses are in
+[`crates/kame-typeset/fonts`](crates/kame-typeset/fonts).

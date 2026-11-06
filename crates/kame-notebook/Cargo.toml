@@ -1,6 +1,7 @@
 [package]
 name = "kame-notebook"
 version = "0.1.0"
+license = "Apache-2.0"
 edition = "2021"
 description = "A notebook: a folder of kame documents to move through, search and publish. See docs/superpowers/specs/2026-11-03-notebook-design.md."
 

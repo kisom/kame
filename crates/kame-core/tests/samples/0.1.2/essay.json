@@ -1,0 +1,285 @@
+{
+  "document": {
+    "annotations": [
+      {
+        "anchor": "41ed5caf-c952-4258-828f-5a73a373b963",
+        "body": "A marginal, beside the whole paragraph, written again.",
+        "id": "8532fedf-4d70-4d3d-b2ae-2f9537c06ea8",
+        "kind": "Marginal"
+      },
+      {
+        "anchor": {
+          "block_id": "41ed5caf-c952-4258-828f-5a73a373b963",
+          "end": 51,
+          "start": 36
+        },
+        "body": "A note, which is private.",
+        "id": "582c0499-590d-4ed0-80e5-9a4838b2a84c",
+        "kind": "Note"
+      },
+      {
+        "anchor": {
+          "block_id": "0adfdc52-0242-4644-9d0a-3f45ba34c3e0",
+          "end": 11,
+          "start": 2
+        },
+        "body": "An older marginal, on a range.",
+        "id": "a840a564-e076-4aff-8259-ef5f655b50d6",
+        "kind": "Marginal"
+      },
+      {
+        "anchor": {
+          "block_id": "7104a20d-4a43-423b-a8b6-4bfd2ed08a39",
+          "end": 24,
+          "start": 14
+        },
+        "body": "The second footnote.",
+        "id": "d8bb43f3-c82d-4eb8-a5c6-ee00c93e887b",
+        "kind": "Footnote"
+      },
+      {
+        "anchor": {
+          "block_id": "41ed5caf-c952-4258-828f-5a73a373b963",
+          "end": 147,
+          "start": 137
+        },
+        "body": "The first footnote, citing [knuth84].",
+        "id": "e7dee76c-c6dd-4048-84ff-0ed1cfb4c032",
+        "kind": "Footnote"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "a7e5e2c2-d0c2-4f68-8549-03909abc49a6",
+        "kind": {
+          "Heading": {
+            "centered": true,
+            "level": 1
+          }
+        },
+        "spans": [],
+        "text": "On marginalia"
+      },
+      {
+        "id": "41ed5caf-c952-4258-828f-5a73a373b963",
+        "kind": "Paragraph",
+        "spans": [
+          {
+            "end": 63,
+            "start": 53,
+            "style": "Bold"
+          },
+          {
+            "end": 76,
+            "start": 65,
+            "style": "Italic"
+          },
+          {
+            "end": 89,
+            "start": 78,
+            "style": "Code"
+          },
+          {
+            "end": 97,
+            "start": 91,
+            "style": {
+              "Link": {
+                "url": "https://example.com/marginalia"
+              }
+            }
+          },
+          {
+            "end": 115,
+            "start": 99,
+            "style": {
+              "DocumentLink": {
+                "target": "notes/other.kame"
+              }
+            }
+          },
+          {
+            "end": 131,
+            "start": 117,
+            "style": {
+              "DocumentLink": {
+                "target": "#Lists"
+              }
+            }
+          }
+        ],
+        "text": "Marginalia are what a reader leaves beside the text: bold words, italic ones, inline code, a link, another document, a heading here, and a citation [knuth84]. Café, naïve, 日本語."
+      },
+      {
+        "id": "c4a81ca8-6279-4184-a2c8-c665059b356d",
+        "kind": {
+          "Heading": {
+            "level": 2
+          }
+        },
+        "spans": [],
+        "text": "Lists"
+      },
+      {
+        "id": "74e6ad27-83a3-4664-ae1a-c00e5f76786c",
+        "kind": {
+          "ListItem": {
+            "ordered": false
+          }
+        },
+        "spans": [],
+        "text": "A bullet"
+      },
+      {
+        "id": "634d5ae9-102c-4466-bf15-ea5adb7e3bd0",
+        "kind": {
+          "ListItem": {
+            "depth": 1,
+            "ordered": false
+          }
+        },
+        "spans": [],
+        "text": "A nested bullet"
+      },
+      {
+        "id": "8c3b2641-523b-4970-af43-78a933f59733",
+        "kind": {
+          "ListItem": {
+            "ordered": true
+          }
+        },
+        "spans": [],
+        "text": "First"
+      },
+      {
+        "id": "07bba6c8-77a2-48eb-b3c9-ece4d564d18a",
+        "kind": {
+          "ListItem": {
+            "ordered": true
+          }
+        },
+        "spans": [],
+        "text": "Second"
+      },
+      {
+        "id": "0adfdc52-0242-4644-9d0a-3f45ba34c3e0",
+        "kind": "BlockQuote",
+        "spans": [],
+        "text": "A quotation, set in italics."
+      },
+      {
+        "id": "e7775841-fba7-4518-a0f9-f0157eb7cf73",
+        "kind": {
+          "Heading": {
+            "level": 3
+          }
+        },
+        "spans": [],
+        "text": "Pictures and code"
+      },
+      {
+        "id": "c35720ed-756d-4a42-85bb-5d00db8fa034",
+        "kind": {
+          "Image": {
+            "align": "Center",
+            "link": "https://example.com/figure",
+            "path": "images/figure.png"
+          }
+        },
+        "spans": [],
+        "text": ""
+      },
+      {
+        "id": "ef5bcd25-a7fe-4776-b550-eecb16723b1e",
+        "kind": {
+          "Image": {
+            "align": "Right",
+            "path": "../pictures/photo.jpg"
+          }
+        },
+        "spans": [],
+        "text": ""
+      },
+      {
+        "id": "c44e7fa9-7628-4c4b-a312-92e02f11a5ca",
+        "kind": "Rule",
+        "spans": [],
+        "text": ""
+      },
+      {
+        "id": "4eb75d9c-1ba7-467a-8a7f-da3007029d24",
+        "kind": {
+          "Code": {
+            "language": "rust"
+          }
+        },
+        "spans": [],
+        "text": "fn main() {\n    println!(\"marginalia\");\n}"
+      },
+      {
+        "id": "717e0402-50a7-4f23-b507-01edade5276e",
+        "kind": {
+          "Code": {}
+        },
+        "spans": [],
+        "text": "plain   code,\n  exactly"
+      },
+      {
+        "id": "74db6b35-73cc-40e3-8e8e-cfd0966ebc55",
+        "kind": "Prose",
+        "spans": [],
+        "text": "Verse keeps its lines,\n    and its spacing,\nexactly."
+      },
+      {
+        "id": "7104a20d-4a43-423b-a8b6-4bfd2ed08a39",
+        "kind": "Paragraph",
+        "spans": [],
+        "text": "The end, with a footnote, and a closing word. Merged in."
+      }
+    ],
+    "id": "45d83c6e-ed37-456e-91b6-306a6cfe86fc",
+    "title": "On marginalia"
+  },
+  "history": {
+    "applied": 57,
+    "undone": 2
+  },
+  "metadata": {
+    "accepted": [
+      {
+        "rule": "Compounds",
+        "text": "naïve"
+      }
+    ],
+    "author": "A. Writer",
+    "created": "2026-11-06",
+    "publish": true,
+    "published": "2026-11-07",
+    "tags": [
+      "format",
+      "samples"
+    ],
+    "title": "On marginalia",
+    "words": [
+      "marginalia",
+      "knuth"
+    ]
+  },
+  "position": {
+    "block": 1,
+    "offset": 164,
+    "scroll": 240.5
+  },
+  "redone": "Title: On marginalia\nDate: 2026-11-07\nAuthor: A. Writer\nTags: format, samples\n\nMarginalia are what a reader leaves beside the text: **bold words**, *italic ones*, `inline code`, [a link](https://example.com/marginalia), another document, [a heading here](<#Lists>), and a citation[^1] \\[knuth84\\]. Café, naïve, 日本語.\n\n## Lists\n\n- A bullet\n\n  - A nested bullet\n\n- First\n\n1. Second\n\n> A quotation, set in italics.\n\n### Pictures and code\n\n[![](images/figure.png)](https://example.com/figure)\n\n![](../pictures/photo.jpg)\n\n---\n\n```rust\nfn main() {\n    println!(\"marginalia\");\n}\n```\n\n```\nplain   code,\n  exactly\n```\n\n> Verse keeps its lines,\\\n>     and its spacing,\\\n> exactly.\n\nThe end, with a footnote[^2], and a closing word. Merged in. An afterthought.\n\n[^1]: The first footnote, citing \\[knuth84\\].\n[^2]: The second footnote.\n",
+  "snapshots": [
+    {
+      "label": null,
+      "markdown": "Title: On marginalia\nDate: 2026-11-07\nAuthor: A. Writer\nTags: format, samples\n\nMarginalia are what a reader leaves beside the text: **bold words**, *italic ones*, `inline code`, [a link](https://example.com/marginalia), another document, [a heading here](<#Lists>), and a citation[^1] \\[knuth84\\]. Café, naïve, 日本語.\n\n## Lists\n\n- A bullet\n\n  - A nested bullet\n\n1. First\n\n2. Second\n\n> A quotation, set in italics.\n\n### Pictures and code\n\n[![](images/figure.png)](https://example.com/figure)\n\n![](../pictures/photo.jpg)\n\n---\n\n```rust\nfn main() {\n    println!(\"marginalia\");\n}\n```\n\n```\nplain   code,\n  exactly\n```\n\n> Verse keeps its lines,\\\n>     and its spacing,\\\n> exactly.\n\nThe end, with a footnote[^2], and a closing word. Merged in.\n\n[^1]: The first footnote, citing \\[knuth84\\].\n[^2]: The second footnote.\n",
+      "timestamp": 1794002274
+    },
+    {
+      "label": "before the quotation",
+      "markdown": "Title: On marginalia\nDate: 2026-11-07\nAuthor: A. Writer\nTags: format, samples\n\nMarginalia are what a reader leaves beside the text: **bold words**, *italic ones*, `inline code`, [a link](https://example.com/marginalia), another document, [a heading here](<#Lists>), and a citation \\[knuth84\\]. Café, naïve, 日本語.\n\n## Lists\n\n- A bullet\n\n  - A nested bullet\n\n1. First\n\n2. Second\n",
+      "timestamp": 1794002274
+    }
+  ]
+}

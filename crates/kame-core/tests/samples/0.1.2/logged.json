@@ -1,0 +1,205 @@
+{
+  "heads": [
+    {
+      "document": {
+        "annotations": [
+          {
+            "anchor": {
+              "block_id": "4065b295-7931-43a7-b743-63cbad632810",
+              "end": 26,
+              "start": 13
+            },
+            "body": "A footnote that travels.",
+            "id": "0e631ba5-411b-4575-827f-4132bfd4351b",
+            "kind": "Footnote"
+          },
+          {
+            "anchor": "f1b1af47-34bc-44ef-9d9d-62a2cbc012a1",
+            "body": "A marginal that travels.",
+            "id": "86c7964e-2253-41f4-a87d-5bc1de169cf7",
+            "kind": "Marginal"
+          }
+        ],
+        "blocks": [
+          {
+            "id": "d9cbb14a-2657-45a3-922f-6aaa56ac2223",
+            "kind": {
+              "Heading": {
+                "level": 1
+              }
+            },
+            "spans": [],
+            "text": "Two machines"
+          },
+          {
+            "id": "4065b295-7931-43a7-b743-63cbad632810",
+            "kind": "Paragraph",
+            "spans": [
+              {
+                "end": 5,
+                "start": 0,
+                "style": "Bold"
+              }
+            ],
+            "text": "Talos writes this sentence. Both share this one, says talos. Talos adds this."
+          },
+          {
+            "id": "f1b1af47-34bc-44ef-9d9d-62a2cbc012a1",
+            "kind": "Paragraph",
+            "spans": [],
+            "text": "Titan writes here later. The end. Titan adds this."
+          }
+        ],
+        "id": "51c108d5-47ed-4845-8dc7-40996e2ebf6b",
+        "title": "essay"
+      },
+      "id": "30b3995caaf6f6f96fe46637e4db48ca",
+      "metadata": {
+        "accepted": [],
+        "author": "A. Writer",
+        "created": "2026-11-06",
+        "publish": false,
+        "published": "",
+        "tags": [],
+        "title": "Two machines",
+        "words": [
+          "talos"
+        ]
+      }
+    },
+    {
+      "document": {
+        "annotations": [
+          {
+            "anchor": {
+              "block_id": "4065b295-7931-43a7-b743-63cbad632810",
+              "end": 26,
+              "start": 13
+            },
+            "body": "A footnote that travels.",
+            "id": "0e631ba5-411b-4575-827f-4132bfd4351b",
+            "kind": "Footnote"
+          },
+          {
+            "anchor": "f1b1af47-34bc-44ef-9d9d-62a2cbc012a1",
+            "body": "A marginal that travels.",
+            "id": "86c7964e-2253-41f4-a87d-5bc1de169cf7",
+            "kind": "Marginal"
+          }
+        ],
+        "blocks": [
+          {
+            "id": "d9cbb14a-2657-45a3-922f-6aaa56ac2223",
+            "kind": {
+              "Heading": {
+                "level": 1
+              }
+            },
+            "spans": [],
+            "text": "Two machines"
+          },
+          {
+            "id": "4065b295-7931-43a7-b743-63cbad632810",
+            "kind": "Paragraph",
+            "spans": [
+              {
+                "end": 5,
+                "start": 0,
+                "style": "Bold"
+              }
+            ],
+            "text": "Talos writes this sentence. Both share this one, says titan. Talos adds this."
+          },
+          {
+            "id": "f1b1af47-34bc-44ef-9d9d-62a2cbc012a1",
+            "kind": "Paragraph",
+            "spans": [],
+            "text": "Titan writes here later. The end. Titan adds this."
+          }
+        ],
+        "id": "51c108d5-47ed-4845-8dc7-40996e2ebf6b",
+        "title": "essay"
+      },
+      "id": "be6e95ec0b18532aee6dcb73ae39a92c",
+      "metadata": {
+        "accepted": [],
+        "author": "A. Writer",
+        "created": "2026-11-06",
+        "publish": false,
+        "published": "",
+        "tags": [],
+        "title": "Two machines",
+        "words": [
+          "talos",
+          "titan"
+        ]
+      }
+    }
+  ],
+  "merged": {
+    "document": {
+      "annotations": [
+        {
+          "anchor": {
+            "block_id": "4065b295-7931-43a7-b743-63cbad632810",
+            "end": 26,
+            "start": 13
+          },
+          "body": "A footnote that travels.",
+          "id": "0e631ba5-411b-4575-827f-4132bfd4351b",
+          "kind": "Footnote"
+        },
+        {
+          "anchor": "f1b1af47-34bc-44ef-9d9d-62a2cbc012a1",
+          "body": "A marginal that travels.",
+          "id": "86c7964e-2253-41f4-a87d-5bc1de169cf7",
+          "kind": "Marginal"
+        },
+        {
+          "anchor": {
+            "block_id": "4065b295-7931-43a7-b743-63cbad632810",
+            "end": 61,
+            "start": 28
+          },
+          "body": "On talos: Both share this one, says talos.",
+          "id": "a180af9a-9e8b-e1d7-225c-54f166bf6c4e",
+          "kind": "Note"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "d9cbb14a-2657-45a3-922f-6aaa56ac2223",
+          "kind": {
+            "Heading": {
+              "level": 1
+            }
+          },
+          "spans": [],
+          "text": "Two machines"
+        },
+        {
+          "id": "4065b295-7931-43a7-b743-63cbad632810",
+          "kind": "Paragraph",
+          "spans": [
+            {
+              "end": 5,
+              "start": 0,
+              "style": "Bold"
+            }
+          ],
+          "text": "Talos writes this sentence. Both share this one, says titan. Talos adds this."
+        },
+        {
+          "id": "f1b1af47-34bc-44ef-9d9d-62a2cbc012a1",
+          "kind": "Paragraph",
+          "spans": [],
+          "text": "Titan writes here later. The end. Titan adds this."
+        }
+      ],
+      "id": "51c108d5-47ed-4845-8dc7-40996e2ebf6b",
+      "title": "essay"
+    },
+    "id": "b8262e554096d03c471096d552d77f3b",
+    "markdown": "Title: Two machines\nDate: 2026-11-06\nAuthor: A. Writer\n\n**Talos** writes this sentence[^1]. Both share this one, says titan. Talos adds this.\n\nTitan writes here later. The end. Titan adds this.\n\n[^1]: A footnote that travels.\n"
+  }
+}

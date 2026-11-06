@@ -1,4 +1,6 @@
 /target
 *.kame
+# What each release wrote, which every later build's tests read.
+!/crates/kame-core/tests/samples/*/*.kame
 /result
 /.direnv/

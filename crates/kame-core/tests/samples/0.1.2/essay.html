@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="A. Writer">
+<meta name="date" content="2026-11-07">
+<meta name="keywords" content="format, samples">
+<title>On marginalia</title>
+<style>
+:root {
+  color-scheme: light;
+  --paper: #f7f3eb;
+  --ink: #201d19;
+  --muted: #564f45;
+  --rule: #968d7e;
+  --footnote: #366084;
+  --link: #3b82f6;
+  --mark: rgba(255, 170, 60, 0.27);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #1e1c19;
+  --ink: #ded8cd;
+  --muted: #a8a094;
+  --rule: #6e6860;
+  --footnote: #78a0be;
+  --mark: rgba(196, 128, 40, 0.31);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #1e1c19;
+    --ink: #ded8cd;
+    --muted: #a8a094;
+    --rule: #6e6860;
+    --footnote: #78a0be;
+  --mark: rgba(196, 128, 40, 0.31);
+  }
+}
+html {
+  font-size: 100%;
+}
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "EB Garamond", "Iowan Old Style", Georgia, serif;
+  font-size: 1.25em;
+  line-height: 1.6;
+  font-feature-settings: "liga" 1, "kern" 1;
+}
+main.document {
+  box-sizing: border-box;
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: 5rem 1.5rem 6rem;
+}
+a {
+  color: var(--link);
+}
+img.image {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1.2em 0;
+}
+img.image-center {
+  margin-left: auto;
+  margin-right: auto;
+}
+img.image-right {
+  margin-left: auto;
+}
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Crimson Pro", "EB Garamond", Georgia, serif;
+  font-weight: bold;
+  line-height: 1.5;
+  text-align: left;
+  margin: 2em 0 0.35em;
+}
+h1 {
+  font-size: 1.75em;
+  margin-top: 1.3em;
+}
+h2 {
+  font-size: 1.4em;
+  margin-top: 1.4em;
+}
+h3 {
+  font-size: 1.12em;
+  margin-top: 1.33em;
+}
+h4, h5, h6 {
+  font-size: 1em;
+  margin-top: 1.49em;
+}
+p {
+  margin: 0 0 0.875em;
+  text-align: justify;
+  hanging-punctuation: first allow-end last;
+}
+strong {
+  font-weight: bold;
+}
+mark {
+  background: var(--mark);
+  color: inherit;
+}
+p.byline {
+  color: var(--muted);
+  text-align: left;
+}
+h1.centered, h2.centered, h3.centered, h4.centered, h5.centered, h6.centered,
+p.byline.centered, p.meta.centered {
+  text-align: center;
+}
+em {
+  font-style: italic;
+}
+blockquote {
+  margin: 1.225em 0 1.225em;
+  margin-left: 1.5em;
+  font-style: italic;
+}
+li > ul, li > ol {
+  margin: 0.875em 0 0;
+}
+ol:not(.footnotes) {
+  counter-reset: item;
+}
+ol:not(.footnotes) > li {
+  counter-increment: item;
+  list-style: none;
+  position: relative;
+}
+ol:not(.footnotes) > li::before {
+  content: counters(item, ".") ".";
+  position: absolute;
+  right: 100%;
+  margin-right: 0.4em;
+  white-space: nowrap;
+}
+li ol:not(.footnotes) > li::before {
+  content: counters(item, ".");
+}
+ul, ol {
+  margin: 0 0 0.875em;
+  padding-left: 1.75em;
+}
+li {
+  margin: 0.875em 0;
+}
+pre {
+  margin: 1.225em 0 1.225em 1.5em;
+  white-space: pre;
+  overflow-x: auto;
+}
+code {
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.84em;
+  font-style: normal;
+}
+pre code {
+  font-size: 0.7em;
+}
+pre.prose {
+  font-family: inherit;
+  white-space: pre-wrap;
+}
+hr {
+  width: 25%;
+  margin: 1.5em auto;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+aside.marginalia {
+  float: right;
+  clear: right;
+  width: 13rem;
+  margin: 0.2rem -16rem 1rem 2rem;
+  font-size: 0.75em;
+  line-height: 1.5;
+  font-style: italic;
+  color: var(--muted);
+}
+aside.marginalia p {
+  margin: 0 0 0.6em;
+  text-align: left;
+}
+sup.footnote-ref {
+  font-size: 0.7em;
+  line-height: 0;
+  vertical-align: super;
+}
+sup.footnote-ref a {
+  color: var(--footnote);
+  text-decoration: none;
+  padding: 0 0.15em;
+}
+ol.footnotes {
+  margin: 3rem 0 0;
+  padding: 1.2rem 0 0 1.4rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+ol.footnotes li {
+  margin: 0.5em 0;
+}
+a.footnote-backref {
+  color: var(--muted);
+  text-decoration: none;
+  margin-left: 0.3em;
+}
+@media (max-width: 72rem) {
+  main.document { max-width: 38rem; }
+  aside.marginalia {
+    float: none;
+    width: auto;
+    margin: 0.6rem 0 1.2rem;
+    padding-left: 0.9rem;
+    border-left: 2px solid var(--rule);
+  }
+}
+@media print {
+  :root, :root[data-theme="dark"], :root:not([data-theme="light"]) {
+    color-scheme: light;
+    --paper: #fff;
+    --ink: #000;
+    --muted: #333;
+    --rule: #888;
+    --footnote: #000;
+    --link: #000;
+    --mark: #eee;
+  }
+  body { font-size: 11pt; }
+  pre { white-space: pre-wrap; }
+  main.document { padding: 0; }
+  nav.site { display: none; }
+  aside.marginalia {
+    float: right;
+    width: 11rem;
+    margin: 0 0 1rem 1.5rem;
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+</style>
+</head>
+<body>
+<main class="document">
+<h1 class="centered">On marginalia</h1>
+<p class="byline centered">A. Writer</p>
+<aside class="marginalia"><p>A marginal, beside the whole paragraph, written again.</p></aside>
+<p>Marginalia are what a reader leaves beside the text: <strong>bold words</strong>, <em>italic ones</em>, <code>inline code</code>, <a href="https://example.com/marginalia">a link</a>, another document, a heading here, and a citation<sup class="footnote-ref" id="fnref1"><a href="#fn1">1</a></sup> [knuth84]. Café, naïve, 日本語.</p>
+<h2>Lists</h2>
+<ul>
+<li>A bullet
+<ul>
+<li>A nested bullet</li>
+</ul>
+</li>
+</ul>
+<ol>
+<li>First</li>
+<li>Second</li>
+</ol>
+<aside class="marginalia"><p>An older marginal, on a range.</p></aside>
+<blockquote>A quotation, set in italics.</blockquote>
+<h3>Pictures and code</h3>
+<a href="https://example.com/figure"><img class="image image-center" src="images/figure.png" alt=""></a>
+<img class="image image-right" src="../pictures/photo.jpg" alt="">
+<hr>
+<pre><code class="language-rust">fn main() {
+    println!("marginalia");
+}</code></pre>
+<pre><code>plain   code,
+  exactly</code></pre>
+<pre class="prose">Verse keeps its lines,
+    and its spacing,
+exactly.</pre>
+<p>The end, with a footnote<sup class="footnote-ref" id="fnref2"><a href="#fn2">2</a></sup>, and a closing word. Merged in.</p>
+<ol class="footnotes">
+<li id="fn1">The first footnote, citing [knuth84]. <a class="footnote-backref" href="#fnref1">&#8617;</a></li>
+<li id="fn2">The second footnote. <a class="footnote-backref" href="#fnref2">&#8617;</a></li>
+</ol>
+</main>
+</body>
+</html>

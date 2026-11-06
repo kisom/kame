@@ -220,7 +220,7 @@ Read every `*.log` in the folder, in sorted order:
 2. Skip any line that won't parse, or whose `id` doesn't match its revision's digest as read back.
 3. Index each block by its digest, also as read back, and each revision by `id`.
 
-Reads can resume where the last stopped, past lines that failed to parse. A log that has got shorter is read from its start, which is harmless since everything is addressed by content. Readers don't check `revision.document` (section 9).
+Reads can resume where the last stopped, past lines that failed to parse. A log that has got shorter is read from its start, which is harmless since everything is addressed by content. Every revision is read and merged whatever document it's of (section 6.4).
 
 **Usable revisions** have all their blocks here and all their parents usable. A log can arrive before the one holding what it builds on, and then that revision waits.
 
@@ -244,6 +244,8 @@ The `sync` key in the file's `meta` table holds the id of the revision this mach
 Appending writes only blocks that no log here has, and does nothing if the id is already there and no blocks are missing.
 
 The app skips all this if no log has changed size and the document and metadata match the last sync.
+
+**Two documents at one name merge.** Heads are merged whatever `revision.document` they're of. The logs only have to be this document's: they hold `last`, or a line says it's of this document, or nothing is there, or it has never synced ([notebook file operations](../superpowers/specs/2026-11-04-notebook-file-operations-design.md)). So two documents made at one name merge. Two machines that follow one link before either's logs reach the other each make a document with an id of its own, and they merge once the logs meet. A document deleted on one machine and made again at its name merges with the old one, if the old one's log comes back, as a sync tool brings back a log changed on one machine while it was deleted on another. It's a merge with no shared ancestor (section 4): both sides' blocks are kept, and the result takes the later side's id, which the other machine then follows. When a sync brings in revisions of a document that neither the open one nor anything it had synced with is of, the app says `merged with another document of this name from MACHINE`, naming the machine that wrote the newest of them as the other merge notices do, or `another machine`. That's once on each machine. After the merge both ids are in its past, so neither later arrivals nor undoing the merge, which brings the old id back, says it again.
 
 **Checkpoints** give two machines a shared past from the start. Undoing back through the applied ops, take the document's state at each op count divisible by 50, and at every count after the last of those. Write them oldest first, each the parent of the next, with no device, default metadata and the op count as `when`. Machines with the same history write the same ones, so a merge has an ancestor near where they really parted. The interval is part of what machines agree on. If the history can't be undone any further, there are no checkpoints before that point.
 
@@ -306,6 +308,7 @@ Everything a merge adds is a `Note`, which never publishes. A merged document ca
 
 These describe the code as it stands, and aren't rules to copy.
 
+- **An old document's words can come back into a new one at its name.** Two documents at one name merge (section 6.4), and nothing tells a document deleted and made again from two machines making one from a link. So when an old document's log comes back after a new one was made at its name, every block of the old one comes into the new one, with no notes, and the document can take the old one's id and title. Nothing is lost, and the app says so. The words that aren't wanted are cut by hand, or the merge undone.
 - **A new field must be left out when empty, or old revisions break.** If a new field were always written, a reader would add it when re-serializing old lines. In a revision or its metadata, the ids would stop matching and the lines would be skipped. In a block, the digest would change and the revision would stay unusable. `Metadata` writes all its fields, so a new metadata field needs a `skip_serializing_if`. Any change to how the JSON is written has the same effect. Golden tests at the end of `crates/kame-sync/src/revlog.rs` pin the bytes written today for a revision and its blocks, so a field added without that fails them.
 - **Sentences are English-shaped.** Abbreviations such as `e.g.` end a sentence if a space follows, which only makes conflicts coarser or finer and loses nothing. Text without those marks, such as Chinese with `。`, counts as one sentence until a line feed.
 - **Clocks decide which words stay in the text.** The later `when` becomes ours. The other words are kept in a note either way, so a wrong clock changes which words are in the note and loses nothing.

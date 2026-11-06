@@ -339,6 +339,9 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   can count as a second home for a stale database of that document, which is then left alone. One more edit ends it.
 - A database that has never synced merges its words into what's at its path on its first sync, even another document's logs. Documents
   created through a link on two machines rely on this. `src/main.rs`'s Save As doesn't check for logs at the target, so it can do the same.
+- A database whose logs are its own merges with another document's revisions there as well, as when a document deleted and made
+  again at its name on another machine meets the old one's log ([merging, section 6.4](../../spec/merging.md)). Both keep all their
+  words, and the app says it merged with another document of this name.
 - A Save As copy shares its original's document id, so a hand copy of one, put on the other's logs, isn't told from its own and
   merges with them.
 - A corrupt line that could be a document's stays until it's removed by hand, as logs are only added to, and until then that document

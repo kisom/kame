@@ -12,7 +12,8 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
 - [ ] **What a kame writes into documents it doesn't have open ignores the lock another holds on them.** A rename's or move's link
   rewrites (kame-notebook `manage`), the title a move writes into the moved document, a reference's rename, and `stranded`
   recording a database's place write into closed documents, and another kame may have one open. A notebook move or delete of a
-  document another kame has open renames or removes the file under it, which that kame then finds changed on disk.
+  document another kame has open renames or removes the file under it, which that kame then finds changed on disk, and so do
+  the stranded sweep's renames (retiring, moving and returning a database), which skip only the document this kame has open.
 
 ## Notebook
 

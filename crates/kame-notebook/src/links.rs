@@ -78,6 +78,10 @@ impl Notebook {
     /// so that a symbolic link can't lead out. A link pointing at nothing counts as existing, and
     /// has no real location, so that writing to it can't lead out either. What's in another
     /// notebook below the root isn't inside, either as written or where it really is.
+    ///
+    /// `path` is taken tidied, with no `..` left in it, as following a link or checking a new path
+    /// leaves it. Another notebook is looked for in each folder as written, so with `..` left in,
+    /// `sub/..` would be taken for a notebook's root, the root's own, and the path for outside.
     pub fn holds(&self, path: &Path) -> bool {
         self.real_place(path)
             .is_some_and(|real| !self.in_another_notebook(path) && !self.in_another_notebook(&real))

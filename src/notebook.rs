@@ -2661,6 +2661,29 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_open_document_lets_it_go() {
+        use kame_core::lock::DocumentLock;
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-delete-held")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let path = root.join("a.kame");
+        let mut session = Session::open(&path).unwrap();
+        session.insert("Words.");
+        let mut page = crate::Headless::new(session);
+        page.app.hold_document(None);
+        let keep = root.join("kept.kame");
+        std::fs::hard_link(&path, &keep).unwrap();
+        page.app.delete_from_notebook(&path, "a");
+        assert!(page.app.session.is_anonymous());
+        assert!(!path.exists());
+        assert!(page.app.document_lock.is_none());
+        DocumentLock::take(&crate::locks_folder().unwrap(), &keep).unwrap();
+    }
+
+    #[test]
     fn the_text_stays_put_if_the_browser_fits_in_the_gutter() {
         assert_eq!(
             page_left_beside_browser(400.0, 800.0, 400.0, 1600.0),

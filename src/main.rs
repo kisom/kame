@@ -9517,6 +9517,41 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(!is_held(&path));
     }
 
+    /// Puts a copy of the document at `path` in its place, as a sync does, keeping the file it
+    /// was under another name, which is returned.
+    fn replace_with_copy(path: &Path) -> PathBuf {
+        let copy = path.with_file_name("copy");
+        std::fs::copy(path, &copy).unwrap();
+        let was = path.with_file_name("was.kame");
+        std::fs::hard_link(path, &was).unwrap();
+        std::fs::rename(&copy, path).unwrap();
+        was
+    }
+
+    #[test]
+    fn opening_the_replacement_holds_it_and_lets_the_old_file_go() {
+        let path = written_document("doc.kame");
+        let mut page = page_holding(&path);
+        let was = replace_with_copy(&path);
+        assert!(is_held(&was));
+        page.app.open_replacement(&path);
+        assert_eq!(page.app.session.last_error, None);
+        assert_eq!(page.app.session.path(), Some(path.as_path()));
+        assert!(is_held(&path));
+        assert!(!is_held(&was));
+    }
+
+    #[test]
+    fn a_merge_into_the_replacement_holds_it_and_lets_the_old_file_go() {
+        let path = written_document("doc.kame");
+        let mut page = page_holding(&path);
+        let was = replace_with_copy(&path);
+        page.app.merge_with_replacement();
+        assert_eq!(page.app.session.last_error, None);
+        assert!(is_held(&path));
+        assert!(!is_held(&was));
+    }
+
     #[test]
     fn a_merge_into_a_replacement_another_kame_has_is_refused() {
         let path = written_document("doc.kame");

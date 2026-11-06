@@ -132,7 +132,7 @@ A key is suggested from the first author's last name and the year, adding `a`, `
 **The browser** has a References row below its folders, opening as a folder does and kept open or closed with them. Under it, a row for each key opens its edit form, its right-click menu asks to rename or delete in the References… window, and a New reference… row adds one without citing it. With another window up it says to close that first, as a form may hold typing. Reference files stay out of the tree itself.
 
 - **Deleting** says how many documents cite it first. They then hold plain `[key]` text.
-- **Renaming** rewrites `[old]` to `[new]` everywhere it counts as a citation in each document citing it: prose, footnotes and marginals, as an ordinary edit in that document. A note isn't touched. A document that can't be rewritten, or can't be read to see whether it cites the key, is named in the result, not skipped silently, and the old key is then kept so that `[old]` still resolves. Running the rename again once the problem is fixed finishes it. The old key's file is removed last, after the open document has followed, so a crash along the way leaves both.
+- **Renaming** rewrites `[old]` to `[new]` everywhere it counts as a citation in each document citing it: prose, footnotes and marginals, as an ordinary edit in that document. A note isn't touched. A document that can't be rewritten, or can't be read to see whether it cites the key, is named in the result, not skipped silently, and the old key is then kept so that `[old]` still resolves. A document another kame window has open is one of those, "it is open in another kame window", and each one rewritten is held under its lock until it's done, so that no other kame opens it halfway. Running the rename again once the problem is fixed finishes it. The old key's file is removed last, after the open document has followed, so a crash along the way leaves both.
 
 ### Exporting
 
@@ -206,7 +206,7 @@ The layering stays one-way, and there are no new dependencies (`kame-notebook` a
 - **A mistyped key in a footnote** looks the same as a right one on the page, and shows up only at export.
 - **Two machines changing the same reference while apart** still gives a sync conflict for that one file. The conflict copy is skipped by kame like any other.
 - **Renaming a key** edits documents that aren't open. In a folder with revision logs, each is synced with its logs before and after, as a closed document is when a move rewrites its links, so a citation only another machine has written is renamed too. The old key's file can still reach another machine before the rewritten logs do, leaving `[old]` as plain text there for a while. A rename can't be run there as it stands, since the old key has no file. Wait for the rewritten documents to arrive, or add the old key again with the same contents and rename it, which the rule for running a rename again allows.
-- **Renaming while a second kame has a citing document open:** that window keeps its old copy and can overwrite the rename. There's no per-document lock, and two programs writing one file isn't something kame is trying to support, so this doesn't get one.
+- **Renaming while a second kame has a citing document open:** that document isn't rewritten, and is named, as one that can't be rewritten is. The rename is finished by running it again once that window has closed it.
 
 ## Testing
 

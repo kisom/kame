@@ -170,7 +170,7 @@ Links are how a notebook grows. Following a link to a document that isn't there 
 
 Below the footnotes, "Linked from" lists the documents that link to this one. It's only drawn on screen, and never reaches an export or a site.
 
-To rename, move or delete a document in a notebook, right-click it in the browser. Links to it follow a rename or a move, and its published address changes with it. Move or rename the file by hand and links to it don't follow.
+To rename, move or delete a document in a notebook, right-click it in the browser. Links to it follow a rename or a move, and its published address changes with it. Move or rename the file by hand and links to it don't follow. A document open in another kame window can't be moved or deleted, and nor can one whose links a move would change; close it there first.
 
 ## References
 
@@ -195,7 +195,7 @@ Outside a notebook it says "Citing needs a notebook."
 **Annotate > References…** lists every reference, with how many documents cite it. Each row has Edit, Rename… and Delete…, and New reference… adds one without citing it.
 
 - Delete… says how many documents cite the reference first. Those documents then hold plain `[key]` text.
-- Rename… rewrites `[old]` to `[new]` in each citing document, in prose, footnotes and marginals but not notes, as an ordinary edit there with its own undo step. The window then lists what it did. A document that can't be rewritten, or can't be read to see whether it cites the key, is named with the reason, and the old key is kept, so `[old]` still resolves. A Markdown document is one of those, and if it's imported and open it stays as its file is. Run the rename again once the problem is fixed to finish it.
+- Rename… rewrites `[old]` to `[new]` in each citing document, in prose, footnotes and marginals but not notes, as an ordinary edit there with its own undo step. The window then lists what it did. A document that can't be rewritten, or can't be read to see whether it cites the key, is named with the reason, and the old key is kept, so `[old]` still resolves. A Markdown document is one of those, and if it's imported and open it stays as its file is, and so is one open in another kame window. Run the rename again once the problem is fixed to finish it.
 
 Reference files are written straight to disk and aren't undo steps. A file kame can't use, such as one with a field it doesn't know, is left alone and named in the References… window, and the status row says what's wrong with it for as long as it's so, once anything passing has gone.
 

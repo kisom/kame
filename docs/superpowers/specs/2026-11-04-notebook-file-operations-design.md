@@ -91,9 +91,19 @@ too: the back stack (`BackStack::forget`), the recent list, `last_document` and 
 
 The root `Notebook.kame` can be deleted like any other document. Home then says the notebook has none, as it does now.
 
+A document another kame has open is refused, with nothing removed, and the app says "NAME is open in another kame window". Its lock
+(`kame_core::lock`) is held while it goes, so that nobody opens it halfway. A document open in this window has been left first,
+which lets go of its lock.
+
 ### Renaming and moving
 
 1. **Refuse** if the open document is the one moving and has a failed save, or if it's read-only from a newer version.
+   Refuse too, before anything moves or changes, if another kame has the moving document open, or any document whose links
+   the plan would rewrite: "NAME is open in another kame window", NAME from the notebook's root, for the first of them.
+   Their locks are taken here and held until the move is done, so that none is opened halfway, and the moving document's
+   lock holds across its rename, since a lock is for the file. The document this window has open is its own, and so is
+   the one it's moving, whose lock it keeps while it leaves it. The plan's sync of a document behind its logs skips one
+   another kame has, which is refused here.
 2. **Plan, before anything moves.** Read every document in the notebook and work out which links lead to the old path and
    what each should become. A closed document's database can be behind its logs, so a document with logs is read from both,
    and one whose logs have such a link is opened and synced first, then planned from the result. Links arriving later from
@@ -235,7 +245,9 @@ flushed to disk, as a power cut between the two would otherwise leave a healthy 
 would look stranded. The state and the place are saved in one transaction (`Db::save_sync`), as a place without its state would read
 as stranded. `Session::save_as` clears both in the copy.
 
-**What's done with a stranded database,** by a new `kame_notebook` function, for everything but the open document. Its
+**What's done with a stranded database,** by a new `kame_notebook` function, for everything but the open document and any
+database another kame has open, which is left for a later pass. The lock on each one acted on is held while it's renamed or
+its place written, and that goes for a stamp too. Its
 *new home* is the one log folder elsewhere in the notebook containing its recorded revision.
 
 - **It moved** if it has a new home with no database there. It's renamed to join those logs, keeping its undo history and

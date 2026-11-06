@@ -163,7 +163,9 @@ empty. It comes from a background read of the notebook when a document opens, so
 
 **Moving a document.** The browser's right-click menu renames, moves and deletes a document. Moving and renaming read
 the notebook for every document linking to the old path, rewriting those links as ordinary edits at the moment of the
-move. See `2026-11-04-notebook-file-operations-design.md`. A document moved by hand keeps its new place while links to
+move. A move, a delete, a reference's rename and the stranded databases' clean-up below never write into, rename or remove
+a document another kame has open: a move or delete is refused, a rename names it and keeps the old key, and the clean-up
+leaves it for a later pass. See `2026-11-04-notebook-file-operations-design.md`. A document moved by hand keeps its new place while links to
 the old one go stale, and following such a link would make a new, empty document at the old path, which is removed again
 if left unwritten. In a folder with logs, section 10 says what a moved document leaves behind.
 

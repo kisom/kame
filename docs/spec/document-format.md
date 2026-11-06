@@ -1,6 +1,6 @@
 # The kame document format
 
-Version 1, as written by kame at commit `aa493c7`. This is what a `.kame` file holds and what a program must do to read and change one safely. Where this document and `kame-core` disagree, that's a bug in one of them, and until it's settled the code is what's in everyone's files.
+Version 1, which every release of kame so far has written, from 0.1.0 to 0.1.2, as the code beside this document reads and writes it. What 0.1.2 wrote is kept as the check (section 7.3), and section 7 says how version 1 may grow. This is what a `.kame` file holds and what a program must do to read and change one safely. Where this document and `kame-core` disagree, that's a bug in one of them, and until it's settled the code is what's in everyone's files.
 
 "Must" marks what another implementation needs in order to share files with kame. Notebooks are in [notebook.md](notebook.md), and merging and revision logs are in [merging.md](merging.md).
 

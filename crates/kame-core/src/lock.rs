@@ -21,7 +21,7 @@ const ATTEMPTS: usize = 100;
 #[derive(Debug)]
 pub struct DocumentLock {
     /// Open for as long as the lock is held, as closing it lets the lock go.
-    _file: File,
+    file: File,
     /// Where the lock's file is, to remove it on letting go.
     path: PathBuf,
     /// Which file the document was when it was taken.
@@ -87,7 +87,7 @@ impl DocumentLock {
             let locked = file.metadata().map_err(LockError::Failed)?;
             if file_identity(&path).is_some_and(|there| same_file(there, &locked)) {
                 return Ok(DocumentLock {
-                    _file: file,
+                    file,
                     path,
                     document: identity,
                 });
@@ -107,9 +107,15 @@ impl DocumentLock {
 
 impl Drop for DocumentLock {
     /// Removes the lock's file while it's still held, so that nobody else can be taking it, and
-    /// lets the lock go as the file closes.
+    /// lets the lock go as the file closes. A file at its path that isn't the one it locked, as
+    /// when something else removed that one, is another holder's, and stays.
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let own = self.file.metadata().is_ok_and(|locked| {
+            file_identity(&self.path).is_some_and(|there| same_file(there, &locked))
+        });
+        if own {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -228,6 +234,23 @@ mod tests {
             Err(LockError::Held)
         ));
         drop(lock);
+        assert_eq!(locks_in(&folder), 0);
+    }
+
+    #[test]
+    fn letting_go_leaves_a_lock_file_that_is_not_its_own() {
+        let (folder, document) = setup();
+        let first = DocumentLock::take(&folder, &document).unwrap();
+        // Something other than kame removes the lock file, and so another takes it.
+        std::fs::remove_file(&first.path).unwrap();
+        let second = DocumentLock::take(&folder, &document).unwrap();
+        drop(first);
+        assert_eq!(locks_in(&folder), 1);
+        assert!(matches!(
+            DocumentLock::take(&folder, &document),
+            Err(LockError::Held)
+        ));
+        drop(second);
         assert_eq!(locks_in(&folder), 0);
     }
 

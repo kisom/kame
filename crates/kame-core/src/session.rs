@@ -622,20 +622,20 @@ impl Session {
     /// Saves the document to `path`, carrying its history, snapshots and metadata,
     /// and switches the session to that file so later edits land there.
     ///
-    /// Anything already at `path` is replaced whole: the file dialog has confirmed
-    /// that. The copy is written beside it and renamed into place, so a failure
-    /// leaves both the old file and this session as they were. The result is as
-    /// private as the old file and the current document, whichever is more so.
+    /// Anything already at `path` is replaced whole: the file dialog has confirmed that. The copy
+    /// is written beside it and renamed into place, so a failure to write it leaves both the old
+    /// file and this session as they were. Failing to say its paths again, below, isn't one: the
+    /// words come first. The result is as private as the old file and the current document,
+    /// whichever is more so.
     ///
     /// Each image's path and each relative link is said again in the copy for where the document
     /// is now, before it's renamed into place, so the file at `path` never says them from where
-    /// it was. If that can't be done, as when the history won't read, the words still matter more,
-    /// so the copy goes into place as it was, and `last_error` says so. `root` is the notebook it's
-    /// in now, if any. This is part of saving it elsewhere
-    /// rather than an edit, so the whole history is said again the same way: undo and redo go on
-    /// as they were, and none of it is a step of its own. Each snapshot says them again too, the
-    /// same way, keeping its label and time, so that restoring one leads where it did. A snapshot
-    /// this build can't read whole is kept as it was.
+    /// it was. If that can't be done, as when the history won't read, the copy goes into place as
+    /// it was, and `last_error` says so. `root` is the notebook it's in now, if any. This is part
+    /// of saving it elsewhere rather than an edit, so the whole history is said again the same
+    /// way: undo and redo go on as they were, and none of it is a step of its own. Each snapshot
+    /// says them again too, the same way, keeping its label and time, so that restoring one leads
+    /// where it did. A snapshot this build can't read whole is kept as it was.
     ///
     /// An image is said again as [`Session::rehome_images`] has it. A link to the document itself
     /// goes on leading to it. A web link or `#Heading` depends on nothing of the kind and stays,

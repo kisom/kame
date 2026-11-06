@@ -4994,7 +4994,6 @@ mod tests {
         let image = session.valid_caret().block_id;
         session.set_image_align(image, ImageAlign::Center);
         session.save_as(&second, Some(&root), |_, _| false).unwrap();
-        session.rehome_images(Some(&first), Some(&root));
         assert_eq!(image_paths(&session), ["../static/plate.png"]);
         assert_eq!(image_align(&session), [ImageAlign::Center]);
         std::fs::remove_dir_all(&root).unwrap();
@@ -5008,7 +5007,6 @@ mod tests {
         let mut session = open(&first);
         session.insert_image("static/plate.png".to_string());
         session.save_as(&second, Some(&root), |_, _| false).unwrap();
-        session.rehome_images(Some(&first), Some(&root));
         assert_eq!(image_paths(&session), ["../static/plate.png"]);
         drop(session);
         let reopened = Session::open(&second).unwrap();
@@ -5023,8 +5021,24 @@ mod tests {
         let mut session = Session::anonymous().unwrap();
         session.insert_image(plate.display().to_string());
         session.save_as(&target, Some(&root), |_, _| false).unwrap();
+        assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Saved where nothing says it's in a notebook, an image keeps its whole path, and once it is
+    /// in one, saying its images again shortens it.
+    #[test]
+    fn saying_images_again_in_a_notebook_shortens_them() {
+        let (root, plate) = plate_folder("unsavedlater");
+        let target = root.join("maritain/essay.kame");
+        let mut session = Session::anonymous().unwrap();
+        session.insert_image(plate.display().to_string());
+        session.save_as(&target, None, |_, _| false).unwrap();
+        assert_eq!(image_paths(&session), [plate.display().to_string()]);
         session.rehome_images(None, Some(&root));
         assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        drop(session);
+        assert_eq!(image_paths(&open(&target)), ["../static/plate.png"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -5052,7 +5066,6 @@ mod tests {
         session
             .save_as(&away.join("essay.kame"), None, |_, _| false)
             .unwrap();
-        session.rehome_images(Some(&first), None);
         assert_eq!(image_paths(&session), [plate.display().to_string()]);
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::remove_dir_all(&away).unwrap();
@@ -5070,7 +5083,6 @@ mod tests {
         session
             .save_as(&root.join("maritain/essay.kame"), Some(&root), |_, _| false)
             .unwrap();
-        session.rehome_images(Some(&first), Some(&root));
         assert_eq!(image_paths(&session), before);
         std::fs::remove_dir_all(&root).unwrap();
     }

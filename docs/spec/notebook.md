@@ -263,7 +263,9 @@ Which links this covers depends on the span:
 | **Open**, on an unpublished one | Its words, with a warning, so nothing private leaks and no link goes dead |
 | **View**, under `static/` with no hidden part | That file's address |
 | **View**, anywhere else | Its words, with a warning |
-| **Create**, of a folder's index | The folder's address, for the web server to answer |
+| **Create**, of the root's index | `/` |
+| **Create**, of the index of a folder that's there | The folder's address if it or anything under it publishes, for the web server to answer. Otherwise its words, with a warning, so a reader doesn't learn that it exists |
+| **Create**, of the index of a folder that isn't there | The folder's address, for the web server to answer |
 | **Create**, of anything else | Its words, with a warning |
 | **Rotted**, on a path under `/static/` inside the notebook with no hidden part | Its site address, tidied and percent-encoded, with a warning, for the web server to answer |
 | **Rotted**, otherwise | Its words, with a warning, because naming anything else would say that it exists |
@@ -311,7 +313,6 @@ Moving a document by hand keeps its new place, and links to the old path don't f
 These describe the code as it stands, and aren't rules to copy.
 
 - **Some untouched documents aren't removed.** Only one newly created document is remembered at a time, so following a link from one untouched new document to create another keeps the first, and it may then write logs. Cancelling the prompt about losing work also keeps it.
-- **Links can publish what they shouldn't, or nothing useful.** A link to an existing private folder publishes its name (`/papers/`) with no warning. A link to `./` in a root with no index publishes `href="//"`.
 - **A move can't change links in Markdown.** kame imports `.md` and `.markdown` files rather than editing them, so links in them are left as they are, and the report after a move names each one.
 - **Reading every document is the cost of storing nothing.** Lists with titles, search and the links list read each file, so the app does them in the background. While the browser or jump list shows, a periodic check re-reads only if the entries changed. So a title changed on another machine shows when one of those is next opened, another document becomes current, or the entries change.
 - **Only Syncthing's conflict copies are recognised.** See [merging, section 7](merging.md).

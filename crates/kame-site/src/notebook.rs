@@ -91,7 +91,12 @@ fn published_link(
             .map(|part| part.as_os_str().to_string_lossy().into_owned())
             .collect();
         let trailing = if path.ends_with('/') { "/" } else { "" };
-        Some(format!("/{}{trailing}", url_path(&parts.join("/"))))
+        let url = url_path(&parts.join("/"));
+        Some(if url.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{url}{trailing}")
+        })
     };
     match notebook.follow(target, from) {
         Follow::Open(file) => {
@@ -119,7 +124,23 @@ fn published_link(
         Follow::Create(file) => {
             // A folder with no index simply has no page, and that's for the web server to say.
             if file.ends_with(INDEX) {
-                let folder = relative_to(notebook, file.parent()?)?;
+                let dir = file.parent()?;
+                let folder = relative_to(notebook, dir)?;
+                // The root is the site itself. A folder that's there is named only if something
+                // in it or under it publishes, since a link would tell a reader it exists.
+                if folder.is_empty() {
+                    return Some("/".to_string());
+                }
+                let real = dir.canonicalize();
+                let empty = real
+                    .as_ref()
+                    .is_ok_and(|real| !published.iter().any(|path| path.starts_with(real)));
+                if empty {
+                    problems.warnings.push(format!(
+                        "\"{slug}\": the link to {target} publishes as its text: nothing in that folder is published"
+                    ));
+                    return None;
+                }
                 return Some(format!("/{}/", url_path(&folder)));
             }
             problems.warnings.push(format!(
@@ -1982,5 +2003,75 @@ mod tests {
             root: root.to_path_buf(),
             build: build.to_path_buf(),
         }
+    }
+
+    /// The link a page at `from` publishes for a link to `url`, and what the build warned.
+    fn folder_link(nb: &Made, from: &str, url: &str) -> (String, Vec<String>) {
+        nb.document(
+            from,
+            true,
+            &linking(
+                "The words.",
+                SpanStyle::Link {
+                    url: url.to_string(),
+                },
+            ),
+        );
+        let (plan, problems) = nb.plan();
+        let stem = from.trim_end_matches(".kame");
+        (
+            page(&plan, &format!("{stem}/index.html")),
+            problems.warnings,
+        )
+    }
+
+    #[test]
+    fn a_link_to_the_root_with_no_index_is_a_slash() {
+        let nb = made("nbrootlink", "");
+        nb.words("deep/x.kame", true, "X.");
+        let (text, _) = folder_link(&nb, "from.kame", "./");
+        assert!(text.contains("href=\"/\""), "{text}");
+        let (text, _) = folder_link(&nb, "deep/from.kame", "../");
+        assert!(text.contains("href=\"/\""), "{text}");
+        assert!(!text.contains("href=\"//\""), "{text}");
+    }
+
+    #[test]
+    fn a_link_to_a_folder_with_no_index_names_it_when_something_in_it_publishes() {
+        let nb = made("nbfolderlink", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("deep/x.kame", true, "X.");
+        nb.words("tree/branch/leaf.kame", true, "Leaf.");
+        let (text, warned) = folder_link(&nb, "deep/from.kame", "./");
+        assert!(text.contains("href=\"/deep/\""), "{text}");
+        let (text, _) = folder_link(&nb, "from.kame", "tree/");
+        assert!(text.contains("href=\"/tree/\""), "{text}");
+        assert!(warned.is_empty() || !warned.iter().any(|w| w.contains("nothing in that folder")));
+    }
+
+    #[test]
+    fn a_link_to_a_folder_with_only_private_documents_is_its_text() {
+        let nb = made("nbprivatefolder", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("papers/secret.kame", false, "Secret.");
+        nb.words("papers/sub/more.kame", false, "More.");
+        let (text, warned) = folder_link(&nb, "from.kame", "papers/");
+        assert!(text.contains("The words."), "{text}");
+        assert!(!text.contains("papers"), "{text}");
+        assert!(
+            warned
+                .iter()
+                .any(|w| w.contains("nothing in that folder is published")),
+            "{warned:?}"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_folder_with_a_published_index_names_it() {
+        let nb = made("nbindexfolder", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("papers/Notebook.kame", true, "Index.");
+        let (text, _) = folder_link(&nb, "from.kame", "papers/");
+        assert!(text.contains("href=\"/papers/\""), "{text}");
     }
 }

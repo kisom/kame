@@ -4069,7 +4069,7 @@ mod tests {
             .start_rename("knuth1981".to_string(), "plass1981".to_string());
         page.app
             .session
-            .save_as(&root_of(&page).join("copy.kame"))
+            .save_as(&root_of(&page).join("copy.kame"), None, |_, _| false)
             .unwrap();
 
         run_until(&mut page, |app| app.refs.renaming.is_none());
@@ -4199,7 +4199,7 @@ mod tests {
 
         page.app
             .session
-            .save_as(&outside.join("copy.kame"))
+            .save_as(&outside.join("copy.kame"), None, |_, _| false)
             .unwrap();
         page.frame(Vec::new());
         page.frame(Vec::new());

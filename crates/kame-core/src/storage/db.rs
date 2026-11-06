@@ -341,6 +341,22 @@ impl Db {
         Ok(())
     }
 
+    /// Puts everything in the `-wal` into the file itself and closes it, for a file about to be
+    /// renamed, which would leave its `-wal` behind. Fails if any of it couldn't be put there.
+    pub fn close(self) -> Result<(), DbError> {
+        let busy: i64 = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("the log could not all be put into the file".to_string()),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Where the author last was in this document, if that was recorded and is
     /// still readable. It is a convenience, so a bad value is the same as none.
     pub fn load_position(&self) -> Option<Position> {
@@ -1477,6 +1493,38 @@ mod tests {
             Err(DbError::SnapshotNotFound(missing)) => assert_eq!(missing, id + 1),
             other => panic!("expected DbError::SnapshotNotFound, got {other:?}"),
         }
+    }
+
+    /// A file closed to be renamed holds everything written to it by itself, without its `-wal`,
+    /// and closing one fails while that can't be so, as when something is still reading the log.
+    #[test]
+    fn closing_puts_the_whole_log_into_the_file_or_fails() {
+        let path = temp_db_path();
+        let mut changed = sample_document();
+        changed.title = "Changed".to_string();
+        // Held open so that closing the other connection doesn't take the log away with it.
+        let other = Connection::open(&path).unwrap();
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&changed).unwrap();
+        db.close().unwrap();
+        let alone = path.with_file_name("alone.kame");
+        std::fs::copy(&path, &alone).unwrap();
+        assert_eq!(
+            Db::open_read_only(&alone).unwrap().load_document().unwrap(),
+            changed
+        );
+
+        let mut db = Db::open(&path).unwrap();
+        other.execute_batch("BEGIN").unwrap();
+        let _: i64 = other
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .unwrap();
+        db.save_document(&sample_document()).unwrap();
+        db.conn
+            .busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        assert!(db.close().is_err());
+        other.execute_batch("COMMIT").unwrap();
     }
 
     /// A history said again changes each snapshot named in place, keeping its label and time, and

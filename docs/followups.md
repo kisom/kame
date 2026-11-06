@@ -10,11 +10,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
 
-- [ ] **A crash during a Save As to another folder can leave the new file's links and images said from the old one.** `save_as`
-  renames the finished copy into place, and `rehome` says its paths again afterwards, in a transaction of its own. Killed between the
-  two, the new file has the old file's relative links and image paths, and nothing says them again on reopening. The rewrite could
-  be done on the copy before it's renamed into place.
-
 ## Notebook
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.

@@ -6478,20 +6478,14 @@ impl KameApp {
                 self.set_open_note(None);
             }
         }
-        // An import's links lead from its Markdown file until it has a file of its own.
-        let from = self
+        // Found from where it's going, which needn't exist yet, since only its folders are looked in.
+        let notebook = kame_notebook::Notebook::find(path).ok().flatten();
+        let root = notebook.as_ref().map(|nb| nb.root.as_path());
+        match self
             .session
-            .path()
-            .or(self.session.source_path.as_deref())
-            .map(Path::to_path_buf);
-        match self.session.save_as(path) {
+            .save_as(path, root, kame_sync::logs::names_logs_only)
+        {
             Ok(()) => {
-                let notebook = kame_notebook::Notebook::find(path).ok().flatten();
-                self.session.rehome(
-                    from.as_deref(),
-                    notebook.as_ref().map(|nb| nb.root.as_path()),
-                    kame_sync::logs::names_logs_only,
-                );
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
                     self.finish_close(ctx);

@@ -587,7 +587,7 @@ fn a_save_as_starts_from_the_history_again() {
         path: original.path.with_file_name("copy.kame"),
         device: original.device.clone(),
     };
-    there.save_as(&copy.path).unwrap();
+    there.save_as(&copy.path, None, |_, _| false).unwrap();
     assert_eq!(there.sync_state(), None);
     assert_eq!(there.sync_place(), None);
     copy.sync(&mut there, 2);

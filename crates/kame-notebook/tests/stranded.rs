@@ -677,7 +677,7 @@ fn a_save_as_copy_is_never_mistaken() {
     synced(&a, "Words.");
     {
         let mut session = Session::open(&a).unwrap();
-        session.save_as(&c).unwrap();
+        session.save_as(&c, None, |_, _| false).unwrap();
     }
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
 

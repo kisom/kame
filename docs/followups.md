@@ -77,3 +77,6 @@ i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame hold
   stack and drift, and on narrow screens they'd have to fold back into the text. Worth trying if
   footnotes on the live site start to feel like they belong in the margin, most likely as a
   `site.yaml` setting, changing only how a page lays them out and not what kame stores.
+- [ ] **Several windows open at once.** Needs a design. kame runs as one instance today, held by `instance.lock`, so the
+  choice is between windows in one process, as egui's viewports allow, and several processes. Then what they share: the
+  notebook, settings, sync and the checks for files changing on disk. And what happens when the same document is open in two.

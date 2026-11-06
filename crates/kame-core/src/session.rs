@@ -651,7 +651,8 @@ impl Session {
     /// retry. Its own file is `path` spelled as the document's, or the file it has open, however
     /// `path` names it: through a symlink, in another case where the disk ignores case, or by a
     /// hard link under another name. Once another file has been put at the document's path, a
-    /// Save As onto that file, by either spelling, is refused.
+    /// Save As onto that file, by either spelling, is refused, and the file it opened, wherever
+    /// it is now, is saved over as any other file is.
     pub fn save_as(
         &mut self,
         path: &Path,
@@ -669,8 +670,9 @@ impl Session {
         {
             return Err("that file changed on disk, so this needs another name".into());
         }
-        // Onto its own file, this is a retry of whatever write failed.
-        if spelled_the_same || target.is_some() && target == self.on_disk {
+        // Onto its own file, this is a retry of whatever write failed. Once replaced, the file it
+        // opened is no longer written, wherever it is now, so it takes a copy like any other.
+        if spelled_the_same || !self.replaced && target.is_some() && target == self.on_disk {
             if self.save_failed {
                 self.write_all()?;
             }
@@ -5212,6 +5214,39 @@ mod tests {
         drop(open(&from));
         std::fs::hard_link(&from, root.join("other.kame")).unwrap();
         saving_as_its_own_file_spelled_otherwise(&from, &root.join("other.kame"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_onto_the_file_it_opened_once_moved_away_is_a_copy() {
+        let root = scratch_dir("savedontomoved").canonicalize().unwrap();
+        let (path, moved) = (root.join("a.kame"), root.join("b.kame"));
+        let mut session = open(&path);
+        session.insert("mine");
+        assert!(session.split());
+        session.insert("more");
+        std::fs::rename(&path, &moved).unwrap();
+        another_copy(&root.join("c.kame"), "theirs");
+        std::fs::rename(root.join("c.kame"), &path).unwrap();
+        assert!(session.check_file());
+        session.save_as(&moved, None, |_, _| false).unwrap();
+        assert_eq!(session.path.as_deref(), Some(moved.as_path()));
+        assert!(!session.replaced && !session.save_failed);
+        assert!(session.insert_then_saved(" again"));
+        drop(session);
+        let mut reopened = open(&moved);
+        let texts: Vec<&str> = reopened
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect();
+        assert_eq!(texts, ["mine", "more again"]);
+        assert_eq!(reopened.history(), (4, 0));
+        assert!(reopened.undo());
+        assert_eq!(reopened.document().blocks[1].text, "more");
+        drop(reopened);
+        assert_eq!(text_in(&path), "theirs");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

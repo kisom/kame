@@ -101,7 +101,7 @@ Saving as another file must not expose a partial or wider-readable copy, or one 
 
 An image whose file can be found is said relative inside a notebook and whole otherwise. A link to the document itself follows its new name. If the snapshots can't be read, they're kept as they were and kame says so, since the words matter more. If the transaction fails, the Save As fails, as a failed copy does.
 
-Saving as the document's own file writes nothing, unless a write has failed. Its own file is the target spelled as the open path, or the file kame has open, by device and inode, however the target names it: through a symlink, in another case on a disk that ignores case, or by a hard link under another name. Once another file has been put at the open path (section 1.6), saving onto that file, by either spelling, is refused. Then it's a retry, as the error strip's is: the head, the whole log, the cursor and the metadata from memory, in one transaction.
+Saving as the document's own file writes nothing, unless a write has failed. Its own file is the target spelled as the open path, or the file kame has open, by device and inode, however the target names it: through a symlink, in another case on a disk that ignores case, or by a hard link under another name. Once another file has been put at the open path (section 1.6), saving onto that file, by either spelling, is refused, and the file kame opened, wherever it is now, is saved over as any other file is. Then it's a retry, as the error strip's is: the head, the whole log, the cursor and the metadata from memory, in one transaction.
 
 ## 2. The document
 

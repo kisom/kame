@@ -1695,14 +1695,19 @@ impl KameApp {
         let (caret, scroll) = (self.session.caret, self.page_scroll);
         // Its session is closed before the files move: a connection held across the rename would go
         // on using its -wal under the old name, with the database under the new one.
-        if let Some(blank) = blank {
+        // The document is still this window's while it moves, as its lock is for the file, which a
+        // move keeps.
+        let held = blank.map(|blank| {
+            let held = self.document_lock.take();
             self.adopt_session(blank);
-        }
+            held
+        });
         let open = (!moving_open).then_some(&mut self.session);
         let result = carry_out(notebook, plan, open, &device, now);
         if moving_open {
             // Only now, since carry_out has changed the file's links and title for it to read.
             let back_to = if result.is_ok() { to } else { from };
+            self.document_lock = held.flatten();
             if there_to_open(back_to) {
                 self.pending_heading = None;
                 self.open_document(back_to.display().to_string());
@@ -1714,6 +1719,8 @@ impl KameApp {
             } else {
                 self.session.last_error = Some(format!("{} is no longer there", back_to.display()));
             }
+            // Its lock goes if it did not open again.
+            self.hold_document(None);
         }
         let report = match result {
             Ok(report) => report,
@@ -2626,6 +2633,31 @@ mod tests {
                 to: b
             }]
         );
+    }
+
+    #[test]
+    fn the_open_document_is_still_held_once_moved() {
+        use kame_core::lock::{DocumentLock, LockError};
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-move-held")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let notebook = Notebook::open(&root).unwrap();
+        let (from, to) = (root.join("a.kame"), root.join("b.kame"));
+        let mut session = Session::open(&from).unwrap();
+        session.insert("Words.");
+        let mut page = crate::Headless::new(session);
+        page.app.hold_document(None);
+        page.app.move_document(&notebook, &from, &to).unwrap();
+        assert_eq!(page.app.session.path(), Some(to.as_path()));
+        assert_eq!(page.app.session.last_error, None);
+        let folder = crate::locks_folder().unwrap();
+        assert!(matches!(
+            DocumentLock::take(&folder, &to),
+            Err(LockError::Held)
+        ));
     }
 
     #[test]

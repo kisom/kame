@@ -20,6 +20,7 @@ use kame_core::links::{
     image_file, is_web_address, resolve_open_path, split_document_target, stored_image_path,
     way_within_notebook, web_address_start,
 };
+use kame_core::lock::{DocumentLock, LockError};
 use kame_core::references::{cited_key, with_citation_spans};
 use kame_core::session::{is_markdown_path, Clipped, LinkUnder, Session};
 use kame_core::{edit, model, storage};
@@ -230,6 +231,48 @@ fn hold_instance_lock(path: &Path) -> bool {
         Err(std::fs::TryLockError::WouldBlock) => false,
         Err(std::fs::TryLockError::Error(_)) => true,
     }
+}
+
+/// Where the locks on open documents are kept, one for each, so that no two kames write one.
+fn locks_folder() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("open"))
+}
+
+/// Takes the lock on the document at `path`, for opening it or saving over it, before anything is
+/// written to it. It's refused, with the words to say so, when another kame has it. A file that
+/// isn't there yet has nothing to lock, and one whose lock can't be taken counts as nobody else's,
+/// as there is then nothing to tell the two apart.
+fn claim(path: &Path) -> Result<Option<DocumentLock>, String> {
+    let Some(folder) = locks_folder() else {
+        return Ok(None);
+    };
+    match DocumentLock::take(&folder, path) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(LockError::Held) => Err(held_elsewhere(path)),
+        Err(LockError::Failed(_)) => Ok(None),
+    }
+}
+
+fn held_elsewhere(path: &Path) -> String {
+    format!("{} is open in another kame window", shown_name(path))
+}
+
+/// A document a launch opened: its session, what to say about an import, and its lock.
+type Launched = (Session, Option<String>, Option<DocumentLock>);
+
+/// Opens the document a launch names, with its lock. One another kame has is refused before
+/// anything is written to it, as building it from its logs would.
+fn launch_open(path: &Path) -> Result<Launched, String> {
+    // Markdown is only read, into a document with no file.
+    let claimed = if is_markdown_path(path) {
+        None
+    } else {
+        claim(path)?
+    };
+    let _ = kame_sync::logs::build_from_logs(path);
+    let (session, note) = Session::open_any(path)
+        .map_err(|err| format!("could not open {} — {err}", path.display()))?;
+    Ok((session, note, claimed))
 }
 
 /// Turns the Tab key into a typed tab. Shift-Tab has nothing to do in a block that takes
@@ -1924,8 +1967,8 @@ fn main() -> eframe::Result {
     let config_device = config.device.clone();
     let config_browser_open = config.browser_open;
     let config_browser_folders = config.browser_folders.clone();
-    // Two windows on one file would overwrite each other's edits, so only the first
-    // running kame goes back to the last document.
+    // Only the first running kame goes back to the last document. A later one would most likely
+    // find the first holding it, and start on a refusal.
     let first = config_dir().is_none_or(|dir| {
         let _ = std::fs::create_dir_all(&dir);
         hold_instance_lock(&dir.join("instance.lock"))
@@ -1948,12 +1991,13 @@ fn main() -> eframe::Result {
         Some(notebook) => (notebook.index(), None),
         None => (argument, last),
     };
-    let (session, notice) = match document_to_open(argument, last) {
+    let (session, notice, claimed) = match document_to_open(argument, last) {
         None => (
             Session::anonymous().unwrap_or_else(|err| {
                 eprintln!("kame: {err}");
                 std::process::exit(1);
             }),
+            None,
             None,
         ),
         Some(path) => {
@@ -1963,8 +2007,7 @@ fn main() -> eframe::Result {
             // still shows the author an editable (in-memory) document and the
             // reason in the status panel, since a desktop launch has no
             // terminal to print to.
-            let _ = kame_sync::logs::build_from_logs(&path);
-            match Session::open_any(&path) {
+            match launch_open(&path) {
                 Ok(opened) => {
                     // An import has no file yet, so it is like a new document.
                     if opened.0.is_anonymous() {
@@ -1985,13 +2028,12 @@ fn main() -> eframe::Result {
                     }
                     opened
                 }
-                Err(err) => {
-                    let message = format!("could not open {} — {err}", path.display());
+                Err(message) => {
                     let session = Session::blank(&path, message).unwrap_or_else(|err| {
                         eprintln!("kame: {err}");
                         std::process::exit(1);
                     });
-                    (session, None)
+                    (session, None, None)
                 }
             }
         }
@@ -2025,6 +2067,7 @@ fn main() -> eframe::Result {
                 browser_folders: config_browser_folders,
             },
         );
+        app.hold_document(claimed);
         if let Some(notebook) = folder_notebook {
             if app.session.is_anonymous() {
                 app.start_in_notebook(notebook);
@@ -2442,6 +2485,8 @@ fn superscript_origin(
 
 struct KameApp {
     session: Session,
+    /// What keeps another kame from writing the open document, while it has a file.
+    document_lock: Option<DocumentLock>,
     /// Whether to mark likely mistakes, and what's been said not to mark.
     check_spelling: bool,
     my_words: Vec<String>,
@@ -2629,6 +2674,7 @@ impl KameApp {
         session.apply_default_author(&default_author);
         KameApp {
             session,
+            document_lock: None,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
             hyphenate,
             check_spelling,
@@ -3118,6 +3164,11 @@ impl KameApp {
     /// Replaces the session, resetting the view state that pointed into the old
     /// document (open note, find bar, typewriter anchor, caches).
     fn adopt_session(&mut self, session: Session) {
+        self.adopt_holding(session, None);
+    }
+
+    /// `adopt_session`, with the lock `claimed` for it before it was opened, if one was.
+    fn adopt_holding(&mut self, session: Session, claimed: Option<DocumentLock>) {
         // The last of this document's words go in its logs before it's left. Not if `session` is
         // on the same file: it has read that file already, and a merge now would leave it stale,
         // so whoever is reopening a file syncs first. An open note closes first, as closing one
@@ -3156,6 +3207,47 @@ impl KameApp {
         self.position_saved_at = std::time::Instant::now();
         self.reveal_caret = false;
         self.image_textures.clear();
+        self.hold_document(claimed);
+    }
+
+    /// `claim` for this window, which is never refused the document it holds already, and needs
+    /// no other lock for it.
+    fn claim_document(&self, path: &Path) -> Result<Option<DocumentLock>, String> {
+        if self
+            .document_lock
+            .as_ref()
+            .is_some_and(|lock| lock.is_for(path))
+        {
+            return Ok(None);
+        }
+        claim(path)
+    }
+
+    /// Holds the open document's lock: `claimed`, if it was taken for its file, or the one held
+    /// already, if that's for it, or else one taken now, as for a file the open has only just
+    /// made. Any other is let go, and a document with no file holds none.
+    fn hold_document(&mut self, claimed: Option<DocumentLock>) {
+        let Some(path) = self.session.path().map(Path::to_path_buf) else {
+            self.document_lock = None;
+            return;
+        };
+        if let Some(lock) = claimed.filter(|lock| lock.is_for(&path)) {
+            self.document_lock = Some(lock);
+            return;
+        }
+        if self
+            .document_lock
+            .as_ref()
+            .is_some_and(|lock| lock.is_for(&path))
+        {
+            return;
+        }
+        self.document_lock = None;
+        match claim(&path) {
+            Ok(lock) => self.document_lock = lock,
+            // Only when another kame took a file this one has just made, before it could.
+            Err(held) => self.session.last_error = Some(held),
+        }
     }
 
     /// Steps the body font size, from which every other size is derived.
@@ -6390,6 +6482,21 @@ impl KameApp {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let path = resolve_open_path(&typed, &base);
+        // Before anything is written, there or here. Markdown is only read, into a document with
+        // no file.
+        let claimed = if is_markdown_path(&path) {
+            Ok(None)
+        } else {
+            self.claim_document(&path)
+        };
+        let claimed = match claimed {
+            Ok(claimed) => claimed,
+            Err(held) => {
+                self.notice = None;
+                self.session.last_error = Some(held);
+                return;
+            }
+        };
         // Before the open, which may be of this same file.
         self.set_open_note(None);
         self.save_position_now();
@@ -6403,7 +6510,7 @@ impl KameApp {
         }
         match Session::open_any(&path) {
             Ok((session, note)) => {
-                self.adopt_session(session);
+                self.adopt_holding(session, claimed);
                 // An import has no file yet, so it is like a new document.
                 if self.session.is_anonymous() {
                     self.last_document.forget();
@@ -6470,6 +6577,14 @@ impl KameApp {
 
     /// Saves the document at `path`, and says its images and links again from there.
     fn save_to(&mut self, ctx: &egui::Context, path: &Path, close_after: bool) {
+        // Saving over a file another kame has open would pull it out from under that one.
+        let claimed = match self.claim_document(path) {
+            Ok(claimed) => claimed,
+            Err(held) => {
+                self.session.last_error = Some(format!("could not save — {held}"));
+                return;
+            }
+        };
         // An unwritten marginal goes first, as it can't once this has logged a step after it. A
         // note being written stays open, since what's typed while writes are refused is only in
         // its field, and saving here is the way out of that.
@@ -6486,6 +6601,10 @@ impl KameApp {
             .save_as(path, root, kame_sync::logs::names_logs_only)
         {
             Ok(()) => {
+                // What was at `path` has been replaced, so its lock goes, and the new file's is
+                // taken.
+                drop(claimed);
+                self.hold_document(None);
                 // They're kept by the paths the document held, which led from where it was.
                 self.image_textures.clear();
                 self.notice = Some(format!("saved {}", path.display()));
@@ -6733,10 +6852,19 @@ impl KameApp {
         if self.say_if_reference_form_up() || self.held_by_rename() {
             return;
         }
+        // The merge is written into the file there now, which another kame may have opened.
+        let claimed = match self.session.path().map(|path| self.claim_document(path)) {
+            Some(Err(held)) => {
+                self.session.last_error = Some(format!("could not merge — {held}"));
+                return;
+            }
+            Some(Ok(claimed)) => claimed,
+            None => None,
+        };
         match kame_sync::files::merge_replaced(&self.session) {
             Ok((session, result)) => {
                 let (caret, scroll) = (self.session.caret, self.page_scroll);
-                self.adopt_session(session);
+                self.adopt_holding(session, claimed);
                 self.session.set_caret(caret);
                 self.pending_scroll = Some(scroll);
                 self.replaced_prompt = false;
@@ -7103,6 +7231,7 @@ impl eframe::App for KameApp {
                 self.clear_left_fresh(true);
             }
         }
+        self.document_lock = None;
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -9167,6 +9296,185 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(hold_instance_lock(&lock));
         assert!(!hold_instance_lock(&lock));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- one kame to a document ---------------------------------------------
+
+    /// A document with words in it, closed, in a folder of its own.
+    fn written_document(name: &str) -> PathBuf {
+        let path = scratch_dir("held").join(name);
+        let mut session = open(&path);
+        assert!(session.insert("words"));
+        drop(session);
+        path
+    }
+
+    /// What another kame holding `path` holds.
+    fn held_elsewhere_lock(path: &Path) -> DocumentLock {
+        DocumentLock::take(&locks_folder().unwrap(), path).unwrap()
+    }
+
+    fn is_held(path: &Path) -> bool {
+        matches!(
+            DocumentLock::take(&locks_folder().unwrap(), path),
+            Err(LockError::Held)
+        )
+    }
+
+    /// Everything on disk for the document at `path`, and its logs beside it.
+    fn on_disk(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut found: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|found| found.is_file())
+            .map(|found| {
+                let bytes = std::fs::read(&found).unwrap();
+                (found, bytes)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    fn page_holding(path: &Path) -> Headless {
+        let mut page = Headless::new(open(path));
+        page.app.hold_document(None);
+        page
+    }
+
+    #[test]
+    fn opening_a_document_another_kame_has_is_refused() {
+        let held = written_document("held.kame");
+        let mine = written_document("mine.kame");
+        let _other = held_elsewhere_lock(&held);
+        let before = on_disk(&held);
+        let mut page = page_holding(&mine);
+        page.app.open_document(held.display().to_string());
+        assert_eq!(page.app.session.path(), Some(mine.as_path()));
+        assert_eq!(
+            page.app.session.last_error.as_deref(),
+            Some("held.kame is open in another kame window")
+        );
+        assert_eq!(on_disk(&held), before);
+        assert!(is_held(&mine), "still this window's");
+    }
+
+    #[test]
+    fn reopening_the_document_this_window_has_is_not_refused() {
+        let path = written_document("doc.kame");
+        let mut page = page_holding(&path);
+        let symlink = path.with_file_name("link.kame");
+        std::os::unix::fs::symlink(&path, &symlink).unwrap();
+        for spelling in [&path, &symlink] {
+            page.app.open_document(spelling.display().to_string());
+            assert_eq!(page.app.session.last_error, None);
+            assert_eq!(page.app.session.path(), Some(spelling.as_path()));
+            assert!(is_held(&path));
+        }
+    }
+
+    #[test]
+    fn leaving_a_document_lets_another_kame_have_it() {
+        let first = written_document("first.kame");
+        let second = written_document("second.kame");
+        let mut page = page_holding(&first);
+        assert!(is_held(&first));
+        page.app.open_document(second.display().to_string());
+        assert!(!is_held(&first));
+        assert!(is_held(&second));
+        page.app.request_new();
+        assert!(page.app.session.is_anonymous());
+        assert!(!is_held(&second));
+    }
+
+    #[test]
+    fn a_document_an_open_makes_is_held() {
+        let path = scratch_dir("held").join("new.kame");
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.app.open_document(path.display().to_string());
+        assert_eq!(page.app.session.path(), Some(path.as_path()));
+        assert!(is_held(&path));
+    }
+
+    #[test]
+    fn a_save_as_over_a_document_another_kame_has_is_refused() {
+        let held = written_document("held.kame");
+        let _other = held_elsewhere_lock(&held);
+        let before = on_disk(&held);
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        assert!(page.app.session.insert("mine"));
+        let ctx = page.ctx.clone();
+        page.app.save_to(&ctx, &held, false);
+        assert!(page.app.session.is_anonymous());
+        assert_eq!(
+            page.app.session.last_error.as_deref(),
+            Some("could not save — held.kame is open in another kame window")
+        );
+        assert_eq!(on_disk(&held), before);
+    }
+
+    #[test]
+    fn a_save_as_holds_the_new_file_and_lets_the_old_go() {
+        let first = written_document("first.kame");
+        let mut page = page_holding(&first);
+        let ctx = page.ctx.clone();
+        let copy = first.with_file_name("copy.kame");
+        page.app.save_to(&ctx, &copy, false);
+        assert_eq!(page.app.session.path(), Some(copy.as_path()));
+        assert!(is_held(&copy));
+        assert!(!is_held(&first));
+        // Onto its own file, it goes on holding it.
+        page.app.save_to(&ctx, &copy, false);
+        assert_eq!(page.app.session.last_error, None);
+        assert!(is_held(&copy));
+    }
+
+    #[test]
+    fn a_launch_onto_a_document_another_kame_has_writes_nothing() {
+        // An empty file, which opening would write a document into.
+        let held = scratch_dir("held").join("held.kame");
+        std::fs::write(&held, b"").unwrap();
+        let other = held_elsewhere_lock(&held);
+        let before = on_disk(&held);
+        let refused = launch_open(&held).map(|_| ());
+        assert_eq!(
+            refused,
+            Err("held.kame is open in another kame window".to_string())
+        );
+        assert_eq!(on_disk(&held), before);
+        let blank = Session::blank(&held, refused.unwrap_err()).unwrap();
+        assert_eq!(blank.path(), None);
+        assert_eq!(on_disk(&held), before);
+        drop(other);
+        assert!(launch_open(&held).is_ok());
+        assert_ne!(on_disk(&held), before, "an open does write it");
+    }
+
+    #[test]
+    fn a_launch_holds_what_it_opens() {
+        let path = written_document("doc.kame");
+        let (session, _, claimed) = launch_open(&path).unwrap();
+        assert!(claimed.is_some_and(|lock| lock.is_for(&path)));
+        drop(session);
+        assert!(!is_held(&path));
+    }
+
+    #[test]
+    fn a_merge_into_a_replacement_another_kame_has_is_refused() {
+        let path = written_document("doc.kame");
+        let copy = path.with_file_name("copy");
+        std::fs::copy(&path, &copy).unwrap();
+        let mut page = page_holding(&path);
+        // A sync puts another file there, which another kame then opens.
+        std::fs::rename(&copy, &path).unwrap();
+        let _other = held_elsewhere_lock(&path);
+        let before = on_disk(&path);
+        page.app.merge_with_replacement();
+        assert_eq!(
+            page.app.session.last_error.as_deref(),
+            Some("could not merge — doc.kame is open in another kame window")
+        );
+        assert_eq!(on_disk(&path), before);
     }
 
     fn type_marked(session: &mut Session, text: &str) {

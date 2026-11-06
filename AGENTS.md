@@ -79,6 +79,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/references/` — the app's side of references. `mod.rs` keeps up with the notebook's list and holds what the windows share, `page` is which keys are drawn as citations and the entry a click on one opens, `notice` the notice for a key with no reference, `cite` Cite and its search, `form` the new reference and edit windows, `list` the References… window with its delete and the rows asking before a rename, `rename` the rename itself, and `browser` the browser's section for them.
 
+`src/interface.rs` — the interface's text size: a scale of egui's text styles and the sizes beside them, and `room()` for kame's own fixed interface sizes; the keys that tell it from the type size.
+
 `src/publish.rs` — the app's Site menu, on `kame-site`.
 
 `src/commands.rs` — the menu bar's commands, in the one list the menus and the command palette (Ctrl-P) both draw from, and the palette.

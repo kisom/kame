@@ -39,6 +39,26 @@ itself is a structured, first-class file, never a pile of markup.
 - **Other versions** — merges the conflict copies a sync tool leaves behind.
   Revision logs for syncing a folder between machines are in trial.
 
+## Install
+
+**Homebrew:**
+
+```sh
+brew install kisom/tap/kame                      # builds kame and kame-site from source
+brew install --cask --no-quarantine kisom/tap/kame   # installs kame.app from the GitHub release
+```
+
+The cask is the same app that `make mac-app` builds: ad-hoc signed and not
+notarized, for Apple Silicon only, which is why it needs `--no-quarantine`.
+
+**GitHub release:** each [release](https://github.com/kisom/kame/releases) has
+`kame.app.zip`, the macOS app, with the same limits as the cask.
+
+**Arch Linux:** `kame` in the AUR, for example `yay -S kame`. It installs
+`kame`, `kame-site`, the desktop shortcut and the `.kame` file type.
+
+**From source:** `make install`, below.
+
 ## Building
 
 Dependencies: a Rust toolchain (edition 2021) and a C compiler. On Linux you

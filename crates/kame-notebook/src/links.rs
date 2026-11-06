@@ -79,13 +79,21 @@ impl Notebook {
     /// has no real location, so that writing to it can't lead out either. What's in another
     /// notebook below the root isn't inside, either as written or where it really is.
     pub fn holds(&self, path: &Path) -> bool {
-        if !path.starts_with(&self.root) || self.in_another_notebook(path) {
-            return false;
+        self.real_place(path)
+            .is_some_and(|real| !self.in_another_notebook(path) && !self.in_another_notebook(&real))
+    }
+
+    /// Where `path` really is, if it's under the root both as written and there, going by as much
+    /// of it as exists, as [`Notebook::holds`] does. Another notebook below the root is left to the
+    /// caller.
+    fn real_place(&self, path: &Path) -> Option<PathBuf> {
+        if !path.starts_with(&self.root) {
+            return None;
         }
         path.ancestors()
             .find(|above| above.symlink_metadata().is_ok())
             .and_then(|above| above.canonicalize().ok())
-            .is_some_and(|real| real.starts_with(&self.root) && !self.in_another_notebook(&real))
+            .filter(|real| real.starts_with(&self.root))
     }
 
     /// Whether `path`, under the root, is another notebook's root or in one.
@@ -140,7 +148,10 @@ impl Notebook {
         let is_folder = path.ends_with('/');
         let base = self.real_base(base);
         let named = tidied(&resolve_open_path(path, &base));
-        if !self.holds(&named) {
+        // Only the root is checked here. What's named may be another notebook's folder beside a
+        // document of the same name, which comes first, so each path that may be returned is
+        // checked against other notebooks.
+        if self.real_place(&named).is_none() {
             return Follow::Rotted;
         }
         // A document comes before a folder of the same name, which moving something into `b/`
@@ -167,6 +178,9 @@ impl Notebook {
             } else {
                 Follow::Rotted
             };
+        }
+        if !self.holds(&named) {
+            return Follow::Rotted;
         }
         if named.is_file() {
             let document = self.in_documents_area(&named)

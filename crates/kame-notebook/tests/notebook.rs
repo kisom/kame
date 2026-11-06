@@ -1090,6 +1090,32 @@ mod a_notebook_inside {
     }
 
     #[test]
+    fn a_document_beside_it_of_the_same_name_is_still_linked_to() {
+        let root = outer("inside-beside");
+        document(&root.join("inner.kame"), "Beside.");
+        let found = notebook(&root);
+        let from = root.join("a.kame");
+        assert_eq!(
+            found.follow("inner", &from),
+            Follow::Open(root.join("inner.kame")),
+            "the document comes before the folder"
+        );
+        for target in ["inner/", "inner/b", "inner/new"] {
+            assert_eq!(found.follow(target, &from), Follow::Rotted, "{target}");
+        }
+        let mut session = Session::open(&from).unwrap();
+        session.insert(" See [[inner]]");
+        session.apply_markdown_link();
+        drop(session);
+        let cancel = AtomicBool::new(false);
+        let links: Vec<String> = linking_to(&found, &root.join("inner.kame"), None, &cancel)
+            .into_iter()
+            .map(|link| link.relative)
+            .collect();
+        assert_eq!(links, ["a.kame"]);
+    }
+
+    #[test]
     fn what_links_here_is_kept_to_each_notebook() {
         let root = outer("inside-backlinks");
         let link_in = |path: &Path, link: &str| {

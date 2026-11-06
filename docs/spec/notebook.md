@@ -156,13 +156,14 @@ The rules, in order:
 
 1. If `PATH` is empty, starts with `#` or `//`, or has a scheme, the link has rotted. A scheme is a letter, then letters, digits, `+`, `-` or `.`, up to a first `:`, so a colon later in a path doesn't make one. An absolute path isn't excluded here, and rule 3 judges it.
 2. Trim surrounding whitespace, expand a leading `~/` or a bare `~`, resolve against the linking document's folder, and take out `.` and `..` by what they say. What's named may not exist yet. The linking document's path must already be in terms of the notebook's real root, or every link rots at rule 3 (section 4.3).
-3. If the result isn't inside the notebook, the link has rotted. A path in another notebook below the root isn't inside (section 1.2). That's judged first by the path as written, then by the real location of as much of the path as exists, so that a symbolic link can't lead out. A dangling link counts as existing, and has no real location, so it gives **Rotted**. Rules 4 and 7 to 9 add to the path, and the result must pass the same check.
-4. If it's a folder, or `PATH` ends in `/`, look at its `Notebook.kame`: **Open** if it's there or has a log folder, **Create** if it's in the documents area, otherwise **Rotted**.
-5. If it's a file: **Open** if it's in the documents area and ends in `.kame`, `.md` or `.markdown`, otherwise **View**.
-6. If nothing is there and it isn't in the documents area, it has **Rotted**.
-7. Try adding `.kame`, then `.md`: **Open** if that file exists. `.markdown` isn't tried, so a link to one has to name it.
-8. If it has no extension, add `.kame`. If its extension is `.kame` in any case, keep it. With any other extension it has **Rotted**, so a missing `paper.pdf` never makes `paper.pdf.kame`.
-9. **Open** if that document has a log folder, since it exists and only needs building. Otherwise **Create**.
+3. If the result isn't inside the notebook, the link has rotted. That's judged first by the path as written, then by the real location of as much of the path as exists, so that a symbolic link can't lead out. A dangling link counts as existing, and has no real location, so it gives **Rotted**. A path in another notebook below the root isn't inside either (section 1.2), but that's judged on what the rules below lead to, so that a document beside another notebook's folder of the same name is still found. Rules 4, 5 and 8 to 10 add to the path, and the result must pass the same check.
+4. If it's a folder and `PATH` doesn't end in `/`, a document of the same name comes first: **Open** the path with `.kame` added if it's there or has a log folder, and is in the documents area. Moving something into `b/` makes such a folder beside `b.kame`.
+5. If it's a folder, or `PATH` ends in `/`, look at its `Notebook.kame`: **Open** if it's there or has a log folder, **Create** if it's in the documents area, otherwise **Rotted**.
+6. If it's a file: **Open** if it's in the documents area and ends in `.kame`, `.md` or `.markdown`, otherwise **View**.
+7. If nothing is there and it isn't in the documents area, it has **Rotted**.
+8. Try adding `.kame`, then `.md`: **Open** if that file exists. `.markdown` isn't tried, so a link to one has to name it.
+9. If it has no extension, add `.kame`. If its extension is `.kame` in any case, keep it. With any other extension it has **Rotted**, so a missing `paper.pdf` never makes `paper.pdf.kame`.
+10. **Open** if that document has a log folder, since it exists and only needs building. Otherwise **Create**.
 
 **The documents area** is everything inside the notebook except what's under `static`, `images`, `theme` or `output` in the root, and anything with a part starting with `.`.
 

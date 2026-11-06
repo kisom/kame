@@ -1766,3 +1766,19 @@ fn another_notebook_inside_is_outside_for_a_move() {
         "the other notebook's links are its own"
     );
 }
+
+#[test]
+fn a_document_beside_another_notebook_of_its_name_has_its_links_moved() {
+    let (root, nb) = plain_notebook("move-beside-inner-notebook");
+    let projects = root.join("projects.kame");
+    document(&projects, "P.");
+    document(&root.join("projects/theirs.kame"), "");
+    std::fs::write(root.join("projects/notebook.yaml"), "").unwrap();
+    let mine = root.join("mine.kame");
+    document(&mine, "");
+    link(&mine, "mine", document_link("projects"));
+
+    let report = make_move(&nb, &projects, &root.join("work.kame"));
+    assert_eq!(report.changed, ["mine.kame"]);
+    assert_eq!(links_of(&read(&mine)), ["work.kame"]);
+}

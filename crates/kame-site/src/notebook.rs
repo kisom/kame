@@ -11,12 +11,12 @@ use kame_core::references::unresolved;
 use kame_notebook::images::IMAGES;
 use kame_notebook::links::{is_web_link, Follow};
 use kame_notebook::references;
-use kame_notebook::{is_notebook_root, read_document, Notebook, INDEX};
+use kame_notebook::{is_notebook_root, read_noting_newer, Notebook, Read, INDEX};
 
 use crate::config::Config;
 use crate::plan::{plan_site, Output, Plan};
 use crate::refs::percent_encode;
-use crate::source::{from_parts, Source};
+use crate::source::{from_parts, newer_warning, Source};
 use crate::starter::FILES;
 use crate::Problems;
 
@@ -261,7 +261,12 @@ fn read_sources(notebook: &Notebook, problems: &mut Problems) -> Vec<Source> {
     let home = notebook.root.join(INDEX);
     let mut sources: Vec<Source> = Vec::new();
     for entry in notebook.documents() {
-        let Some((doc, metadata)) = read_document(&entry.path) else {
+        let Some(Read {
+            document: doc,
+            metadata,
+            newer,
+        }) = read_noting_newer(&entry.path)
+        else {
             // An unreadable document that isn't marked can't be told from one that is.
             problems.warnings.push(format!(
                 "could not read {}, so it isn't published",
@@ -271,6 +276,9 @@ fn read_sources(notebook: &Notebook, problems: &mut Problems) -> Vec<Source> {
         };
         if !metadata.publish && entry.path != home {
             continue;
+        }
+        if newer {
+            problems.warnings.push(newer_warning(&entry.relative));
         }
         if let Some(mut source) =
             from_parts(&entry.relative, &entry.path, false, doc, metadata, problems)
@@ -942,6 +950,79 @@ mod tests {
         assert!(!plan
             .files
             .contains_key(Path::new("private/research/index.html")));
+    }
+
+    /// What this build can read of a document from a newer kame publishes, and nothing stands in
+    /// for the rest. Each one that publishes is warned of, once, and one that doesn't isn't.
+    #[test]
+    fn a_document_from_a_newer_kame_publishes_what_this_one_reads_and_warns() {
+        let nb = made("nbnewer", "title: Philosophy\n");
+        nb.words("Notebook.kame", false, "The contents.");
+        let newer = [
+            (
+                "kinds.kame",
+                true,
+                r#""kind":"Paragraph","text":"A table of otters.""#,
+                r#""kind":"Table","text":"A table of otters.""#,
+            ),
+            (
+                "fields.kame",
+                true,
+                r#""text":"A table of otters.""#,
+                r#""text":"A table of otters.","colour":"red""#,
+            ),
+            (
+                "quiet.kame",
+                false,
+                r#""kind":"Paragraph","text":"A table of otters.""#,
+                r#""kind":"Table","text":"A table of otters.""#,
+            ),
+        ];
+        for (relative, publish, from, to) in newer {
+            let mut doc = Document::new("D");
+            doc.blocks = vec![paragraph("Kept words."), paragraph("A table of otters.")];
+            nb.document(relative, publish, &doc);
+            let conn = rusqlite::Connection::open(nb.root.join(relative)).unwrap();
+            let head: String = conn
+                .query_row("SELECT json FROM documents", [], |row| row.get(0))
+                .unwrap();
+            let edited = head.replacen(from, to, 1);
+            assert_ne!(edited, head);
+            conn.execute("UPDATE documents SET json = ?1", [&edited])
+                .unwrap();
+        }
+        let (plan, problems) = nb.plan();
+        let mut warned: Vec<&String> = problems
+            .warnings
+            .iter()
+            .filter(|said| said.contains("newer version of kame"))
+            .collect();
+        warned.sort();
+        assert_eq!(
+            warned,
+            ["fields.kame", "kinds.kame"]
+                .map(|relative| format!(
+                    "\"{relative}\": it was written by a newer version of kame, so it may be \
+                     missing parts; update kame to publish all of it"
+                ))
+                .iter()
+                .collect::<Vec<_>>(),
+            "{:?}",
+            problems.warnings
+        );
+        let kinds = page(&plan, "kinds/index.html");
+        assert!(kinds.contains("Kept words."), "{kinds}");
+        assert!(!kinds.contains("otters"), "{kinds}");
+        let fields = page(&plan, "fields/index.html");
+        assert!(fields.contains("Kept words."), "{fields}");
+        assert!(fields.contains("A table of otters."), "{fields}");
+        for path in plan.files.keys() {
+            if let Some(Output::Bytes(bytes)) = plan.files.get(path) {
+                let text = String::from_utf8_lossy(bytes);
+                assert!(!text.contains("newer version"), "{}", path.display());
+            }
+        }
+        assert!(!plan.files.contains_key(Path::new("quiet/index.html")));
     }
 
     #[test]

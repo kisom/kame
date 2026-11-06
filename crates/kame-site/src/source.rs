@@ -76,18 +76,19 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
             .push(format!("\"{slug}\": no document at {}", path.display()));
         return None;
     }
-    let loaded = kame_core::storage::Db::open_read_only(path)
-        .and_then(|db| Ok((db.load_document()?, db.load_metadata()?)));
+    let loaded = kame_core::storage::Db::open_read_only(path).and_then(|db| {
+        Ok((
+            db.load_readable()?,
+            db.load_metadata()?,
+            db.leaves_out_newer(),
+        ))
+    });
     let (doc, metadata) = match loaded {
-        Ok(loaded) => loaded,
-        // One from a newer kame is for that kame to publish, and opening it in this one changes
-        // nothing.
-        Err(_) if kame_core::storage::Db::open_read_only(path).is_ok_and(|db| db.holds_newer()) => {
-            problems.errors.push(format!(
-                "\"{slug}\": could not read {}: it has changes from a newer version of kame. Update kame to publish it.",
-                path.display()
-            ));
-            return None;
+        Ok((doc, metadata, newer)) => {
+            if newer {
+                problems.warnings.push(newer_warning(slug));
+            }
+            (doc, metadata)
         }
         Err(err) => {
             problems.errors.push(format!(
@@ -104,6 +105,15 @@ pub fn read(entry: &Entry, draft: bool, problems: &mut Problems) -> Option<Sourc
         doc,
         metadata.unwrap_or_default(),
         problems,
+    )
+}
+
+/// What a build says of a document that holds something only a newer version of kame knows, which
+/// publishes without it.
+pub fn newer_warning(slug: &str) -> String {
+    format!(
+        "\"{slug}\": it was written by a newer version of kame, so it may be missing parts; update \
+         kame to publish all of it"
     )
 }
 
@@ -411,25 +421,57 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Opening it in this kame changes nothing, so that isn't what to say.
+    /// One from a newer kame publishes what this one can read of it, and nothing in place of the
+    /// rest, with a warning to update kame to publish all of it. So does one with a newer field.
     #[test]
-    fn a_document_from_a_newer_kame_says_to_update_kame() {
+    fn a_document_from_a_newer_kame_publishes_what_this_one_reads_and_says_to_update() {
         let dir = temp_dir("newerkind");
-        let path = dir.join("a.kame");
-        write_kame(&path, &doc("A"), Some(&metadata("A", "2026-11-02", &[])));
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute(
-            "UPDATE documents SET json = replace(json, '\"kind\":\"Paragraph\"', '\"kind\":\"Table\"')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-        let mut problems = Problems::default();
-        assert!(read(&entry("a", path), false, &mut problems).is_none());
-        let said = &problems.errors[0];
-        assert!(said.contains("a newer version of kame"), "{said}");
-        assert!(said.contains("Update kame"), "{said}");
-        assert!(!said.contains("open it in kame"), "{said}");
+        for (name, from, to) in [
+            (
+                "kinds",
+                r#""kind":"Paragraph","text":"A table.""#,
+                r#""kind":"Table","text":"A table.""#,
+            ),
+            (
+                "fields",
+                r#""text":"A table.""#,
+                r#""text":"A table.","colour":"red""#,
+            ),
+        ] {
+            let path = dir.join(format!("{name}.kame"));
+            let mut document = doc("A");
+            document.blocks.push(paragraph("A table."));
+            write_kame(&path, &document, Some(&metadata("A", "2026-11-02", &[])));
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let head: String = conn
+                .query_row("SELECT json FROM documents", [], |row| row.get(0))
+                .unwrap();
+            let newer = head.replacen(from, to, 1);
+            assert_ne!(newer, head);
+            conn.execute("UPDATE documents SET json = ?1", [&newer])
+                .unwrap();
+            drop(conn);
+            let before = std::fs::read(&path).unwrap();
+            let mut problems = Problems::default();
+            let source = read(&entry(name, path.clone()), false, &mut problems)
+                .unwrap_or_else(|| panic!("{name}: {:?}", problems.errors));
+            assert!(problems.errors.is_empty(), "{:?}", problems.errors);
+            assert_eq!(source.doc.blocks[0].text, "Words.", "{name}");
+            let texts: Vec<&str> = source.doc.blocks.iter().map(|b| b.text.as_str()).collect();
+            assert!(
+                !texts.contains(&kame_core::storage::NEWER_PART),
+                "{name}: {texts:?}"
+            );
+            assert_eq!(texts.contains(&"A table."), name == "fields", "{texts:?}");
+            assert_eq!(
+                problems.warnings,
+                [format!(
+                    "\"{name}\": it was written by a newer version of kame, so it may be missing \
+                     parts; update kame to publish all of it"
+                )]
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

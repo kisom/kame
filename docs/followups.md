@@ -21,8 +21,6 @@ unless daily writing finds something that fails it.
 Releases now put different versions on different machines (Homebrew, the GitHub release and the AUR), so a file or a log
 written by one version has to be safe in another.
 
-- [ ] **Read-only tools don't check for newer fields.** A site build or a notebook's lists on an older machine leave out what
-  they don't know, and say nothing. See `docs/spec/document-format.md`, section 8.
 - [ ] **A newer build's revisions stop an older one following.** Readers drop fields they don't know and recompute digests and
   ids from what they parsed, so one new field leaves an older machine unable to follow until it's updated. See
   `docs/spec/merging.md`, section 9.

@@ -345,7 +345,7 @@ If a sync tool leaves a conflict copy beside the open document, the status row s
 Merge Conflict Copies merges it. Sentences both versions changed keep the words on screen, with the
 other version in a note. A merge is one undo, after a snapshot, and the copy stays beside the document
 with `.merged` added to its name. A copy another kame window has open isn't merged, and kame says "could not merge — NAME is open in
-another kame window".
+another kame window". Nor is a copy written by a newer version of kame, which stays as it is, and kame says to update kame to merge it.
 
 If the file itself is replaced while open, kame stops saving to it and asks whether to merge the two,
 save this version under a new name, or open the one on disk.
@@ -388,7 +388,8 @@ path, or it isn't a place a document can be, the dialog says why and stays open.
 A rename or move rewrites the links to the document in every other document, including closed ones and any with links only in their
 revision logs, and fixes its own relative links and images if it changed folders. A title that was only the file's name follows the new
 name. `.md` and `.markdown` documents are imported rather than edited, so links in them are left as they are. Those, and any other document
-that couldn't be changed, are named in a report when it's done. If another kame window has the document open, a conflict or retired copy
+that couldn't be changed, are named in a report when it's done. A document written by a newer version of kame is never changed, and is
+named, with "it was written by a newer version of kame; update kame to change it", even if nothing this kame can read of it links there. If another kame window has the document open, a conflict or retired copy
 of it, or any document whose links it would change, the dialog says "NAME is open in another kame window", and no file moves and no link is
 rewritten. A copy of it open in this window is refused the same way, as "NAME is open in this window".
 
@@ -442,7 +443,8 @@ A file named `site` opens as `kame ./site`.
 synced folder, stop that syncing with `/path/to/notebook/output` and `/path/to/notebook/.output-*` in `.stignore`, or two machines' builds
 will conflict. A build won't replace an `output/` it didn't make.
 
-In a notebook, the Site menu has Build and Sync, which run in the background and list any warnings when they finish. Sync needs your key in an agent, since kame can't ask for a passphrase.
+In a notebook, the Site menu has Build and Sync, which run in the background and list any warnings when they finish. A document written by
+a newer version of kame publishes what this kame can read of it, and the build warns that it may be missing parts. Sync needs your key in an agent, since kame can't ask for a passphrase.
 
 `kame-site sync FOLDER` also sends it to `remote` with `rsync --delete`. A dry run comes first, and if that would delete more than 5 files
 from the remote, they're listed and nothing happens without `--yes`. Document Properties has a *Publish* tick, and in Markdown it's `publish: true` in the front matter. `Notebook.kame`

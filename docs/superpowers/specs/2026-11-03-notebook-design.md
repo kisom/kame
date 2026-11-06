@@ -81,7 +81,9 @@ use it.
 
 **Reading the files is enough at this scale.** A background thread opens one document at a time with
 `Db::open_read_only`, reads only its head row, and moves on, so a document's history is never read and nothing is
-written. Only the list of paths and titles stays in memory. Measured on Talos, with 1,000 documents of 15 KB of text
+written. Only the list of paths and titles stays in memory. A document holding something only a newer kame knows is
+read as far as this build can, and the jump list, search, the browser and what links here say nothing of the rest, since
+they show what's there and the document says so itself when it's opened. Measured on Talos, with 1,000 documents of 15 KB of text
 each, about as much as the largest real one:
 
 | Option | Same as Ctrl-F | Extra disk | Typical search | First search, cold | Peak memory |
@@ -192,6 +194,10 @@ kame-site sync ~/notes/philosophy    # builds, then sends it to `remote`
 - **Sending** does a dry run first, and if that would delete more than 5 files from `remote` it lists them and stops, without `--yes`.
 - **A link to an unmarked document** shows as plain text, and the build lists it, so nothing private leaks and no link
   goes dead.
+- **A document from a newer kame** publishes what this build can read of it, and nothing in place of the rest. The build
+  warns once for each such document that publishes: `"NAME": it was written by a newer version of kame, so it may be
+  missing parts; update kame to publish all of it`. A newer field warns the same way, and one that isn't marked says
+  nothing.
 - **What doesn't change.** `site.yaml` sites and your existing essays work as they do today. RSS, dates, images, drafts
   and deterministic output all reuse what's there. Unmarked documents are simply never read for the site's content.
 

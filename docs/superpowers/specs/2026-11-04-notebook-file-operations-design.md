@@ -143,7 +143,9 @@ from its logs first if it has none (`build_from_logs`), changed, synced to its l
 changed through the app's own session.
 
 **What's left alone, and listed:** `.md` and `.markdown` documents, which kame imports rather than edits, and documents from
-a newer version of kame. A document that can't be read isn't known to link at all and isn't listed, as with what-links-here.
+a newer version of kame, with "it was written by a newer version of kame; update kame to change it". One from a newer
+version is read as far as this build can, and listed even when nothing it can read links here, since what it can't read
+may. A document that can't be read isn't known to link at all and isn't listed, as with what-links-here.
 
 **The moved document's own links** have one catch: `kame_core::links::retargeted` turns `#Heading` into a path, as is right
 for a paste, and a moved document's `#Heading` still means itself. So it's used for everything except a link with no

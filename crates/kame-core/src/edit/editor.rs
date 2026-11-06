@@ -1041,6 +1041,108 @@ impl Editor {
         (!ops.is_empty()).then(|| self.apply_edit(Op::Batch { ops }))
     }
 
+    /// Moves list items one place up or down among the items of their list, as one edit,
+    /// with the items nested under them: past the item before, or after, at their own level,
+    /// and the items nested under that one. `block_ids` are the selected blocks, in a row, and
+    /// they move as one, at the level of the first.
+    ///
+    /// `None`, with nothing changed, at either end of the list, for anything that isn't a
+    /// list item, and for a selection that climbs out of the first item's level. Nothing
+    /// leaves its list or changes level.
+    ///
+    /// It's made of the edits there have always been, so any kame can read it. Each block
+    /// keeps its id and its notes, which are taken off and put back with it. The first item
+    /// on each side is given its level as its depth when it holds a deeper one, as it would
+    /// show at another level where it lands.
+    pub fn move_list_items(&mut self, block_ids: &[BlockId], up: bool) -> Option<Op> {
+        let blocks = &self.doc.blocks;
+        let positions = crate::model::list_positions(blocks, false);
+        let depth = |at: usize| positions.get(at).copied().flatten().map(|at| at.depth);
+        let selected: Vec<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| block_ids.contains(&block.id))
+            .map(|(at, _)| at)
+            .collect();
+        let (&first, &last) = (selected.first()?, selected.last()?);
+        let level = depth(first)?;
+        if (first..=last).any(|at| depth(at).is_none_or(|depth| depth < level)) {
+            return None;
+        }
+        // Where the unit starting at `at` ends: past every item nested under it.
+        let unit_end = |at: usize| {
+            (at + 1..blocks.len())
+                .find(|&next| depth(next).is_none_or(|depth| depth <= level))
+                .unwrap_or(blocks.len())
+        };
+        let end = unit_end(last);
+        // The two units, side by side, that change places.
+        let (start, middle, end) = if up {
+            let before = (0..first)
+                .rev()
+                .find(|&at| depth(at).is_none_or(|depth| depth <= level))?;
+            if depth(before) != Some(level) {
+                return None;
+            }
+            (before, first, end)
+        } else {
+            if depth(end) != Some(level) {
+                return None;
+            }
+            (first, end, unit_end(end))
+        };
+        // The smaller unit moves, which says the least in the log.
+        let (from, to, at) = if middle - start <= end - middle {
+            (start, middle, end - (middle - start))
+        } else {
+            (middle, end, start)
+        };
+        let mut staged = self.doc.clone();
+        let mut ops = Vec::new();
+        let mut notes = Vec::new();
+        let mut moving = Vec::new();
+        for _ in from..to {
+            let op = Op::delete_block(&staged, from);
+            if let Op::DeleteBlock {
+                block, annotations, ..
+            } = &op
+            {
+                moving.push(block.clone());
+                notes.extend(annotations.iter().cloned());
+            }
+            apply(&mut staged, &op);
+            ops.push(op);
+        }
+        let inserts = moving
+            .into_iter()
+            .enumerate()
+            .map(|(offset, block)| Op::InsertBlock {
+                index: at + offset,
+                block,
+            });
+        let notes = notes
+            .into_iter()
+            .map(|annotation| Op::AddAnnotation { annotation });
+        for op in inserts.chain(notes) {
+            apply(&mut staged, &op);
+            ops.push(op);
+        }
+        // The first of each unit is all that has something new before it.
+        for head in [start, start + (end - middle)] {
+            let block = &staged.blocks[head];
+            if let BlockKind::ListItem { ordered, depth } = block.kind {
+                if depth != level {
+                    let kind = BlockKind::ListItem {
+                        ordered,
+                        depth: level,
+                    };
+                    ops.push(Op::set_block_kind(&staged, block.id, kind));
+                }
+            }
+        }
+        Some(self.apply_edit(Op::Batch { ops }))
+    }
+
     /// Turns a `` `code` `` the caret just closed into inline code, as one edit, returning
     /// it and where the caret goes.
     pub fn apply_inline_code(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
@@ -3538,6 +3640,370 @@ mod tests {
                 editor.redo().unwrap();
             }
             assert_eq!(state(editor.document()), end, "redone, seed {seed}");
+        }
+    }
+
+    mod moving_list_items {
+        use super::*;
+        use crate::model::{list_labels, list_positions};
+
+        fn item(depth: u8, text: &str) -> Block {
+            Block {
+                id: Uuid::new_v4(),
+                kind: BlockKind::ListItem {
+                    ordered: false,
+                    depth,
+                },
+                text: text.to_string(),
+                spans: Vec::new(),
+            }
+        }
+
+        fn paragraph(text: &str) -> Block {
+            Block {
+                id: Uuid::new_v4(),
+                kind: BlockKind::Paragraph,
+                text: text.to_string(),
+                spans: Vec::new(),
+            }
+        }
+
+        fn editor_of(blocks: Vec<Block>) -> Editor {
+            let mut doc = Document::new("Doc");
+            doc.blocks = blocks;
+            Editor::new(doc)
+        }
+
+        /// Each block's text, in order.
+        fn texts(editor: &Editor) -> Vec<&str> {
+            editor
+                .document()
+                .blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect()
+        }
+
+        /// The id of the block with `text`.
+        fn id(editor: &Editor, text: &str) -> BlockId {
+            editor
+                .document()
+                .blocks
+                .iter()
+                .find(|block| block.text == text)
+                .unwrap()
+                .id
+        }
+
+        fn ids(editor: &Editor, of: &[&str]) -> Vec<BlockId> {
+            of.iter().map(|text| id(editor, text)).collect()
+        }
+
+        fn three() -> Editor {
+            editor_of(vec![item(0, "a"), item(0, "b"), item(0, "c")])
+        }
+
+        #[test]
+        fn an_item_moves_up_past_the_one_before_it() {
+            let mut editor = three();
+            let b = ids(&editor, &["b"]);
+            assert!(editor.move_list_items(&b, true).is_some());
+            assert_eq!(texts(&editor), ["b", "a", "c"]);
+        }
+
+        #[test]
+        fn an_item_moves_down_past_the_one_after_it() {
+            let mut editor = three();
+            let b = ids(&editor, &["b"]);
+            assert!(editor.move_list_items(&b, false).is_some());
+            assert_eq!(texts(&editor), ["a", "c", "b"]);
+        }
+
+        #[test]
+        fn moving_keeps_every_block_as_it_was() {
+            let mut editor = three();
+            let before = editor.document().blocks.clone();
+            let b = ids(&editor, &["b"]);
+            editor.move_list_items(&b, true).unwrap();
+            let after = &editor.document().blocks;
+            assert_eq!(
+                after,
+                &vec![before[1].clone(), before[0].clone(), before[2].clone()]
+            );
+        }
+
+        fn nested() -> Editor {
+            editor_of(vec![
+                item(0, "a"),
+                item(1, "a1"),
+                item(2, "a1x"),
+                item(1, "a2"),
+                item(0, "b"),
+                item(1, "b1"),
+                item(0, "c"),
+            ])
+        }
+
+        #[test]
+        fn an_item_takes_the_items_under_it_and_passes_its_neighbour_with_theirs() {
+            let mut editor = nested();
+            let a = ids(&editor, &["a"]);
+            editor.move_list_items(&a, false).unwrap();
+            assert_eq!(texts(&editor), ["b", "b1", "a", "a1", "a1x", "a2", "c"]);
+            let b = ids(&editor, &["b"]);
+            editor.move_list_items(&b, false).unwrap();
+            assert_eq!(texts(&editor), ["a", "a1", "a1x", "a2", "b", "b1", "c"]);
+            let c = ids(&editor, &["c"]);
+            editor.move_list_items(&c, true).unwrap();
+            assert_eq!(texts(&editor), ["a", "a1", "a1x", "a2", "c", "b", "b1"]);
+        }
+
+        #[test]
+        fn a_nested_item_moves_among_the_items_of_its_own_list() {
+            let mut editor = nested();
+            let a2 = ids(&editor, &["a2"]);
+            editor.move_list_items(&a2, true).unwrap();
+            assert_eq!(texts(&editor), ["a", "a2", "a1", "a1x", "b", "b1", "c"]);
+            let depths: Vec<u8> = list_positions(&editor.document().blocks, false)
+                .into_iter()
+                .map(|position| position.unwrap().depth)
+                .collect();
+            assert_eq!(depths, [0, 1, 1, 2, 0, 1, 0]);
+        }
+
+        #[test]
+        fn a_nested_item_never_leaves_its_list() {
+            let mut editor = nested();
+            let before = editor.document().clone();
+            for (text, up) in [("a1", true), ("a2", false), ("b1", true), ("b1", false)] {
+                let at = ids(&editor, &[text]);
+                assert!(editor.move_list_items(&at, up).is_none(), "{text} {up}");
+            }
+            assert_eq!(*editor.document(), before);
+            assert_eq!(editor.history(), (0, 0));
+        }
+
+        #[test]
+        fn several_selected_items_move_together() {
+            let mut editor = editor_of(vec![
+                item(0, "a"),
+                item(0, "b"),
+                item(1, "b1"),
+                item(0, "c"),
+                item(0, "d"),
+            ]);
+            let selected = ids(&editor, &["b", "b1", "c"]);
+            editor.move_list_items(&selected, true).unwrap();
+            assert_eq!(texts(&editor), ["b", "b1", "c", "a", "d"]);
+            editor.move_list_items(&selected, false).unwrap();
+            editor.move_list_items(&selected, false).unwrap();
+            assert_eq!(texts(&editor), ["a", "d", "b", "b1", "c"]);
+        }
+
+        #[test]
+        fn a_selection_ending_inside_an_item_takes_what_is_under_it() {
+            let mut editor = nested();
+            let selected = ids(&editor, &["a", "a1"]);
+            editor.move_list_items(&selected, false).unwrap();
+            assert_eq!(texts(&editor), ["b", "b1", "a", "a1", "a1x", "a2", "c"]);
+        }
+
+        #[test]
+        fn nothing_moves_past_either_end_of_a_list() {
+            let mut editor = editor_of(vec![
+                paragraph("before"),
+                item(0, "a"),
+                item(0, "b"),
+                paragraph("after"),
+                item(0, "c"),
+            ]);
+            let before = editor.document().clone();
+            for (text, up) in [("a", true), ("b", false), ("c", true), ("c", false)] {
+                let at = ids(&editor, &[text]);
+                assert!(editor.move_list_items(&at, up).is_none(), "{text} {up}");
+            }
+            assert_eq!(*editor.document(), before);
+            assert_eq!(editor.history(), (0, 0));
+        }
+
+        #[test]
+        fn body_text_and_a_selection_reaching_out_of_the_list_stay_put() {
+            let mut editor = editor_of(vec![paragraph("before"), item(0, "a"), item(0, "b")]);
+            let before = editor.document().clone();
+            for selected in [vec!["before"], vec!["before", "a"]] {
+                let at = ids(&editor, &selected);
+                assert!(editor.move_list_items(&at, false).is_none(), "{selected:?}");
+                assert!(editor.move_list_items(&at, true).is_none(), "{selected:?}");
+            }
+            assert!(editor.move_list_items(&[], true).is_none());
+            assert_eq!(*editor.document(), before);
+        }
+
+        #[test]
+        fn a_selection_climbing_out_of_a_nested_list_stays_put() {
+            let mut editor = nested();
+            let before = editor.document().clone();
+            let selected = ids(&editor, &["a2", "b"]);
+            assert!(editor.move_list_items(&selected, true).is_none());
+            assert!(editor.move_list_items(&selected, false).is_none());
+            assert_eq!(*editor.document(), before);
+        }
+
+        #[test]
+        fn a_move_is_one_step_that_undo_and_redo_put_back_exactly() {
+            let mut editor = nested();
+            let a = id(&editor, "a");
+            let a1x = id(&editor, "a1x");
+            editor
+                .add_annotation(AnnotationKind::Note, Anchor::range(a, 0, 1), "on a")
+                .unwrap();
+            editor
+                .add_annotation(AnnotationKind::Marginal, Anchor::block(a1x), "")
+                .unwrap();
+            let b1 = id(&editor, "b1");
+            editor
+                .add_annotation(AnnotationKind::Footnote, Anchor::range(b1, 2, 2), "f")
+                .unwrap();
+            let start = state(editor.document());
+            let (steps, _) = editor.history();
+            editor.move_list_items(&[a], false).unwrap();
+            assert_eq!(editor.history(), (steps + 1, 0));
+            let moved = state(editor.document());
+            editor.undo().unwrap();
+            assert_eq!(state(editor.document()), start);
+            editor.redo().unwrap();
+            assert_eq!(state(editor.document()), moved);
+            editor.undo().unwrap();
+            assert_eq!(state(editor.document()), start);
+        }
+
+        #[test]
+        fn notes_stay_on_the_blocks_they_were_on() {
+            let mut editor = nested();
+            let a = id(&editor, "a");
+            let a1 = id(&editor, "a1");
+            editor
+                .add_annotation(AnnotationKind::Note, Anchor::range(a1, 0, 2), "on a1")
+                .unwrap();
+            editor
+                .add_annotation(AnnotationKind::Footnote, Anchor::range(a, 1, 1), "on a")
+                .unwrap();
+            let notes = state(editor.document()).annotations;
+            editor.move_list_items(&[a], false).unwrap();
+            assert_eq!(state(editor.document()).annotations, notes);
+        }
+
+        #[test]
+        fn ordered_items_number_from_where_they_now_are() {
+            let mut editor = editor_of(
+                ["a", "b", "c"]
+                    .map(|text| Block {
+                        kind: BlockKind::ListItem {
+                            ordered: true,
+                            depth: 0,
+                        },
+                        ..item(0, text)
+                    })
+                    .to_vec(),
+            );
+            let c = ids(&editor, &["c"]);
+            editor.move_list_items(&c, true).unwrap();
+            assert_eq!(texts(&editor), ["a", "c", "b"]);
+            let labels: Vec<String> = list_labels(&editor.document().blocks)
+                .into_iter()
+                .map(Option::unwrap)
+                .collect();
+            assert_eq!(labels, ["1.", "2.", "3."]);
+        }
+
+        /// An item can hold a depth deeper than it's shown at, as outdenting the item over it
+        /// leaves it, and where it lands it would show deeper. It's given the depth it's shown
+        /// at, and undo gives it back what it held.
+        #[test]
+        fn an_item_stays_at_the_depth_it_was_shown_at() {
+            let mut editor = editor_of(vec![
+                item(0, "p"),
+                item(2, "u"),
+                item(1, "s"),
+                item(2, "s1"),
+            ]);
+            let shown = |editor: &Editor| -> Vec<u8> {
+                list_positions(&editor.document().blocks, false)
+                    .into_iter()
+                    .map(|position| position.unwrap().depth)
+                    .collect()
+            };
+            assert_eq!(shown(&editor), [0, 1, 1, 2]);
+            let start = state(editor.document());
+            let u = ids(&editor, &["u"]);
+            editor.move_list_items(&u, false).unwrap();
+            assert_eq!(texts(&editor), ["p", "s", "s1", "u"]);
+            assert_eq!(shown(&editor), [0, 1, 2, 1]);
+            editor.undo().unwrap();
+            assert_eq!(state(editor.document()), start);
+        }
+
+        /// kame 0.1.2 and every build since read these, so a document with a move in its
+        /// history isn't one only a newer kame can open.
+        #[test]
+        fn a_move_is_logged_as_edits_every_release_reads() {
+            let mut editor =
+                editor_of(vec![item(0, "q"), item(0, "p"), item(2, "u"), item(1, "s")]);
+            let q = id(&editor, "q");
+            editor
+                .add_annotation(AnnotationKind::Note, Anchor::range(q, 0, 1), "n")
+                .unwrap();
+            let u = ids(&editor, &["u"]);
+            let op = editor.move_list_items(&u, false).unwrap();
+            let other = editor.move_list_items(&[q], false).unwrap();
+            for op in [op, other] {
+                let json = serde_json::to_value(&op).unwrap();
+                let members = json["Batch"]["ops"].as_array().unwrap();
+                for member in members {
+                    let kind = member.as_object().unwrap().keys().next().unwrap();
+                    assert!(
+                        [
+                            "DeleteBlock",
+                            "InsertBlock",
+                            "AddAnnotation",
+                            "SetBlockKind"
+                        ]
+                        .contains(&kind.as_str()),
+                        "{kind}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn a_move_reloads_from_the_log_and_still_undoes() {
+            let path = temp_db_path();
+            let mut editor = nested();
+            let mut db = Db::open(&path).unwrap();
+            db.save_document(editor.document()).unwrap();
+            let a = id(&editor, "a");
+            editor
+                .add_annotation(AnnotationKind::Note, Anchor::range(a, 0, 1), "n")
+                .map(|op| db.record_edit(editor.document(), &op).unwrap())
+                .unwrap();
+            let start = state(editor.document());
+            let op = editor.move_list_items(&[a], false).unwrap();
+            db.record_edit(editor.document(), &op).unwrap();
+            let moved = state(editor.document());
+            drop(db);
+
+            let db = Db::open(&path).unwrap();
+            let ops: Vec<Op> = db
+                .load_ops()
+                .unwrap()
+                .into_iter()
+                .map(|(_, op)| op)
+                .collect();
+            let mut reloaded =
+                Editor::with_cursor(db.load_document().unwrap(), ops, db.cursor().unwrap());
+            assert_eq!(state(reloaded.document()), moved);
+            reloaded.undo().unwrap();
+            assert_eq!(state(reloaded.document()), start);
         }
     }
 }

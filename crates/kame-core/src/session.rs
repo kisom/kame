@@ -1783,6 +1783,24 @@ impl Session {
         }
     }
 
+    /// Moves the selected list items, or the caret's, one place up or down in their list,
+    /// with the items nested under them, if there's one to pass. The caret and the selection
+    /// stay on the words they were on.
+    pub fn move_list_item(&mut self, up: bool) -> bool {
+        if self.save_failed {
+            return false;
+        }
+        self.valid_caret();
+        let blocks = self.tabbed_blocks();
+        match self.editor.move_list_items(&blocks, up) {
+            Some(op) => {
+                self.record(&op);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Joins up a saved history word by word, as typing now does, returning how many entries
     /// there were and now are. Every edit that matters is kept: what goes is stopping points
     /// inside words. What redo can still return to is left as it is.
@@ -3171,7 +3189,27 @@ pub fn caret_for_op(document: &Document, op: &Op) -> Option<Cursor> {
                 offset: 0,
             })
         }
-        Op::Batch { ops } => ops.iter().find_map(|member| caret_for_op(document, member)),
+        // A block taken out and put back in the same step only moved, as list items do, and
+        // the caret stays on the words it was on.
+        Op::Batch { ops } => {
+            let moved = |id: crate::model::BlockId| {
+                let deleted = ops
+                    .iter()
+                    .any(|op| matches!(op, Op::DeleteBlock { block, .. } if block.id == id));
+                let inserted = ops
+                    .iter()
+                    .any(|op| matches!(op, Op::InsertBlock { block, .. } if block.id == id));
+                deleted && inserted
+            };
+            ops.iter()
+                .filter(|member| match member {
+                    Op::InsertBlock { block, .. } | Op::DeleteBlock { block, .. } => {
+                        !moved(block.id)
+                    }
+                    _ => true,
+                })
+                .find_map(|member| caret_for_op(document, member))
+        }
         _ => None,
     }
 }
@@ -9938,6 +9976,108 @@ mod tests {
         select(&mut session, (1, 0), (1, 2));
         assert!(session.indent_list_item(true));
         assert_eq!(depths(&session), vec![0, 1, 0, 0, 0]);
+    }
+
+    fn item_texts(session: &Session) -> Vec<String> {
+        session
+            .document()
+            .blocks
+            .iter()
+            .map(|block| block.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_item_moves_up_and_down_with_the_caret_on_its_words() {
+        let mut session = five_items();
+        let three = session.document().blocks[2].id;
+        let caret = Cursor {
+            block_id: three,
+            offset: 2,
+        };
+        session.set_caret(caret);
+        assert!(session.move_list_item(true));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "three", "two", "four", "five"]
+        );
+        assert_eq!(session.caret, caret);
+        assert!(session.move_list_item(false));
+        assert!(session.move_list_item(false));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "two", "four", "three", "five"]
+        );
+        assert_eq!(session.caret, caret);
+    }
+
+    #[test]
+    fn selected_items_move_together_and_stay_selected() {
+        let mut session = five_items();
+        select(&mut session, (1, 1), (2, 2));
+        let selection = session.selection;
+        assert!(session.move_list_item(false));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "four", "two", "three", "five"]
+        );
+        assert_eq!(session.selection, selection);
+    }
+
+    #[test]
+    fn an_item_at_the_end_of_its_list_stays() {
+        let mut session = five_items();
+        let history = session.history();
+        assert!(!session.move_list_item(false), "the caret is on the last");
+        let first = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        assert!(!session.move_list_item(true));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "two", "three", "four", "five"]
+        );
+        assert_eq!(session.history(), history, "nothing was logged");
+    }
+
+    #[test]
+    fn a_move_undoes_in_one_step_and_the_caret_stays_on_the_words() {
+        let mut session = five_items();
+        let caret = session.caret;
+        assert!(session.move_list_item(true));
+        assert!(session.undo());
+        assert_eq!(
+            item_texts(&session),
+            ["one", "two", "three", "four", "five"]
+        );
+        assert_eq!(session.caret, caret);
+        assert!(session.redo());
+        assert_eq!(
+            item_texts(&session),
+            ["one", "two", "three", "five", "four"]
+        );
+        assert_eq!(session.caret, caret);
+    }
+
+    #[test]
+    fn a_move_is_saved_and_undoes_after_reopening() {
+        let path = temp_db_path();
+        let mut session = five_items();
+        session.save_as(&path, None, |_, _| false).unwrap();
+        assert!(session.move_list_item(true));
+        drop(session);
+        let mut reopened = Session::open(&path).unwrap();
+        assert_eq!(
+            item_texts(&reopened),
+            ["one", "two", "three", "five", "four"]
+        );
+        assert!(reopened.undo());
+        assert_eq!(
+            item_texts(&reopened),
+            ["one", "two", "three", "four", "five"]
+        );
     }
 
     #[test]

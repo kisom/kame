@@ -237,6 +237,14 @@ fn is_from_a_newer_version(path: &Path) -> bool {
 /// merge should not leave it the only place those words are. A copy from a newer version of kame
 /// isn't merged and stays as it is, since this build would leave out what it doesn't know.
 pub fn merge_copy_into(session: &mut Session, copy: &Path) -> Result<MergedIn> {
+    // Read-only, which also counts as a failed save, so this comes first to say why.
+    if session.newer {
+        return Err(
+            "this document was written by a newer version of kame; update kame to merge \
+                    the copy into it"
+                .into(),
+        );
+    }
     if session.save_failed {
         return Err("this document cannot be saved at the moment".into());
     }

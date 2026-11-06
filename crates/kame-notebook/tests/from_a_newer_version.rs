@@ -521,3 +521,36 @@ fn a_document_with_only_logs_says_when_they_hold_a_newer_revision() {
         "what this build can read"
     );
 }
+
+/// An open document from a newer kame still finds its conflict copies, by what this build can read
+/// of its id, so that kame can say there is one. None is merged into it, and kame says why.
+#[test]
+fn a_document_from_a_newer_version_finds_its_copies_and_merges_none() {
+    use kame_sync::files::{conflict_copies, merge_copy_into};
+    let dir = kame_test_dir::folder("newer-open-copies")
+        .canonicalize()
+        .unwrap();
+    let doc = dir.join("a.kame");
+    Session::open(&doc).unwrap().insert("Words.");
+    let copy = dir.join("a.sync-conflict-20261103-011500-ABCDEFG.kame");
+    std::fs::copy(&doc, &copy).unwrap();
+    Session::open(&copy).unwrap().insert("More. ");
+    as_a_newer_build_wrote_it(&doc);
+    let (in_doc, in_copy) = (everything_in(&doc), everything_in(&copy));
+
+    let mut session = Session::open(&doc).unwrap();
+    assert!(session.lossy);
+    assert_eq!(conflict_copies(&doc), std::slice::from_ref(&copy));
+    let said = merge_copy_into(&mut session, &copy)
+        .err()
+        .expect("nothing is merged")
+        .to_string();
+    assert_eq!(
+        said,
+        "this document was written by a newer version of kame; update kame to merge the copy \
+         into it"
+    );
+    drop(session);
+    assert_eq!(everything_in(&doc), in_doc);
+    assert_eq!(everything_in(&copy), in_copy);
+}

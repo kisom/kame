@@ -1,0 +1,149 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  REPO: kisom/kame
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the versions in the tree
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          want="${TAG#v}"
+          cargo_ver="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          plist_ver="$(grep -A1 '<key>CFBundleShortVersionString</key>' packaging/macos/Info.plist | sed -n 's|.*<string>\(.*\)</string>.*|\1|p')"
+          ok=1
+          if [ "$cargo_ver" != "$want" ]; then
+            echo "::error::tag $TAG wants version $want, but Cargo.toml says $cargo_ver"
+            ok=0
+          fi
+          if [ "$plist_ver" != "$want" ]; then
+            echo "::error::tag $TAG wants version $want, but Info.plist CFBundleShortVersionString says $plist_ver"
+            ok=0
+          fi
+          [ "$ok" = 1 ] || exit 1
+          echo "tag $TAG matches Cargo.toml and Info.plist"
+
+  macos:
+    needs: check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the app bundle
+        run: make mac-app
+      - name: Zip the app
+        run: ditto -c -k --sequesterRsrc --keepParent target/kame.app kame.app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kame.app.zip
+          path: kame.app.zip
+          if-no-files-found: error
+
+  release:
+    needs: macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: kame.app.zip
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          flags=()
+          case "$TAG" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" kame.app.zip \
+            --repo "$REPO" \
+            --title "$TAG" \
+            --generate-notes \
+            "${flags[@]}"
+
+  tap:
+    needs: release
+    # A tag with a - in it is a prerelease, which the tap never follows.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_CPAT: ${{ secrets.GH_CPAT }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Skip without GH_CPAT
+        id: gate
+        run: |
+          if [ -z "$GH_CPAT" ]; then
+            echo "::notice::GH_CPAT is empty, so the Homebrew tap was not updated"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Hash the source and the app
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o source.tar.gz "https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz"
+          curl -fsSL -o kame.app.zip "https://github.com/$REPO/releases/download/$TAG/kame.app.zip"
+          {
+            echo "SRC_SHA=$(sha256sum source.tar.gz | cut -d' ' -f1)"
+            echo "APP_SHA=$(sha256sum kame.app.zip | cut -d' ' -f1)"
+          } >> "$GITHUB_ENV"
+      - name: Check out the tap
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: kisom/homebrew-tap
+          ref: master
+          token: ${{ secrets.GH_CPAT }}
+          path: tap
+      - name: Update the formula and the cask
+        if: steps.gate.outputs.run == 'true'
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          for f in Formula/kame.rb Casks/kame.rb; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f is not in kisom/homebrew-tap, so there is nothing to update"
+              exit 1
+            fi
+          done
+          version="${TAG#v}"
+          sed -i \
+            -e "s|^\( *url \"https://github.com/$REPO/archive/refs/tags/\)[^\"]*\"|\1$TAG.tar.gz\"|" \
+            -e "s|^\( *sha256 \)\"[^\"]*\"|\1\"$SRC_SHA\"|" \
+            Formula/kame.rb
+          sed -i \
+            -e "s|^\( *version \)\"[^\"]*\"|\1\"$version\"|" \
+            -e "s|^\( *sha256 \)\"[^\"]*\"|\1\"$APP_SHA\"|" \
+            Casks/kame.rb
+          grep -q "refs/tags/$TAG.tar.gz\"" Formula/kame.rb || { echo "::error::no url line updated in Formula/kame.rb"; exit 1; }
+          grep -q "sha256 \"$SRC_SHA\"" Formula/kame.rb || { echo "::error::no sha256 line updated in Formula/kame.rb"; exit 1; }
+          grep -q "version \"$version\"" Casks/kame.rb || { echo "::error::no version line updated in Casks/kame.rb"; exit 1; }
+          grep -q "sha256 \"$APP_SHA\"" Casks/kame.rb || { echo "::error::no sha256 line updated in Casks/kame.rb"; exit 1; }
+      - name: Commit and push
+        if: steps.gate.outputs.run == 'true'
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/kame.rb Casks/kame.rb
+          if git diff --cached --quiet; then
+            echo "::notice::the tap already has $TAG"
+            exit 0
+          fi
+          git commit -m "kame ${TAG#v}"
+          git push origin HEAD:master

@@ -2852,6 +2852,25 @@ impl KameApp {
         }
     }
 
+    /// Exports the document as Markdown to `path`, with the references it cites as their files have
+    /// them now.
+    fn export_markdown_to(&mut self, path: &Path) {
+        self.reload_references();
+        let exported = self.session.export_markdown_to(path, &self.refs.list);
+        self.notice = exported.map(|path| {
+            self.export_notice(format!("exported Markdown to {}", path.display()), false)
+        });
+    }
+
+    /// Exports the document as HTML to `path`, with the references it cites as their files have them
+    /// now.
+    fn export_html_to(&mut self, path: &Path) {
+        self.reload_references();
+        let exported = self.session.export_html_to(path, &self.refs.list);
+        self.notice = exported
+            .map(|path| self.export_notice(format!("exported HTML to {}", path.display()), true));
+    }
+
     /// The one entry point for the four file commands, shared by the chords and
     /// the toolbar buttons so the two cannot drift apart.
     fn run_file_command(&mut self, command: FileCommand) {
@@ -2862,10 +2881,7 @@ impl KameApp {
                 else {
                     return;
                 };
-                let exported = self.session.export_markdown_to(&path, &self.refs.list);
-                self.notice = exported.map(|path| {
-                    self.export_notice(format!("exported Markdown to {}", path.display()), false)
-                });
+                self.export_markdown_to(&path);
             }
             FileCommand::ExportHtml => {
                 let suggestion = self.session.export_suggestion("html");
@@ -2873,10 +2889,7 @@ impl KameApp {
                 else {
                     return;
                 };
-                let exported = self.session.export_html_to(&path, &self.refs.list);
-                self.notice = exported.map(|path| {
-                    self.export_notice(format!("exported HTML to {}", path.display()), true)
-                });
+                self.export_html_to(&path);
             }
             FileCommand::SnapshotNow => {
                 self.restore_picker = None;

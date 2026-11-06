@@ -1036,8 +1036,9 @@ impl KameApp {
         window.reveal = true;
     }
 
-    /// Reads the list after a change made here, so that it shows at once.
-    fn reload_references(&mut self) {
+    /// Reads the list after a change made here, so that it shows at once, or for an export, which
+    /// can't go by a list still being read, as it is just after a notebook opens.
+    pub(crate) fn reload_references(&mut self) {
         let Some(notebook) = self.nb.notebook.clone() else {
             return;
         };
@@ -4081,6 +4082,32 @@ mod tests {
         );
         assert!(page.sees("knuth1981 was kept"));
         assert!(page.sees("doc.kame: "), "the document left behind is named");
+    }
+
+    #[test]
+    fn an_export_just_after_a_notebook_opens_has_its_references() {
+        let root = notebook_folder("export-early");
+        write_reference(&root, "knuth1981", GOOD);
+        let mut session = Session::open(&root.join("doc.kame")).unwrap();
+        session.insert("see [knuth1981]");
+        let mut page = Headless::new(session);
+        // The reference files are being read on another thread.
+        page.frame(Vec::new());
+        let (markdown, html) = (root.join("doc.md"), root.join("doc.html"));
+
+        page.app.export_markdown_to(&markdown);
+        page.app.refs = ReferencesUi::default();
+        page.frame(Vec::new());
+        page.app.export_html_to(&html);
+
+        let markdown = std::fs::read_to_string(markdown).unwrap();
+        assert!(markdown.contains("## References"), "{markdown}");
+        assert!(
+            markdown.contains("Breaking paragraphs into lines"),
+            "{markdown}"
+        );
+        let html = std::fs::read_to_string(html).unwrap();
+        assert!(html.contains("<h2>References</h2>"), "{html}");
     }
 
     /// A page on `doc.kame` saying `see`, in a notebook whose folder syncs through logs, with the

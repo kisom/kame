@@ -160,6 +160,8 @@ All four fields are required. A new document has one empty `Paragraph`. Block id
 
 **Every offset is a count of UTF-8 bytes into a block's `text`, and must fall on a character boundary.** That includes span and anchor ranges, cursor positions and op offsets. "é" is 2 bytes and "🐢" is 4. Kotlin, Java and JavaScript strings count UTF-16 units, so offsets must be converted wherever text crosses into them.
 
+A damaged or hand-made file can still hold a span or range anchor past its text, inside a character or reversed, so kame fits them whenever it reads a document: the head, a snapshot, a document or block in an op, and a revision from a log. Each offset is brought into the block's text and back to a character boundary. A span left empty or reversed is dropped, and a reversed anchor becomes a point at its start. One that already fits, and an anchor whose block is gone, are left alone. This is only in memory, so the file keeps what it had until the head is next written, and a revision's id still checks.
+
 ### 2.2 Blocks
 
 Each block has an `id` (UUID), `kind`, `text` and `spans`, all required.
@@ -417,8 +419,8 @@ These describe the code as it stands, and aren't rules to copy.
 
 - **Read-only tools don't check for newer fields.** A site build or a notebook's lists read such a document and leave out what they don't know, so a site built on an older machine can lack a newer feature.
 - **Unknown kinds and styles aren't skipped.** One unknown block kind, style or annotation kind makes the head unreadable, so the document won't open, with a message saying it may be from a different version. A new variant in the head should raise `user_version`.
-- **Ranges aren't checked on reading.** Nothing checks a span or anchor against its text when a document is read, so a damaged or hand-made file can hold offsets out of range or inside a character. Readers should clamp them for display, and must not assume they're valid.
-- **The rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
+- **Undo can bring back offsets that don't fit.** A delete's notes, old spans and the notes it cut short are kept in the log as recorded, since the text they were given against is gone, so they aren't fitted (section 2.1). Undoing a step recorded against a damaged file puts them back as they were, until the document is next read, and a step that no longer matches what was read is refused.
+- **The other rules in section 2 aren't enforced on reading.** `level` and `depth` from 0 to 255 aren't checked, and anything outside that makes the head unreadable. Text on `Image` and `Rule` blocks isn't checked either. Keep to the rules when writing and tolerate them when reading.
 - **Older files can hold text in an image block,** from before typing on one started a new paragraph. It isn't shown, and nothing removes it.
 - **Paths aren't portable by themselves.** A whole image path or a `~/` link only works where it was made. Only relative forms hold on another machine.
 - **Save As says what exists on this machine.** A relative `Link` is said again for the new place only if what it names is there, on disk or as revision logs, and nothing limits that to the notebook or the document's folder. A document from elsewhere that comes back after a Save As to another depth shows which of its paths existed here. No contents are read.

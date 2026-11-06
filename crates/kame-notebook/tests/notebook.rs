@@ -993,3 +993,135 @@ fn a_heading_with_multibyte_words_can_be_found() {
     let document = outline(&[(1, "Überblick über Kröten")]);
     assert_eq!(heading_texts("kröt", &document).len(), 1);
 }
+
+mod a_notebook_inside {
+    use super::*;
+    use kame_notebook::links::{linking_to, Follow};
+    use kame_notebook::search::search;
+    use std::sync::atomic::AtomicBool;
+
+    /// An outer notebook holding `inner/`, another notebook, and `a/b/`, another one deeper down.
+    fn outer(name: &str) -> PathBuf {
+        let root = folder(name);
+        std::fs::write(root.join("notebook.yaml"), "title: Outer\n").unwrap();
+        document(&root.join("Notebook.kame"), "Contents.");
+        document(&root.join("a.kame"), "Words.");
+        document(&root.join("a/x.kame"), "Words.");
+        document(&root.join("inner/Notebook.kame"), "Contents.");
+        std::fs::write(root.join("inner/notebook.yaml"), "title: Inner\n").unwrap();
+        document(&root.join("inner/b.kame"), "Words.");
+        document(&root.join("inner/deep/c.kame"), "Words.");
+        std::fs::write(root.join("inner/paper.pdf"), "pdf").unwrap();
+        document(&root.join("a/b/y.kame"), "Words.");
+        std::fs::write(root.join("a/b/notebook.yaml"), "").unwrap();
+        root
+    }
+
+    fn relatives(entries: Vec<kame_notebook::list::Entry>) -> Vec<String> {
+        entries.into_iter().map(|entry| entry.relative).collect()
+    }
+
+    #[test]
+    fn the_outer_list_and_search_leave_it_out() {
+        let root = outer("inside-list");
+        let found = notebook(&root);
+        assert_eq!(
+            relatives(found.entries()),
+            ["Notebook.kame", "a.kame", "a/x.kame"],
+            "nothing under inner/ or a/b/, and neither notebook.yaml"
+        );
+        let mut hits = Vec::new();
+        let cancel = AtomicBool::new(false);
+        search(&found, "Words", None, &cancel, |hit| {
+            hits.push(hit.relative.clone())
+        });
+        assert_eq!(hits, ["a.kame", "a/x.kame"]);
+    }
+
+    #[test]
+    fn the_inner_one_is_as_it_was() {
+        let root = outer("inside-inner");
+        let inner = Notebook::find(&root.join("inner/deep/c.kame"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(inner.title(), "Inner");
+        assert_eq!(
+            relatives(inner.entries()),
+            ["Notebook.kame", "b.kame", "deep/c.kame", "paper.pdf"]
+        );
+        let deeper = Notebook::find(&root.join("a/b/y.kame")).unwrap().unwrap();
+        assert_eq!(deeper.root, root.join("a/b"));
+        assert_eq!(relatives(deeper.entries()), ["y.kame"]);
+        let above = Notebook::find(&root.join("a/x.kame")).unwrap().unwrap();
+        assert_eq!(above.title(), "Outer", "a/ isn't cut off, only a/b/");
+    }
+
+    #[test]
+    fn a_link_into_it_leads_outside_the_notebook() {
+        let root = outer("inside-links");
+        let found = notebook(&root);
+        let from = root.join("a.kame");
+        for target in [
+            "inner/b",
+            "inner/b.kame",
+            "inner/",
+            "inner",
+            "inner/new",
+            "inner/paper.pdf",
+            "inner/deep/c",
+            "a/b/y",
+            "a/b/new",
+        ] {
+            assert_eq!(found.follow(target, &from), Follow::Rotted, "{target}");
+        }
+        assert_eq!(
+            found.follow("a/x", &from),
+            Follow::Open(root.join("a/x.kame"))
+        );
+        let inner = notebook(&root.join("inner"));
+        assert_eq!(
+            inner.follow("deep/c", &root.join("inner/b.kame")),
+            Follow::Open(root.join("inner/deep/c.kame"))
+        );
+        assert_eq!(
+            inner.follow("../a", &root.join("inner/b.kame")),
+            Follow::Rotted
+        );
+    }
+
+    #[test]
+    fn what_links_here_is_kept_to_each_notebook() {
+        let root = outer("inside-backlinks");
+        let link_in = |path: &Path, link: &str| {
+            let mut session = Session::open(path).unwrap();
+            session.insert(&format!(" See [[{link}]]"));
+            session.apply_markdown_link();
+        };
+        link_in(&root.join("a.kame"), "inner/b");
+        link_in(&root.join("inner/deep/c.kame"), "../b");
+        let cancel = AtomicBool::new(false);
+        let target = root.join("inner/b.kame");
+        let outer_links = linking_to(&notebook(&root), &target, None, &cancel);
+        assert!(outer_links.is_empty(), "{outer_links:?}");
+        let inner_links: Vec<String> =
+            linking_to(&notebook(&root.join("inner")), &target, None, &cancel)
+                .into_iter()
+                .map(|link| link.relative)
+                .collect();
+        assert_eq!(inner_links, ["deep/c.kame"]);
+    }
+
+    #[test]
+    fn an_image_in_it_is_copied_in_as_one_from_outside() {
+        let root = outer("inside-image");
+        let found = notebook(&root);
+        std::fs::write(root.join("inner/plate.jpg"), "a plate").unwrap();
+        let brought = kame_notebook::images::bring_in(
+            &found,
+            &root.join("a.kame"),
+            &root.join("inner/plate.jpg"),
+        )
+        .unwrap();
+        assert_eq!(brought, root.join("images/a/plate.jpg"));
+    }
+}

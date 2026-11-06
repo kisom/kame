@@ -385,7 +385,8 @@ struct Walked {
 
 /// Goes through the folders `Notebook::entries` finds documents in, the same way: symbolic links
 /// aren't followed, and hidden folders are passed over, which is also what keeps the old logs in a
-/// sync tool's `.stversions` from being taken for a home.
+/// sync tool's `.stversions` from being taken for a home. Another notebook's folder is passed over
+/// too, so its logs aren't a home here and nothing set aside in it is brought back.
 fn walk(notebook: &Notebook, folder: &Path, walked: &mut Walked) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         walked.unreadable.push(folder.to_path_buf());
@@ -413,7 +414,7 @@ fn walk(notebook: &Notebook, folder: &Path, walked: &mut Walked) {
             }
             let no_documents = folder == notebook.root
                 && (name == OUTPUT || NOT_DOCUMENTS.contains(&name.as_str()));
-            if !name.starts_with('.') && !no_documents {
+            if !name.starts_with('.') && !no_documents && !crate::is_notebook_root(&entry.path()) {
                 walk(notebook, &entry.path(), walked);
             }
         } else if kind.is_file() && is_set_aside(&name) {

@@ -1740,3 +1740,29 @@ fn a_copy_left_in_a_moving_name_moves_with_its_document() {
         "Neighbour's. AB."
     );
 }
+
+#[test]
+fn another_notebook_inside_is_outside_for_a_move() {
+    let (root, nb) = plain_notebook("move-inner-notebook");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let mine = root.join("mine.kame");
+    document(&mine, "");
+    link(&mine, "mine", document_link("a"));
+    let theirs = root.join("inner/theirs.kame");
+    document(&theirs, "");
+    link(&theirs, "theirs", document_link("../a"));
+    std::fs::write(root.join("inner/notebook.yaml"), "").unwrap();
+
+    let refused = check_new_path(&nb, &a, "inner/a").unwrap_err();
+    assert!(refused.contains("outside"), "{refused}");
+    let to = root.join("z.kame");
+    let report = make_move(&nb, &a, &to);
+    assert_eq!(report.changed, ["mine.kame"]);
+    assert_eq!(links_of(&read(&mine)), ["z.kame"]);
+    assert_eq!(
+        links_of(&read(&theirs)),
+        ["../a"],
+        "the other notebook's links are its own"
+    );
+}

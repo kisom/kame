@@ -76,15 +76,23 @@ pub(crate) fn tidied(path: &Path) -> PathBuf {
 impl Notebook {
     /// Whether `path` is inside the notebook, going by the real location of as much of it as exists,
     /// so that a symbolic link can't lead out. A link pointing at nothing counts as existing, and
-    /// has no real location, so that writing to it can't lead out either.
+    /// has no real location, so that writing to it can't lead out either. What's in another
+    /// notebook below the root isn't inside, either as written or where it really is.
     pub fn holds(&self, path: &Path) -> bool {
-        if !path.starts_with(&self.root) {
+        if !path.starts_with(&self.root) || self.in_another_notebook(path) {
             return false;
         }
         path.ancestors()
             .find(|above| above.symlink_metadata().is_ok())
             .and_then(|above| above.canonicalize().ok())
-            .is_some_and(|real| real.starts_with(&self.root))
+            .is_some_and(|real| real.starts_with(&self.root) && !self.in_another_notebook(&real))
+    }
+
+    /// Whether `path`, under the root, is another notebook's root or in one.
+    fn in_another_notebook(&self, path: &Path) -> bool {
+        path.ancestors()
+            .take_while(|folder| *folder != self.root)
+            .any(crate::is_notebook_root)
     }
 
     /// Whether what's at `path`, inside the notebook, could be a document, going by where it is.

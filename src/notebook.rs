@@ -2661,6 +2661,36 @@ mod tests {
     }
 
     #[test]
+    fn a_link_into_another_notebook_inside_opens_it_there_and_makes_nothing() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-inner-notebook")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let theirs = root.join("inner/b.kame");
+        std::fs::create_dir_all(root.join("inner")).unwrap();
+        Session::open(&theirs).unwrap().insert("Theirs.");
+        std::fs::write(root.join("inner/notebook.yaml"), "").unwrap();
+        let mine = root.join("a.kame");
+        let mut session = Session::open(&mine).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+        let root_of =
+            |page: &crate::Headless| page.app.nb.notebook.as_ref().map(|nb| nb.root.clone());
+        assert_eq!(root_of(&page), Some(root.clone()));
+
+        page.app.follow_document_link("inner/new");
+        assert!(!root.join("inner/new.kame").exists());
+        assert_eq!(page.app.session.path(), Some(mine.as_path()));
+        page.app.follow_document_link("inner/b");
+        assert_eq!(page.app.session.path(), Some(theirs.as_path()));
+        page.frame(Vec::new());
+        assert_eq!(root_of(&page), Some(root.join("inner")));
+    }
+
+    #[test]
     fn deleting_the_open_document_lets_it_go() {
         use kame_core::lock::DocumentLock;
         use kame_core::session::Session;

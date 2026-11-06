@@ -18,7 +18,7 @@ pub const IMAGES: &str = "images";
 pub fn bring_in(notebook: &Notebook, document: &Path, file: &Path) -> Result<PathBuf, String> {
     let said = |err: std::io::Error| format!("could not copy {}: {err}", file.display());
     let real = file.canonicalize().map_err(said)?;
-    if real.starts_with(&notebook.root) {
+    if notebook.holds(&real) {
         return Ok(file.to_path_buf());
     }
     let folder = notebook

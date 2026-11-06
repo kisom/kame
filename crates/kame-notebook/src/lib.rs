@@ -30,6 +30,13 @@ pub const SETTINGS: &str = "notebook.yaml";
 /// The index document of a folder. In a notebook's root it is the contents page.
 pub const INDEX: &str = "Notebook.kame";
 
+/// Whether `folder` is a notebook's root, holding a `notebook.yaml`. Finding a notebook stops at the
+/// first going up, and every walk down from a root stops at any below it, since what's there is
+/// that other notebook's and not this one's.
+pub fn is_notebook_root(folder: &Path) -> bool {
+    folder.join(SETTINGS).is_file()
+}
+
 /// What `notebook.yaml` holds. A typo in a key is refused, so it can't quietly do nothing.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
@@ -58,10 +65,7 @@ impl Notebook {
                 .map_err(|err| err.to_string())?
                 .join(path)
         };
-        let Some(root) = absolute
-            .ancestors()
-            .find(|folder| folder.join(SETTINGS).is_file())
-        else {
+        let Some(root) = absolute.ancestors().find(|folder| is_notebook_root(folder)) else {
             return Ok(None);
         };
         Notebook::open(root).map(Some)

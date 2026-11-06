@@ -48,7 +48,8 @@ fn is_working_file(name: &str) -> bool {
 
 impl Notebook {
     /// Everything in the notebook, in order by path. Symbolic links aren't followed, so nothing
-    /// outside it is listed and a loop can't catch this.
+    /// outside it is listed and a loop can't catch this, and a folder that's another notebook's
+    /// root is passed over, as outside it.
     pub fn entries(&self) -> Vec<Entry> {
         let mut found = Vec::new();
         self.walk(&self.root, true, &mut found);
@@ -116,6 +117,9 @@ impl Notebook {
                 }
                 let at_root = folder == self.root;
                 if at_root && name == OUTPUT {
+                    continue;
+                }
+                if crate::is_notebook_root(&path) {
                     continue;
                 }
                 let leaves_documents = at_root && NOT_DOCUMENTS.contains(&name.as_str());

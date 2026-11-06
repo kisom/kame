@@ -2917,3 +2917,40 @@ fn a_retired_database_coming_back_with_a_wal_beside_it_is_not_opened() {
     assert_eq!(std::fs::read(&b).unwrap(), file);
     assert_eq!(std::fs::read(with_suffix(&b, "-wal")).unwrap(), wal);
 }
+
+#[test]
+fn another_notebook_inside_is_left_to_itself() {
+    let (root, nb) = logged_notebook("stranded-inner-notebook");
+    let inner = root.join("inner");
+    let theirs = inner.join("theirs.kame");
+    synced(&theirs, "Theirs.");
+    std::fs::write(inner.join("notebook.yaml"), "").unwrap();
+    remove_logs(&theirs);
+    // Moved into the other notebook on another machine.
+    let mine = root.join("mine.kame");
+    synced(&mine, "Mine.");
+    move_logs(&mine, &inner.join("mine.kame"));
+
+    assert_eq!(listed(&nb), ["mine.kame"]);
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&mine));
+    let done = reconcile(&nb, &[mine.clone(), theirs.clone()], None);
+    assert_eq!(
+        done,
+        [Done::Retired {
+            from: mine.clone(),
+            to: root.join(".mine.retired.kame"),
+            opened_there: false,
+            unsynced: true,
+        }],
+        "its logs in the other notebook aren't a home here"
+    );
+    assert!(theirs.is_file(), "nothing in the other notebook is settled");
+    assert!(!inner.join("mine.kame").exists());
+
+    let other = Notebook::open(&inner).unwrap();
+    assert_eq!(listed(&other), ["mine.kame", "theirs.kame"]);
+    assert_eq!(
+        find_stranded(&other, &mut Healthy::default()),
+        just(&theirs)
+    );
+}

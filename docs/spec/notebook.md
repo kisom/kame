@@ -49,6 +49,8 @@ An unknown key must be refused, not ignored, so that a typo can't quietly do not
 
 The notebook holding a path is the nearest folder with a `notebook.yaml`, going up from that path. The root is the folder's real path, with symbolic links resolved.
 
+**A notebook inside a notebook is another notebook.** A folder below the root with its own `notebook.yaml` belongs to that notebook alone, and is no more part of the outer one than a folder outside it is. A `notebook.yaml` deeper down, as in `a/b/`, cuts off only `a/b`, not `a`. The outer notebook doesn't list, search, publish or settle anything in it, and a path in it isn't inside the outer notebook for links (section 4), images (section 5) or moves. The inner notebook is as it would be anywhere.
+
 A new notebook writes `Notebook.kame` first, unless one is there, then `notebook.yaml` with its keys commented out. That file goes last so that a failure leaves the folder not a notebook. A folder that already has a `notebook.yaml` is refused and left alone.
 
 `Notebook.kame` is the contents page. A new one holds only a level 1 heading with the folder's name, and the rest is for the person to write. In any folder, a file with that name is the folder's index.
@@ -73,6 +75,7 @@ Each entry is either a **document**, which kame opens and search reads, or a **f
 
 - `output` in the root.
 - Anything else starting with `.`, except as below.
+- Any folder holding a `notebook.yaml`, which is another notebook (section 1.2), wherever it is.
 
 **Log folders.** A folder named `.NAME.sync`, where `NAME` ends in `.kame` in any case, stands for a document called `NAME` if no such file is beside it. This is a document with only logs, as on a new machine. It's listed as a document, unless it's inside `static`, `images` or `theme` in the root. Its contents are never listed.
 
@@ -153,7 +156,7 @@ The rules, in order:
 
 1. If `PATH` is empty, starts with `#` or `//`, or has a scheme, the link has rotted. A scheme is a letter, then letters, digits, `+`, `-` or `.`, up to a first `:`, so a colon later in a path doesn't make one. An absolute path isn't excluded here, and rule 3 judges it.
 2. Trim surrounding whitespace, expand a leading `~/` or a bare `~`, resolve against the linking document's folder, and take out `.` and `..` by what they say. What's named may not exist yet. The linking document's path must already be in terms of the notebook's real root, or every link rots at rule 3 (section 4.3).
-3. If the result isn't inside the notebook, the link has rotted. That's judged first by the path as written, then by the real location of as much of the path as exists, so that a symbolic link can't lead out. A dangling link counts as existing, and has no real location, so it gives **Rotted**. Rules 4 and 7 to 9 add to the path, and the result must pass the same check.
+3. If the result isn't inside the notebook, the link has rotted. A path in another notebook below the root isn't inside (section 1.2). That's judged first by the path as written, then by the real location of as much of the path as exists, so that a symbolic link can't lead out. A dangling link counts as existing, and has no real location, so it gives **Rotted**. Rules 4 and 7 to 9 add to the path, and the result must pass the same check.
 4. If it's a folder, or `PATH` ends in `/`, look at its `Notebook.kame`: **Open** if it's there or has a log folder, **Create** if it's in the documents area, otherwise **Rotted**.
 5. If it's a file: **Open** if it's in the documents area and ends in `.kame`, `.md` or `.markdown`, otherwise **View**.
 6. If nothing is there and it isn't in the documents area, it has **Rotted**.
@@ -309,7 +312,6 @@ These describe the code as it stands, and aren't rules to copy.
 
 - **Some untouched documents aren't removed.** Only one newly created document is remembered at a time, so following a link from one untouched new document to create another keeps the first, and it may then write logs. Cancelling the prompt about losing work also keeps it.
 - **Links can publish what they shouldn't, or nothing useful.** A link to an existing private folder publishes its name (`/papers/`) with no warning. A link to `./` in a root with no index publishes `href="//"`.
-- **A notebook inside a notebook isn't separated.** Finding one stops at the nearest `notebook.yaml`, but walking down from the outer root doesn't stop at an inner one. The outer notebook lists and publishes the inner one's documents, and its `notebook.yaml` shows up as a file.
 - **A move can't change links in Markdown.** kame imports `.md` and `.markdown` files rather than editing them, so links in them are left as they are, and the report after a move names each one.
 - **Reading every document is the cost of storing nothing.** Lists with titles, search and the links list read each file, so the app does them in the background. While the browser or jump list shows, a periodic check re-reads only if the entries changed. So a title changed on another machine shows when one of those is next opened, another document becomes current, or the entries change.
 - **Only Syncthing's conflict copies are recognised.** See [merging, section 7](merging.md).

@@ -510,6 +510,7 @@ fn what_could_hide_its_home(path: &Path, logs: &AllLogs) -> Option<PathBuf> {
     if let Some(first) = logs.cannot_read.first() {
         return Some(first.clone());
     }
+    // One from a newer version counts as unreadable, which is the more careful of the two.
     let document = Db::open_read_only(path)
         .and_then(|db| db.load_document())
         .ok()
@@ -583,7 +584,8 @@ fn what_to_do(
     }
 }
 
-/// What a database holds, if that can be read.
+/// What a database holds, if that can be read. One from a newer version of kame can't be, since what
+/// this build reads of it could match the logs while the file holds more.
 fn contents_of(path: &Path) -> Option<Contents> {
     let db = Db::open_read_only(path).ok()?;
     Some(Contents {

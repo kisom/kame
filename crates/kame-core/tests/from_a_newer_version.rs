@@ -321,3 +321,46 @@ fn a_damaged_head_is_still_refused() {
         assert_eq!(everything_in(&path), before, "{name}");
     }
 }
+
+/// A snapshot a newer build took can't be restored here, since what this build would put back
+/// leaves out what it doesn't know. The document is otherwise this build's own to edit.
+#[test]
+fn a_snapshot_from_a_newer_version_is_not_restored() {
+    let path = kame_test_dir::folder("newer-snapshot").join("doc.kame");
+    let (doc, _) = document();
+    {
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&doc).unwrap();
+        db.create_snapshot(&doc, Some("ours")).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let ours: String = connection
+        .query_row("SELECT json FROM snapshots WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let kind = ours.replacen(r#""kind":"Note""#, r#""kind":"Comment""#, 1);
+    let field = ours.replacen(r#""blocks":"#, r#""future":1,"blocks":"#, 1);
+    for json in [&kind, &field] {
+        assert_ne!(json, &ours);
+        connection
+            .execute(
+                "INSERT INTO snapshots (timestamp, label, json) VALUES (2, 'newer', ?1)",
+                [json],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(!session.newer, "a snapshot doesn't make the document newer");
+    assert!(session.insert("Typed. "));
+    let before = everything_in(&path);
+    for id in [2, 3] {
+        assert!(!session.restore(id), "snapshot {id}");
+        let said = session.last_error.take().unwrap_or_default();
+        assert!(said.contains("newer version of kame"), "{said:?}");
+    }
+    assert_eq!(everything_in(&path), before);
+    assert!(session.restore(1), "one of its own is restored as ever");
+}

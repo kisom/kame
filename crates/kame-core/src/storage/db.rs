@@ -46,6 +46,8 @@ pub enum DbError {
     /// first launch, whereas restoring a missing snapshot means the caller
     /// asked for something that is gone.
     SnapshotNotFound(i64),
+    /// It holds something from a newer version of kame, which reading it here would leave out.
+    Newer,
 }
 
 impl fmt::Display for DbError {
@@ -64,6 +66,10 @@ impl fmt::Display for DbError {
             }
             DbError::Meta(value) => write!(f, "unreadable meta value: {value}"),
             DbError::SnapshotNotFound(id) => write!(f, "no snapshot with id {id}"),
+            DbError::Newer => f.write_str(
+                "it has changes from a newer version of kame, so it can't be used here \
+                 until kame is updated",
+            ),
         }
     }
 }
@@ -77,7 +83,8 @@ impl std::error::Error for DbError {
             | DbError::SchemaTooNew { .. }
             | DbError::JournalMode(_)
             | DbError::Meta(_)
-            | DbError::SnapshotNotFound(_) => None,
+            | DbError::SnapshotNotFound(_)
+            | DbError::Newer => None,
         }
     }
 }
@@ -842,8 +849,9 @@ impl Db {
     /// returned document (e.g. via [`Db::save_document`] or
     /// [`Db::save_state`]).
     ///
-    /// Returns [`DbError::SnapshotNotFound`] when no such snapshot exists. The document is made to
-    /// fit as the head is.
+    /// Returns [`DbError::SnapshotNotFound`] when no such snapshot exists, and [`DbError::Newer`]
+    /// for one holding something from a newer version of kame, which restoring here would lose.
+    /// The document is made to fit as the head is.
     pub fn restore_snapshot(&self, id: i64) -> Result<Document, DbError> {
         let json: String = self
             .conn
@@ -856,6 +864,9 @@ impl Db {
                 rusqlite::Error::QueryReturnedNoRows => DbError::SnapshotNotFound(id),
                 other => DbError::Sqlite(other),
             })?;
+        if drops_something::<Document>(&json) || view::is_newer(&json) {
+            return Err(DbError::Newer);
+        }
         let mut doc: Document = serde_json::from_str(&json)?;
         doc.fit();
         Ok(doc)

@@ -398,7 +398,7 @@ The head is stored whole, so nothing needs replaying to open a file. The log is 
 
 A snapshot is a complete document in the `json` column, with `timestamp` in Unix seconds and an optional `label`. `timestamp` and `json` must not be NULL, though the schema allows it: a NULL `timestamp` makes kame's list of snapshots fail. It's independent of the head and log, and undo and redo can't touch it. A Save As, to any folder, says a snapshot's relative links and image paths again, in place, keeping its `id`, `label` and `timestamp` (section 1.7), and leaves one this build can't read whole as it is. Lists show the newest first, by `timestamp` and then `id`.
 
-Restoring isn't an edit. It starts a new history (section 5) and leaves metadata alone. A snapshot with no blocks can't be restored.
+Restoring isn't an edit. It starts a new history (section 5) and leaves metadata alone. A snapshot with no blocks can't be restored, and neither can one holding anything from a newer version (section 7), since this build would put back less than it holds. That doesn't make the document read-only.
 
 ## 7. Compatibility
 

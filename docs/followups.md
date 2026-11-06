@@ -10,6 +10,17 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
 
+- [ ] **After a failed write, a retry or a Save As writes a head that holds the last edit over a log that lacks it.** Found by reading,
+  not seen happen. An edit is applied in memory before `Session::record` writes it, and if `Db::record_edit` fails the op stays in
+  the editor but not in the log. `Session::save_state`, which the retry and `save_as` both use, then writes the head and the cursor
+  with that edit over the log without it. A reopen, or a Save As that says paths again and so rebuilds the editor from the copy's
+  log (`rehome` in `session.rs`), has an undo that takes back the step before against text that still has the last one, so it can
+  take back the wrong words. A Save As that changes nothing keeps the editor, whose history is then one step longer than the file's.
+
+- [ ] **A crash during a Save As leaves its hidden copy.** The `.NAME.saving-UUID` beside the target, and once the copy is open for
+  saying its paths again its `-wal` and `-shm` too, stay after a crash, and nothing sweeps them, as references' `.saving-` files are.
+  No words are lost, and the names can't pair a log with the wrong file, but each is a whole private copy of the document.
+
 ## Notebook
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.

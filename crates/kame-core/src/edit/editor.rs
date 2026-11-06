@@ -152,6 +152,8 @@ pub struct Editor {
     refused: bool,
     /// While edits are gathered into one step, whether that step has begun.
     gathering: Option<bool>,
+    /// The redo stack as the step being gathered, or the one just ended, found it.
+    redo_before_step: Vec<Op>,
 }
 
 impl Editor {
@@ -164,6 +166,7 @@ impl Editor {
             coalesced: false,
             refused: false,
             gathering: None,
+            redo_before_step: Vec::new(),
         }
     }
 
@@ -196,6 +199,7 @@ impl Editor {
             coalesced: false,
             refused: false,
             gathering: None,
+            redo_before_step: Vec::new(),
         }
     }
 
@@ -235,7 +239,7 @@ impl Editor {
                 let op = Op::Batch { ops: members(op) };
                 self.coalesced = false;
                 self.undo.push(op.clone());
-                self.redo.clear();
+                self.redo_before_step = std::mem::take(&mut self.redo);
                 return op;
             }
             Some(true) => {
@@ -263,16 +267,39 @@ impl Editor {
     }
 
     /// Gathers every edit from here to [`Editor::end_step`] into one step of the history, for a
-    /// command that takes several edits, as a paste does. Each is applied as it comes. The first
-    /// is returned as a batch of its own, which is how it's to be logged, and the rest are joined
-    /// on to it, as [`Editor::coalesced_edit`] says.
+    /// command that takes several edits, as a paste does. Each is applied as it comes, and the
+    /// first begins a batch the rest are joined on to. The step is logged whole once it ends, so
+    /// nothing is to be persisted while [`Editor::gathering`] says so.
     pub fn begin_step(&mut self) {
         self.gathering = Some(false);
+        self.redo_before_step.clear();
     }
 
-    /// Ends the step [`Editor::begin_step`] began. What comes next is a step of its own.
-    pub fn end_step(&mut self) {
-        self.gathering = None;
+    /// Whether edits are being gathered into one step.
+    pub fn gathering(&self) -> bool {
+        self.gathering.is_some()
+    }
+
+    /// Ends the step [`Editor::begin_step`] began, returning it to be logged as one edit, or `None`
+    /// if nothing was edited. What comes next is a step of its own.
+    pub fn end_step(&mut self) -> Option<&Op> {
+        let begun = self.gathering.take() == Some(true);
+        self.coalesced = false;
+        self.undo.last().filter(|_| begun)
+    }
+
+    /// Takes back the step [`Editor::end_step`] just returned, for when it couldn't be logged, and
+    /// gives back the redo stack it found, so that memory is as the log still has it.
+    pub fn take_back_step(&mut self) {
+        let Some(step) = self.undo.last() else {
+            return;
+        };
+        if !try_apply_inverse(self.doc.get_mut(), step) {
+            self.refused = true;
+            return;
+        }
+        self.undo.pop();
+        self.redo = std::mem::take(&mut self.redo_before_step);
     }
 
     /// Replaces the document, joining this onto the last edit if that replaced the document too,

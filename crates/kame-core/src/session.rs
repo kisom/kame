@@ -822,8 +822,12 @@ impl Session {
     }
 
     /// Persists one applied edit (op + head + cursor in one transaction).
-    /// Returns whether the write landed.
+    /// Returns whether the write landed. An edit of a step being gathered is written with the
+    /// rest of the step once it ends, as [`Session::as_one_step`] does.
     pub fn record(&mut self, op: &Op) -> bool {
+        if self.editor.gathering() {
+            return true;
+        }
         self.check_file();
         if self.replaced || self.newer {
             return false;
@@ -1485,12 +1489,28 @@ impl Session {
         Some(clipped)
     }
 
-    /// Makes every edit `edit` makes one step of the history.
+    /// Makes every edit `edit` makes one step of the history. The edits are made in memory, and
+    /// the step is written once they're done, with the head, in one transaction, so a crash part
+    /// way through leaves none of it. If that write fails, the step is taken back out of memory
+    /// too, so that memory is as the file has it.
     fn as_one_step(&mut self, edit: impl FnOnce(&mut Session) -> bool) -> bool {
+        let (caret, selection) = (self.caret, self.selection);
         self.editor.begin_step();
         let done = edit(self);
-        self.editor.end_step();
-        done
+        let Some(step) = self.editor.end_step().cloned() else {
+            return done;
+        };
+        if self.record(&step) {
+            return done;
+        }
+        // A file replaced behind this, or from a newer kame, keeps the words in memory, as for
+        // any edit, for saving elsewhere.
+        if !self.replaced && !self.newer {
+            self.editor.take_back_step();
+            self.caret = caret;
+            self.selection = selection;
+        }
+        false
     }
 
     /// The blocks a Tab acts on: those the selection touches, or the caret's. A selection
@@ -8357,6 +8377,80 @@ mod tests {
         assert!(same(session.document(), &before));
         assert!(session.paste_clipped(&clipped.text, None));
         assert_eq!(session.document().annotations.len(), 3);
+    }
+
+    #[test]
+    fn a_paste_is_written_to_the_file_once() {
+        let mut session = annotated();
+        let path = session.path().unwrap().to_path_buf();
+        select(&mut session, (1, 0), (2, 0));
+        let clipped = session.clipped().unwrap();
+        let before = session.document().clone();
+        let outside = rusqlite::Connection::open(&path).unwrap();
+        outside
+            .execute_batch(
+                "CREATE TABLE writes (what TEXT); \
+                 CREATE TRIGGER head AFTER INSERT ON documents \
+                 BEGIN INSERT INTO writes VALUES ('head'); END; \
+                 CREATE TRIGGER added AFTER INSERT ON ops \
+                 BEGIN INSERT INTO writes VALUES ('added'); END; \
+                 CREATE TRIGGER changed AFTER UPDATE ON ops \
+                 BEGIN INSERT INTO writes VALUES ('changed'); END;",
+            )
+            .unwrap();
+        select(&mut session, (2, 0), (2, 5));
+        let text = format!("{}\nand more\nand more again", clipped.text);
+        let clipped = Clipped { text, ..clipped };
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        let mut writes = outside.prepare("SELECT what FROM writes").unwrap();
+        let writes: Vec<String> = writes
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(writes, ["added", "head"]);
+        assert_agrees_with_its_file(&session);
+        let pasted = session.document().clone();
+
+        drop(session);
+        let mut reopened = open(&path);
+        assert!(same(reopened.document(), &pasted));
+        assert!(reopened.undo());
+        assert!(same(reopened.document(), &before));
+        assert!(reopened.redo());
+        assert!(same(reopened.document(), &pasted));
+    }
+
+    #[test]
+    fn a_paste_the_file_refuses_leaves_memory_as_the_file_has_it() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        session.insert("one");
+        session.split();
+        session.insert("two");
+        assert!(session.undo());
+        let (before, history) = (session.document().clone(), session.history());
+        let (caret, selection) = (session.caret, session.selection);
+        let outside = rusqlite::Connection::open(&path).unwrap();
+        outside
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON ops \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+
+        assert!(!session.paste("a\nb\nc"));
+
+        assert!(session.save_failed);
+        assert_eq!(session.document(), &before);
+        assert_eq!(session.history(), history);
+        assert_eq!((session.caret, session.selection), (caret, selection));
+        assert_agrees_with_its_file(&session);
+        outside.execute_batch("DROP TRIGGER refuse").unwrap();
+        assert!(session.retry_or_dismiss());
+        assert!(session.redo());
+        assert_eq!(block_texts(&session), ["one", "two"]);
+        assert_agrees_with_its_file(&session);
     }
 
     #[test]

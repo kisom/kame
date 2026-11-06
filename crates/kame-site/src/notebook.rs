@@ -11,7 +11,7 @@ use kame_core::references::unresolved;
 use kame_notebook::images::IMAGES;
 use kame_notebook::links::{is_web_link, Follow};
 use kame_notebook::references;
-use kame_notebook::{read_document, Notebook, INDEX};
+use kame_notebook::{is_notebook_root, read_document, Notebook, INDEX};
 
 use crate::config::Config;
 use crate::plan::{plan_site, Output, Plan};
@@ -196,13 +196,15 @@ fn rewrite_links(
             // document shows it, and what's kept stays private until one does.
             let in_kept = real.as_ref().ok().and_then(|real| {
                 let inside = real.strip_prefix(&kept).ok()?;
-                Some((inside.to_path_buf(), real.clone()))
+                notebook
+                    .holds(real)
+                    .then(|| (inside.to_path_buf(), real.clone()))
             });
             if let Some((inside, real)) = in_kept {
                 *path = published_image_url(&inside);
                 placed.push(path.clone());
                 images.insert(inside, real);
-            } else if real.is_ok_and(|real| !real.starts_with(&notebook.root)) {
+            } else if real.is_ok_and(|real| !notebook.holds(&real)) {
                 problems.warnings.push(format!(
                     "\"{slug}\": the image {path} isn't published: it's outside the notebook"
                 ));
@@ -260,7 +262,7 @@ fn read_sources(notebook: &Notebook, problems: &mut Problems) -> Vec<Source> {
     sources
 }
 
-/// Everything under `from`, as paths relative to it.
+/// Everything under `from`, as paths relative to it, but for what's in another notebook's folder.
 fn files_under(from: &Path, inside: &Path, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(from.join(inside)) else {
         return;
@@ -274,7 +276,9 @@ fn files_under(from: &Path, inside: &Path, found: &mut Vec<PathBuf>) {
         }
         let relative = inside.join(&name);
         match entry.file_type() {
-            Ok(kind) if kind.is_dir() => files_under(from, &relative, found),
+            Ok(kind) if kind.is_dir() && !is_notebook_root(&from.join(&relative)) => {
+                files_under(from, &relative, found)
+            }
             Ok(kind) if kind.is_file() => found.push(relative),
             _ => {}
         }
@@ -1899,5 +1903,84 @@ mod tests {
         assert!(is_notebook(&nb.root));
         std::fs::write(nb.root.join("site.yaml"), "").unwrap();
         assert!(!is_notebook(&nb.root));
+    }
+
+    #[test]
+    fn another_notebook_inside_publishes_nothing_here() {
+        let nb = made("nbinner", "title: Outer\n");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.document(
+            "a.kame",
+            true,
+            &linking(
+                "See it",
+                SpanStyle::DocumentLink {
+                    target: "inner/b".to_string(),
+                },
+            ),
+        );
+        nb.document("shows.kame", true, &image("inner/plate.png"));
+        nb.document("kept.kame", true, &image("images/inner/kept.png"));
+        nb.words("deep/x.kame", true, "Outer words.");
+        nb.file("inner/notebook.yaml", "title: Inner\n");
+        nb.words("inner/Notebook.kame", false, "Inner contents.");
+        nb.words("inner/b.kame", true, "Inner words.");
+        nb.file("inner/plate.png", "their picture");
+        nb.file("images/inner/notebook.yaml", "");
+        nb.file("images/inner/kept.png", "their kept picture");
+        nb.file("deep/er/notebook.yaml", "");
+        nb.words("deep/er/y.kame", true, "Deeper words.");
+        nb.file("static/public.txt", "public");
+        nb.file("static/inner/notebook.yaml", "");
+        nb.file("static/inner/theirs.txt", "theirs");
+        nb.file("theme/static/inner/notebook.yaml", "");
+        nb.file("theme/static/inner/theirs.css", "theirs");
+
+        let (plan, problems) = nb.plan();
+        let mut published: Vec<String> = plan
+            .files
+            .keys()
+            .map(|path| path.display().to_string())
+            .collect();
+        published.sort();
+        assert!(published.contains(&"deep/x/index.html".to_string()));
+        assert!(published.contains(&"static/public.txt".to_string()));
+        for path in &published {
+            assert!(
+                !path.contains("inner") && !path.starts_with("deep/er"),
+                "{path} publishes: {published:?}"
+            );
+        }
+        for output in plan.files.values() {
+            let text = match output {
+                Output::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                Output::Copy(from) => std::fs::read_to_string(from).unwrap_or_default(),
+            };
+            for theirs in ["Inner words", "Deeper words", "their picture", "theirs"] {
+                assert!(!text.contains(theirs), "{theirs} publishes");
+            }
+        }
+        let linked = page(&plan, "a/index.html");
+        assert!(!linked.contains("href=\"/inner"), "{linked}");
+        let warned = |slug: &str, what: &str| {
+            problems
+                .warnings
+                .iter()
+                .any(|said| said.contains(slug) && said.contains(what))
+        };
+        assert!(warned("a.kame", "inner/b"), "{:?}", problems.warnings);
+        assert!(warned("shows.kame", "outside"), "{:?}", problems.warnings);
+        assert!(warned("kept.kame", "outside"), "{:?}", problems.warnings);
+
+        let inner = made_at(&nb.root.join("inner"), &nb.build.join("inner"));
+        let (plan, _) = inner.plan();
+        assert!(page(&plan, "b/index.html").contains("Inner words."));
+    }
+
+    fn made_at(root: &Path, build: &Path) -> Made {
+        Made {
+            root: root.to_path_buf(),
+            build: build.to_path_buf(),
+        }
     }
 }

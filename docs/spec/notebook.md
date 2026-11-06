@@ -228,7 +228,7 @@ Each notebook is its own site, built by `kame-site`. A folder holding both `note
 | A reference in `references/` | Only as an entry in the References section of a published document citing it, never as a file |
 | The site's own pages | Archive and tag pages, and a feed when `url` is set, generated from what publishes |
 
-Hidden files, hidden folders, conflict copies and symbolic links under `static/` don't publish.
+Hidden files, hidden folders, conflict copies and symbolic links under `static/` don't publish. Nor does anything in another notebook below the root (section 1.2), even under `static/`, `images/` or `theme/`: its documents aren't listed, a link to one publishes as its words, and an image in one is outside the notebook.
 
 **What goes public is decided by the mark on a document, by `static/`, and by what a published document shows.** An implementation must not publish anything else.
 

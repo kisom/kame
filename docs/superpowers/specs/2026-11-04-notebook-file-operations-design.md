@@ -219,11 +219,8 @@ stranded, whatever its place, since logs for it would go to every machine and be
 
 **Logs that may be another document's.** A database that isn't stranded can still have another document's logs beside it, if a
 copy is put at a path that has logs, or a database with no place was left behind when its path was reused, or a verdict can't be
-reached since a corrupt line is all there is. Or another document's log can be beside its own, when a document was deleted on one
-machine and another made at its name while the old one's log lived on. Logs count as a database's own only if there's nothing
-there, they hold the revision it remembers, or a line in them says it's of this document (`Store::can_be_for`, by `Document::id`),
-and none of their heads is another document's (`Store::can_be_its_own`, by `revision.document`). Another document's revisions in
-a head's past don't count, as where an older kame merged two documents made at one name on two machines. Each line holds its
+reached since a corrupt line is all there is. Logs count as a database's own only if there's nothing there, they hold the
+revision it remembers, or a line in them says it's of this document (`Store::can_be_for`, by `Document::id`). Each line holds its
 document's id inside its revision, so a line in an older format still says, even with an id that fails its check, and a line
 that doesn't parse says if its JSON can still be read. Only a line with no id to read says nothing. A document's own old lines
 therefore heal, and another document's don't count. Logs that say nothing, or that can't be read, show nothing, and "can't be told" means doing less.
@@ -231,9 +228,9 @@ therefore heal, and another document's don't count. Logs that say nothing, or th
 Otherwise `Logged` writes nothing, as its history could reach another document's logs on every machine. `Outcome::others_logs` says
 so, and the app says the logs may be another document's, and that Save As gives this one logs of its own. A delete leaves
 those logs, and a move is refused, as for a stranded database. A pass leaves it alone, and doesn't take a copy like this at a stranded
-database's new home for the moved document having been opened there. A database that has never synced is held to the same rule: it
-doesn't merge with another document's logs or write its history into them, a change to it as a closed document is refused, and a
-delete or a move doesn't take what's there. Nor does one whose file can't be read. With no file at all, the logs are the document, and a delete takes them.
+database's new home for the moved document having been opened there. A database that has never synced merges with what's there, as
+documents created through a link on two machines rely on (see the limits), but until it has, a delete or a move doesn't take what's
+there. Nor does one whose file can't be read. With no file at all, the logs are the document, and a delete takes them.
 
 **Lines that can't be read.** There are three kinds, and they aren't alike.
 
@@ -340,9 +337,8 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   copy, such as one holding the same revision, rather than the document's real home. Nothing is deleted, and it's recoverable by hand.
 - A hand copy of a document unedited since its first sync reproduces the original's revision when it writes its history, so its logs
   can count as a second home for a stale database of that document, which is then left alone. One more edit ends it.
-- Two documents made at one name on two machines, as through a link before the logs arrived, don't sync. Whichever opens on logs
-  holding the other's says they may be another document's, and the words wait for a Save As to another name. A kame from before
-  this rule merged them, and the one that came out is synced with as usual.
+- A database that has never synced merges its words into what's at its path on its first sync, even another document's logs. Documents
+  created through a link on two machines rely on this. `src/main.rs`'s Save As doesn't check for logs at the target, so it can do the same.
 - A Save As copy shares its original's document id, so a hand copy of one, put on the other's logs, isn't told from its own and
   merges with them.
 - A corrupt line that could be a document's stays until it's removed by hand, as logs are only added to, and until then that document

@@ -1345,6 +1345,108 @@ dance, on a page, of pen, eye and hand.";
         }
     }
 
+    /// A line whose tallest or deepest ink goes away is redrawn over the rows that ink covered,
+    /// not only over those its new ink covers, or the accent or the descender would stay on the
+    /// page: an "Ó" made "O", and the one "q" of a line with no other descender made "o".
+    #[test]
+    fn ink_a_line_loses_is_painted_out() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let line = 3;
+        // `text` with the first letter of the line's second word as `with`, and as `instead`.
+        let mut changed_in = |text: &str, with: &str, instead: &str| {
+            let layout = layout_block(&mut fs, &paragraph(text), &config());
+            let start = layout.lines[line].start;
+            let at = start + text[start..].find(' ').unwrap() + 1;
+            let next = at + text[at..].chars().next().unwrap().len_utf8();
+            let made = |letter: &str| format!("{}{letter}{}", &text[..at], &text[next..]);
+            (made(with), made(instead))
+        };
+        let accent = changed_in(PROSE, "Ó", "O");
+        let no_descenders = "the clocks hum on and the old water runs at the stone wall ".repeat(7);
+        let descender = changed_in(&no_descenders, "q", "o");
+        for scale in [1.0, 2.0] {
+            for (from, to) in [&accent, &descender] {
+                let (_, before) =
+                    painting_of(&mut fs, &mut atlas, &paragraph(from), &config(), &[], scale);
+                let (_, after) =
+                    painting_of(&mut fs, &mut atlas, &paragraph(to), &config(), &[], scale);
+                let (old, new) = (rows_of_line(&before, line), rows_of_line(&after, line));
+                eprintln!(
+                    "{scale} {old:?} {new:?} {} {} {:?} {:?}",
+                    before.lines.len(),
+                    after.lines.len(),
+                    before.bounds,
+                    after.bounds
+                );
+                assert!(
+                    old.start < new.start || old.end > new.end,
+                    "the line's old ink reaches past its new ink: {old:?} against {new:?}"
+                );
+                let rows = redrawn_rows(&mut fs, &mut atlas, &before, &after);
+                assert!(
+                    rows.iter()
+                        .any(|band| band.start as i32 <= old.start && old.end <= band.end as i32),
+                    "the old ink's rows {old:?} are redrawn, in {rows:?}"
+                );
+            }
+        }
+    }
+
+    /// The lines with a hyphen drawn at their end, which stands for no text.
+    fn hyphenated_lines(layout: &BlockLayout) -> Vec<usize> {
+        (0..layout.runs.len())
+            .filter(|line| {
+                layout.runs[*line]
+                    .glyphs
+                    .iter()
+                    .any(|glyph| glyph.start == glyph.end)
+            })
+            .collect()
+    }
+
+    /// Hyphenated, a line's drawn hyphen comes and goes with its break, and the lines it's on are
+    /// redrawn as drawing them whole does.
+    #[test]
+    fn a_hyphen_that_comes_or_goes_redraws_as_drawing_whole_does() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let config = LayoutConfig {
+            body_width: 200.0,
+            hyphenate: true,
+            ..config()
+        };
+        for scale in [1.0, 2.0] {
+            let block = paragraph(PROSE);
+            let (layout, before) = painting_of(&mut fs, &mut atlas, &block, &config, &[], scale);
+            let hyphens = hyphenated_lines(&layout);
+            assert!(!hyphens.is_empty(), "a line ends in a hyphen");
+            let mut found = 0;
+            for line in &layout.lines {
+                for at in (line.start..line.end).filter(|at| PROSE.as_bytes()[*at] == b' ') {
+                    let text = typed(PROSE, at, " a");
+                    let (typed_in, after) =
+                        painting_of(&mut fs, &mut atlas, &paragraph(&text), &config, &[], scale);
+                    if after.lines.len() != before.lines.len() || after.bounds != before.bounds {
+                        continue;
+                    }
+                    let hyphens_after = hyphenated_lines(&typed_in);
+                    let crossed = (0..before.lines.len()).any(|line| {
+                        before.lines[line] != after.lines[line]
+                            && (hyphens.contains(&line) || hyphens_after.contains(&line))
+                    });
+                    if crossed && hyphens != hyphens_after {
+                        redrawn_rows(&mut fs, &mut atlas, &before, &after);
+                        found += 1;
+                    }
+                }
+            }
+            assert!(found > 0, "no edit moved a hyphen at {scale}x");
+        }
+    }
+
     #[test]
     fn the_same_painting_redraws_nothing() {
         let mut fs = FontSystem::new();
@@ -1354,6 +1456,29 @@ dance, on a page, of pen, eye and hand.";
             painting_of(&mut fs, &mut atlas, &paragraph(PROSE), &config(), &[], 2.0);
         let patches = atlas.redraw(&mut fs, &painting, &painting).unwrap();
         assert!(patches.is_empty());
+    }
+
+    /// A line more, with the ink's bounds the same, is drawn whole: comparing the lines in pairs
+    /// would leave the extra one out, and its ink with it.
+    #[test]
+    fn a_line_more_inside_the_same_bounds_is_drawn_whole() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let (_, before) = painting_of(&mut fs, &mut atlas, &paragraph(PROSE), &config(), &[], 2.0);
+        // The first line's ink again, a line further down, which no layout gives but which
+        // keeps within the bounds.
+        let mut after = before.clone();
+        let again = after.lines[0]
+            .iter()
+            .map(|mark| Mark {
+                top: mark.top + 24 * 2,
+                ..*mark
+            })
+            .collect();
+        after.lines.push(again);
+        assert_eq!(after.bounds, before.bounds);
+        assert!(atlas.redraw(&mut fs, &before, &after).is_none());
     }
 
     /// A band can only be laid over an image of the same size and place, so a change in the

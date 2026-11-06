@@ -205,6 +205,11 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
         let Some(last) = last_sync(&path) else {
             continue;
         };
+        // It may hold more than its logs, and this build can't tell, so it's left as it is for a
+        // kame that can.
+        if holds_newer(&path) {
+            continue;
+        }
         let contents = contents_of(&path);
         match what_to_do(&path, &last.revision, contents.as_ref(), &logs) {
             Some(Verdict::Retire {
@@ -510,7 +515,7 @@ fn what_could_hide_its_home(path: &Path, logs: &AllLogs) -> Option<PathBuf> {
     if let Some(first) = logs.cannot_read.first() {
         return Some(first.clone());
     }
-    // One from a newer version counts as unreadable, which is the more careful of the two.
+    // One from a newer version doesn't get this far: `decide` leaves it alone.
     let document = Db::open_read_only(path)
         .and_then(|db| db.load_document())
         .ok()
@@ -584,10 +589,20 @@ fn what_to_do(
     }
 }
 
-/// What a database holds, if that can be read. One from a newer version of kame can't be, since what
-/// this build reads of it could match the logs while the file holds more.
+/// Whether a database holds something from a newer version of kame: a field, kind, style or other
+/// value this build doesn't know, or a step of history it can't read.
+fn holds_newer(path: &Path) -> bool {
+    Db::open_read_only(path).is_ok_and(|db| db.holds_newer())
+}
+
+/// What a database holds, if that can be read. One holding anything from a newer version of kame
+/// can't be, a field as much as a kind: what this build reads of it leaves that out, so it could
+/// match the logs while the file holds more.
 fn contents_of(path: &Path) -> Option<Contents> {
     let db = Db::open_read_only(path).ok()?;
+    if db.holds_newer() {
+        return None;
+    }
     Some(Contents {
         document: document_digest(&db.load_document().ok()?),
         metadata: db.load_metadata().ok()??,

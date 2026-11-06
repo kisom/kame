@@ -3098,3 +3098,57 @@ fn a_database_another_kame_has_open_is_not_stamped_until_it_is_let_go() {
     assert_eq!(place_in(&a), place_of(&a));
     assert!(no_locks_left(&folder));
 }
+
+/// Writes `to` in place of `from` in a database's head, as a newer kame would have written it.
+fn as_a_newer_kame_wrote_it(path: &Path, from: &str, to: &str) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let head: String = connection
+        .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let newer = head.replacen(from, to, 1);
+    assert_ne!(newer, head);
+    connection
+        .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&newer])
+        .unwrap();
+}
+
+/// A stranded database holding something only a newer kame knows, a field or a kind, may hold more
+/// than its logs, and this build can't tell. It's neither retired nor moved, as a copy of what's in
+/// the logs or otherwise, and is left for an updated kame.
+#[test]
+fn a_stranded_database_from_a_newer_kame_is_left_for_an_updated_one() {
+    for (name, from, to) in [
+        (
+            "stranded-newer-field",
+            r#""spans":["#,
+            r#""colour":"red","spans":["#,
+        ),
+        (
+            "stranded-newer-kind",
+            r#""kind":"Paragraph""#,
+            r#""kind":"Table""#,
+        ),
+    ] {
+        // Opened at the moved document's new home, which would retire it as a copy.
+        let (root, nb) = logged_notebook(name);
+        let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+        synced(&a, "Words.");
+        move_logs(&a, &b);
+        assert!(build_from_logs(&b).unwrap());
+        as_a_newer_kame_wrote_it(&a, from, to);
+        let bytes = std::fs::read(&a).unwrap();
+        assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE), [], "{name}");
+        assert_eq!(std::fs::read(&a).unwrap(), bytes, "{name}");
+
+        // Deleted elsewhere, which would retire it as having no home.
+        let c = root.join("c.kame");
+        synced(&c, "Words.");
+        remove_logs(&c);
+        as_a_newer_kame_wrote_it(&c, from, to);
+        let bytes = std::fs::read(&c).unwrap();
+        assert_eq!(reconcile(&nb, just(&c), None, Locks::NONE), [], "{name}");
+        assert_eq!(std::fs::read(&c).unwrap(), bytes, "{name}");
+    }
+}

@@ -281,3 +281,104 @@ fn a_notebook_finds_what_it_can_read_of_documents_from_a_newer_version() {
 
     assert_eq!((everything_in(&kinds), everything_in(&fields)), before);
 }
+
+/// A conflict copy from a newer kame is found as any other is, and isn't merged, since what this
+/// build would take from it leaves out what it doesn't know. It stays as it is, to merge once kame
+/// is updated, and so does the document.
+#[test]
+fn a_conflict_copy_from_a_newer_version_is_found_and_not_merged() {
+    use kame_sync::files::{conflict_copies, merge_copy_into};
+    for (name, from, to) in [
+        (
+            "newer-copy-field",
+            r#""spans":["#,
+            r#""colour":"red","spans":["#,
+        ),
+        (
+            "newer-copy-kind",
+            r#""kind":"Paragraph""#,
+            r#""kind":"Table""#,
+        ),
+    ] {
+        let dir = kame_test_dir::folder(name).canonicalize().unwrap();
+        let doc = dir.join("a.kame");
+        Session::open(&doc).unwrap().insert("Words.");
+        let copy = dir.join("a.sync-conflict-20261103-011500-ABCDEFG.kame");
+        std::fs::copy(&doc, &copy).unwrap();
+        Session::open(&copy).unwrap().insert("More. ");
+        let connection = rusqlite::Connection::open(&copy).unwrap();
+        let head: String = connection
+            .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let newer = head.replacen(from, to, 1);
+        assert_ne!(newer, head, "{name}");
+        connection
+            .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&newer])
+            .unwrap();
+        drop(connection);
+        assert!(Db::open_read_only(&copy).unwrap().holds_newer(), "{name}");
+        let (in_doc, in_copy) = (everything_in(&doc), everything_in(&copy));
+
+        let mut session = Session::open(&doc).unwrap();
+        assert_eq!(conflict_copies(&doc), [copy.clone()], "{name}");
+        let said = merge_copy_into(&mut session, &copy)
+            .err()
+            .unwrap_or_else(|| panic!("{name} merged"))
+            .to_string();
+        assert_eq!(
+            said, "the copy was written by a newer version of kame; update kame to merge it",
+            "{name}"
+        );
+        assert_eq!(session.document().blocks[0].text, "Words.", "{name}");
+        drop(session);
+        assert_eq!(everything_in(&doc), in_doc, "{name}");
+        assert_eq!(everything_in(&copy), in_copy, "{name}");
+    }
+}
+
+/// A file from a newer kame that replaced an open document isn't merged with what's on the screen,
+/// and nothing is written into it, not even the snapshot a merge takes first.
+#[test]
+fn a_file_from_a_newer_version_that_replaced_this_one_is_not_merged() {
+    use kame_sync::files::merge_replaced;
+    let dir = kame_test_dir::folder("newer-replaced")
+        .canonicalize()
+        .unwrap();
+    let path = dir.join("a.kame");
+    Session::open(&path).unwrap().insert("Words.");
+    let other = dir.join("other.kame");
+    std::fs::copy(&path, &other).unwrap();
+    Session::open(&other).unwrap().insert("Theirs. ");
+    let connection = rusqlite::Connection::open(&other).unwrap();
+    let head: String = connection
+        .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let newer = head.replacen(r#""spans":["#, r#""colour":"red","spans":["#, 1);
+    assert_ne!(newer, head);
+    connection
+        .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&newer])
+        .unwrap();
+    drop(connection);
+
+    let mut old = Session::open(&path).unwrap();
+    old.insert(" Mine.");
+    std::fs::rename(&other, &path).unwrap();
+    old.insert(" Unsaved.");
+    assert!(old.replaced);
+    let arrived = everything_in(&path);
+    let said = merge_replaced(&old)
+        .err()
+        .expect("it isn't merged")
+        .to_string();
+    assert_eq!(
+        said,
+        "the file there now was written by a newer version of kame; update kame to merge it"
+    );
+    assert!(old.document().blocks[0].text.contains("Unsaved"));
+    drop(old);
+    assert_eq!(everything_in(&path), arrived);
+}

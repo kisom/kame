@@ -131,7 +131,7 @@ pub fn conflict_copies(path: &Path) -> Vec<PathBuf> {
         return copies;
     }
     let Ok(id) = Db::open_read_only(path)
-        .and_then(|db| db.load_document())
+        .and_then(|db| db.load_readable())
         .map(|doc| doc.id)
     else {
         return Vec::new();
@@ -143,7 +143,7 @@ pub fn conflict_copies(path: &Path) -> Vec<PathBuf> {
 
 fn same_document(path: &Path, id: uuid::Uuid) -> bool {
     Db::open_read_only(path)
-        .and_then(|db| db.load_document())
+        .and_then(|db| db.load_readable())
         .is_ok_and(|doc| doc.id == id)
 }
 
@@ -167,7 +167,7 @@ pub fn copies_of(path: &Path, mut files: Vec<PathBuf>) -> Vec<PathBuf> {
 fn document_id(path: &Path) -> Option<uuid::Uuid> {
     match path.symlink_metadata() {
         Ok(_) => Db::open_read_only(path)
-            .and_then(|db| db.load_document())
+            .and_then(|db| db.load_readable())
             .ok()
             .map(|doc| doc.id),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -226,12 +226,24 @@ pub struct MergedIn {
     pub changed: bool,
 }
 
+/// Whether the database at `path` holds something from a newer version of kame, which merging what
+/// this build reads of it would leave out.
+fn is_from_a_newer_version(path: &Path) -> bool {
+    Db::open_read_only(path).is_ok_and(|db| db.holds_newer())
+}
+
 /// Merges `copy` into an open document as one undo step, with a snapshot before it, then renames
 /// the copy so that it is no longer offered. It stays there under that name, since undoing the
-/// merge should not leave it the only place those words are.
+/// merge should not leave it the only place those words are. A copy from a newer version of kame
+/// isn't merged and stays as it is, since this build would leave out what it doesn't know.
 pub fn merge_copy_into(session: &mut Session, copy: &Path) -> Result<MergedIn> {
     if session.save_failed {
         return Err("this document cannot be saved at the moment".into());
+    }
+    if is_from_a_newer_version(copy) {
+        return Err(
+            "the copy was written by a newer version of kame; update kame to merge it".into(),
+        );
     }
     let other = Version::read(copy)?;
     if other.doc.id != session.document().id {
@@ -282,6 +294,12 @@ pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
     // Opening a missing path would create a document there.
     if !path.is_file() {
         return Err("that file is no longer there".into());
+    }
+    if is_from_a_newer_version(&path) {
+        return Err(
+            "the file there now was written by a newer version of kame; update kame to merge it"
+                .into(),
+        );
     }
     let arrived = Version::read(&path)?;
     if arrived.doc.id != old.document().id {

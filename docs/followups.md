@@ -14,15 +14,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
 
-## Annotations
-
-- [ ] **Copy, cut and paste carry no notes, footnotes or marginals.** `Clipped` holds only the words, their spans and the folder
-  their links lead from, so a cut takes a block's annotations away and a paste brings none. The author has decided a marginal goes
-  with a block whose whole text is copied: cut then paste moves it, and copy then paste gives the pasted block a copy. Still to
-  choose: whether notes and footnotes in the copied words go too, where a carried marginal goes when the first or last line is
-  pasted into the middle of a paragraph, and what a cut of all of one block's words, which leaves the block there empty, does with
-  its marginal.
-
 ## Notebook
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.

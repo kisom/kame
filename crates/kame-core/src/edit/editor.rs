@@ -150,6 +150,8 @@ pub struct Editor {
     coalesced: bool,
     /// Whether an undo or redo was just refused, because the history doesn't fit the document.
     refused: bool,
+    /// While edits are gathered into one step, whether that step has begun.
+    gathering: Option<bool>,
 }
 
 impl Editor {
@@ -161,6 +163,7 @@ impl Editor {
             redo: Vec::new(),
             coalesced: false,
             refused: false,
+            gathering: None,
         }
     }
 
@@ -192,6 +195,7 @@ impl Editor {
             redo,
             coalesced: false,
             refused: false,
+            gathering: None,
         }
     }
 
@@ -224,6 +228,25 @@ impl Editor {
     pub fn apply_edit(&mut self, op: Op) -> Op {
         let op = with_clipped(&self.doc, normalize(&self.doc, op));
         apply(self.doc.get_mut(), &op);
+        match self.gathering {
+            // A batch, which typing doesn't join on to, even of one edit.
+            Some(false) => {
+                self.gathering = Some(true);
+                let op = Op::Batch { ops: members(op) };
+                self.coalesced = false;
+                self.undo.push(op.clone());
+                self.redo.clear();
+                return op;
+            }
+            Some(true) => {
+                if let Some(Op::Batch { ops }) = self.undo.last_mut() {
+                    ops.extend(members(op.clone()));
+                    self.coalesced = true;
+                    return op;
+                }
+            }
+            None => {}
+        }
         // Never onto history a redo could still return to, since that history is going.
         let joined = if self.redo.is_empty() {
             self.undo.last().and_then(|last| coalesce(last, &op))
@@ -237,6 +260,19 @@ impl Editor {
         }
         self.redo.clear();
         op
+    }
+
+    /// Gathers every edit from here to [`Editor::end_step`] into one step of the history, for a
+    /// command that takes several edits, as a paste does. Each is applied as it comes. The first
+    /// is returned as a batch of its own, which is how it's to be logged, and the rest are joined
+    /// on to it, as [`Editor::coalesced_edit`] says.
+    pub fn begin_step(&mut self) {
+        self.gathering = Some(false);
+    }
+
+    /// Ends the step [`Editor::begin_step`] began. What comes next is a step of its own.
+    pub fn end_step(&mut self) {
+        self.gathering = None;
     }
 
     /// Replaces the document, joining this onto the last edit if that replaced the document too,
@@ -1574,6 +1610,14 @@ fn markdown_link(text: &str, caret: usize) -> Option<(usize, usize, String)> {
         return None;
     }
     Some((open_bracket, close_bracket, url))
+}
+
+/// The edits `op` is made of: those of a batch, or `op` itself.
+fn members(op: Op) -> Vec<Op> {
+    match op {
+        Op::Batch { ops } => ops,
+        other => vec![other],
+    }
 }
 
 #[cfg(test)]

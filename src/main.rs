@@ -3569,12 +3569,14 @@ impl KameApp {
                 }
                 // With nothing selected these leave the clipboard as it was.
                 Command::Copy | Command::Cut => {
-                    if let Some(clipped) = self.session.clipped() {
+                    let clipped = if matches!(command, Command::Cut) {
+                        self.session.cut()
+                    } else {
+                        self.session.clipped()
+                    };
+                    if let Some(clipped) = clipped {
                         ctx.copy_text(clipped.text.clone());
                         self.clipped = Some(clipped);
-                        if matches!(command, Command::Cut) {
-                            self.session.backspace();
-                        }
                     }
                 }
                 Command::Backspace => {
@@ -10989,6 +10991,41 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         assert_eq!(block_of(&page, id), first);
         assert!(page.app.session.redo());
         assert_eq!(block_of(&page, id), second);
+    }
+
+    #[test]
+    fn a_marginal_goes_with_all_of_its_blocks_words_through_a_cut_and_a_paste() {
+        let (mut page, first, second, id) = page_with_a_marginal_to_move();
+        page.app.session.set_caret(Cursor {
+            block_id: first,
+            offset: 0,
+        });
+        page.app.session.select_to(Cursor {
+            block_id: first,
+            offset: "First".len(),
+        });
+        page.frame(vec![egui::Event::Cut]);
+        let document = page.app.session.document();
+        assert_eq!(document.blocks[0].text, "");
+        assert!(
+            document.annotations.is_empty(),
+            "the emptied block keeps no marginal"
+        );
+
+        page.app.session.set_caret(Cursor {
+            block_id: second,
+            offset: "Second".len(),
+        });
+        page.frame(vec![egui::Event::Paste("First".to_string())]);
+        let document = page.app.session.document();
+        assert_eq!(document.blocks[1].text, "SecondFirst");
+        let pasted: Vec<_> = document
+            .annotations
+            .iter()
+            .map(|annotation| (annotation.anchor.block_id(), annotation.body.as_str()))
+            .collect();
+        assert_eq!(pasted, [(second, "Said beside.")]);
+        assert_ne!(document.annotations[0].id, id);
     }
 
     #[test]

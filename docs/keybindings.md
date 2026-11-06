@@ -9,7 +9,7 @@ macOS (`Modifiers::command`).
 | --- | --- |
 | text, Enter, Backspace, Delete | insert, new paragraph, delete back/forward |
 | Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y | undo / redo / redo, a word at a time as you type |
-| Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste, as plain text |
+| Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste. Within kame, formatting, links, notes, footnotes and marginals go too. A paste is one undo step |
 | Shift-Enter | in a code or prose block, a line without leaving the block |
 | Ctrl-Shift-1 / -2 / -3 | make the caret's block a level 1/2/3 heading |
 | Ctrl-Shift-0 | return the caret's block to body text |
@@ -114,6 +114,12 @@ out, along with its highlight. Emptying a marginal removes it too, and so does c
 Right-clicking a marginal offers Move to the caret's block, which moves it, words and all, to the block the caret is in,
 as one undo step. It's greyed out when the marginal is already there. Any block can hold a marginal, and one moved beside
 another stacks below it.
+
+Copy, cut and paste carry them, within a document or into another. A note or footnote goes when the copy holds all of the
+words it's on, and one only partly copied stays where it is. A marginal goes when the copy holds all of its block's words,
+and lands on the block those words are pasted into, beside any marginal that's there already. Cut and paste moves them,
+cutting all of a block's words takes its marginal even though the empty block stays, and copy and paste gives the pasted
+words copies of their own. Text copied from outside kame brings none.
 
 ## Centered headings
 

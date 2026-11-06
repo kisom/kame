@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+use crate::edit::ops::anchor_wholly_inside;
 use crate::edit::{Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::links::{
@@ -1373,20 +1374,37 @@ impl Session {
         self.clipped().map(|clipped| clipped.text)
     }
 
-    /// What's selected, with its formatting, for pasting. An image or a rule is an empty line.
+    /// What's selected, with its formatting and annotations, for pasting. An image or a rule is
+    /// an empty line.
+    ///
+    /// A note or footnote goes with it when the selection holds all of what it's on, as a delete
+    /// of the selection would take it. Everything on a block goes when the selection holds all of
+    /// the block's text, its marginal included, and a selection ending at the very start of a
+    /// block doesn't reach into it.
     pub fn clipped(&self) -> Option<Clipped> {
+        self.clipping().map(|(clipped, _)| clipped)
+    }
+
+    /// [`Session::clipped`], with the ids of the annotations it takes.
+    fn clipping(&self) -> Option<(Clipped, Vec<AnnotationId>)> {
         let (start, end) = self.ordered_selection()?;
         if start == end {
             return None;
         }
-        let blocks = &self.document().blocks;
+        let document = self.document();
+        let blocks = &document.blocks;
         let first = self.block_index(start.block_id)?;
         let last = self.block_index(end.block_id)?;
         let mut text = String::new();
         let mut spans = Vec::new();
+        let mut annotations = Vec::new();
+        let mut taken = Vec::new();
+        // The line of `text` this block's words begin on, a verbatim block holding several.
+        let mut line = 0;
         for (index, block) in blocks[first..=last].iter().enumerate() {
             if index > 0 {
                 text.push('\n');
+                line += 1;
             }
             let from = if index == 0 { start.offset } else { 0 };
             let to = if first + index == last {
@@ -1403,13 +1421,76 @@ impl Session {
                     style: span.style.clone(),
                 })
             }));
-            text.push_str(block.text.get(from..to).unwrap_or(""));
+            let reached = index == 0 || first + index < last || end.offset > 0;
+            let whole = reached && from == 0 && to == block.text.len();
+            for annotation in document
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.anchor.block_id() == block.id)
+            {
+                let at = match annotation.anchor.byte_range() {
+                    None if whole => ClippedAnchor::Line(line),
+                    Some((anchor_start, anchor_end))
+                        if whole || anchor_wholly_inside(anchor_start, anchor_end, from, to) =>
+                    {
+                        ClippedAnchor::Range {
+                            start: anchor_start - from + base,
+                            end: anchor_end - from + base,
+                        }
+                    }
+                    _ => continue,
+                };
+                annotations.push(ClippedAnnotation {
+                    kind: annotation.kind,
+                    body: annotation.body.clone(),
+                    at,
+                });
+                taken.push(annotation.id);
+            }
+            let words = block.text.get(from..to).unwrap_or("");
+            line += words.matches('\n').count();
+            text.push_str(words);
         }
-        Some(Clipped {
+        let clipped = Clipped {
             text,
             spans,
             from: self.link_base(),
-        })
+            annotations,
+        };
+        Some((clipped, taken))
+    }
+
+    /// What's selected, as [`Session::clipped`] has it, taken out of the document as one step.
+    /// Whatever goes with it goes from here, so a block whose words are all cut loses its
+    /// marginal too. `None` when nothing is selected.
+    pub fn cut(&mut self) -> Option<Clipped> {
+        let (clipped, taken) = self.clipping()?;
+        self.as_one_step(|session| {
+            if session.save_failed || !session.delete_selected() {
+                return false;
+            }
+            // A delete leaves what's on a block it empties without deleting it.
+            let left: Vec<AnnotationId> = session
+                .document()
+                .annotations
+                .iter()
+                .filter(|annotation| taken.contains(&annotation.id))
+                .map(|annotation| annotation.id)
+                .collect();
+            left.into_iter().all(|id| {
+                let result = session.editor.remove_annotation(id);
+                session.commit(result)
+            })
+        });
+        Some(clipped)
+    }
+
+    /// Makes every edit `edit` makes one step of the history.
+    fn as_one_step(&mut self, edit: impl FnOnce(&mut Session) -> bool) -> bool {
+        self.editor.begin_step();
+        let done = edit(self);
+        self.editor.end_step();
+        done
     }
 
     /// The blocks a Tab acts on: those the selection touches, or the caret's. A selection
@@ -2049,22 +2130,14 @@ impl Session {
         self.commit(result)
     }
 
-    /// Inserts pasted text one line per block: each newline becomes a
-    /// paragraph break, so the block model keeps its one-paragraph invariant.
-    /// [`Session::paste`], keeping the formatting of `clipped`, what kame last copied, if that's
-    /// what's being pasted. The clipboard itself is the system's and holds only text, so anything
-    /// copied elsewhere since will differ, and goes in as text.
+    /// [`Session::paste`], keeping the formatting and annotations of `clipped`, what kame last
+    /// copied, if that's what's being pasted. The clipboard itself is the system's and holds only
+    /// text, so anything copied elsewhere since will differ, and goes in as text.
     pub fn paste_clipped(&mut self, text: &str, clipped: Option<&Clipped>) -> bool {
         let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
         let Some(clipped) = clipped.filter(|clipped| clipped.text == normalised) else {
             return self.paste(text);
         };
-        if self.save_failed {
-            return false;
-        }
-        if self.selection.is_some() && !self.delete_selected() {
-            return false;
-        }
         // A relative link has to lead to the same place from here.
         let here = self.link_base();
         let moved: Vec<Span> = clipped
@@ -2087,22 +2160,68 @@ impl Session {
                 }
             })
             .collect();
-        let caret = self.valid_caret();
-        let verbatim = self
-            .block_index(caret.block_id)
-            .is_some_and(|index| self.document().blocks[index].kind.is_verbatim());
-        if verbatim {
-            return self.insert_styled(&normalised, &moved);
+        self.as_one_step(|session| session.paste_lines(&normalised, &moved, &clipped.annotations))
+    }
+
+    /// Inserts pasted text one line per block, as one step: each newline becomes a paragraph
+    /// break, so the block model keeps its one-paragraph invariant.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.as_one_step(|session| session.paste_lines(&normalised, &[], &[]))
+    }
+
+    /// Puts `text` in at the caret, over any selection, one line a block, with `spans` and
+    /// `annotations` on it, their offsets being into `text`. Returns whether it changed anything,
+    /// stopping at an edit that fails.
+    fn paste_lines(
+        &mut self,
+        text: &str,
+        spans: &[Span],
+        annotations: &[ClippedAnnotation],
+    ) -> bool {
+        if self.save_failed {
+            return false;
         }
-        let mut changed = false;
+        let (depth, _) = self.history();
+        if self.selection.is_some() && !self.delete_selected() {
+            return false;
+        }
+        // A verbatim block holds line breaks, so what is pasted into one stays in it.
+        let caret = self.valid_caret();
+        let Some(index) = self.block_index(caret.block_id) else {
+            return false;
+        };
+        let verbatim = self.document().blocks[index].kind.is_verbatim();
+        let lines: Vec<&str> = if verbatim {
+            vec![text]
+        } else {
+            text.split('\n').collect()
+        };
+        // The words after the caret go to the last line's block, and so, as for Enter, do the
+        // marginals of a block whose words all come after it.
+        let own_marginals: Vec<AnnotationId> = if lines.len() > 1
+            && caret.offset == 0
+            && !self.document().blocks[index].text.is_empty()
+        {
+            self.document()
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.anchor == Anchor::block(caret.block_id))
+                .map(|annotation| annotation.id)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Where each line's words begin.
+        let mut landed: Vec<Cursor> = Vec::new();
         let mut base = 0;
-        for (index, line) in normalised.split('\n').enumerate() {
-            if index > 0 {
-                changed |= self.split();
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 && !self.split() {
+                return false;
             }
             if !line.is_empty() {
                 let end = base + line.len();
-                let spans: Vec<Span> = moved
+                let spans: Vec<Span> = spans
                     .iter()
                     .filter_map(|span| {
                         let (start, stop) = (span.start.max(base), span.end.min(end));
@@ -2113,39 +2232,71 @@ impl Session {
                         })
                     })
                     .collect();
-                changed |= self.insert_styled(line, &spans);
+                if !self.insert_styled(line, &spans) {
+                    return false;
+                }
             }
+            let caret = self.valid_caret();
+            landed.push(Cursor {
+                block_id: caret.block_id,
+                offset: caret.offset - line.len(),
+            });
             base += line.len() + 1;
         }
-        changed
-    }
-
-    pub fn paste(&mut self, text: &str) -> bool {
-        if self.save_failed {
+        let Some(last) = landed.last().map(|at| at.block_id) else {
             return false;
-        }
-        if self.selection.is_some() && !self.delete_selected() {
-            return false;
-        }
-        let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
-        // A verbatim block holds line breaks, so what is pasted into one stays in it.
-        let caret = self.valid_caret();
-        let verbatim = self
-            .block_index(caret.block_id)
-            .is_some_and(|index| self.document().blocks[index].kind.is_verbatim());
-        if verbatim {
-            return self.insert_as_step(&normalised);
-        }
-        let mut changed = false;
-        for (index, line) in normalised.split('\n').enumerate() {
-            if index > 0 {
-                changed |= self.split();
-            }
-            if !line.is_empty() {
-                changed |= self.insert_as_step(line);
+        };
+        for id in own_marginals {
+            // Enter at the very start of a block has already moved them, if a line began there.
+            let there =
+                self.document().annotations.iter().any(|annotation| {
+                    annotation.id == id && annotation.anchor == Anchor::block(last)
+                });
+            if !there {
+                let moved = self.editor.move_marginal(id, last);
+                if !self.commit(moved) {
+                    return false;
+                }
             }
         }
-        changed
+        // The line an offset into `text` is on, counting from 0.
+        let starts: Vec<usize> = lines
+            .iter()
+            .scan(0, |start, line| {
+                let here = *start;
+                *start += line.len() + 1;
+                Some(here)
+            })
+            .collect();
+        let line_of = |offset: usize| starts.iter().rposition(|start| *start <= offset);
+        for annotation in annotations {
+            let anchor = match annotation.at {
+                ClippedAnchor::Line(line) => {
+                    // A verbatim block takes every line.
+                    let line = if verbatim { 0 } else { line };
+                    landed.get(line).map(|at| Anchor::block(at.block_id))
+                }
+                ClippedAnchor::Range { start, end } => line_of(start).map(|line| {
+                    let at = landed[line];
+                    let end = end.min(starts[line] + lines[line].len());
+                    Anchor::range(
+                        at.block_id,
+                        at.offset + start - starts[line],
+                        at.offset + end - starts[line],
+                    )
+                }),
+            };
+            let Some(anchor) = anchor else {
+                continue;
+            };
+            let added = self
+                .editor
+                .add_annotation(annotation.kind, anchor, &annotation.body);
+            if !self.commit(added) {
+                return false;
+            }
+        }
+        self.history().0 > depth
     }
 
     /// Deletes the word before the caret. A selection goes instead, as it does for
@@ -2727,6 +2878,26 @@ pub struct Clipped {
     pub spans: Vec<Span>,
     /// What its relative links are relative to.
     pub from: PathBuf,
+    /// The notes, footnotes and marginals that go with the words.
+    pub annotations: Vec<ClippedAnnotation>,
+}
+
+/// A note, footnote or marginal that goes with what was copied. Pasted, it's another with the same
+/// kind and body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClippedAnnotation {
+    pub kind: AnnotationKind,
+    pub body: String,
+    pub at: ClippedAnchor,
+}
+
+/// Where in what was copied an annotation goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClippedAnchor {
+    /// On the block whose words begin this line of them, counting from 0.
+    Line(usize),
+    /// On these words, by their offsets.
+    Range { start: usize, end: usize },
 }
 
 /// A link in a block, stored or bare.
@@ -7847,6 +8018,358 @@ mod tests {
         other.paste(&copied);
         assert_eq!(other.document().blocks.len(), 2);
         assert_eq!(other.document().blocks[1].text, "second");
+    }
+
+    /// "one", "two words here" and "three", the second with a marginal, a note on "words" and a
+    /// footnote on "here".
+    fn annotated() -> Session {
+        let mut session = open(&temp_db_path());
+        session.insert("one");
+        session.split();
+        session.insert("two words here");
+        session.split();
+        session.insert("three");
+        let middle = session.document().blocks[1].id;
+        session.set_caret(Cursor {
+            block_id: middle,
+            offset: 0,
+        });
+        let marginal = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.set_annotation_body(marginal, "in the margin"));
+        select_range(&mut session, middle, 4, 9);
+        let note = session.add_annotation(AnnotationKind::Note).unwrap();
+        assert!(session.set_annotation_body(note, "a note"));
+        select_range(&mut session, middle, 10, 14);
+        let footnote = session.add_annotation(AnnotationKind::Footnote).unwrap();
+        assert!(session.set_annotation_body(footnote, "a footnote"));
+        session.set_caret(Cursor {
+            block_id: middle,
+            offset: 0,
+        });
+        session
+    }
+
+    fn block_texts(session: &Session) -> Vec<&str> {
+        let blocks = &session.document().blocks;
+        blocks.iter().map(|block| block.text.as_str()).collect()
+    }
+
+    /// What's anchored in the block at `index`: its kind, the words it's on, which a marginal
+    /// has none of, and what it says.
+    fn annotations_of(session: &Session, index: usize) -> Vec<(AnnotationKind, String, String)> {
+        let document = session.document();
+        let block = &document.blocks[index];
+        let mut found: Vec<_> = document
+            .annotations
+            .iter()
+            .filter(|annotation| annotation.anchor.block_id() == block.id)
+            .map(|annotation| {
+                let words = annotation
+                    .anchor
+                    .byte_range()
+                    .map_or("", |(start, end)| &block.text[start..end]);
+                (annotation.kind, words.to_string(), annotation.body.clone())
+            })
+            .collect();
+        found.sort_by(|a, b| a.2.cmp(&b.2));
+        found
+    }
+
+    /// What `annotated` puts on its second block.
+    fn carried() -> Vec<(AnnotationKind, String, String)> {
+        vec![
+            (AnnotationKind::Footnote, "here".into(), "a footnote".into()),
+            (AnnotationKind::Note, "words".into(), "a note".into()),
+            (
+                AnnotationKind::Marginal,
+                String::new(),
+                "in the margin".into(),
+            ),
+        ]
+    }
+
+    /// Whether two documents are the same, whatever order their annotations are listed in, which
+    /// an undo can change.
+    fn same(a: &Document, b: &Document) -> bool {
+        let sorted = |document: &Document| {
+            let mut document = document.clone();
+            document.annotations.sort_by_key(|annotation| annotation.id);
+            document
+        };
+        sorted(a) == sorted(b)
+    }
+
+    fn caret_at(session: &mut Session, index: usize, offset: usize) {
+        let block_id = session.document().blocks[index].id;
+        session.set_caret(Cursor { block_id, offset });
+    }
+
+    #[test]
+    fn a_whole_block_cut_and_pasted_takes_its_annotations_along() {
+        let mut session = annotated();
+        let path = session.path().unwrap().to_path_buf();
+        let before = session.document().clone();
+        let (depth, _) = session.history();
+        select(&mut session, (1, 0), (2, 0));
+        let clipped = session.cut().unwrap();
+        assert_eq!(clipped.text, "two words here\n");
+        assert_eq!(block_texts(&session), ["one", "three"]);
+        assert!(session.document().annotations.is_empty());
+        let cut = session.document().clone();
+
+        caret_at(&mut session, 0, 0);
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(block_texts(&session), ["two words here", "one", "three"]);
+        assert_eq!(annotations_of(&session, 0), carried());
+        assert_eq!(session.document().annotations.len(), 3);
+        assert_eq!(
+            session.history().0,
+            depth + 2,
+            "one step to cut, one to paste"
+        );
+        let pasted = session.document().clone();
+
+        assert!(session.undo());
+        assert!(same(session.document(), &cut));
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+        assert!(session.redo());
+        assert!(same(session.document(), &cut));
+        assert!(session.redo());
+        assert!(same(session.document(), &pasted));
+
+        // The file has the same history.
+        drop(session);
+        let mut reopened = open(&path);
+        assert!(same(reopened.document(), &pasted));
+        assert!(reopened.undo());
+        assert!(reopened.undo());
+        assert!(same(reopened.document(), &before));
+        assert!(reopened.redo());
+        assert!(reopened.redo());
+        assert!(same(reopened.document(), &pasted));
+    }
+
+    #[test]
+    fn a_copied_block_pasted_gets_annotations_of_its_own() {
+        let mut session = annotated();
+        let originals = session.document().annotations.clone();
+        select(&mut session, (1, 0), (2, 0));
+        let clipped = session.clipped().unwrap();
+        caret_at(&mut session, 0, 0);
+        let before = session.document().clone();
+        let (depth, _) = session.history();
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(
+            block_texts(&session),
+            ["two words here", "one", "two words here", "three"]
+        );
+        assert_eq!(annotations_of(&session, 0), carried());
+        assert_eq!(annotations_of(&session, 2), carried());
+        for original in &originals {
+            assert!(session.document().annotations.contains(original));
+        }
+        let ids: std::collections::HashSet<AnnotationId> = session
+            .document()
+            .annotations
+            .iter()
+            .map(|annotation| annotation.id)
+            .collect();
+        assert_eq!(ids.len(), 6, "the copies have ids of their own");
+        assert_eq!(session.history().0, depth + 1);
+        let pasted = session.document().clone();
+
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+        assert!(session.redo());
+        assert!(same(session.document(), &pasted));
+    }
+
+    #[test]
+    fn a_block_pasted_into_a_paragraph_brings_its_annotations_to_where_its_words_land() {
+        let mut session = annotated();
+        select(&mut session, (1, 0), (2, 0));
+        let clipped = session.clipped().unwrap();
+        caret_at(&mut session, 2, 3);
+        let before = session.document().clone();
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(
+            block_texts(&session),
+            ["one", "two words here", "thrtwo words here", "ee"]
+        );
+        assert_eq!(annotations_of(&session, 2), carried());
+        assert!(annotations_of(&session, 3).is_empty());
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+
+        // A whole block as the last line joins the start of what follows the caret.
+        select(&mut session, (0, 1), (1, 14));
+        let clipped = session.clipped().unwrap();
+        assert_eq!(clipped.text, "ne\ntwo words here");
+        caret_at(&mut session, 2, 3);
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(
+            block_texts(&session),
+            ["one", "two words here", "thrne", "two words hereee"]
+        );
+        assert!(annotations_of(&session, 2).is_empty());
+        assert_eq!(annotations_of(&session, 3), carried());
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+    }
+
+    #[test]
+    fn a_block_pasted_at_the_start_of_a_paragraph_leaves_that_paragraphs_marginal_on_its_words() {
+        let mut session = annotated();
+        caret_at(&mut session, 2, 0);
+        let own = session.add_annotation(AnnotationKind::Marginal).unwrap();
+        assert!(session.set_annotation_body(own, "on three"));
+        select(&mut session, (1, 0), (2, 0));
+        let clipped = session.clipped().unwrap();
+        caret_at(&mut session, 2, 0);
+        let before = session.document().clone();
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(
+            block_texts(&session),
+            ["one", "two words here", "two words here", "three"]
+        );
+        assert_eq!(annotations_of(&session, 2), carried());
+        assert_eq!(
+            annotations_of(&session, 3),
+            [(AnnotationKind::Marginal, String::new(), "on three".into())]
+        );
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+    }
+
+    #[test]
+    fn a_note_goes_with_a_paste_only_when_all_of_it_was_copied() {
+        let mut session = annotated();
+        select(&mut session, (1, 6), (1, 12));
+        let clipped = session.clipped().unwrap();
+        assert_eq!(clipped.text, "rds he");
+        caret_at(&mut session, 2, 5);
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(session.document().annotations.len(), 3, "nothing more");
+
+        let mut session = annotated();
+        select(&mut session, (1, 4), (1, 9));
+        let clipped = session.clipped().unwrap();
+        caret_at(&mut session, 2, 5);
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(
+            annotations_of(&session, 2),
+            [(AnnotationKind::Note, "words".into(), "a note".into())]
+        );
+        assert_eq!(annotations_of(&session, 1), carried());
+
+        // A cut moves the note, and leaves the footnote it reached only part of.
+        let mut session = annotated();
+        let before = session.document().clone();
+        select(&mut session, (1, 4), (1, 12));
+        let clipped = session.cut().unwrap();
+        assert_eq!(block_texts(&session), ["one", "two re", "three"]);
+        assert_eq!(
+            annotations_of(&session, 1),
+            [
+                (AnnotationKind::Footnote, "re".into(), "a footnote".into()),
+                (
+                    AnnotationKind::Marginal,
+                    String::new(),
+                    "in the margin".into()
+                ),
+            ]
+        );
+        caret_at(&mut session, 0, 3);
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(
+            annotations_of(&session, 0),
+            [(AnnotationKind::Note, "words".into(), "a note".into())]
+        );
+        assert!(session.undo());
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+    }
+
+    #[test]
+    fn cutting_all_of_a_blocks_words_takes_its_marginal_along() {
+        let mut session = annotated();
+        let before = session.document().clone();
+        select(&mut session, (1, 0), (1, 14));
+        let clipped = session.cut().unwrap();
+        assert_eq!(block_texts(&session), ["one", "", "three"]);
+        assert!(
+            session.document().annotations.is_empty(),
+            "the emptied block keeps nothing"
+        );
+        let cut = session.document().clone();
+
+        caret_at(&mut session, 2, 5);
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(block_texts(&session), ["one", "", "threetwo words here"]);
+        assert_eq!(annotations_of(&session, 2), carried());
+        let pasted = session.document().clone();
+
+        assert!(session.undo());
+        assert!(same(session.document(), &cut));
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+        assert!(session.redo());
+        assert!(same(session.document(), &cut));
+        assert!(session.redo());
+        assert!(same(session.document(), &pasted));
+    }
+
+    #[test]
+    fn a_paste_over_a_selection_is_one_step_with_its_annotations() {
+        let mut session = annotated();
+        select(&mut session, (1, 0), (2, 0));
+        let clipped = session.clipped().unwrap();
+        let before = session.document().clone();
+        let (depth, _) = session.history();
+        select(&mut session, (2, 0), (2, 5));
+        assert!(session.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(
+            block_texts(&session),
+            ["one", "two words here", "two words here", ""]
+        );
+        assert_eq!(annotations_of(&session, 2), carried());
+        assert_eq!(session.history().0, depth + 1);
+        let pasted = session.document().clone();
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+        assert!(session.redo());
+        assert!(same(session.document(), &pasted));
+    }
+
+    #[test]
+    fn text_from_elsewhere_pastes_with_no_annotations_as_one_step() {
+        let mut session = annotated();
+        select(&mut session, (1, 0), (2, 0));
+        let clipped = session.clipped().unwrap();
+        caret_at(&mut session, 2, 5);
+        let before = session.document().clone();
+        let (depth, _) = session.history();
+        assert!(session.paste_clipped("two words here\nmore", Some(&clipped)));
+        assert_eq!(session.document().annotations.len(), 3);
+        assert_eq!(session.history().0, depth + 1);
+        assert!(session.undo());
+        assert!(same(session.document(), &before));
+        assert!(session.paste_clipped(&clipped.text, None));
+        assert_eq!(session.document().annotations.len(), 3);
+    }
+
+    #[test]
+    fn annotations_go_with_a_paste_into_another_document() {
+        let mut source = annotated();
+        let unchanged = source.document().clone();
+        select(&mut source, (1, 0), (2, 0));
+        let clipped = source.clipped().unwrap();
+        let mut other = Session::anonymous().unwrap();
+        assert!(other.paste_clipped(&clipped.text, Some(&clipped)));
+        assert_eq!(block_texts(&other), ["two words here", ""]);
+        assert_eq!(annotations_of(&other, 0), carried());
+        assert!(same(source.document(), &unchanged));
     }
 
     #[test]

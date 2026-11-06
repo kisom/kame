@@ -84,7 +84,7 @@ Formatting applies as you type, and undoes as one step.
 - `---` then Enter is a horizontal rule.
 - Three backticks then Enter starts a code block, and you can put a language straight after them. Press Enter on a blank last line to leave it.
 - `| ` at the start of a line starts a prose block, for poetry or anything else whose line breaks and spacing should stand exactly as typed. It leaves the same way as a code block.
-- `[words](https://example.com)` is a link. So is Ctrl-K on a selection, which also lets you change the words: left empty, they show the address, and an empty address removes the link. Right-click a link to open it, copy it or edit it. Cutting or copying within kame keeps links and formatting when you paste, even in another document, and a relative link still leads to the same place from there.
+- `[words](https://example.com)` is a link. So is Ctrl-K on a selection, which also lets you change the words: left empty, they show the address, and an empty address removes the link. Right-click a link to open it, copy it or edit it. Cutting or copying within kame keeps links, formatting and annotations when you paste, even in another document, and a relative link still leads to the same place from there.
 
 The right-click menu changes the kind of the block under the caret, adds annotations, and has Insert image…, which asks for a file and shows the picture at its own size, or at the body's width if it's wider. Right-click a picture for Align, to put it at the left, center or right of its line. It's on a line of its own, whichever you choose, and Markdown exports leave the alignment out. "Where to put papers and images" below says where the file ends up.
 
@@ -100,7 +100,7 @@ These are the reason for kame's name. Each attaches to the selection, or to the 
 - A **marginal** (Ctrl-Shift-M) sits in the margin beside its paragraph. It publishes in HTML, and is left out of Markdown, which has nowhere to put it.
 - A **footnote** (Ctrl-Shift-F) is numbered and collected at the foot of the page, and publishes in both formats. Its selection grows to whole words.
 
-Adding one opens a small box for its words, and Escape closes that box. Click a note's marker to open it again, or a footnote's words to edit them. The box has a Remove button. Clicking a footnote's number moves between the footnote and its place in the text. To move a marginal to another paragraph, put the caret there, right-click the marginal and choose Move to the caret's block. One undo puts it back.
+Adding one opens a small box for its words, and Escape closes that box. Click a note's marker to open it again, or a footnote's words to edit them. The box has a Remove button. Clicking a footnote's number moves between the footnote and its place in the text. To move a marginal to another paragraph, put the caret there, right-click the marginal and choose Move to the caret's block. One undo puts it back. Cutting and pasting a passage takes its notes and footnotes along, and its paragraph's marginal if you cut the whole paragraph. Copying gives the pasted words copies of their own. A note on words only partly copied stays where it was.
 
 ## Getting around and keeping focus
 

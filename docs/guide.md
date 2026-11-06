@@ -69,7 +69,7 @@ kame notes.md       # import Markdown as a new, unsaved document
 
 Each window holds one document, and opening another replaces it. A second kame started while one is running begins empty, so that two windows don't overwrite each other's edits on one file. A document remembers where your caret and scroll position were.
 
-The menus are File, Annotate, View and Help, and F1 shows a short list of keys. On Linux, Alt-F, Alt-A, Alt-V and Alt-H open the menus from the keyboard.
+The menus are File, Edit, Annotate, View and Help, with Site in a notebook, and F1 shows a short list of keys. The Edit menu holds the editing keys, from Undo and Paste to the headings, Link… and moving a list item, each doing what its key does. On Linux, Alt-F, Alt-E, Alt-A, Alt-V and Alt-H open the menus from the keyboard, and Alt-S the Site menu.
 
 File > Document Properties holds the title, author, dates and tags. A document with no title goes by its file's name.
 

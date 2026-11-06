@@ -326,8 +326,19 @@ there is one.
 ## The menu bar and status row
 
 The menu bar holds every command with its shortcut: File (open, save, import,
-export, snapshots, document properties, and the document's counts), Annotate, View (type size,
+export, snapshots, document properties, and the document's counts), Edit, Annotate, View (type size,
 interface text, dark mode, hyphenation, spelling, a notebook's commands and the view modes) and Help.
+
+The Edit menu has Undo and Redo; Cut, Copy, Paste and Select All; Find; Heading 1, 2 and 3 and
+Body Text; Link…; and Move Item Up, Move Item Down, Indent Item and Outdent Item. Each does what its
+key does, so Cut, Copy and Paste carry kame's own formatting, notes and links as Ctrl-X, Ctrl-C and
+Ctrl-V do, and Select All takes the caret's block, then the whole document. What can't act is greyed
+out: Undo or Redo with nothing to do, Cut and Copy with nothing selected, Link… with no words chosen
+and no link under the caret, and the list items' commands outside a list. Only the system knows
+whether there's anything to paste, so Paste can always be chosen, unless the document can't be
+changed: in one that's read-only because a newer kame wrote it, or whose last save failed until it's
+retried, everything that would change it is greyed out, as its keys are refused, and Copy, Select
+All and Find still work.
 
 The View menu's first two rows are the type size and the interface's text, each with buttons to
 step it that leave the menu open, so either can be walked to taste. The interface text goes from 80%
@@ -335,7 +346,7 @@ to 200% in steps of 10%, and Reset puts it back at 100%, as egui draws it. Both 
 kept for the next launch, and neither is kept in a document. The page and its margin, and what
 links here below them, follow the type size, and everything else follows the interface text.
 
-On Linux, Alt-F, Alt-A, Alt-V, Alt-S (in a notebook) and Alt-H open those menus; arrows and Enter then
+On Linux, Alt-F, Alt-E, Alt-A, Alt-V, Alt-S (in a notebook) and Alt-H open those menus; arrows and Enter then
 choose an item, and Escape closes it. There are no such chords on macOS, where
 Option plus a letter types a character. The document takes no keystrokes while a
 menu is open.

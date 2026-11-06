@@ -83,7 +83,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/publish.rs` — the app's Site menu, on `kame-site`.
 
-`src/commands.rs` — the menu bar's commands, in the one list the menus and the command palette (Ctrl-P) both draw from, and the palette.
+`src/commands.rs` — the menu bar's commands, in the one list the menus and the command palette (Ctrl-P) both draw from, the Edit menu's, which run what their keys do, and the palette.
 
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.
 

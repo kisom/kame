@@ -6486,6 +6486,8 @@ impl KameApp {
             .save_as(path, root, kame_sync::logs::names_logs_only)
         {
             Ok(()) => {
+                // They're kept by the paths the document held, which led from where it was.
+                self.image_textures.clear();
                 self.notice = Some(format!("saved {}", path.display()));
                 if close_after {
                     self.finish_close(ctx);
@@ -9484,6 +9486,32 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         page.app.follow_document_link(&target);
         assert_eq!(page.app.session.path(), Some(picked.as_path()));
         assert!(!root.join("three/two").exists());
+    }
+
+    #[test]
+    fn a_save_as_forgets_the_images_it_had_drawn() {
+        let root = kame_test_dir::folder("app-images-save-as")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("three")).unwrap();
+        image::RgbaImage::new(1, 1)
+            .save(root.join("one/plate.png"))
+            .unwrap();
+        let mut session = open(&root.join("one/a.kame"));
+        session.insert("x");
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+        assert!(page.app.image_texture_handle(&ctx, "plate.png").is_some());
+        assert_eq!(page.app.image_textures.len(), 1);
+
+        page.app.save_to(&ctx, &root.join("three/a.kame"), false);
+
+        assert_eq!(
+            page.app.session.path(),
+            Some(root.join("three/a.kame").as_path())
+        );
+        assert!(page.app.image_textures.is_empty());
     }
 
     #[test]

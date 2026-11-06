@@ -194,6 +194,24 @@ fn undoing_that_merge_gives_the_file_as_it_arrived() {
     assert_eq!(new.document(), &arrived);
 }
 
+/// What's on the screen of a document from a newer version may be only a view, leaving out what
+/// this build doesn't know, so it's never merged into the file that replaced it.
+#[test]
+fn a_view_of_a_newer_document_is_not_merged_with_the_file_that_replaced_it() {
+    let (path, other) = with_copy();
+    edit_file(&other, 1, 1, " grand");
+    let mut old = Session::open(&path).unwrap();
+    edit(&mut old, 0, 1, " fine");
+    std::fs::rename(&other, &path).unwrap();
+    old.check_file();
+    // As a view is: read-only and leaving something out.
+    old.mark_newer();
+    old.lossy = true;
+    let before = std::fs::read(&path).unwrap();
+    assert!(merge_replaced(&old).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 #[test]
 fn a_file_gone_altogether_cannot_be_merged_with() {
     let (path, _) = with_copy();

@@ -271,7 +271,13 @@ pub fn merge_copy_into(session: &mut Session, copy: &Path) -> Result<MergedIn> {
 /// Merges what an open session holds with the file that replaced its own, returning a session on
 /// that file with the merge as its last undo step. `old` still has the words if this fails, and
 /// it is for the caller to drop it.
+///
+/// A view of a newer version's document ([`Session::lossy`]) isn't merged: it leaves out what this
+/// build doesn't know, which the merge would then take out of the file.
 pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
+    if old.lossy {
+        return Err("this document has changes from a newer version of kame".into());
+    }
     let path = old.path().ok_or("this document has no file")?.to_path_buf();
     // Opening a missing path would create a document there.
     if !path.is_file() {

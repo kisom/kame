@@ -687,6 +687,8 @@ impl Session {
             .file_name()
             .ok_or("the path does not name a file")?
             .to_string_lossy();
+        // A Save As onto its own file, above, writes no copy and sweeps nothing.
+        clear_abandoned_copies(path.parent().unwrap_or(Path::new(".")));
         let partial = path.with_file_name(format!(".{name}.saving-{}", uuid::Uuid::new_v4()));
         // Replacing a file must not widen who can read it, and a private document
         // stays private under a new name. The copy is private from the moment it
@@ -3156,6 +3158,61 @@ pub fn default_mode(directory: &Path) -> u32 {
     mode
 }
 
+/// How long the leftovers of a Save As have to lie untouched before the next one removes them, so
+/// that no other kame can still be writing them.
+const COPY_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The name of the copy a Save As made, without any `-wal` or `-shm` after it, if `name` is one:
+/// hidden, then `.saving-` and a UUID.
+fn copy_base_name(name: &str) -> Option<&str> {
+    let base = ["-wal", "-shm"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    let (_, uuid) = base.rsplit_once(".saving-")?;
+    (base.starts_with('.') && uuid::Uuid::parse_str(uuid).is_ok()).then_some(base)
+}
+
+/// Removes the copies an interrupted Save As left in `folder`: hidden files named as
+/// [`Session::save_as`] names its copy, with the `-wal` and `-shm` of each. A copy is removed only
+/// when every file of it is a plain file not touched for a day, as SQLite may write only the
+/// `-wal` while a copy is being made. Only `folder` is looked in. A file that can't be removed is
+/// left for next time, and nothing here fails.
+fn clear_abandoned_copies(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    // Each copy's files, and whether all are old plain files.
+    let mut copies: HashMap<String, (Vec<PathBuf>, bool)> = HashMap::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(base) = copy_base_name(&name) else {
+            continue;
+        };
+        let stale = entry
+            .path()
+            .symlink_metadata()
+            .ok()
+            .filter(|metadata| metadata.file_type().is_file())
+            .and_then(|metadata| metadata.modified().ok())
+            .is_some_and(|modified| {
+                now.duration_since(modified)
+                    .is_ok_and(|age| age >= COPY_STALE_AFTER)
+            });
+        let copy = copies.entry(base.to_string()).or_default();
+        copy.0.push(entry.path());
+        copy.1 = (copy.0.len() == 1 || copy.1) && stale;
+    }
+    for (files, stale) in copies.into_values() {
+        if stale {
+            for file in files {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+    }
+}
+
 fn known_mode(path: &Path) -> Result<Option<u32>, ()> {
     mode_from(std::fs::metadata(path))
 }
@@ -3616,6 +3673,138 @@ mod tests {
         let dir = crate::test_temp_dir().join(format!("kame-gui-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("doc.kame")
+    }
+
+    fn age(path: &Path, by: std::time::Duration) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - by)
+            .unwrap();
+    }
+
+    const DAYS: std::time::Duration = std::time::Duration::from_secs(2 * 24 * 60 * 60);
+    const UUID: &str = "67e55044-10b1-426f-9247-bb680e5fe0c8";
+
+    fn make(folder: &Path, name: &str, old: bool) -> PathBuf {
+        let path = folder.join(name);
+        std::fs::write(&path, b"x").unwrap();
+        if old {
+            age(&path, DAYS);
+        }
+        path
+    }
+
+    fn folder() -> PathBuf {
+        temp_db_path().parent().unwrap().to_path_buf()
+    }
+
+    #[test]
+    fn an_old_abandoned_copy_with_its_wal_and_shm_is_cleared() {
+        let dir = folder();
+        let names = [
+            format!(".a.kame.saving-{UUID}"),
+            format!(".b.saving-{UUID}-wal"),
+        ];
+        let files: Vec<_> = names.iter().map(|n| make(&dir, n, true)).collect();
+        let shm = make(&dir, &format!(".a.kame.saving-{UUID}-shm"), true);
+        clear_abandoned_copies(&dir);
+        assert!(files.iter().all(|f| !f.exists()) && !shm.exists());
+    }
+
+    #[test]
+    fn a_young_copy_stays() {
+        let dir = folder();
+        let main = make(&dir, &format!(".a.kame.saving-{UUID}"), false);
+        clear_abandoned_copies(&dir);
+        assert!(main.exists());
+    }
+
+    #[test]
+    fn a_copy_whose_wal_is_young_stays_whole() {
+        let dir = folder();
+        let main = make(&dir, &format!(".a.kame.saving-{UUID}"), true);
+        let shm = make(&dir, &format!(".a.kame.saving-{UUID}-shm"), true);
+        let wal = make(&dir, &format!(".a.kame.saving-{UUID}-wal"), false);
+        clear_abandoned_copies(&dir);
+        assert!(main.exists() && shm.exists() && wal.exists());
+    }
+
+    #[test]
+    fn a_young_main_file_keeps_an_old_wal() {
+        let dir = folder();
+        let main = make(&dir, &format!(".a.kame.saving-{UUID}"), false);
+        let wal = make(&dir, &format!(".a.kame.saving-{UUID}-wal"), true);
+        clear_abandoned_copies(&dir);
+        assert!(main.exists() && wal.exists());
+    }
+
+    #[test]
+    fn a_lone_old_wal_is_cleared() {
+        let dir = folder();
+        let wal = make(&dir, &format!(".a.kame.saving-{UUID}-wal"), true);
+        clear_abandoned_copies(&dir);
+        assert!(!wal.exists());
+    }
+
+    #[test]
+    fn a_symbolic_link_or_folder_with_a_copys_name_stays() {
+        use std::os::unix::fs::symlink;
+        let dir = folder();
+        let target = make(&dir, "precious.txt", true);
+        let link = dir.join(format!(".a.kame.saving-{UUID}"));
+        symlink(&target, &link).unwrap();
+        let plain = make(&dir, &format!(".a.kame.saving-{UUID}-wal"), true);
+        let other = dir.join(format!(".b.kame.saving-{UUID}"));
+        std::fs::create_dir(&other).unwrap();
+        let inside = make(&other, "inner", true);
+        clear_abandoned_copies(&dir);
+        assert!(link.symlink_metadata().is_ok() && target.exists());
+        assert!(plain.exists(), "a link in the group keeps the group");
+        assert!(other.is_dir() && inside.exists());
+    }
+
+    #[test]
+    fn names_that_are_almost_a_copys_stay() {
+        let dir = folder();
+        let names = [
+            format!("a.kame.saving-{UUID}"),
+            ".a.kame.saving-not-a-uuid".to_string(),
+            ".a.kame.saving-".to_string(),
+            format!(".a.kame.saving-{UUID}.bak"),
+            format!(".a.kame.saving-{UUID}-journal"),
+        ];
+        let files: Vec<_> = names.iter().map(|n| make(&dir, n, true)).collect();
+        clear_abandoned_copies(&dir);
+        assert!(files.iter().all(|f| f.exists()));
+    }
+
+    #[test]
+    fn a_subfolder_is_not_swept() {
+        let dir = folder();
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let file = make(&sub, &format!(".a.kame.saving-{UUID}"), true);
+        clear_abandoned_copies(&dir);
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn a_save_as_clears_old_copies_and_leaves_its_own_and_the_target() {
+        let target = temp_db_path();
+        let dir = target.parent().unwrap().to_path_buf();
+        let old = make(&dir, &format!(".doc.kame.saving-{UUID}"), true);
+        let young = make(
+            &dir,
+            &format!(".doc.kame.saving-{}-wal", uuid::Uuid::new_v4()),
+            false,
+        );
+        let mut session = Session::anonymous().unwrap();
+        session.insert("words");
+        session.save_as(&target, None, |_, _| false).unwrap();
+        assert!(!old.exists());
+        assert!(young.exists());
+        assert!(target.exists());
+        drop(session);
+        assert_eq!(open(&target).document().blocks[0].text, "words");
     }
 
     fn open(path: &Path) -> Session {

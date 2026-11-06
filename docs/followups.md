@@ -10,10 +10,6 @@ Found while writing `docs/spec/`, most pressing first. Each spec's last section 
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.
 
-- [ ] **A crash during a Save As leaves its hidden copy.** The `.NAME.saving-UUID` beside the target, and once the copy is open for
-  saying its paths again its `-wal` and `-shm` too, stay after a crash, and nothing sweeps them, as references' `.saving-` files are.
-  No words are lost, and the names can't pair a log with the wrong file, but each is a whole private copy of the document.
-
 ## Notebook
 
 Built as a proof of concept. See section 13 of `docs/superpowers/specs/2026-11-03-notebook-design.md`.

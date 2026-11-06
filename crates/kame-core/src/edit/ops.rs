@@ -223,8 +223,9 @@ impl Op {
     /// block, and the notes a delete took, which lie in the text it took.
     ///
     /// Anything given against a block's text at some point in history that the op doesn't carry
-    /// is left as it is: a delete's old spans and the notes it cut short, the spans `SetSpans`
-    /// sets, and the note `AddAnnotation` and `RemoveAnnotation` carry.
+    /// is left as it is here, and fitted to the document when it's applied ([`apply`]): a delete's
+    /// old spans and the notes it cut short, the spans `SetSpans` sets, and the note
+    /// `AddAnnotation` adds.
     pub fn fit_offsets(&mut self) {
         match self {
             Op::ReplaceDocument { old, new } => {
@@ -533,7 +534,9 @@ pub fn apply_inverse(doc: &mut Document, op: &Op) {
         ..
     } = op
     {
-        block_mut(doc, *block_id).spans = spans.clone();
+        let block = block_mut(doc, *block_id);
+        block.spans = spans.clone();
+        block.fit_spans();
     }
     let restore: &[Annotation] = match op {
         Op::DeleteBlock { annotations, .. } => annotations,
@@ -550,8 +553,9 @@ pub fn apply_inverse(doc: &mut Document, op: &Op) {
     }
     if let Op::DeleteText { clipped, .. } = op {
         for was in clipped {
+            let anchor = fitted_to(doc, was).anchor;
             if let Some(annotation) = doc.annotations.iter_mut().find(|note| note.id == was.id) {
-                annotation.anchor = was.anchor.clone();
+                annotation.anchor = anchor;
             }
         }
     }
@@ -719,11 +723,14 @@ pub fn apply(doc: &mut Document, op: &Op) {
         }
         // Unlike the removal payloads, nothing is lost if `old_spans` is out of step:
         // spans are only formatting, and history written by older versions can drift
-        // from them. That isn't worth stopping the editor for.
+        // from them. That isn't worth stopping the editor for. They're fitted to the
+        // text, as on reading, since a damaged history can set some that don't fit.
         Op::SetSpans {
             block_id, spans, ..
         } => {
-            block_mut(doc, *block_id).spans = spans.clone();
+            let block = block_mut(doc, *block_id);
+            block.spans = spans.clone();
+            block.fit_spans();
         }
         // Fitted to the block it lands in, as a note read from a file is: a damaged history can
         // add one that doesn't fit, and a later delete is read expecting it fitted.

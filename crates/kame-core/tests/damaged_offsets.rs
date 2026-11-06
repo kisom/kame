@@ -409,3 +409,59 @@ fn a_damaged_note_added_and_deleted_with_its_block_redoes_both() {
     now.annotations.clear();
     add_delete_undo_both_redo_both("added-deleted-block", &was, delete, &now);
 }
+
+/// A delete recorded against damaged text, cutting a note short that started inside "é", with the
+/// bold it cut ending inside it too. Undo gives back the note and the bold as they were, and they
+/// fit as what was read does.
+#[test]
+fn undoing_a_cut_into_damaged_text_gives_back_what_fits() {
+    let path = file("cut");
+    let mut was = Document::new("Damaged");
+    was.blocks = vec![paragraph(CAFE, vec![span(0, 4, SpanStyle::Bold)])];
+    let note = annotation(AnnotationKind::Note, &was.blocks[0], 4, 8);
+    was.annotations = vec![note.clone()];
+    let block_id = was.blocks[0].id;
+    let delete = Op::DeleteText {
+        block_id,
+        start: 6,
+        end: CAFE.len(),
+        text: CAFE[6..].to_string(),
+        removed: Vec::new(),
+        old_spans: Some(was.blocks[0].spans.clone()),
+        clipped: vec![note],
+    };
+    let mut now = was.clone();
+    now.blocks[0].text = CAFE[..6].to_string();
+    now.annotations[0].anchor = Anchor::range(block_id, 4, 6);
+    Db::open(&path).unwrap().record_edit(&now, &delete).unwrap();
+
+    let mut session = Session::open(&path).unwrap();
+    assert_eq!(anchors_of(session.document()), [(3, 6)]);
+    assert!(session.undo(), "{:?}", session.last_error);
+
+    assert_eq!(session.document().blocks[0].text, CAFE);
+    assert_eq!(spans_of(session.document())[0], [(0, 3)]);
+    assert_eq!(anchors_of(session.document()), [(3, 8)]);
+}
+
+/// Bold set by a damaged history, ending inside "é", fits when redone.
+#[test]
+fn redoing_damaged_formatting_gives_what_fits() {
+    let path = file("formatting");
+    let mut doc = Document::new("Damaged");
+    doc.blocks = vec![paragraph(CAFE, Vec::new())];
+    let bold = vec![span(0, 4, SpanStyle::Bold)];
+    let set = Op::SetSpans {
+        block_id: doc.blocks[0].id,
+        old_spans: Vec::new(),
+        spans: bold.clone(),
+    };
+    doc.blocks[0].spans = bold;
+    Db::open(&path).unwrap().record_edit(&doc, &set).unwrap();
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(session.undo(), "{:?}", session.last_error);
+    assert!(session.redo(), "{:?}", session.last_error);
+
+    assert_eq!(spans_of(session.document())[0], [(0, 3)]);
+}

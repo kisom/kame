@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
+use kame_core::lock::Locks;
 use kame_core::references::{cited, Reference, References};
 use kame_notebook::references::{remove, rename, Open, Renamed};
 use kame_notebook::Notebook;
@@ -70,10 +71,13 @@ impl KameApp {
             old: old.clone(),
             new: new.clone(),
         });
+        // The open document is left out, so this window holds nothing the rename writes into.
+        let folder = crate::locks_folder();
         std::thread::spawn(move || {
             // A document with no file can hold `[old]` too, so the old file is always left here.
             let leaving = open.as_deref().map_or(Open::Unsaved, Open::File);
-            let _ = send.send(rename(&notebook, &old, &new, leaving, &device, now));
+            let locks = Locks::new(folder.as_deref(), None);
+            let _ = send.send(rename(&notebook, &old, &new, leaving, locks, &device, now));
         });
     }
 
@@ -340,6 +344,7 @@ mod tests {
             "knuth1981",
             "plass1981",
             Open::File(&open),
+            Locks::NONE,
             "here-aaaa",
             1_000,
         );
@@ -389,6 +394,7 @@ mod tests {
             "knuth1981",
             "plass1981",
             Open::File(&open),
+            Locks::NONE,
             "here-aaaa",
             1_000,
         );
@@ -699,6 +705,7 @@ mod tests {
             "knuth1981",
             "plass1981",
             Open::File(&open),
+            Locks::NONE,
             "here-aaaa",
             1_000,
         ))

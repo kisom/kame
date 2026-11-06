@@ -119,6 +119,76 @@ impl Drop for DocumentLock {
     }
 }
 
+/// What a write into documents that aren't open here needs to know so as not to write into one
+/// another kame has open: where the locks are kept, and the lock its caller holds already, on the
+/// document it has open, which is never refused. With no folder, nothing is locked or refused.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Locks<'a> {
+    folder: Option<&'a Path>,
+    own: Option<&'a DocumentLock>,
+}
+
+/// The locks taken for a write, held until this is dropped.
+#[derive(Debug, Default)]
+pub struct Holding {
+    locks: Vec<DocumentLock>,
+}
+
+impl<'a> Locks<'a> {
+    /// No locks to take, for a caller that keeps none, so that nothing is refused.
+    pub const NONE: Locks<'static> = Locks {
+        folder: None,
+        own: None,
+    };
+
+    pub fn new(folder: Option<&'a Path>, own: Option<&'a DocumentLock>) -> Locks<'a> {
+        Locks { folder, own }
+    }
+
+    /// Takes the lock on each of `documents`, to be held while they're written, so that another
+    /// kame can't open one halfway through. `Err` is the first another holder has, and then none
+    /// of them is held. The caller's own document needs no other lock, and nor does one named
+    /// twice. One whose lock can't be taken for any other reason, as when it isn't there, counts
+    /// as nobody else's, as there's nothing to tell the two apart.
+    pub fn take<P: AsRef<Path>>(
+        &self,
+        documents: impl IntoIterator<Item = P>,
+    ) -> Result<Holding, PathBuf> {
+        let mut holding = Holding::default();
+        let Some(folder) = self.folder else {
+            return Ok(holding);
+        };
+        for document in documents {
+            let document = document.as_ref();
+            let held_here = self
+                .own
+                .into_iter()
+                .chain(&holding.locks)
+                .any(|lock| lock.is_for(document));
+            if held_here {
+                continue;
+            }
+            match DocumentLock::take(folder, document) {
+                Ok(lock) => holding.locks.push(lock),
+                Err(LockError::Held) => return Err(document.to_path_buf()),
+                Err(LockError::Failed(_)) => {}
+            }
+        }
+        Ok(holding)
+    }
+}
+
+impl Holding {
+    /// How many locks this holds.
+    pub fn len(&self) -> usize {
+        self.locks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.locks.is_empty()
+    }
+}
+
 fn same_file(identity: FileIdentity, metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     identity.device == metadata.dev() && identity.inode == metadata.ino()
@@ -278,5 +348,90 @@ mod tests {
             DocumentLock::take(&folder, &missing),
             Err(LockError::Failed(_))
         ));
+    }
+
+    #[test]
+    fn a_write_holds_each_document_until_it_is_done() {
+        let (folder, document) = setup();
+        let other = document.with_file_name("other.kame");
+        std::fs::write(&other, b"").unwrap();
+        let holding = Locks::new(Some(&folder), None)
+            .take([&document, &other])
+            .unwrap();
+        assert_eq!(holding.len(), 2);
+        for held in [&document, &other] {
+            assert!(matches!(
+                DocumentLock::take(&folder, held),
+                Err(LockError::Held)
+            ));
+        }
+        drop(holding);
+        assert_eq!(locks_in(&folder), 0);
+        DocumentLock::take(&folder, &document).unwrap();
+    }
+
+    #[test]
+    fn a_write_is_refused_a_document_another_holds_and_holds_none() {
+        let (folder, document) = setup();
+        let first = document.with_file_name("first.kame");
+        std::fs::write(&first, b"").unwrap();
+        let _theirs = DocumentLock::take(&folder, &document).unwrap();
+        assert_eq!(
+            Locks::new(Some(&folder), None)
+                .take([&first, &document])
+                .unwrap_err(),
+            document
+        );
+        DocumentLock::take(&folder, &first).unwrap();
+    }
+
+    #[test]
+    fn a_write_into_the_callers_own_document_is_not_refused() {
+        let (folder, document) = setup();
+        let own = DocumentLock::take(&folder, &document).unwrap();
+        let symlink = document.with_file_name("link.kame");
+        std::os::unix::fs::symlink(&document, &symlink).unwrap();
+        let holding = Locks::new(Some(&folder), Some(&own))
+            .take([&document, &symlink])
+            .unwrap();
+        assert!(holding.is_empty());
+        drop(holding);
+        // Still the caller's.
+        assert!(matches!(
+            DocumentLock::take(&folder, &document),
+            Err(LockError::Held)
+        ));
+    }
+
+    #[test]
+    fn a_document_named_twice_is_held_once() {
+        let (folder, document) = setup();
+        let symlink = document.with_file_name("link.kame");
+        std::os::unix::fs::symlink(&document, &symlink).unwrap();
+        let holding = Locks::new(Some(&folder), None)
+            .take([&document, &symlink, &document])
+            .unwrap();
+        assert_eq!(holding.len(), 1);
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_taken_does_not_refuse_a_write() {
+        let (folder, document) = setup();
+        let missing = document.with_file_name("missing.kame");
+        let holding = Locks::new(Some(&folder), None).take([&missing]).unwrap();
+        assert!(holding.is_empty());
+        // A folder that can't be made.
+        let blocked = folder.with_file_name("blocked");
+        std::fs::write(&blocked, b"").unwrap();
+        let holding = Locks::new(Some(&blocked), None).take([&document]).unwrap();
+        assert!(holding.is_empty());
+    }
+
+    #[test]
+    fn with_no_folder_nothing_is_locked_or_refused() {
+        let (folder, document) = setup();
+        let _theirs = DocumentLock::take(&folder, &document).unwrap();
+        assert!(Locks::NONE.take([&document]).unwrap().is_empty());
+        assert!(Locks::new(None, None).take([&document]).unwrap().is_empty());
     }
 }

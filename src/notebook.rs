@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use kame_core::lock::Locks;
 use kame_core::model::{BlockId, Metadata};
 use kame_core::session::Session;
 use kame_notebook::links::{create_document, linking_to, remove_untouched, Follow, LinkFrom, Made};
@@ -18,7 +19,9 @@ use kame_notebook::list::{
     listed, listed_if_changed, narrow, narrow_headings, rows, Entry, Kind, Listed, RowKind,
 };
 use kame_notebook::log_folder;
-use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
+use kame_notebook::manage::{
+    carry_out, check_new_path, delete_document, plan_move, DeleteError, MoveReport,
+};
 use kame_notebook::search::{search, Hit};
 use kame_notebook::stranded::{apply, decide, find_stranded, Done, Healthy, Steps, Unsettled};
 use kame_notebook::Notebook;
@@ -662,7 +665,10 @@ impl KameApp {
                     // The next frame works out when the next pass is.
                     ctx.request_repaint();
                     let unsettled = steps.unsettled().cloned();
-                    let done = apply(&notebook, steps, self.session.path());
+                    // What another kame has open waits, as what's open here does.
+                    let folder = crate::locks_folder();
+                    let locks = Locks::new(folder.as_deref(), self.document_lock.as_ref());
+                    let done = apply(&notebook, steps, self.session.path(), locks);
                     if !done.is_empty() {
                         self.nb.refresh_listing();
                         self.nb.stranded_due = true;
@@ -1681,6 +1687,9 @@ impl KameApp {
         } else {
             None
         };
+        // What another kame has open isn't written into, and refuses the move. This window's own
+        // document is its to change.
+        let folder = crate::locks_folder();
         // The plan reads the open document from the screen, so it comes before leaving it.
         let plan = plan_move(
             notebook,
@@ -1689,6 +1698,7 @@ impl KameApp {
             self.session
                 .path()
                 .map(|path| (path, self.session.document())),
+            Locks::new(folder.as_deref(), self.document_lock.as_ref()),
             &device,
             now,
         );
@@ -1702,8 +1712,13 @@ impl KameApp {
             self.adopt_session(blank);
             held
         });
+        let own = match &held {
+            Some(held) => held.as_ref(),
+            None => self.document_lock.as_ref(),
+        };
+        let locks = Locks::new(folder.as_deref(), own);
         let open = (!moving_open).then_some(&mut self.session);
-        let result = carry_out(notebook, plan, open, &device, now);
+        let result = carry_out(notebook, plan, open, locks, &device, now);
         if moving_open {
             // Only now, since carry_out has changed the file's links and title for it to read.
             let back_to = if result.is_ok() { to } else { from };
@@ -1787,8 +1802,15 @@ impl KameApp {
         // Leaving a new document nobody has written in has already taken it away.
         let mut left_logs = false;
         if path.symlink_metadata().is_ok() || log_folder(path).exists() {
-            match delete_document(path) {
+            // Leaving it, if it was open here, has let go of its lock.
+            let folder = crate::locks_folder();
+            match delete_document(path, Locks::new(folder.as_deref(), None)) {
                 Ok(left) => left_logs = left,
+                Err(DeleteError::HeldElsewhere) => {
+                    self.session.last_error = Some(crate::held_elsewhere(path));
+                    self.notebook_files_changed();
+                    return;
+                }
                 Err(err) => {
                     self.session.last_error =
                         Some(format!("could not delete {} — {err}", path.display()));
@@ -2617,9 +2639,12 @@ mod tests {
         let start = Instant::now();
         let (seen, healthy, steps) =
             read_pass(&notebook, HashMap::new(), Healthy::default(), start);
-        assert!(apply(&notebook, steps, None).is_empty(), "first sighting");
+        assert!(
+            apply(&notebook, steps, None, Locks::NONE).is_empty(),
+            "first sighting"
+        );
         let (seen, healthy, steps) = read_pass(&notebook, seen, healthy, start + STRANDED_WAIT);
-        assert_eq!(apply(&notebook, steps, None).len(), 1);
+        assert_eq!(apply(&notebook, steps, None, Locks::NONE).len(), 1);
         let retired = root.join(".a.retired.kame");
         assert!(retired.is_file());
 
@@ -2627,7 +2652,7 @@ mod tests {
         let (seen, _, steps) = read_pass(&notebook, seen, healthy, start + STRANDED_WAIT);
         assert!(seen.is_empty());
         assert_eq!(
-            apply(&notebook, steps, None),
+            apply(&notebook, steps, None, Locks::NONE),
             [Done::Returned {
                 from: retired,
                 to: b
@@ -2658,6 +2683,118 @@ mod tests {
             DocumentLock::take(&folder, &to),
             Err(LockError::Held)
         ));
+    }
+
+    /// A document linking to `a.kame`, as the move would rewrite it.
+    fn linking_to_a(path: &Path) {
+        use kame_core::model::{Span, SpanStyle};
+        use kame_core::session::Session;
+
+        let mut session = Session::open(path).unwrap();
+        let mut doc = session.document().clone();
+        let block = &mut doc.blocks[0];
+        block.text.push('A');
+        block.spans.push(Span {
+            start: 0,
+            end: 1,
+            style: SpanStyle::DocumentLink {
+                target: "a.kame".to_string(),
+            },
+        });
+        assert!(session.replace_document(doc));
+    }
+
+    #[test]
+    fn a_move_is_refused_when_another_kame_has_a_document_linking_to_it_open() {
+        use kame_core::lock::{DocumentLock, LockError};
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-move-held-linker")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let notebook = Notebook::open(&root).unwrap();
+        let (from, to) = (root.join("a.kame"), root.join("b.kame"));
+        let linker = root.join("linker.kame");
+        linking_to_a(&linker);
+        let mut session = Session::open(&from).unwrap();
+        session.insert("Words.");
+        let mut page = crate::Headless::new(session);
+        page.app.hold_document(None);
+        let folder = crate::locks_folder().unwrap();
+        let theirs = DocumentLock::take(&folder, &linker).unwrap();
+
+        let err = page.app.move_document(&notebook, &from, &to).unwrap_err();
+        assert_eq!(err, "linker.kame is open in another kame window");
+        assert!(from.is_file());
+        assert!(!to.exists());
+        assert_eq!(page.app.session.path(), Some(from.as_path()));
+        assert!(matches!(
+            DocumentLock::take(&folder, &from),
+            Err(LockError::Held)
+        ));
+        drop(theirs);
+        assert_eq!(
+            Session::open(&linker).unwrap().document().blocks[0].spans[0].style,
+            kame_core::model::SpanStyle::DocumentLink {
+                target: "a.kame".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_move_rewrites_the_open_document_without_taking_its_lock_again() {
+        use kame_core::lock::{DocumentLock, LockError};
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-move-open-linker")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let notebook = Notebook::open(&root).unwrap();
+        let (from, to) = (root.join("a.kame"), root.join("b.kame"));
+        Session::open(&from).unwrap().insert("Words.");
+        let linker = root.join("linker.kame");
+        linking_to_a(&linker);
+        let mut page = crate::Headless::new(Session::open(&linker).unwrap());
+        page.app.hold_document(None);
+
+        page.app.move_document(&notebook, &from, &to).unwrap();
+        assert!(to.is_file());
+        assert_eq!(page.app.session.last_error, None);
+        let folder = crate::locks_folder().unwrap();
+        assert!(matches!(
+            DocumentLock::take(&folder, &linker),
+            Err(LockError::Held)
+        ));
+        DocumentLock::take(&folder, &to).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_document_another_kame_has_open_is_refused() {
+        use kame_core::lock::DocumentLock;
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-delete-held-elsewhere")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let (open, theirs) = (root.join("a.kame"), root.join("x.kame"));
+        Session::open(&theirs).unwrap().insert("Theirs.");
+        let mut session = Session::open(&open).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.app.hold_document(None);
+        let held = DocumentLock::take(&crate::locks_folder().unwrap(), &theirs).unwrap();
+
+        page.app.delete_from_notebook(&theirs, "x");
+        assert!(theirs.is_file());
+        assert_eq!(
+            page.app.session.last_error.as_deref(),
+            Some("x.kame is open in another kame window")
+        );
+        assert_eq!(page.app.session.path(), Some(open.as_path()));
+        drop(held);
     }
 
     #[test]

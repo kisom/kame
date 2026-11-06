@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use kame_core::lock::{LockError, Locks};
 use kame_core::model::Document;
 use kame_core::references::{cited, valid_key, Reference, References};
 use kame_core::session::is_markdown_path;
@@ -312,13 +313,15 @@ fn holds_no_logs(path: &Path) -> bool {
 /// any other only in case is refused, as is a damaged file for either. A `new` that already holds
 /// exactly `old`'s reference is accepted, so that a rename can be run again after fixing what
 /// stopped it. A document that can't be rewritten, or read to see whether it cites `old`, is named
-/// in the result and the rest still are; the old file is then kept. A logged document is read in
+/// in the result and the rest still are; the old file is then kept. So is one another kame has
+/// open, which `locks` tells. A logged document is read in
 /// each of its latest versions, and synced with them before it's rewritten, as `device` at `now`.
 pub fn rename(
     notebook: &Notebook,
     old: &str,
     new: &str,
     open: Open<'_>,
+    locks: Locks<'_>,
     device: &str,
     now: i64,
 ) -> Result<Renamed, String> {
@@ -364,7 +367,12 @@ pub fn rename(
         if !cites_old(&doc) && !versions_in_logs(&path).iter().any(cites_old) {
             continue;
         }
-        match rewrite(&path, old, new, device, now) {
+        // Held while it's rewritten, so that nobody opens it halfway.
+        let rewritten = match locks.take([&path]) {
+            Ok(_holding) => rewrite(&path, old, new, device, now),
+            Err(_) => Err(LockError::Held.to_string()),
+        };
+        match rewritten {
             Ok(()) => renamed.rewritten.push(path),
             Err(why) => renamed.failed.push((path, why)),
         }
@@ -540,9 +548,27 @@ mod tests {
     fn renaming_a_key_that_is_not_a_reference_says_so_even_for_a_change_of_case() {
         let notebook = notebook("ref-rename-missing-case");
         save(&notebook, "old", &article()).unwrap();
-        let err = rename(&notebook, "missing", "MISSING", Open::Nothing, DEVICE, NOW).unwrap_err();
+        let err = rename(
+            &notebook,
+            "missing",
+            "MISSING",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap_err();
         assert_eq!(err, "there is no reference \"missing\"");
-        let err = rename(&notebook, "old", "OLD", Open::Nothing, DEVICE, NOW).unwrap_err();
+        let err = rename(
+            &notebook,
+            "old",
+            "OLD",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap_err();
         assert_eq!(err, "\"OLD\" is already a reference");
     }
 
@@ -878,7 +904,16 @@ mod tests {
         );
         write_document(&two, "and [old] again", &[]);
         write_document(&bystander, "no [other] here", &[]);
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.failed, []);
         assert_eq!(renamed.rewritten, [one.clone(), two.clone()]);
         assert_eq!(text_of(&one), "see [fresh]");
@@ -898,7 +933,16 @@ mod tests {
         let document = notebook.root.join("x.kame");
         std::fs::create_dir(kame_sync::logs::log_folder(&document)).unwrap();
         assert!(citing(&notebook).is_empty());
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.failed, []);
         assert!(!renamed.old_kept);
         assert!(!folder(&notebook).join("old.yaml").exists());
@@ -913,7 +957,16 @@ mod tests {
         std::fs::create_dir(&logs).unwrap();
         // A folder where a log should be can't be read as one.
         std::fs::create_dir(logs.join("a.log")).unwrap();
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.failed.len(), 1);
         assert!(renamed.old_kept);
     }
@@ -926,7 +979,16 @@ mod tests {
         let other = notebook.root.join("other.kame");
         write_document(&open, "[old]", &[]);
         write_document(&other, "[old]", &[]);
-        let renamed = rename(&notebook, "old", "fresh", Open::File(&open), DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::File(&open),
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.rewritten, std::slice::from_ref(&other));
         assert_eq!(renamed.failed, []);
         assert_eq!(text_of(&open), "[old]");
@@ -941,7 +1003,16 @@ mod tests {
     fn renaming_with_nothing_open_removes_the_old_file_itself() {
         let notebook = notebook("ref-rename-none-open");
         save(&notebook, "old", &article()).unwrap();
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert!(!renamed.old_kept);
         assert!(!folder(&notebook).join("old.yaml").exists());
     }
@@ -950,7 +1021,16 @@ mod tests {
     fn renaming_with_an_unsaved_document_open_leaves_the_old_file_for_it() {
         let notebook = notebook("ref-rename-unsaved-open");
         save(&notebook, "old", &article()).unwrap();
-        let renamed = rename(&notebook, "old", "fresh", Open::Unsaved, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Unsaved,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert!(renamed.old_kept);
         assert!(folder(&notebook).join("old.yaml").exists());
         assert!(folder(&notebook).join("fresh.yaml").exists());
@@ -964,7 +1044,16 @@ mod tests {
         let kame = notebook.root.join("b.kame");
         std::fs::write(&note, "Cites [old].\n").unwrap();
         write_document(&kame, "[old]", &[]);
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.rewritten, std::slice::from_ref(&kame));
         assert_eq!(renamed.failed.len(), 1, "{:?}", renamed.failed);
         assert_eq!(renamed.failed[0].0, note);
@@ -998,7 +1087,16 @@ mod tests {
             .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&future])
             .unwrap();
         drop(connection);
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.rewritten, std::slice::from_ref(&good));
         assert_eq!(renamed.failed.len(), 1, "{:?}", renamed.failed);
         assert_eq!(renamed.failed[0].0, newer);
@@ -1025,11 +1123,29 @@ mod tests {
             "Taken", "taken", "TAKEN", "old", "OLD", "1bad", "", "no way",
         ] {
             assert!(
-                rename(&notebook, "old", new, Open::Nothing, DEVICE, NOW).is_err(),
+                rename(
+                    &notebook,
+                    "old",
+                    new,
+                    Open::Nothing,
+                    Locks::NONE,
+                    DEVICE,
+                    NOW
+                )
+                .is_err(),
                 "{new:?}"
             );
         }
-        assert!(rename(&notebook, "missing", "fresh", Open::Nothing, DEVICE, NOW).is_err());
+        assert!(rename(
+            &notebook,
+            "missing",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW
+        )
+        .is_err());
         assert_eq!(text_of(&doc), "[old]");
         let names: Vec<String> = stamp(&notebook).into_iter().map(|(n, ..)| n).collect();
         assert_eq!(names, ["Taken.yaml", "old.yaml"]);
@@ -1049,13 +1165,54 @@ mod tests {
             logged.sync(&mut session, clock).unwrap();
         };
         sync(1_000);
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.rewritten, std::slice::from_ref(&doc));
         sync(2_000);
         assert_eq!(text_of(&doc), "see [fresh]");
         let store = kame_sync::revlog::Store::load(&kame_sync::logs::log_folder(&doc)).unwrap();
         let head = store.heads().into_iter().next().unwrap();
         assert_eq!(store.document(&head).blocks[0].text, "see [fresh]");
+    }
+
+    /// Rewritten when it's next run, once the other kame has let it go.
+    #[test]
+    fn a_document_another_kame_has_open_is_named_and_keeps_the_old_key() {
+        let notebook = notebook("ref-rename-held");
+        save(&notebook, "old", &article()).unwrap();
+        let one = notebook.root.join("one.kame");
+        let two = notebook.root.join("two.kame");
+        write_document(&one, "see [old]", &[]);
+        write_document(&two, "and [old] again", &[]);
+        let folder_of_locks = kame_test_dir::folder("ref-rename-held-locks");
+        let locks = Locks::new(Some(&folder_of_locks), None);
+
+        let theirs = kame_core::lock::DocumentLock::take(&folder_of_locks, &two).unwrap();
+        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, locks, DEVICE, NOW).unwrap();
+        assert_eq!(renamed.rewritten, std::slice::from_ref(&one));
+        assert_eq!(
+            renamed.failed,
+            [(two.clone(), "it is open in another kame window".to_string())]
+        );
+        assert!(renamed.old_kept);
+        assert!(folder(&notebook).join("old.yaml").is_file());
+        assert_eq!(text_of(&one), "see [fresh]");
+        assert_eq!(text_of(&two), "and [old] again");
+        drop(theirs);
+
+        let again = rename(&notebook, "old", "fresh", Open::Nothing, locks, DEVICE, NOW).unwrap();
+        assert_eq!(again.failed, []);
+        assert_eq!(again.rewritten, std::slice::from_ref(&two));
+        assert!(!folder(&notebook).join("old.yaml").exists());
+        assert_eq!(std::fs::read_dir(&folder_of_locks).unwrap().count(), 0);
     }
 
     #[test]
@@ -1075,7 +1232,16 @@ mod tests {
         }
         assert!(!doc.exists());
         assert_eq!(citing(&notebook)["old"], std::slice::from_ref(&doc));
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.failed, []);
         assert_eq!(renamed.rewritten, std::slice::from_ref(&doc));
         assert_eq!(text_of(&doc), "see [fresh]");
@@ -1122,7 +1288,16 @@ mod tests {
         send_from_elsewhere(&doc, "ref-rename-unmerged-there", "Cited there: [old].");
         assert_eq!(text_of(&doc), "No citation yet.");
 
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
 
         assert_eq!(renamed.failed, []);
         assert_eq!(renamed.rewritten, std::slice::from_ref(&doc));
@@ -1145,7 +1320,16 @@ mod tests {
         std::fs::write(&bad, b"not a database at all").unwrap();
         let good = notebook.root.join("good.kame");
         write_document(&good, "[old]", &[]);
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.rewritten, std::slice::from_ref(&good));
         assert_eq!(renamed.failed.len(), 1, "{:?}", renamed.failed);
         assert_eq!(renamed.failed[0].0, bad);
@@ -1170,7 +1354,16 @@ mod tests {
         let elsewhere = kame_test_dir::folder("ref-rename-link-to");
         let link = elsewhere.join("alias.kame");
         std::os::unix::fs::symlink(&doc, &link).unwrap();
-        let renamed = rename(&notebook, "old", "fresh", Open::File(&link), DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::File(&link),
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.rewritten, Vec::<PathBuf>::new());
         assert_eq!(renamed.failed, []);
         assert_eq!(text_of(&doc), "[old]");
@@ -1184,12 +1377,30 @@ mod tests {
         std::fs::write(&md, "Cites [old].\n").unwrap();
         let kame = notebook.root.join("b.kame");
         write_document(&kame, "[old]", &[]);
-        let first = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let first = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert!(first.old_kept);
         assert_eq!(first.failed.len(), 1);
         // The person fixes the Markdown document by hand and tries again.
         std::fs::write(&md, "Cites [fresh].\n").unwrap();
-        let second = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let second = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(second.failed, []);
         assert_eq!(second.rewritten, Vec::<PathBuf>::new());
         assert!(!second.old_kept);
@@ -1206,7 +1417,15 @@ mod tests {
         let doc = notebook.root.join("one.kame");
         write_document(&doc, "see [old]", &[]);
         assert_eq!(
-            rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW),
+            rename(
+                &notebook,
+                "old",
+                "fresh",
+                Open::Nothing,
+                Locks::NONE,
+                DEVICE,
+                NOW
+            ),
             Err("there is no reference \"old\"".to_string())
         );
 
@@ -1216,11 +1435,29 @@ mod tests {
             ..article()
         };
         save(&notebook, "old", &other).unwrap();
-        assert!(rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).is_err());
+        assert!(rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW
+        )
+        .is_err());
         assert_eq!(text_of(&doc), "see [old]");
 
         save(&notebook, "old", &article()).unwrap();
-        let renamed = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW).unwrap();
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(renamed.failed, []);
         assert_eq!(renamed.rewritten, std::slice::from_ref(&doc));
         assert!(!renamed.old_kept);
@@ -1247,7 +1484,15 @@ mod tests {
             eprintln!("skipped: this user can write to a read-only folder");
             return;
         }
-        let result = rename(&notebook, "old", "fresh", Open::Nothing, DEVICE, NOW);
+        let result = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        );
         std::fs::set_permissions(&references, std::fs::Permissions::from_mode(0o755)).unwrap();
         let renamed = result.unwrap();
         assert_eq!(renamed.rewritten, std::slice::from_ref(&doc));

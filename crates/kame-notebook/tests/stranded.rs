@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 mod aged;
 use aged::age_logs;
 
+use kame_core::lock::{DocumentLock, Locks};
 use kame_core::session::Session;
 use kame_core::storage::Db;
 use kame_notebook::manage::{carry_out, delete_document, plan_move};
@@ -166,7 +167,7 @@ fn a_database_that_never_synced_is_not_stranded() {
     let a = root.join("a.kame");
     Session::open(&a).unwrap().insert("Never synced.");
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -179,7 +180,7 @@ fn one_outside_a_marked_folder_is_not_stranded() {
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
     std::fs::remove_file(root.join(MARKER)).unwrap();
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -189,7 +190,7 @@ fn one_with_its_logs_is_not_stranded() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -208,7 +209,7 @@ fn a_moved_document_joins_its_logs_with_history_intact() {
 
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Moved {
             from: a.clone(),
             to: b.clone()
@@ -241,7 +242,7 @@ fn unsynced_words_merge_after_joining() {
         .insert(" Typed before the logs moved.");
     move_logs(&a, &b);
 
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     let mut session = Session::open(&b).unwrap();
     assert!(sync(&mut session).written > 0);
     let store = Store::load(&log_folder(&b)).unwrap();
@@ -261,7 +262,7 @@ fn a_deleted_document_is_retired_and_stays_gone() {
 
     let retired = root.join(".a.retired.kame");
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: retired.clone(),
@@ -274,7 +275,7 @@ fn a_deleted_document_is_retired_and_stays_gone() {
     assert!(listed(&nb).is_empty());
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(!log_folder(&a).exists());
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
     assert!(!a.exists());
 }
 
@@ -284,12 +285,12 @@ fn a_second_retirement_gets_a_number() {
     let a = root.join("a.kame");
     synced(&a, "First.");
     remove_logs(&a);
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     synced(&a, "Second.");
     remove_logs(&a);
 
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired-2.kame"),
@@ -312,7 +313,7 @@ fn a_reused_path_retires_the_old_database_and_keeps_the_new_logs_clean() {
     std::fs::remove_file(&other).unwrap();
 
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -339,7 +340,7 @@ fn a_swap_moves_both_through_temporary_names() {
     move_logs(&b, &a);
     std::fs::rename(&held, log_folder(&b)).unwrap();
 
-    let done = reconcile(&nb, &[a.clone(), b.clone()], None);
+    let done = reconcile(&nb, &[a.clone(), b.clone()], None, Locks::NONE);
     assert_eq!(
         done,
         [
@@ -374,10 +375,10 @@ fn half_a_swap_waits_for_the_other_half() {
     move_logs(&b, &a);
     std::fs::rename(&held, log_folder(&b)).unwrap();
 
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(text_of(&a).contains("Words of a."));
     assert!(text_of(&b).contains("Words of b."));
-    assert!(reconcile(&nb, &[a.clone(), b.clone()], Some(&b)).is_empty());
+    assert!(reconcile(&nb, &[a.clone(), b.clone()], Some(&b), Locks::NONE).is_empty());
     assert!(text_of(&a).contains("Words of a."));
     assert!(!names_in(&root).iter().any(|name| name.contains(".moving-")));
 }
@@ -395,7 +396,7 @@ fn a_chain_of_moves_frees_each_name_for_the_next() {
     move_logs(&b, &c);
     move_logs(&a, &b);
 
-    let done = reconcile(&nb, &[a.clone(), b.clone()], None);
+    let done = reconcile(&nb, &[a.clone(), b.clone()], None, Locks::NONE);
     assert_eq!(done.len(), 2, "{done:?}");
     assert!(!a.exists());
     assert!(text_of(&b).contains("Words of a."));
@@ -419,7 +420,7 @@ fn a_chain_stopped_at_its_far_end_does_not_set_out() {
     move_logs(&m, &z);
     move_logs(&a, &m);
 
-    assert!(reconcile(&nb, &[a.clone(), m.clone()], None).is_empty());
+    assert!(reconcile(&nb, &[a.clone(), m.clone()], None, Locks::NONE).is_empty());
     assert!(text_of(&a).contains("Words of a."));
     assert!(text_of(&m).contains("Words of m."));
     assert!(text_of(&z).contains("Words of z."));
@@ -443,7 +444,7 @@ fn a_name_that_was_to_be_freed_and_was_not_is_not_written_over() {
         std::fs::write(root.join(format!(".b.moving-{number}.kame")), "").unwrap();
     }
 
-    assert!(reconcile(&nb, &[a.clone(), b.clone()], None).is_empty());
+    assert!(reconcile(&nb, &[a.clone(), b.clone()], None, Locks::NONE).is_empty());
     assert!(text_of(&a).contains("Words of a."));
     assert!(text_of(&b).contains("Words of b."));
 }
@@ -457,7 +458,7 @@ fn a_retirement_frees_its_name_for_a_move_in_the_same_pass() {
     remove_logs(&b);
     move_logs(&a, &b);
 
-    let done = reconcile(&nb, &[a.clone(), b.clone()], None);
+    let done = reconcile(&nb, &[a.clone(), b.clone()], None, Locks::NONE);
     assert_eq!(
         done,
         [
@@ -486,7 +487,7 @@ fn when_the_moved_document_is_already_open_there_the_old_one_retires() {
     assert!(build_from_logs(&b).unwrap());
 
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -510,7 +511,7 @@ fn two_homes_leave_it_alone() {
     move_logs(&a, &c);
     let before = std::fs::read(&a).unwrap();
 
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert_eq!(std::fs::read(&a).unwrap(), before);
     assert!(!b.exists());
     assert!(!c.exists());
@@ -537,7 +538,7 @@ fn two_databases_with_the_same_home_are_left_alone() {
         [a.clone(), copy.clone()]
     );
 
-    assert!(reconcile(&nb, &[a.clone(), copy.clone()], None).is_empty());
+    assert!(reconcile(&nb, &[a.clone(), copy.clone()], None, Locks::NONE).is_empty());
     assert!(a.is_file());
     assert!(copy.is_file());
     assert!(!b.exists());
@@ -551,13 +552,13 @@ fn late_logs_bring_a_retired_database_back() {
     let history = Session::open(&a).unwrap().history();
     let elsewhere = root.join(".carried");
     std::fs::rename(log_folder(&a), &elsewhere).unwrap();
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     let retired = root.join(".a.retired.kame");
     assert!(retired.is_file());
 
     std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
     assert_eq!(
-        reconcile(&nb, &[], None),
+        reconcile(&nb, &[], None, Locks::NONE),
         [Done::Returned {
             from: retired.clone(),
             to: b.clone()
@@ -575,10 +576,10 @@ fn a_retired_database_stays_retired_with_a_database_at_its_logs() {
     synced(&a, "Words.");
     move_logs(&a, &b);
     assert!(build_from_logs(&b).unwrap());
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     let before = std::fs::read(&b).unwrap();
 
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
     assert!(root.join(".a.retired.kame").is_file());
     assert_eq!(std::fs::read(&b).unwrap(), before);
 }
@@ -596,7 +597,7 @@ fn a_retired_database_leaves_a_home_to_the_stranded_one_still_waiting() {
     synced(&a, "Words.");
     move_logs(&a, &b);
     assert!(build_from_logs(&b).unwrap());
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     {
         let mut session = Session::open(&b).unwrap();
         session.insert(" Newer.");
@@ -604,13 +605,13 @@ fn a_retired_database_leaves_a_home_to_the_stranded_one_still_waiting() {
     }
     move_logs(&b, &c);
 
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
     assert!(root.join(".a.retired.kame").is_file());
-    assert!(reconcile(&nb, &[], Some(&b)).is_empty());
+    assert!(reconcile(&nb, &[], Some(&b), Locks::NONE).is_empty());
     assert!(root.join(".a.retired.kame").is_file());
 
     assert_eq!(
-        reconcile(&nb, just(&b), None),
+        reconcile(&nb, just(&b), None, Locks::NONE),
         [Done::Moved {
             from: b.clone(),
             to: c.clone()
@@ -630,7 +631,7 @@ fn two_retired_databases_with_the_same_home_stay_retired() {
     std::fs::rename(&a, &other).unwrap();
     move_logs(&a, &b);
 
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
     assert!(one.is_file());
     assert!(other.is_file());
     assert!(!b.exists());
@@ -647,7 +648,7 @@ fn a_move_stopped_by_a_crash_comes_back_from_its_temporary_name() {
     assert!(listed(&nb) == ["b.kame"]);
 
     assert_eq!(
-        reconcile(&nb, &[], None),
+        reconcile(&nb, &[], None, Locks::NONE),
         [Done::Returned {
             from: parked.clone(),
             to: b.clone()
@@ -665,7 +666,7 @@ fn a_temporary_name_left_by_a_crash_is_not_used_again() {
     std::fs::write(&parked, "left by a crash").unwrap();
     move_logs(&a, &b);
 
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     assert!(text_of(&b).contains("Words."));
     assert_eq!(std::fs::read(&parked).unwrap(), b"left by a crash");
 }
@@ -685,7 +686,7 @@ fn a_save_as_copy_is_never_mistaken() {
     remove_logs(&a);
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -705,12 +706,12 @@ fn only_what_may_be_acted_on_is_touched() {
     remove_logs(&a);
     remove_logs(&b);
 
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
     assert_eq!(
         find_stranded(&nb, &mut Healthy::default()),
         [a.clone(), b.clone()]
     );
-    assert_eq!(reconcile(&nb, just(&b), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&b), None, Locks::NONE).len(), 1);
     assert!(a.is_file());
     assert!(!b.exists());
 }
@@ -720,7 +721,7 @@ fn what_has_stopped_being_stranded_is_left_alone() {
     let (root, nb) = logged_notebook("stranded-recheck");
     let (a, gone) = (root.join("a.kame"), root.join("gone.kame"));
     synced(&a, "Words.");
-    assert!(reconcile(&nb, &[a.clone(), gone.clone()], None).is_empty());
+    assert!(reconcile(&nb, &[a.clone(), gone.clone()], None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -730,9 +731,9 @@ fn a_path_that_is_no_document_of_the_notebook_is_left_alone() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     remove_logs(&a);
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     let retired = root.join(".a.retired.kame");
-    assert!(reconcile(&nb, just(&retired), None).is_empty());
+    assert!(reconcile(&nb, just(&retired), None, Locks::NONE).is_empty());
     assert!(retired.is_file());
 
     let outside = kame_test_dir::folder("stranded-not-a-document-outside")
@@ -742,12 +743,12 @@ fn a_path_that_is_no_document_of_the_notebook_is_left_alone() {
     let there = outside.join("there.kame");
     synced(&there, "Words.");
     remove_logs(&there);
-    assert!(reconcile(&nb, just(&there), None).is_empty());
+    assert!(reconcile(&nb, just(&there), None, Locks::NONE).is_empty());
     assert!(there.is_file());
 
     std::os::unix::fs::symlink(&outside, root.join("out-link")).unwrap();
     let through_link = root.join("out-link/there.kame");
-    assert!(reconcile(&nb, &[through_link], None).is_empty());
+    assert!(reconcile(&nb, &[through_link], None, Locks::NONE).is_empty());
     assert!(there.is_file());
 }
 
@@ -757,7 +758,7 @@ fn the_open_document_is_never_touched() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     remove_logs(&a);
-    assert!(reconcile(&nb, just(&a), Some(&a)).is_empty());
+    assert!(reconcile(&nb, just(&a), Some(&a), Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -768,11 +769,11 @@ fn a_retired_database_that_is_open_stays_where_it_is() {
     synced(&a, "Words.");
     let elsewhere = root.join(".carried");
     std::fs::rename(log_folder(&a), &elsewhere).unwrap();
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     let retired = root.join(".a.retired.kame");
     std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
 
-    assert!(reconcile(&nb, &[], Some(&retired)).is_empty());
+    assert!(reconcile(&nb, &[], Some(&retired), Locks::NONE).is_empty());
     assert!(retired.is_file());
     assert!(!b.exists());
 }
@@ -783,13 +784,13 @@ fn nothing_goes_to_a_path_on_the_screen_with_no_file_yet() {
     let (a, b) = (root.join("a.kame"), root.join("b.kame"));
     synced(&a, "Words.");
     move_logs(&a, &b);
-    assert!(reconcile(&nb, just(&a), Some(&b)).is_empty());
+    assert!(reconcile(&nb, just(&a), Some(&b), Locks::NONE).is_empty());
     assert!(a.is_file());
     assert!(!b.exists());
 
     let retired = root.join(".a.retired.kame");
     std::fs::rename(&a, &retired).unwrap();
-    assert!(reconcile(&nb, &[], Some(&b)).is_empty());
+    assert!(reconcile(&nb, &[], Some(&b), Locks::NONE).is_empty());
     assert!(retired.is_file());
     assert!(!b.exists());
 }
@@ -803,7 +804,7 @@ fn retired_files_are_not_listed_and_their_side_files_go_with_them() {
     remove_logs(&a);
 
     let retired = root.join(".a.retired.kame");
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     assert_eq!(
         names_in(&root),
         [
@@ -827,7 +828,7 @@ fn a_moved_database_takes_its_side_files_along() {
     crash_with_words_in_the_wal(&a, " Only in the wal.");
     move_logs(&a, &b);
 
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     assert!(!with_suffix(&a, "-wal").exists());
     assert!(!with_suffix(&a, "-shm").exists());
     assert!(text_of(&b).contains("Only in the wal."));
@@ -842,14 +843,17 @@ fn a_stale_wal_at_the_new_home_stops_the_move() {
     for suffix in ["-wal", "-shm"] {
         let stale = with_suffix(&b, suffix);
         std::fs::write(&stale, "stale").unwrap();
-        assert!(reconcile(&nb, just(&a), None).is_empty(), "{suffix}");
+        assert!(
+            reconcile(&nb, just(&a), None, Locks::NONE).is_empty(),
+            "{suffix}"
+        );
         assert!(a.is_file());
         assert!(!b.exists());
         assert_eq!(std::fs::read(&stale).unwrap(), b"stale");
         std::fs::remove_file(&stale).unwrap();
     }
     assert!(!names_in(&root).iter().any(|name| name.contains(".moving-")));
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
 }
 
 #[test]
@@ -859,13 +863,13 @@ fn a_stale_wal_at_the_new_home_keeps_a_retired_database_retired() {
     synced(&a, "Words.");
     let elsewhere = root.join(".carried");
     std::fs::rename(log_folder(&a), &elsewhere).unwrap();
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     let retired = root.join(".a.retired.kame");
     std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
     let stale = with_suffix(&b, "-wal");
     std::fs::write(&stale, "stale").unwrap();
 
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
     assert!(retired.is_file());
     assert_eq!(std::fs::read(&stale).unwrap(), b"stale");
 }
@@ -880,7 +884,7 @@ fn a_retired_name_with_a_stale_side_file_is_passed_over() {
     std::fs::write(&stale, "stale").unwrap();
 
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired-2.kame"),
@@ -898,7 +902,7 @@ fn a_name_with_dots_is_retired_under_its_whole_name() {
     synced(&a, "Words.");
     remove_logs(&a);
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join("sub/.v1.2.retired.kame"),
@@ -916,7 +920,7 @@ fn a_document_moved_to_another_folder_is_found_there() {
     std::fs::create_dir_all(b.parent().unwrap()).unwrap();
     move_logs(&a, &b);
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Moved {
             from: a.clone(),
             to: b.clone()
@@ -934,7 +938,7 @@ fn logs_where_no_document_can_be_are_no_home() {
     std::fs::create_dir_all(b.parent().unwrap()).unwrap();
     move_logs(&a, &b);
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -954,7 +958,7 @@ fn old_logs_kept_by_the_sync_tool_are_no_home() {
     std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
     move_logs(&a, &kept);
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -973,7 +977,7 @@ fn logs_from_a_newer_kame_could_be_its_home_so_nothing_is_done() {
     remove_logs(&a);
     add_newer_line(&other);
 
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -990,11 +994,11 @@ fn a_retired_database_comes_back_while_some_logs_are_from_a_newer_kame() {
     synced(&other, "Other words.");
     let elsewhere = root.join(".carried");
     std::fs::rename(log_folder(&a), &elsewhere).unwrap();
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
     add_newer_line(&other);
 
-    assert_eq!(reconcile(&nb, &[], None).len(), 1);
+    assert_eq!(reconcile(&nb, &[], None, Locks::NONE).len(), 1);
     assert!(b.is_file());
 }
 
@@ -1013,7 +1017,7 @@ fn a_log_that_cannot_be_read_could_be_its_home_so_nothing_is_done() {
         .path();
     set_mode(&log, 0o000);
 
-    let done = reconcile(&nb, just(&a), None);
+    let done = reconcile(&nb, just(&a), None, Locks::NONE);
     set_mode(&log, 0o644);
     assert!(done.is_empty());
     assert!(a.is_file());
@@ -1029,7 +1033,7 @@ fn a_log_folder_that_cannot_be_listed_could_be_its_home_so_nothing_is_done() {
     let folder = log_folder(&other);
     set_mode(&folder, 0o000);
 
-    let done = reconcile(&nb, just(&a), None);
+    let done = reconcile(&nb, just(&a), None, Locks::NONE);
     set_mode(&folder, 0o755);
     assert!(done.is_empty());
     assert!(a.is_file());
@@ -1045,7 +1049,7 @@ fn a_folder_that_cannot_be_read_could_hold_its_home_so_nothing_is_done() {
     let shut = root.join("shut");
     set_mode(&shut, 0o000);
 
-    let done = reconcile(&nb, just(&a), None);
+    let done = reconcile(&nb, just(&a), None, Locks::NONE);
     set_mode(&shut, 0o755);
     assert!(done.is_empty());
     assert!(a.is_file());
@@ -1059,14 +1063,14 @@ fn its_own_log_folder_has_to_be_readable_to_tell() {
     synced(&a, "Words.");
     let folder = log_folder(&a);
     set_mode(&folder, 0o000);
-    let done = reconcile(&nb, just(&a), None);
+    let done = reconcile(&nb, just(&a), None, Locks::NONE);
     set_mode(&folder, 0o755);
     assert!(done.is_empty());
     assert!(a.is_file());
 
     remove_logs(&a);
     std::fs::write(&folder, "a file where the logs go").unwrap();
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -1078,7 +1082,7 @@ fn a_database_that_cannot_be_read_at_the_new_home_says_nothing_so_it_is_left_alo
     move_logs(&a, &b);
     std::fs::write(&b, "not a database").unwrap();
 
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
     assert_eq!(std::fs::read(&b).unwrap(), b"not a database");
 }
@@ -1091,7 +1095,7 @@ fn a_folder_at_the_new_home_is_left_alone() {
     move_logs(&a, &b);
     std::fs::create_dir_all(&b).unwrap();
 
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
     assert!(b.is_dir());
 }
@@ -1107,7 +1111,7 @@ fn a_move_that_cannot_finish_goes_back() {
     // Readable and searchable, so that its logs can be read, but nothing can be put in it.
     set_mode(&shut, 0o555);
 
-    let done = reconcile(&nb, just(&a), None);
+    let done = reconcile(&nb, just(&a), None, Locks::NONE);
     set_mode(&shut, 0o755);
     assert!(done.is_empty());
     assert!(a.is_file());
@@ -1125,7 +1129,7 @@ fn a_database_that_cannot_be_renamed_is_not_reported() {
     let shut = root.join("shut");
     set_mode(&shut, 0o555);
 
-    let done = reconcile(&nb, just(&a), None);
+    let done = reconcile(&nb, just(&a), None, Locks::NONE);
     set_mode(&shut, 0o755);
     assert!(done.is_empty());
     assert!(a.is_file());
@@ -1143,7 +1147,7 @@ fn a_retired_database_with_words_that_never_synced_says_so() {
     assert!(build_from_logs(&b).unwrap());
 
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -1163,7 +1167,7 @@ fn a_retired_database_holding_nothing_beyond_its_logs_says_so() {
     move_logs(&a, &b);
     assert!(build_from_logs(&b).unwrap());
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -1189,7 +1193,7 @@ fn a_retired_database_with_only_a_new_title_counts_as_unsynced() {
     move_logs(&a, &b);
     assert!(build_from_logs(&b).unwrap());
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -1216,7 +1220,7 @@ fn a_step_is_skipped_if_what_it_found_has_changed() {
     move_logs(&a, &b);
     let steps = decide(&nb, just(&a));
     let mut session = Session::open(&a).unwrap();
-    assert!(apply(&nb, steps, Some(&a)).is_empty());
+    assert!(apply(&nb, steps, Some(&a), Locks::NONE).is_empty());
     assert!(a.is_file());
     assert!(!b.exists());
     assert_no_temporary_names(&root);
@@ -1233,12 +1237,12 @@ fn a_step_is_skipped_if_what_it_found_has_changed() {
     let steps = decide(&nb, just(&a));
     assert!(build_from_logs(&b).unwrap());
     let built = std::fs::read(&b).unwrap();
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert_eq!(std::fs::read(&b).unwrap(), built);
     assert!(a.is_file());
     assert_no_temporary_names(&root);
     assert!(matches!(
-        reconcile(&nb, just(&a), None)[..],
+        reconcile(&nb, just(&a), None, Locks::NONE)[..],
         [Done::Retired {
             opened_there: true,
             ..
@@ -1252,7 +1256,7 @@ fn a_step_is_skipped_if_what_it_found_has_changed() {
     move_logs(&a, &b);
     let steps = decide(&nb, just(&a));
     std::fs::remove_file(&a).unwrap();
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(!b.exists());
     assert_no_temporary_names(&root);
 
@@ -1263,7 +1267,7 @@ fn a_step_is_skipped_if_what_it_found_has_changed() {
     move_logs(&a, &b);
     let steps = decide(&nb, just(&a));
     Session::open(&a).unwrap().set_sync_state("something else");
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(a.is_file());
     assert!(!b.exists());
     assert_no_temporary_names(&root);
@@ -1278,18 +1282,18 @@ fn a_retirement_is_skipped_if_what_it_found_has_changed() {
 
     let steps = decide(&nb, just(&a));
     let session = Session::open(&a).unwrap();
-    assert!(apply(&nb, steps, Some(&a)).is_empty());
+    assert!(apply(&nb, steps, Some(&a), Locks::NONE).is_empty());
     drop(session);
     assert!(a.is_file());
 
     let steps = decide(&nb, just(&a));
     Session::open(&a).unwrap().set_sync_state("something else");
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(a.is_file());
 
     let steps = decide(&nb, just(&a));
     std::fs::remove_file(&a).unwrap();
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(!root.join(".a.retired.kame").exists());
 }
 
@@ -1304,17 +1308,17 @@ fn a_return_is_skipped_if_what_it_found_has_changed() {
 
     // The retired file is opened by hand, and then the path it would go to is.
     let steps = decide(&nb, &[]);
-    assert!(apply(&nb, steps, Some(&retired)).is_empty());
+    assert!(apply(&nb, steps, Some(&retired), Locks::NONE).is_empty());
     assert!(retired.is_file());
     let steps = decide(&nb, &[]);
-    assert!(apply(&nb, steps, Some(&b)).is_empty());
+    assert!(apply(&nb, steps, Some(&b), Locks::NONE).is_empty());
     assert!(retired.is_file());
 
     // A database has been built there.
     let steps = decide(&nb, &[]);
     assert!(build_from_logs(&b).unwrap());
     let built = std::fs::read(&b).unwrap();
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert_eq!(std::fs::read(&b).unwrap(), built);
     assert!(retired.is_file());
 }
@@ -1357,7 +1361,7 @@ fn deciding_on_another_thread_changes_nothing_until_it_is_applied() {
     assert_eq!(everything(&root), before);
 
     assert_eq!(
-        apply(&nb, steps, None),
+        apply(&nb, steps, None, Locks::NONE),
         [
             Done::Retired {
                 from: b.clone(),
@@ -1384,7 +1388,7 @@ fn steps_are_applied_only_to_the_notebook_they_were_found_in() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     remove_logs(&a);
-    assert!(apply(&other, decide(&nb, just(&a)), None).is_empty());
+    assert!(apply(&other, decide(&nb, just(&a)), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -1404,10 +1408,10 @@ fn a_retirement_is_left_for_the_next_pass_if_words_were_typed_after_it_was_decid
         assert!(sync(&mut session).stranded);
     }
 
-    assert!(apply(&nb, steps, Some(&b)).is_empty());
+    assert!(apply(&nb, steps, Some(&b), Locks::NONE).is_empty());
     assert!(text_of(&a).contains("Typed after decide."));
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -1429,10 +1433,10 @@ fn a_retirement_is_left_for_the_next_pass_if_words_were_typed_in_a_session_open_
     session.insert(" Typed while open.");
     drop(session);
 
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(a.is_file());
     assert!(matches!(
-        reconcile(&nb, just(&a), None)[..],
+        reconcile(&nb, just(&a), None, Locks::NONE)[..],
         [Done::Retired { unsynced: true, .. }]
     ));
 }
@@ -1454,7 +1458,7 @@ fn a_retirement_is_left_for_the_next_pass_if_only_the_title_changed_after_it_was
         session.set_metadata(metadata);
     }
 
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -1470,7 +1474,7 @@ fn a_retirement_goes_ahead_if_the_database_was_only_opened_after_it_was_decided(
     drop(Session::open(&a).unwrap());
 
     assert!(matches!(
-        apply(&nb, steps, None)[..],
+        apply(&nb, steps, None, Locks::NONE)[..],
         [Done::Retired {
             opened_there: true,
             unsynced: false,
@@ -1648,7 +1652,7 @@ fn a_hand_copy_is_not_stranded_and_starts_its_own_logs() {
     }
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
     assert!(find_stranded(&other_nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, &copies, None).is_empty());
+    assert!(reconcile(&nb, &copies, None, Locks::NONE).is_empty());
     assert!(listed(&nb).contains(&"z.kame".to_string()));
     assert!(root.join("z.kame").is_file());
 
@@ -1680,7 +1684,7 @@ fn a_hand_copy_to_the_same_path_in_another_notebook_is_not_stranded() {
     std::fs::copy(&a, &copy).unwrap();
 
     assert!(find_stranded(&other_nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&other_nb, just(&copy), None).is_empty());
+    assert!(reconcile(&other_nb, just(&copy), None, Locks::NONE).is_empty());
     assert!(copy.is_file());
     let mut session = Session::open(&copy).unwrap();
     assert!(sync(&mut session).written > 0);
@@ -1753,7 +1757,7 @@ fn a_database_with_no_recorded_place_is_not_stranded() {
     assert_eq!(place_in(&a), None);
 
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 
     let mut session = Session::open(&a).unwrap();
@@ -1773,7 +1777,7 @@ fn a_retired_file_renamed_back_by_hand_syncs_again() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     remove_logs(&a);
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     let retired = root.join(".a.retired.kame");
 
     // Under the name it left, it's in the place it last synced, with the logs still gone.
@@ -1803,7 +1807,7 @@ fn a_retired_file_opened_where_it_is_writes_no_logs() {
     let a = root.join("a.kame");
     synced(&a, "Words.");
     remove_logs(&a);
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     let retired = root.join(".a.retired.kame");
 
     let mut session = Session::open(&retired).unwrap();
@@ -1849,7 +1853,7 @@ fn a_database_from_elsewhere_on_another_documents_logs_is_listed_and_writes_noth
     let before = words_in_logs(&log_folder(&a));
 
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(listed(&nb).contains(&"a.kame".to_string()));
 
     let mut session = Session::open(&a).unwrap();
@@ -1874,13 +1878,13 @@ fn a_database_that_arrives_at_a_new_home_is_recognised_if_that_moves_too() {
     );
     synced(&a, "Words.");
     move_logs(&a, &b);
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     assert_eq!(place_in(&b), place_of(&b));
 
     move_logs(&b, &c);
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&b));
     assert_eq!(
-        reconcile(&nb, just(&b), None),
+        reconcile(&nb, just(&b), None, Locks::NONE),
         [Done::Moved {
             from: b.clone(),
             to: c.clone()
@@ -1900,13 +1904,13 @@ fn a_retired_database_found_by_its_revision_records_its_new_place_on_arrival() {
     synced(&a, "Words.");
     let carried = root.join(".carried");
     std::fs::rename(log_folder(&a), &carried).unwrap();
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     let retired = root.join(".a.retired.kame");
     assert_eq!(place_in(&retired), place_of(&a), "as it was");
 
     std::fs::rename(&carried, log_folder(&b)).unwrap();
     assert_eq!(
-        reconcile(&nb, &[], None),
+        reconcile(&nb, &[], None, Locks::NONE),
         [Done::Returned {
             from: retired,
             to: b.clone()
@@ -1927,7 +1931,7 @@ fn a_place_that_cannot_be_written_on_arrival_does_not_stop_the_move() {
     move_logs(&a, &b);
     set_mode(&a, 0o444);
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Moved {
             from: a.clone(),
             to: b.clone()
@@ -1955,7 +1959,7 @@ fn a_hand_copy_does_not_keep_a_retired_database_from_its_home() {
     move_logs(&a, &b);
 
     assert_eq!(
-        reconcile(&nb, &[], None),
+        reconcile(&nb, &[], None, Locks::NONE),
         [Done::Returned {
             from: retired,
             to: b.clone()
@@ -1980,7 +1984,7 @@ fn a_hand_copy_of_another_document_at_a_new_home_leaves_the_stale_one_alone() {
     let before = std::fs::read(&b).unwrap();
 
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
     assert_eq!(std::fs::read(&b).unwrap(), before);
 }
@@ -1993,7 +1997,7 @@ fn a_step_is_skipped_if_the_place_it_found_has_changed() {
     remove_logs(&a);
     let steps = decide(&nb, just(&a));
     Session::open(&a).unwrap().set_sync_place("elsewhere.kame");
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -2032,7 +2036,7 @@ fn a_document_last_synced_before_a_field_was_added_is_not_retired_and_heals() {
 
     let mut healthy = Healthy::default();
     assert!(find_stranded(&nb, &mut healthy).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 
     let mut session = Session::open(&a).unwrap();
@@ -2042,7 +2046,7 @@ fn a_document_last_synced_before_a_field_was_added_is_not_retired_and_heals() {
     drop(session);
     assert!(a.is_file());
     assert!(find_stranded(&nb, &mut healthy).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(text_of(&a).contains("Words."));
 }
 
@@ -2064,7 +2068,7 @@ fn a_corrupt_line_that_could_be_this_documents_vetoes_its_retirement_and_says_so
             because: "z.kame".to_string()
         })
     );
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -2096,7 +2100,7 @@ fn a_corrupt_line_beside_this_documents_lines_vetoes_its_retirement() {
 
     let steps = decide(&nb, just(&a));
     assert_eq!(steps.unsettled().map(|found| found.waiting), Some(1));
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -2112,7 +2116,7 @@ fn a_corrupt_line_in_another_documents_logs_does_not_veto_a_retirement() {
 
     let steps = decide(&nb, just(&a));
     assert_eq!(steps.unsettled(), None);
-    assert_eq!(apply(&nb, steps, None).len(), 1);
+    assert_eq!(apply(&nb, steps, None, Locks::NONE).len(), 1);
     assert!(root.join(".a.retired.kame").is_file());
 }
 
@@ -2131,7 +2135,7 @@ fn a_corrupt_line_elsewhere_does_not_veto_a_move() {
     let steps = decide(&nb, just(&a));
     assert_eq!(steps.unsettled(), None);
     assert_eq!(
-        apply(&nb, steps, None),
+        apply(&nb, steps, None, Locks::NONE),
         [Done::Moved {
             from: a.clone(),
             to: b.clone()
@@ -2153,7 +2157,7 @@ fn a_corrupt_line_elsewhere_does_not_veto_a_retirement_with_the_document_opened_
     add_line_that_cannot_be_checked(&z);
 
     assert!(matches!(
-        reconcile(&nb, just(&a), None)[..],
+        reconcile(&nb, just(&a), None, Locks::NONE)[..],
         [Done::Retired {
             opened_there: true,
             ..
@@ -2172,11 +2176,11 @@ fn a_corrupt_line_elsewhere_lets_a_retired_database_come_back() {
     synced(&a, "Words.");
     let elsewhere = root.join(".carried");
     std::fs::rename(log_folder(&a), &elsewhere).unwrap();
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
     add_line_that_cannot_be_checked(&z);
 
-    assert_eq!(reconcile(&nb, &[], None).len(), 1);
+    assert_eq!(reconcile(&nb, &[], None, Locks::NONE).len(), 1);
     assert!(b.is_file());
 }
 
@@ -2202,7 +2206,7 @@ fn a_line_in_the_older_format_elsewhere_stops_nothing() {
 
     let steps = decide(&nb, &[a.clone(), b.clone()]);
     assert_eq!(steps.unsettled(), None);
-    assert_eq!(apply(&nb, steps, None).len(), 2);
+    assert_eq!(apply(&nb, steps, None, Locks::NONE).len(), 2);
     assert!(root.join(".a.retired.kame").is_file());
     assert!(c.is_file());
 
@@ -2211,7 +2215,7 @@ fn a_line_in_the_older_format_elsewhere_stops_nothing() {
     let (d, e) = (root.join("d.kame"), root.join("e.kame"));
     synced(&d, "Later.");
     move_logs(&d, &e);
-    assert_eq!(reconcile(&nb, just(&d), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&d), None, Locks::NONE).len(), 1);
 }
 
 #[test]
@@ -2231,7 +2235,7 @@ fn a_database_parked_by_a_crash_comes_back_with_older_lines_about() {
     move_logs(&a, &b);
 
     assert_eq!(
-        reconcile(&nb, &[], None),
+        reconcile(&nb, &[], None, Locks::NONE),
         [Done::Returned {
             from: parked,
             to: b.clone()
@@ -2250,13 +2254,13 @@ fn a_retired_database_comes_back_to_logs_in_the_older_format() {
     Session::open(&a).unwrap().set_sync_state(&aged);
     let elsewhere = root.join(".carried");
     std::fs::rename(log_folder(&a), &elsewhere).unwrap();
-    reconcile(&nb, just(&a), None);
+    reconcile(&nb, just(&a), None, Locks::NONE);
     let retired = root.join(".a.retired.kame");
     assert!(retired.is_file());
     std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
 
     assert_eq!(
-        reconcile(&nb, &[], None),
+        reconcile(&nb, &[], None, Locks::NONE),
         [Done::Returned {
             from: retired,
             to: b.clone()
@@ -2282,7 +2286,7 @@ fn a_retirement_with_its_revision_only_in_an_older_line_counts_as_unsynced() {
     }
 
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Retired {
             from: a.clone(),
             to: root.join(".a.retired.kame"),
@@ -2360,7 +2364,7 @@ fn a_move_goes_ahead_while_some_logs_are_from_a_newer_kame() {
     move_logs(&a, &b);
     add_newer_line(&other);
 
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
     assert!(b.is_file());
 }
 
@@ -2414,7 +2418,7 @@ fn a_line_that_cannot_be_checked_lets_no_history_into_another_documents_logs() {
     let before = words_in_logs(&log_folder(&a));
 
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
     let mut session = Session::open(&a).unwrap();
     let outcome = sync(&mut session);
@@ -2438,7 +2442,7 @@ fn half_a_line_still_being_written_does_not_stop_a_pass() {
     bytes.extend_from_slice(b"{\"id\":\"half");
     std::fs::write(&log, bytes).unwrap();
 
-    assert_eq!(reconcile(&nb, just(&a), None).len(), 1);
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
 }
 
 /// Tries to move a database, and then to delete it, and shows that its logs stayed each time.
@@ -2450,15 +2454,19 @@ fn assert_logs_are_kept(nb: &Notebook, path: &Path, refused_for: &str) {
         path,
         &with_suffix(path, "-moved.kame"),
         None,
+        Locks::NONE,
         DEVICE,
         100,
     );
-    let err = carry_out(nb, plan, None, DEVICE, 100).unwrap_err();
+    let err = carry_out(nb, plan, None, Locks::NONE, DEVICE, 100).unwrap_err();
     assert!(err.contains(refused_for), "{err}");
     assert!(path.is_file());
     assert_eq!(words_in_logs(&logs), before);
 
-    assert!(delete_document(path).unwrap(), "it says it left the logs");
+    assert!(
+        delete_document(path, Locks::NONE).unwrap(),
+        "it says it left the logs"
+    );
     assert!(!path.exists());
     assert_eq!(words_in_logs(&logs), before);
 }
@@ -2509,7 +2517,7 @@ fn another_documents_aged_logs_are_not_taken_by_a_database_with_no_place() {
     let before = words_in_logs(&log_folder(&a));
 
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     let mut session = Session::open(&a).unwrap();
     session.insert(" Typed here.");
     let outcome = sync(&mut session);
@@ -2531,14 +2539,14 @@ fn a_documents_own_aged_logs_are_deleted_and_moved_with_it() {
     let aged = age_logs(&log_folder(&a), &state);
     Session::open(&a).unwrap().set_sync_state(&aged);
 
-    let plan = plan_move(&nb, &a, &b, None, DEVICE, 100);
-    let report = carry_out(&nb, plan, None, DEVICE, 100).unwrap();
+    let plan = plan_move(&nb, &a, &b, None, Locks::NONE, DEVICE, 100);
+    let report = carry_out(&nb, plan, None, Locks::NONE, DEVICE, 100).unwrap();
     assert!(report.left.is_empty(), "{:?}", report.left);
     assert!(b.is_file());
     assert!(log_folder(&b).is_dir());
     assert!(!log_folder(&a).exists());
 
-    assert!(!delete_document(&b).unwrap());
+    assert!(!delete_document(&b, Locks::NONE).unwrap());
     assert!(!log_folder(&b).exists());
 }
 
@@ -2577,7 +2585,7 @@ fn a_line_that_names_no_document_beside_its_own_lines_changes_nothing() {
     assert!(!outcome.others_logs);
     assert!(outcome.written > 0);
     drop(session);
-    assert!(!delete_document(&a).unwrap());
+    assert!(!delete_document(&a, Locks::NONE).unwrap());
     assert!(!log_folder(&a).exists());
     assert!(listed(&nb).is_empty());
 }
@@ -2612,7 +2620,7 @@ fn logs_that_cannot_be_read_are_kept() {
     synced(&a, "Words.");
     let log = only_log(&a);
     set_mode(&log, 0o000);
-    let left = delete_document(&a);
+    let left = delete_document(&a, Locks::NONE);
     set_mode(&log, 0o644);
     assert!(left.unwrap(), "it says it left the logs");
     assert!(!a.exists());
@@ -2627,10 +2635,10 @@ fn a_database_that_cannot_be_read_leaves_its_logs_and_a_row_of_only_logs_does_no
     let a = root.join("a.kame");
     synced(&a, "Words.");
     std::fs::write(&a, "not a database").unwrap();
-    assert!(delete_document(&a).unwrap());
+    assert!(delete_document(&a, Locks::NONE).unwrap());
     assert!(log_folder(&a).is_dir());
 
-    assert!(!delete_document(&a).unwrap());
+    assert!(!delete_document(&a, Locks::NONE).unwrap());
     assert!(!log_folder(&a).exists());
 }
 
@@ -2646,7 +2654,7 @@ fn a_pass_stamps_a_database_with_its_logs_and_losing_them_then_strands_it() {
     let steps = decide(&nb, &[]);
     assert_eq!(place_in(&a), None, "deciding changes nothing");
     assert!(
-        apply(&nb, steps, None).is_empty(),
+        apply(&nb, steps, None, Locks::NONE).is_empty(),
         "and there's nothing to say"
     );
     assert_eq!(place_in(&a), place_of(&a));
@@ -2663,7 +2671,7 @@ fn a_hand_copy_with_no_logs_beside_it_is_not_stamped() {
     std::fs::copy(&a, &copy).unwrap();
     as_an_older_kame_left_it(&copy);
 
-    reconcile(&nb, &[], None);
+    reconcile(&nb, &[], None, Locks::NONE);
     assert_eq!(place_in(&copy), None);
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
 }
@@ -2679,7 +2687,7 @@ fn a_database_whose_revision_is_not_beside_it_is_not_stamped() {
     std::fs::remove_file(&other).unwrap();
     as_an_older_kame_left_it(&a);
 
-    reconcile(&nb, &[], None);
+    reconcile(&nb, &[], None, Locks::NONE);
     assert_eq!(place_in(&a), None);
     assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
 }
@@ -2694,7 +2702,7 @@ fn an_older_line_that_could_hold_the_revision_counts_as_beside_it() {
     Session::open(&a).unwrap().set_sync_state(&aged);
     as_an_older_kame_left_it(&a);
 
-    reconcile(&nb, &[], None);
+    reconcile(&nb, &[], None, Locks::NONE);
     assert_eq!(place_in(&a), place_of(&a));
 }
 
@@ -2703,7 +2711,7 @@ fn a_database_that_never_synced_is_not_stamped() {
     let (root, nb) = logged_notebook("stamp-never-synced");
     let a = root.join("a.kame");
     Session::open(&a).unwrap().insert("Never synced.");
-    reconcile(&nb, &[], None);
+    reconcile(&nb, &[], None, Locks::NONE);
     assert_eq!(place_in(&a), None);
 }
 
@@ -2714,9 +2722,9 @@ fn the_open_document_is_never_stamped() {
     synced(&a, "Words.");
     as_an_older_kame_left_it(&a);
 
-    reconcile(&nb, &[], Some(&a));
+    reconcile(&nb, &[], Some(&a), Locks::NONE);
     assert_eq!(place_in(&a), None);
-    reconcile(&nb, &[], None);
+    reconcile(&nb, &[], None, Locks::NONE);
     assert_eq!(place_in(&a), place_of(&a));
 }
 
@@ -2729,7 +2737,7 @@ fn a_stamp_is_skipped_if_what_it_found_has_changed() {
 
     let steps = decide(&nb, &[]);
     Session::open(&a).unwrap().set_sync_state("something else");
-    apply(&nb, steps, None);
+    apply(&nb, steps, None, Locks::NONE);
     assert_eq!(place_in(&a), None);
 
     let (root, nb) = logged_notebook("stamp-changed-place");
@@ -2738,7 +2746,7 @@ fn a_stamp_is_skipped_if_what_it_found_has_changed() {
     as_an_older_kame_left_it(&a);
     let steps = decide(&nb, &[]);
     Session::open(&a).unwrap().set_sync_place("elsewhere");
-    apply(&nb, steps, None);
+    apply(&nb, steps, None, Locks::NONE);
     assert_eq!(place_in(&a).as_deref(), Some("elsewhere"));
 }
 
@@ -2753,7 +2761,7 @@ fn a_stamp_that_cannot_be_written_is_no_trouble() {
     set_mode(&a, 0o444);
     let steps = decide(&nb, &[]);
     assert!(format!("{steps:?}").contains("stamping: []"), "not asked");
-    let done = apply(&nb, steps, None);
+    let done = apply(&nb, steps, None, Locks::NONE);
     set_mode(&a, 0o644);
     assert!(done.is_empty());
     assert_eq!(names_in(&root), names, "and nothing left beside it");
@@ -2788,7 +2796,7 @@ fn a_stamp_leaves_alone_a_database_with_another_machines_wal_beside_it() {
 
     let steps = decide(&nb, &[]);
     assert!(format!("{steps:?}").contains("stamping: []"), "not asked");
-    assert!(apply(&nb, steps, None).is_empty());
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
 
     assert_eq!(std::fs::read(&a).unwrap(), file);
     assert_eq!(std::fs::read(&wal).unwrap(), carried);
@@ -2808,7 +2816,7 @@ fn a_stamp_leaves_alone_a_document_open_in_another_process() {
         std::fs::read(with_suffix(&a, "-wal")).unwrap(),
     );
 
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
 
     assert_eq!(std::fs::read(&wal).unwrap(), side);
     assert_eq!(session.sync_place(), None);
@@ -2829,13 +2837,16 @@ fn a_stamp_waits_for_a_crash_wal_to_go() {
 
     let mut healthy = Healthy::default();
     assert!(find_stranded(&nb, &mut healthy).is_empty(), "nothing waits");
-    assert!(reconcile(&nb, &[], None).is_empty(), "nothing is said");
+    assert!(
+        reconcile(&nb, &[], None, Locks::NONE).is_empty(),
+        "nothing is said"
+    );
     assert!(with_suffix(&a, "-wal").exists());
     assert_eq!(std::fs::read(&a).unwrap(), file);
 
     drop(Session::open(&a).unwrap());
     assert!(!with_suffix(&a, "-wal").exists());
-    assert!(reconcile(&nb, &[], None).is_empty());
+    assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
     assert_eq!(place_in(&a), place_of(&a));
     assert!(text_of(&a).contains("Only in the wal."));
 }
@@ -2853,7 +2864,7 @@ fn a_database_at_the_new_home_whose_document_cannot_be_read_leaves_the_stale_one
         .execute("UPDATE documents SET json = 'nonsense' WHERE id = 1", [])
         .unwrap();
 
-    assert!(reconcile(&nb, just(&a), None).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
     assert!(a.is_file());
 }
 
@@ -2876,7 +2887,7 @@ fn a_database_arriving_with_a_wal_beside_it_is_not_opened() {
     );
 
     assert_eq!(
-        reconcile(&nb, just(&a), None),
+        reconcile(&nb, just(&a), None, Locks::NONE),
         [Done::Moved {
             from: a.clone(),
             to: b.clone()
@@ -2908,7 +2919,7 @@ fn a_retired_database_coming_back_with_a_wal_beside_it_is_not_opened() {
     );
 
     assert_eq!(
-        reconcile(&nb, &[], None),
+        reconcile(&nb, &[], None, Locks::NONE),
         [Done::Returned {
             from: retired,
             to: b.clone()
@@ -2933,7 +2944,7 @@ fn another_notebook_inside_is_left_to_itself() {
 
     assert_eq!(listed(&nb), ["mine.kame"]);
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&mine));
-    let done = reconcile(&nb, &[mine.clone(), theirs.clone()], None);
+    let done = reconcile(&nb, &[mine.clone(), theirs.clone()], None, Locks::NONE);
     assert_eq!(
         done,
         [Done::Retired {
@@ -2953,4 +2964,137 @@ fn another_notebook_inside_is_left_to_itself() {
         find_stranded(&other, &mut Healthy::default()),
         just(&theirs)
     );
+}
+
+// Another kame holding a database. Each step on one is left for a later pass, and the lock is let
+// go once the step is done.
+
+/// A folder for one test's locks, as the app keeps them in its own.
+fn locks_folder(name: &str) -> PathBuf {
+    kame_test_dir::folder(&format!("{name}-locks"))
+}
+
+fn no_locks_left(folder: &Path) -> bool {
+    std::fs::read_dir(folder).map_or(true, |mut entries| entries.next().is_none())
+}
+
+#[test]
+fn a_database_another_kame_has_open_is_not_retired_until_it_is_let_go() {
+    let (root, nb) = logged_notebook("stranded-held-retire");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    remove_logs(&a);
+    let folder = locks_folder("stranded-held-retire");
+    let locks = Locks::new(Some(&folder), None);
+
+    let theirs = DocumentLock::take(&folder, &a).unwrap();
+    assert!(reconcile(&nb, just(&a), None, locks).is_empty());
+    assert!(a.is_file());
+    assert!(!root.join(".a.retired.kame").exists());
+    drop(theirs);
+
+    assert_eq!(reconcile(&nb, just(&a), None, locks).len(), 1);
+    assert!(!a.exists());
+    assert!(no_locks_left(&folder));
+}
+
+#[test]
+fn a_database_another_kame_has_open_is_not_moved_until_it_is_let_go() {
+    let (root, nb) = logged_notebook("stranded-held-move");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    let folder = locks_folder("stranded-held-move");
+    let locks = Locks::new(Some(&folder), None);
+
+    let theirs = DocumentLock::take(&folder, &a).unwrap();
+    assert!(reconcile(&nb, just(&a), None, locks).is_empty());
+    assert!(a.is_file());
+    assert!(!b.exists());
+    drop(theirs);
+
+    assert_eq!(
+        reconcile(&nb, just(&a), None, locks),
+        [Done::Moved {
+            from: a.clone(),
+            to: b.clone()
+        }]
+    );
+    assert!(no_locks_left(&folder));
+}
+
+/// The other half has nowhere to go while the one in its way is held.
+#[test]
+fn a_swap_waits_while_another_kame_has_either_half_open() {
+    let (root, nb) = logged_notebook("stranded-held-swap");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words of a.");
+    synced(&b, "Words of b.");
+    let held = root.join(".held");
+    std::fs::rename(log_folder(&a), &held).unwrap();
+    move_logs(&b, &a);
+    std::fs::rename(&held, log_folder(&b)).unwrap();
+    let folder = locks_folder("stranded-held-swap");
+    let locks = Locks::new(Some(&folder), None);
+
+    let theirs = DocumentLock::take(&folder, &b).unwrap();
+    assert!(reconcile(&nb, &[a.clone(), b.clone()], None, locks).is_empty());
+    assert!(text_of(&a).contains("Words of a."));
+    assert!(text_of(&b).contains("Words of b."));
+    assert!(!names_in(&root).iter().any(|name| name.contains(".moving-")));
+    drop(theirs);
+
+    assert_eq!(
+        reconcile(&nb, &[a.clone(), b.clone()], None, locks).len(),
+        2
+    );
+    assert!(no_locks_left(&folder));
+}
+
+#[test]
+fn a_retired_database_another_kame_has_open_is_not_brought_back_until_it_is_let_go() {
+    let (root, nb) = logged_notebook("stranded-held-return");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    let elsewhere = root.join(".carried");
+    std::fs::rename(log_folder(&a), &elsewhere).unwrap();
+    assert_eq!(reconcile(&nb, just(&a), None, Locks::NONE).len(), 1);
+    let retired = root.join(".a.retired.kame");
+    std::fs::rename(&elsewhere, log_folder(&b)).unwrap();
+    let folder = locks_folder("stranded-held-return");
+    let locks = Locks::new(Some(&folder), None);
+
+    let theirs = DocumentLock::take(&folder, &retired).unwrap();
+    assert!(reconcile(&nb, &[], None, locks).is_empty());
+    assert!(retired.is_file());
+    assert!(!b.exists());
+    drop(theirs);
+
+    assert_eq!(
+        reconcile(&nb, &[], None, locks),
+        [Done::Returned {
+            from: retired.clone(),
+            to: b.clone()
+        }]
+    );
+    assert!(no_locks_left(&folder));
+}
+
+#[test]
+fn a_database_another_kame_has_open_is_not_stamped_until_it_is_let_go() {
+    let (root, nb) = logged_notebook("stamp-held");
+    let a = root.join("a.kame");
+    synced(&a, "Words.");
+    as_an_older_kame_left_it(&a);
+    let folder = locks_folder("stamp-held");
+    let locks = Locks::new(Some(&folder), None);
+
+    let theirs = DocumentLock::take(&folder, &a).unwrap();
+    reconcile(&nb, &[], None, locks);
+    assert_eq!(place_in(&a), None);
+    drop(theirs);
+
+    reconcile(&nb, &[], None, locks);
+    assert_eq!(place_in(&a), place_of(&a));
+    assert!(no_locks_left(&folder));
 }

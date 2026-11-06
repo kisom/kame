@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use kame_core::lock::Locks;
 use kame_core::model::Metadata;
 use kame_core::storage::Db;
 use kame_sync::logs::{
@@ -237,9 +238,16 @@ pub fn decide(notebook: &Notebook, may_act_on: &[PathBuf]) -> Steps {
 /// since then, so each step is looked at again just before it's taken, with no more reading than
 /// that takes: it's skipped if the database has gone, is open, or remembers something else now, or
 /// if something has arrived where it's going. A retirement is also skipped if what the database
-/// holds has changed, since what it reports about that would be out of date. This returns what was
-/// done, and what's skipped or fails is left to be seen again by the next pass.
-pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done> {
+/// holds has changed, since what it reports about that would be out of date. A database another kame
+/// has open, as `locks` tells, is skipped too, and the lock on each one acted on is held while it's
+/// renamed or written. This returns what was done, and what's skipped or fails is left to be seen
+/// again by the next pass.
+pub fn apply(
+    notebook: &Notebook,
+    steps: Steps,
+    open: Option<&Path>,
+    locks: Locks<'_>,
+) -> Vec<Done> {
     if steps.root != notebook.root {
         return Vec::new();
     }
@@ -249,6 +257,9 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
 
     let mut done = Vec::new();
     for step in steps.retiring {
+        let Ok(_holding) = locks.take([&step.path]) else {
+            continue;
+        };
         if !as_it_was(&step.path, &step.last) || contents_of(&step.path) != step.contents {
             continue;
         }
@@ -263,16 +274,26 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
             }
         }
     }
-    // After the retirements, which may have freed a name that a mover is going to.
-    let movers = steps
-        .moving
-        .into_iter()
-        .filter(|mover| as_it_was(&mover.path, &mover.last))
-        .collect();
+    // After the retirements, which may have freed a name that a mover is going to. One that stays
+    // where it is leaves no room for another.
+    let (mut movers, mut holding) = (Vec::new(), Vec::new());
+    for mover in steps.moving {
+        let Ok(held) = locks.take([&mover.path]) else {
+            continue;
+        };
+        if as_it_was(&mover.path, &mover.last) {
+            movers.push(mover);
+            holding.push(held);
+        }
+    }
     done.extend(carry_out_moves(movers, &is_open));
+    drop(holding);
     // After the moves, since a database moving is the document as it is now, and a retired one
     // isn't.
     for step in steps.returning {
+        let Ok(_holding) = locks.take([&step.path]) else {
+            continue;
+        };
         if as_it_was(&step.path, &step.last)
             && !is_open(&step.home)
             && arrive(&step.path, &step.home)
@@ -285,6 +306,9 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
         }
     }
     for (path, last) in steps.stamping {
+        let Ok(_holding) = locks.take([&path]) else {
+            continue;
+        };
         if as_it_was(&path, &last) {
             record_place(&path);
         }
@@ -293,8 +317,13 @@ pub fn apply(notebook: &Notebook, steps: Steps, open: Option<&Path>) -> Vec<Done
 }
 
 /// Both, for callers with nothing else going on.
-pub fn reconcile(notebook: &Notebook, may_act_on: &[PathBuf], open: Option<&Path>) -> Vec<Done> {
-    apply(notebook, decide(notebook, may_act_on), open)
+pub fn reconcile(
+    notebook: &Notebook,
+    may_act_on: &[PathBuf],
+    open: Option<&Path>,
+    locks: Locks<'_>,
+) -> Vec<Done> {
+    apply(notebook, decide(notebook, may_act_on), open, locks)
 }
 
 /// Whether a path is a database of this notebook that's stranded right now. `is_stranded` takes a

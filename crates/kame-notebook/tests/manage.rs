@@ -4,11 +4,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use kame_core::links::image_file;
+use kame_core::lock::{DocumentLock, LockError, Locks};
 use kame_core::model::{BlockKind, Document, ImageAlign, Metadata, Span, SpanStyle};
 use kame_core::session::Session;
 use kame_core::storage::Db;
 use kame_notebook::links::Follow;
-use kame_notebook::manage::{carry_out, check_new_path, delete_document, plan_move, MoveReport};
+use kame_notebook::manage::{
+    carry_out, check_new_path, delete_document, plan_move, DeleteError, MoveReport,
+};
 use kame_notebook::Notebook;
 use kame_sync::logs::{log_folder, place_of, Logged, MARKER};
 use kame_sync::revlog::Store;
@@ -121,7 +124,7 @@ fn deleting_leaves_nothing_named_for_the_document() {
     std::fs::write(root.join(".X.kame.sync/titan.log"), "").unwrap();
     document(&root.join("XY.kame"), "XY.");
     std::fs::copy(root.join("XY.kame"), root.join(".XY.retired.kame")).unwrap();
-    delete_document(&x).unwrap();
+    delete_document(&x, Locks::NONE).unwrap();
     let mut left: Vec<String> = std::fs::read_dir(&root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -135,7 +138,7 @@ fn deleting_a_markdown_document_removes_only_its_file() {
     let root = folder("manage-delete-md");
     std::fs::write(root.join("n.md"), "# N\n").unwrap();
     std::fs::write(root.join("n.sync-conflict-1.kame"), "").unwrap();
-    assert!(!delete_document(&root.join("n.md")).unwrap());
+    assert!(!delete_document(&root.join("n.md"), Locks::NONE).unwrap());
     assert!(!root.join("n.md").exists());
     assert!(root.join("n.sync-conflict-1.kame").exists());
 }
@@ -191,8 +194,8 @@ fn read(path: &Path) -> Document {
 }
 
 fn make_move(nb: &Notebook, from: &Path, to: &Path) -> MoveReport {
-    let plan = plan_move(nb, from, to, None, DEVICE, NOW);
-    carry_out(nb, plan, None, DEVICE, NOW).unwrap()
+    let plan = plan_move(nb, from, to, None, Locks::NONE, DEVICE, NOW);
+    carry_out(nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap()
 }
 
 fn plain_notebook(name: &str) -> (PathBuf, Notebook) {
@@ -585,7 +588,10 @@ fn deleting_a_document_with_only_logs_removes_them() {
     document(&a, "The words.");
     sync(&a);
     std::fs::remove_file(&a).unwrap();
-    assert!(!delete_document(&a).unwrap(), "no logs were left");
+    assert!(
+        !delete_document(&a, Locks::NONE).unwrap(),
+        "no logs were left"
+    );
     assert!(!log_folder(&a).exists());
 }
 
@@ -620,7 +626,10 @@ fn deleting_a_stale_copy_leaves_the_logs_of_the_document_now_at_its_path() {
     let logs = files_in(&log_folder(&a));
     assert!(!logs.is_empty());
 
-    assert!(delete_document(&a).unwrap(), "it says it left the logs");
+    assert!(
+        delete_document(&a, Locks::NONE).unwrap(),
+        "it says it left the logs"
+    );
 
     assert!(!a.exists());
     assert!(!root.join(".a.retired.kame").exists());
@@ -634,7 +643,7 @@ fn deleting_a_stale_copy_with_no_logs_at_its_path_left_none() {
     document(&a, "Old words.");
     sync(&a);
     std::fs::remove_dir_all(log_folder(&a)).unwrap();
-    assert!(!delete_document(&a).unwrap());
+    assert!(!delete_document(&a, Locks::NONE).unwrap());
     assert!(!a.exists());
 }
 
@@ -657,7 +666,7 @@ fn deleting_leaves_a_retired_copy_of_another_document() {
     std::fs::copy(&x, root.join(".X.retired-2.kame")).unwrap();
     std::fs::write(root.join(".X.retired-3.kame"), "can't be read").unwrap();
 
-    delete_document(&x).unwrap();
+    delete_document(&x, Locks::NONE).unwrap();
 
     assert_eq!(std::fs::read(root.join(".X.retired.kame")).unwrap(), words);
     assert!(!root.join(".X.retired-2.kame").exists(), "its own goes");
@@ -698,7 +707,7 @@ fn a_document_with_only_logs_is_known_by_the_id_in_them() {
     sync(&x);
     std::fs::rename(&x, root.join(".X.retired-2.kame")).unwrap();
 
-    delete_document(&x).unwrap();
+    delete_document(&x, Locks::NONE).unwrap();
 
     assert_eq!(std::fs::read(root.join(".X.retired.kame")).unwrap(), words);
     assert!(!root.join(".X.retired-2.kame").exists(), "its own goes");
@@ -717,7 +726,7 @@ fn logs_with_no_head_to_read_leave_every_retired_copy() {
         std::fs::write(entry.path(), "").unwrap();
     }
 
-    delete_document(&x).unwrap();
+    delete_document(&x, Locks::NONE).unwrap();
 
     assert!(root.join(".X.retired.kame").is_file());
     assert!(!folder.exists());
@@ -731,7 +740,7 @@ fn a_database_that_cannot_be_read_leaves_every_retired_copy() {
     std::fs::copy(&x, root.join(".X.retired.kame")).unwrap();
     std::fs::write(&x, "not a database").unwrap();
 
-    delete_document(&x).unwrap();
+    delete_document(&x, Locks::NONE).unwrap();
 
     assert!(!x.exists());
     assert!(root.join(".X.retired.kame").is_file());
@@ -743,7 +752,10 @@ fn deleting_a_document_in_step_with_its_logs_removes_them() {
     let a = root.join("a.kame");
     document(&a, "The words.");
     sync(&a);
-    assert!(!delete_document(&a).unwrap(), "no logs were left");
+    assert!(
+        !delete_document(&a, Locks::NONE).unwrap(),
+        "no logs were left"
+    );
     assert!(!a.exists());
     assert!(!log_folder(&a).exists());
 }
@@ -751,8 +763,11 @@ fn deleting_a_document_in_step_with_its_logs_removes_them() {
 #[test]
 fn deleting_what_isnt_there_says_so() {
     let (root, _nb) = logged_notebook("delete-nothing");
-    let err = delete_document(&root.join("a.kame")).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    let err = delete_document(&root.join("a.kame"), Locks::NONE).unwrap_err();
+    assert!(
+        matches!(&err, DeleteError::Io(err) if err.kind() == std::io::ErrorKind::NotFound),
+        "{err:?}"
+    );
 }
 
 /// A second machine: its own folder, holding a copy of the document with the same past, whose
@@ -761,6 +776,7 @@ fn second_machine(root: &Path, linker: &Path, name: &str) -> PathBuf {
     let elsewhere = folder(name);
     std::fs::write(elsewhere.join(MARKER), "").unwrap();
     let copy = elsewhere.join(linker.strip_prefix(root).unwrap());
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
     std::fs::copy(linker, &copy).unwrap();
     let (from, to) = (log_folder(linker), log_folder(&copy));
     std::fs::create_dir_all(&to).unwrap();
@@ -1004,10 +1020,11 @@ fn the_open_document_changes_through_its_session() {
         &a,
         &b,
         Some((linker.as_path(), session.document())),
+        Locks::NONE,
         DEVICE,
         NOW,
     );
-    let report = carry_out(&nb, plan, Some(&mut session), DEVICE, NOW).unwrap();
+    let report = carry_out(&nb, plan, Some(&mut session), Locks::NONE, DEVICE, NOW).unwrap();
     assert_eq!(report.changed, ["linker.kame"]);
     assert_eq!(links_of(session.document()), ["b.kame"]);
     assert_eq!(session.history().0, before.0 + 1);
@@ -1025,10 +1042,11 @@ fn a_session_on_the_moving_document_is_refused() {
         &a,
         &b,
         Some((a.as_path(), session.document())),
+        Locks::NONE,
         DEVICE,
         NOW,
     );
-    assert!(carry_out(&nb, plan, Some(&mut session), DEVICE, NOW).is_err());
+    assert!(carry_out(&nb, plan, Some(&mut session), Locks::NONE, DEVICE, NOW).is_err());
     assert!(a.is_file());
     assert!(!b.exists());
 }
@@ -1160,9 +1178,9 @@ fn a_failed_move_leaves_everything_as_it_was() {
     let history = Session::open(&linker).unwrap().history();
     let to = locked.join("b.kame");
 
-    let plan = plan_move(&nb, &a, &to, None, DEVICE, NOW);
+    let plan = plan_move(&nb, &a, &to, None, Locks::NONE, DEVICE, NOW);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let result = carry_out(&nb, plan, None, DEVICE, NOW);
+    let result = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert!(result.is_err());
@@ -1182,8 +1200,8 @@ fn a_file_in_the_way_stops_the_move_and_is_not_overwritten() {
     // Left over from a `b` that's gone. Beside a new `b.kame`, SQLite could read it as its log.
     std::fs::write(root.join("b.kame-wal"), "stale").unwrap();
     let b = root.join("b.kame");
-    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
-    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    let plan = plan_move(&nb, &a, &b, None, Locks::NONE, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap_err();
     assert_eq!(err, "something is already at b.kame-wal; delete it first");
     assert!(a.is_file());
     assert!(!b.exists());
@@ -1203,8 +1221,8 @@ fn a_real_log_left_at_the_new_path_does_not_replace_the_moved_words() {
         let wal = PathBuf::from(format!("{}-wal", gone.display()));
         std::fs::copy(&wal, root.join("b.kame-wal")).unwrap();
     }
-    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
-    assert!(carry_out(&nb, plan, None, DEVICE, NOW).is_err());
+    let plan = plan_move(&nb, &a, &b, None, Locks::NONE, DEVICE, NOW);
+    assert!(carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).is_err());
     assert!(!b.exists());
     assert_eq!(read(&a).blocks[0].text, "The words of a.");
 }
@@ -1216,8 +1234,8 @@ fn logs_in_the_way_stop_a_move_with_none_of_its_own_to_bring() {
     document(&a, "A.");
     let b = root.join("b.kame");
     std::fs::create_dir_all(log_folder(&b)).unwrap();
-    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
-    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    let plan = plan_move(&nb, &a, &b, None, Locks::NONE, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap_err();
     assert_eq!(err, "something is already at .b.kame.sync; delete it first");
     assert!(a.is_file());
     assert!(!b.exists());
@@ -1227,8 +1245,16 @@ fn logs_in_the_way_stop_a_move_with_none_of_its_own_to_bring() {
 fn a_document_that_is_not_there_is_an_error() {
     let (root, nb) = plain_notebook("move-nothing");
     let gone = root.join("gone.kame");
-    let plan = plan_move(&nb, &gone, &root.join("b.kame"), None, DEVICE, NOW);
-    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    let plan = plan_move(
+        &nb,
+        &gone,
+        &root.join("b.kame"),
+        None,
+        Locks::NONE,
+        DEVICE,
+        NOW,
+    );
+    let err = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap_err();
     assert_eq!(err, "there's nothing at gone.kame");
     assert!(!root.join("b.kame").exists());
 }
@@ -1313,8 +1339,8 @@ fn a_stranded_document_is_refused_and_another_documents_logs_stay() {
     let bytes = std::fs::read(&a).unwrap();
 
     let b = root.join("b.kame");
-    let plan = plan_move(&nb, &a, &b, None, DEVICE, NOW);
-    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    let plan = plan_move(&nb, &a, &b, None, Locks::NONE, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap_err();
     assert_eq!(
         err,
         "this document was moved or deleted on another machine, so it can't be moved until that's settled"
@@ -1449,8 +1475,16 @@ fn a_rename_with_nothing_else_to_change_records_the_new_place() {
 
     // It's recognised if the logs now leave it.
     std::fs::remove_dir_all(log_folder(&b)).unwrap();
-    let plan = plan_move(&nb, &b, &root.join("c.kame"), None, DEVICE, NOW);
-    assert!(carry_out(&nb, plan, None, DEVICE, NOW).is_err());
+    let plan = plan_move(
+        &nb,
+        &b,
+        &root.join("c.kame"),
+        None,
+        Locks::NONE,
+        DEVICE,
+        NOW,
+    );
+    assert!(carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).is_err());
     assert!(b.is_file());
 }
 
@@ -1485,7 +1519,7 @@ fn a_hand_copy_is_changed_moved_and_deleted_like_any_document() {
     assert!(log_folder(&moved).is_dir());
     assert_eq!(place_in(&moved), place_of(&moved));
 
-    assert!(!delete_document(&moved).unwrap());
+    assert!(!delete_document(&moved, Locks::NONE).unwrap());
     assert!(!moved.exists());
     assert!(!log_folder(&moved).exists());
 }
@@ -1508,7 +1542,10 @@ fn on_another_documents_logs(root: &Path) -> (PathBuf, Vec<(std::ffi::OsString, 
 fn deleting_a_database_on_another_documents_logs_leaves_them() {
     let (root, _nb) = logged_notebook("delete-on-others-logs");
     let (path, logs) = on_another_documents_logs(&root);
-    assert!(delete_document(&path).unwrap(), "it says it left the logs");
+    assert!(
+        delete_document(&path, Locks::NONE).unwrap(),
+        "it says it left the logs"
+    );
     assert!(!path.exists());
     assert_eq!(files_in(&log_folder(&path)), logs);
 }
@@ -1518,8 +1555,8 @@ fn moving_a_database_on_another_documents_logs_is_refused_and_they_stay() {
     let (root, nb) = logged_notebook("move-on-others-logs");
     let (path, logs) = on_another_documents_logs(&root);
     let to = root.join("to.kame");
-    let plan = plan_move(&nb, &path, &to, None, DEVICE, NOW);
-    let err = carry_out(&nb, plan, None, DEVICE, NOW).unwrap_err();
+    let plan = plan_move(&nb, &path, &to, None, Locks::NONE, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap_err();
     assert!(err.contains("another document's"), "{err}");
     assert!(path.is_file());
     assert!(!to.exists());
@@ -1580,7 +1617,7 @@ fn deleting_takes_what_sqlite_keeps_beside_a_retired_copy_and_leaves_a_neighbour
     document(&xy, "XY.");
     copy_with_words_in_its_wal(&xy, &root.join(".XY.retired.kame"), "Neighbour's. ");
 
-    delete_document(&x).unwrap();
+    delete_document(&x, Locks::NONE).unwrap();
 
     let mut left: Vec<String> = std::fs::read_dir(&root)
         .unwrap()
@@ -1682,7 +1719,7 @@ fn deleting_takes_a_copy_left_in_a_moving_name_and_leaves_a_neighbours() {
         std::fs::copy(&x, root.join(name)).unwrap();
     }
 
-    delete_document(&x).unwrap();
+    delete_document(&x, Locks::NONE).unwrap();
 
     let mut left: Vec<String> = std::fs::read_dir(&root)
         .unwrap()
@@ -1784,4 +1821,141 @@ fn a_document_beside_another_notebook_of_its_name_has_its_links_moved() {
     let report = make_move(&nb, &projects, &root.join("work.kame"));
     assert_eq!(report.changed, ["mine.kame"]);
     assert_eq!(links_of(&read(&mine)), ["work.kame"]);
+}
+
+// Another kame holding a document. What it has open is never written into, renamed or removed.
+
+/// A folder for one test's locks, as the app keeps them in its own.
+fn locks_folder(name: &str) -> PathBuf {
+    kame_test_dir::folder(&format!("{name}-locks"))
+}
+
+fn no_locks_left(folder: &Path) -> bool {
+    std::fs::read_dir(folder).map_or(true, |mut entries| entries.next().is_none())
+}
+
+/// The name of everything in a folder and below it, and what's in each file.
+fn everything_in(folder: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(folder).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.push((path.clone(), Vec::new()));
+            found.extend(everything_in(&path));
+        } else {
+            found.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn a_move_of_a_document_another_kame_has_open_is_refused_with_nothing_changed() {
+    let (root, nb) = plain_notebook("move-held");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    let folder = locks_folder("move-held");
+    let locks = Locks::new(Some(&folder), None);
+    let before = everything_in(&root);
+
+    let _theirs = DocumentLock::take(&folder, &a).unwrap();
+    let plan = plan_move(&nb, &a, &root.join("b.kame"), None, locks, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, locks, DEVICE, NOW).unwrap_err();
+    assert_eq!(err, "a.kame is open in another kame window");
+    assert_eq!(everything_in(&root), before);
+}
+
+/// It's behind its logs, which a move would otherwise bring in before rewriting it.
+#[test]
+fn a_move_is_refused_when_another_kame_has_a_document_linking_to_it_open() {
+    let (root, nb) = logged_notebook("move-held-linker");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    sync(&a);
+    let linker = root.join("deep/linker.kame");
+    document(&linker, "Words.");
+    sync(&linker);
+    let copy = second_machine(&root, &linker, "move-held-linker-there");
+    write_and_send(&copy, &linker, |session| {
+        let mut doc = session.document().clone();
+        let block = &mut doc.blocks[0];
+        let start = block.text.len();
+        block.text.push_str(" Link.");
+        block.spans.push(Span {
+            start,
+            end: block.text.len(),
+            style: document_link("../a.kame"),
+        });
+        assert!(session.replace_document(doc));
+    });
+    let folder = locks_folder("move-held-linker");
+    let locks = Locks::new(Some(&folder), None);
+    let history = Session::open(&linker).unwrap().history();
+    let before = everything_in(&root);
+
+    let theirs = DocumentLock::take(&folder, &linker).unwrap();
+    let plan = plan_move(&nb, &a, &root.join("b.kame"), None, locks, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, locks, DEVICE, NOW).unwrap_err();
+    assert_eq!(err, "deep/linker.kame is open in another kame window");
+    assert_eq!(everything_in(&root), before);
+    drop(theirs);
+    assert_eq!(Session::open(&linker).unwrap().history(), history);
+    assert!(links_of(&read(&linker)).is_empty());
+    assert!(no_locks_left(&folder), "the move let go of what it took");
+}
+
+/// As the app holds the document it has open, and keeps holding the one it's moving.
+#[test]
+fn a_move_goes_ahead_with_the_callers_own_document_and_lets_go_of_the_rest() {
+    let (root, nb) = plain_notebook("move-own");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    let folder = locks_folder("move-own");
+    let own = DocumentLock::take(&folder, &a).unwrap();
+    let locks = Locks::new(Some(&folder), Some(&own));
+    let b = root.join("b.kame");
+
+    let plan = plan_move(&nb, &a, &b, None, locks, DEVICE, NOW);
+    let report = carry_out(&nb, plan, None, locks, DEVICE, NOW).unwrap();
+    assert_eq!(report.changed, ["linker.kame"]);
+    assert_eq!(links_of(&read(&linker)), ["b.kame"]);
+    assert_eq!(read(&b).title, "b");
+    assert!(own.is_for(&b));
+    assert!(matches!(
+        DocumentLock::take(&folder, &b),
+        Err(LockError::Held)
+    ));
+    DocumentLock::take(&folder, &linker).unwrap();
+    drop(own);
+    assert!(no_locks_left(&folder));
+}
+
+#[test]
+fn deleting_a_document_another_kame_has_open_is_refused_with_nothing_removed() {
+    let (root, _nb) = logged_notebook("delete-held");
+    let x = root.join("X.kame");
+    document(&x, "X.");
+    sync(&x);
+    std::fs::copy(&x, root.join(".X.retired.kame")).unwrap();
+    let folder = locks_folder("delete-held");
+    let locks = Locks::new(Some(&folder), None);
+    let before = everything_in(&root);
+
+    let theirs = DocumentLock::take(&folder, &x).unwrap();
+    let err = delete_document(&x, locks).unwrap_err();
+    assert!(matches!(err, DeleteError::HeldElsewhere), "{err:?}");
+    assert_eq!(err.to_string(), "it is open in another kame window");
+    assert_eq!(everything_in(&root), before);
+    drop(theirs);
+
+    delete_document(&x, locks).unwrap();
+    assert!(!x.exists());
+    assert!(no_locks_left(&folder));
 }

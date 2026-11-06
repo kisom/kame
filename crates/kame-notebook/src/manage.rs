@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use kame_core::links::{moved_target, own_target_after_move};
+use kame_core::lock::{LockError, Locks};
 use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::storage::Db;
@@ -168,8 +169,10 @@ fn with_side_files(old: &Path, new: &Path) -> Vec<(PathBuf, PathBuf)> {
 /// logs of its own, and one whose logs can't be shown to be its own may not: what's at its log
 /// folder stays, as removing it could remove another document on every machine. This returns whether
 /// it left logs there, since the document at that path still lists, and a second delete would take
-/// them.
-pub fn delete_document(path: &Path) -> std::io::Result<bool> {
+/// them. A document another kame has open is refused with nothing removed, and its lock is held
+/// while it goes, so that nobody opens it halfway.
+pub fn delete_document(path: &Path, locks: Locks<'_>) -> Result<bool, DeleteError> {
+    let _holding = locks.take([path]).map_err(|_| DeleteError::HeldElsewhere)?;
     if !is_database(path) {
         std::fs::remove_file(path)?;
         return Ok(false);
@@ -181,7 +184,7 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     // A document this machine hasn't opened yet has only its logs.
     match std::fs::remove_file(path) {
         Err(err) if err.kind() != std::io::ErrorKind::NotFound || !log_folder(path).is_dir() => {
-            return Err(err);
+            return Err(err.into());
         }
         _ => {}
     }
@@ -191,7 +194,7 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
         .map(|(file, _)| file);
     for file in sqlite_files(path).into_iter().chain(belonging) {
         match std::fs::remove_file(&file) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err.into()),
             _ => {}
         }
     }
@@ -204,6 +207,31 @@ pub fn delete_document(path: &Path) -> std::io::Result<bool> {
     }
     Ok(!its_own)
 }
+
+/// Why a document couldn't be deleted.
+#[derive(Debug)]
+pub enum DeleteError {
+    /// Another kame has it open, and nothing was removed.
+    HeldElsewhere,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for DeleteError {
+    fn from(err: std::io::Error) -> DeleteError {
+        DeleteError::Io(err)
+    }
+}
+
+impl std::fmt::Display for DeleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeleteError::HeldElsewhere => LockError::Held.fmt(f),
+            DeleteError::Io(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for DeleteError {}
 
 /// A document a move couldn't change, and why.
 #[derive(Clone, Debug, PartialEq)]
@@ -445,13 +473,15 @@ fn why_markdown_is_left(
 /// Works out which links lead to `from` and what each becomes once the document is at `to`. Files
 /// don't move yet. What this does change is `to`'s folders, which have to exist for the new links
 /// to be worked out, and any closed document that links here and is behind its logs, which is
-/// synced so that what gets rewritten is the whole of it. `open` is what's on the screen, read in
-/// place of its file and left for its own session to sync.
+/// synced so that what gets rewritten is the whole of it, unless another kame has it open, which
+/// `carry_out` then refuses. `open` is what's on the screen, read in place of its file and left for
+/// its own session to sync.
 pub fn plan_move(
     notebook: &Notebook,
     from: &Path,
     to: &Path,
     open: Option<(&Path, &Document)>,
+    locks: Locks<'_>,
     device: &str,
     now: i64,
 ) -> MovePlan {
@@ -510,11 +540,11 @@ pub fn plan_move(
         // A document to be rewritten comes together with its logs, and is planned from the result.
         // If that fails, the rewrite is left to fail for the same reason, and say so.
         let behind = versions.iter().any(|version| version != document);
-        if !targets.is_empty()
-            && behind
-            && on_screen.is_none()
-            && edit_closed(&entry.path, device, now, |_| Ok(())).is_ok()
-        {
+        let synced = || match locks.take([&entry.path]) {
+            Ok(_holding) => edit_closed(&entry.path, device, now, |_| Ok(())).is_ok(),
+            Err(_) => false,
+        };
+        if !targets.is_empty() && behind && on_screen.is_none() && synced() {
             if let Some((synced, _)) = read_document(&entry.path) {
                 targets.extend(links_leading_to(notebook, &synced, &entry.path, from));
             }
@@ -681,10 +711,15 @@ fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String>
 /// the report, and the others still change. `open` is the session on the screen, which mustn't
 /// be on the moving document, since no connection may be open across the rename. A change to it
 /// is saved here, and reaches its logs when the app next syncs it.
+///
+/// If another kame has the moving document open, or one whose links this would change, the move is
+/// refused before anything changes. Each of their locks is held until it's done, so that nobody
+/// opens one halfway. A lock is for the file, which keeps it across the rename.
 pub fn carry_out(
     notebook: &Notebook,
     plan: MovePlan,
     mut open: Option<&mut Session>,
+    locks: Locks<'_>,
     device: &str,
     now: i64,
 ) -> Result<MoveReport, String> {
@@ -708,6 +743,13 @@ pub fn carry_out(
     if from == to {
         return Ok(report);
     }
+    let writing = std::iter::once(&from).chain(rewrites.iter().map(|(path, _)| path));
+    let _holding = locks.take(writing).map_err(|held| {
+        format!(
+            "{} is open in another kame window",
+            relative_in(notebook, &held)
+        )
+    })?;
     // What's at its log folder may be another document's by now, and that mustn't go with it.
     if is_database(&from) && is_stranded_database(&from) {
         return Err(

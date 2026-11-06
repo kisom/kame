@@ -629,7 +629,9 @@ impl Session {
     ///
     /// Each image's path and each relative link is said again in the copy for where the document
     /// is now, before it's renamed into place, so the file at `path` never says them from where
-    /// it was. `root` is the notebook it's in now, if any. This is part of saving it elsewhere
+    /// it was. If that can't be done, as when the history won't read, the words still matter more,
+    /// so the copy goes into place as it was, and `last_error` says so. `root` is the notebook it's
+    /// in now, if any. This is part of saving it elsewhere
     /// rather than an edit, so the whole history is said again the same way: undo and redo go on
     /// as they were, and none of it is a step of its own. Each snapshot says them again too, the
     /// same way, keeping its label and time, so that restoring one leads where it did. A snapshot
@@ -684,7 +686,7 @@ impl Session {
             (Ok(target), Ok(source)) => saved_mode(target, source, PRIVATE_MODE),
             _ => PRIVATE_MODE,
         };
-        let written = (|| -> AppResult<Option<Editor>> {
+        let written = (|| -> AppResult<Result<Option<Editor>, DbError>> {
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
             std::fs::OpenOptions::new()
                 .write(true)
@@ -695,8 +697,9 @@ impl Session {
             let mut copy = Db::open(&partial)?;
             // The copy is a different file, and what a sync tool recorded was about the original.
             copy.clear_sync_state()?;
-            let editor = rehome(&mut copy, &doc, from, path, root, &there)
-                .map_err(|err| format!("could not say links and images again from here — {err}"))?;
+            // Saving the words comes first, so a copy whose paths can't be said again goes into
+            // place as it was copied, which the transaction leaves it as.
+            let rehomed = rehome(&mut copy, &doc, from, path, root, &there);
             copy.close()?;
             std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(mode))?;
             for suffix in ["-wal", "-shm"] {
@@ -711,10 +714,10 @@ impl Session {
                 }
             });
             std::fs::rename(&partial, path)?;
-            Ok(editor)
+            Ok(rehomed)
         })();
-        let editor = match written {
-            Ok(editor) => editor,
+        let rehomed = match written {
+            Ok(rehomed) => rehomed,
             Err(err) => {
                 let _ = std::fs::remove_file(&partial);
                 for suffix in ["-wal", "-shm"] {
@@ -727,14 +730,24 @@ impl Session {
         };
 
         self.db = Db::open(path)?;
-        if let Some(editor) = editor {
-            self.editor = editor;
-        }
+        let unsaid = match rehomed {
+            Ok(Some(editor)) => {
+                self.editor = editor;
+                None
+            }
+            Ok(None) => None,
+            Err(err) => Some(err),
+        };
         self.path = Some(path.to_path_buf());
         self.on_disk = file_identity(path);
         self.log_on_disk = file_identity(&wal_path(path));
         self.replaced = false;
         self.clear_save_error();
+        if let Some(err) = unsaid {
+            self.last_error = Some(format!(
+                "could not say links and images again from here — {err}"
+            ));
+        }
         Ok(())
     }
 
@@ -4774,31 +4787,67 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn a_save_as_that_cant_say_links_again_leaves_nothing_and_the_old_file_open() {
-        let root = scratch_dir("rehomefail").canonicalize().unwrap();
-        let from = root.join("one/a.kame");
-        let mut session = document_with_each_link(&root);
-        let before = link_targets(&session);
-        // A step of the history that won't be read, written behind the session's back.
-        rusqlite::Connection::open(&from)
+    /// Writes a step of the history that won't be read into the file at `path`, behind the back
+    /// of the session that has it open.
+    fn spoil_history(path: &Path) {
+        rusqlite::Connection::open(path)
             .unwrap()
             .execute(
                 "INSERT INTO ops (json) VALUES ('{\"SetTitle\":{\"old\":\"a\"}}')",
                 [],
             )
             .unwrap();
+    }
+
+    /// The names in `folder`, leaving out the `-wal` and `-shm` of a document that's open, but not
+    /// of a Save As's copy.
+    fn names_in(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                name.contains(".saving-") || !(name.ends_with("-wal") || name.ends_with("-shm"))
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_save_as_elsewhere_that_cant_say_links_again_still_saves_the_words() {
+        let root = scratch_dir("rehomefail").canonicalize().unwrap();
+        let mut session = document_with_each_link(&root);
+        let before = link_targets(&session);
+        spoil_history(&root.join("one/a.kame"));
         std::fs::create_dir_all(root.join("three")).unwrap();
         let to = root.join("three/a.kame");
-        assert!(session.save_as(&to, None, |_, _| false).is_err());
-        let left: Vec<_> = std::fs::read_dir(root.join("three"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert!(left.is_empty(), "left behind: {left:?}");
-        assert_eq!(session.path(), Some(from.as_path()));
-        assert_eq!(link_targets(&session), before);
+        session.save_as(&to, None, |_, _| false).unwrap();
+        assert_eq!(names_in(&root.join("three")), ["a.kame"]);
+        assert_eq!(session.path(), Some(to.as_path()));
+        let said = session.last_error.clone().unwrap_or_default();
+        assert!(
+            said.contains("could not say links and images again from here"),
+            "{said:?}"
+        );
+        assert_eq!(link_targets(&session), before, "as it was copied");
         assert!(session.insert("more"));
+        drop(session);
+        assert_eq!(link_targets(&open(&to)), before);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_within_its_folder_saves_whatever_its_history_holds() {
+        let root = scratch_dir("rehomefailsame").canonicalize().unwrap();
+        let mut session = open(&root.join("a.kame"));
+        session.insert("Words");
+        spoil_history(&root.join("a.kame"));
+        let to = root.join("b.kame");
+        session.save_as(&to, None, |_, _| false).unwrap();
+        assert_eq!(names_in(&root), ["a.kame", "b.kame"]);
+        assert_eq!(session.path(), Some(to.as_path()));
+        drop(session);
+        assert_eq!(open(&to).document().blocks[0].text, "Words");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

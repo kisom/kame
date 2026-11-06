@@ -357,6 +357,14 @@ impl Db {
         Ok(())
     }
 
+    /// How long to wait for another connection before giving up, shortened by tests that wait on
+    /// purpose.
+    #[cfg(test)]
+    pub(crate) fn set_busy_timeout(&self, timeout: std::time::Duration) -> Result<(), DbError> {
+        self.conn.busy_timeout(timeout)?;
+        Ok(())
+    }
+
     /// Where the author last was in this document, if that was recorded and is
     /// still readable. It is a convenience, so a bad value is the same as none.
     pub fn load_position(&self) -> Option<Position> {

@@ -700,6 +700,12 @@ impl Session {
             // Saving the words comes first, so a copy whose paths can't be said again goes into
             // place as it was copied, which the transaction leaves it as.
             let rehomed = rehome(&mut copy, &doc, from, path, root, &there);
+            #[cfg(test)]
+            BEFORE_CLOSE.with_borrow_mut(|hook| {
+                if let Some(hook) = hook {
+                    hook(&copy, &partial);
+                }
+            });
             copy.close()?;
             std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(mode))?;
             for suffix in ["-wal", "-shm"] {
@@ -3441,15 +3447,23 @@ pub fn iso_date(when: std::time::SystemTime) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// Something shown a file by its path.
+/// What a test runs on a Save As's copy, by its path, just before it's renamed into place.
 #[cfg(test)]
-type Look = Box<dyn FnMut(&Path)>;
+type BeforeRename = Box<dyn FnMut(&Path)>;
+
+/// What a test runs on a Save As's copy, open and by its path, just before it's closed.
+#[cfg(test)]
+type BeforeClose = Box<dyn FnMut(&Db, &Path)>;
 
 #[cfg(test)]
 thread_local! {
-    /// Shown a Save As's finished copy, by its path, just before it's renamed into place, so that a
-    /// test can see what the file will hold before anything is at the new path.
-    static BEFORE_RENAME: std::cell::RefCell<Option<Look>> = const { std::cell::RefCell::new(None) };
+    /// Shown a Save As's finished copy just before it's renamed into place, so that a test can see
+    /// what the file will hold before anything is at the new path.
+    static BEFORE_RENAME: std::cell::RefCell<Option<BeforeRename>> =
+        const { std::cell::RefCell::new(None) };
+    /// Shown a Save As's copy just before it's closed, so that a test can make closing it fail.
+    static BEFORE_CLOSE: std::cell::RefCell<Option<BeforeClose>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -4833,6 +4847,46 @@ mod tests {
         assert!(session.insert("more"));
         drop(session);
         assert_eq!(link_targets(&open(&to)), before);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_whose_copy_cant_be_closed_fails_and_leaves_nothing() {
+        let root = scratch_dir("rehomeclose").canonicalize().unwrap();
+        let from = root.join("one/a.kame");
+        let mut session = document_with_each_link(&root);
+        let before = link_targets(&session);
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        let to = root.join("three/deep/a.kame");
+        // Something still reading the copy's log keeps it from all going into the file.
+        let reader = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let held = reader.clone();
+        BEFORE_CLOSE.set(Some(Box::new(move |copy: &Db, path: &Path| {
+            copy.set_busy_timeout(std::time::Duration::from_millis(10))
+                .unwrap();
+            let conn = rusqlite::Connection::open(path).unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            let _: i64 = conn
+                .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+                .unwrap();
+            *held.borrow_mut() = Some(conn);
+        })));
+        let saved = session.save_as(&to, None, |_, _| false);
+        BEFORE_CLOSE.set(None);
+        assert!(saved.is_err());
+        assert!(reader.borrow().is_some(), "the copy was there to read");
+        assert!(
+            names_in(&root.join("three/deep")).is_empty(),
+            "{:?}",
+            std::fs::read_dir(root.join("three/deep"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>()
+        );
+        reader.take();
+        assert_eq!(session.path(), Some(from.as_path()));
+        assert_eq!(link_targets(&session), before);
+        assert!(session.insert("more"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

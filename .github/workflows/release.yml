@@ -114,7 +114,7 @@ jobs:
         working-directory: tap
         run: |
           set -euo pipefail
-          for f in Formula/kame.rb Casks/kame.rb; do
+          for f in Formula/kame-site.rb Casks/kame.rb; do
             if [ ! -f "$f" ]; then
               echo "::error::$f is not in kisom/homebrew-tap, so there is nothing to update"
               exit 1
@@ -124,13 +124,13 @@ jobs:
           sed -i \
             -e "s|^\( *url \"https://github.com/$REPO/archive/refs/tags/\)[^\"]*\"|\1$TAG.tar.gz\"|" \
             -e "s|^\( *sha256 \)\"[^\"]*\"|\1\"$SRC_SHA\"|" \
-            Formula/kame.rb
+            Formula/kame-site.rb
           sed -i \
             -e "s|^\( *version \)\"[^\"]*\"|\1\"$version\"|" \
             -e "s|^\( *sha256 \)\"[^\"]*\"|\1\"$APP_SHA\"|" \
             Casks/kame.rb
-          grep -q "refs/tags/$TAG.tar.gz\"" Formula/kame.rb || { echo "::error::no url line updated in Formula/kame.rb"; exit 1; }
-          grep -q "sha256 \"$SRC_SHA\"" Formula/kame.rb || { echo "::error::no sha256 line updated in Formula/kame.rb"; exit 1; }
+          grep -q "refs/tags/$TAG.tar.gz\"" Formula/kame-site.rb || { echo "::error::no url line updated in Formula/kame-site.rb"; exit 1; }
+          grep -q "sha256 \"$SRC_SHA\"" Formula/kame-site.rb || { echo "::error::no sha256 line updated in Formula/kame-site.rb"; exit 1; }
           grep -q "version \"$version\"" Casks/kame.rb || { echo "::error::no version line updated in Casks/kame.rb"; exit 1; }
           grep -q "sha256 \"$APP_SHA\"" Casks/kame.rb || { echo "::error::no sha256 line updated in Casks/kame.rb"; exit 1; }
       - name: Commit and push
@@ -140,10 +140,47 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/kame.rb Casks/kame.rb
+          git add Formula/kame-site.rb Casks/kame.rb
           if git diff --cached --quiet; then
             echo "::notice::the tap already has $TAG"
             exit 0
           fi
           git commit -m "kame ${TAG#v}"
           git push origin HEAD:master
+
+  # What someone gets from the tap, on a Mac that has never seen kame.
+  verify:
+    needs: tap
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: macos-26
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Install kame from the tap
+        run: |
+          set -euo pipefail
+          brew tap kisom/tap
+          brew install kisom/tap/kame
+      - name: Check the app
+        run: |
+          set -euo pipefail
+          app=/Applications/kame.app
+          want="${TAG#v}"
+          test -d "$app" || { echo "::error::brew install kisom/tap/kame left no $app"; exit 1; }
+          got="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          [ "$got" = "$want" ] || { echo "::error::the tap installed kame.app $got, not $want"; exit 1; }
+          codesign --verify --deep "$app"
+          if xattr -p com.apple.quarantine "$app" >/dev/null 2>&1; then
+            echo "::error::kame.app is still quarantined, so macOS would refuse to open it"
+            exit 1
+          fi
+          # The app's own binary runs its site tool without a window.
+          "$app/Contents/MacOS/kame" site new "$RUNNER_TEMP/app-site"
+          test -f "$RUNNER_TEMP/app-site/site.yaml"
+      - name: Install and test kame-site from the tap
+        run: |
+          set -euo pipefail
+          brew install kisom/tap/kame-site
+          brew test kisom/tap/kame-site
+          got="$(brew list --versions kame-site | awk '{print $2}')"
+          [ "$got" = "${TAG#v}" ] || { echo "::error::the tap built kame-site $got, not ${TAG#v}"; exit 1; }

@@ -82,7 +82,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.
 
-`.github/workflows/release.yml` and `packaging/aur/` — releasing: a `v*` tag builds the macOS app, creates the GitHub release and bumps the Homebrew tap (`kisom/homebrew-tap`); the PKGBUILD and `.SRCINFO` are the AUR package, whose version, like the tag's, must match every `Cargo.toml` and `packaging/macos/Info.plist`.
+`.github/workflows/release.yml` and `packaging/aur/` — releasing: a `v*` tag builds the macOS app, creates the GitHub release, bumps the Homebrew tap (`kisom/homebrew-tap`: the `kame` cask for the app, the `kame-site` formula) and installs both from it on a clean Mac to check them; the PKGBUILD and `.SRCINFO` are the AUR package, whose version, like the tag's, must match every `Cargo.toml` and `packaging/macos/Info.plist`.
 
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 

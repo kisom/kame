@@ -293,6 +293,12 @@ fn a_copy_merges_into_a_document_holding_a_note_inside_a_character() {
     // Both changed the one sentence, so the copy's words are in a note.
     let doc = session.document();
     assert_eq!(doc.blocks[0].text, "Oh. Café au lait.");
-    assert!(doc.annotations[1].body.ends_with("Café au lait. Sweet."));
-    assert_eq!(doc.annotations[0].anchor.byte_range(), Some((7, 12)));
+    let body = |ends: &str| {
+        doc.annotations
+            .iter()
+            .find(|note| note.body.ends_with(ends))
+            .unwrap_or_else(|| panic!("no note ending {ends:?}: {doc:?}"))
+    };
+    body("Café au lait. Sweet.");
+    assert_eq!(body("a note").anchor.byte_range(), Some((7, 12)));
 }

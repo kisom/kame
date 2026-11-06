@@ -278,6 +278,71 @@ fn new_blocks_on_both_sides_land_where_they_were_written() {
     assert_eq!(texts, ["A.", "After A, here.", "B.", "After B, there."]);
 }
 
+fn list_item(id: u128, text: &str) -> Block {
+    Block {
+        kind: BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+        },
+        ..block(id, text)
+    }
+}
+
+fn texts(doc: &Document) -> Vec<&str> {
+    doc.blocks.iter().map(|block| block.text.as_str()).collect()
+}
+
+/// A list `a b c` and a paragraph after it, with `b` moved up on one side and the paragraph
+/// edited on the other. The move's step is in the mover's history, and what it left is merged.
+fn moved_and_edited() -> (Document, Session, Session) {
+    let mut base = document(vec![
+        list_item(1, "a"),
+        list_item(2, "b"),
+        list_item(3, "c"),
+        block(4, "After."),
+    ]);
+    base.annotations.push(kame_core::model::Annotation {
+        id: Uuid::from_u128(50),
+        kind: AnnotationKind::Footnote,
+        anchor: Anchor::range(Uuid::from_u128(2), 1, 1),
+        body: "On b.".to_string(),
+    });
+    let mut mover = editing(&base);
+    at(&mut mover, 1, 0);
+    assert!(mover.move_list_item(true));
+    assert_eq!(mover.history(), (1, 0));
+    let mut editor = editing(&base);
+    at(&mut editor, 3, "After".len());
+    editor.insert(" all");
+    (base, mover, editor)
+}
+
+#[test]
+fn a_move_on_the_later_side_stands_beside_the_other_sides_edits() {
+    let (base, mover, editor) = moved_and_edited();
+    let result = merged(&base, mover.document(), editor.document());
+    assert_eq!(texts(&result.doc), ["b", "a", "c", "After all."]);
+    assert_eq!(
+        result.doc.annotations, base.annotations,
+        "the footnote is still on b"
+    );
+    assert!(result.notes.is_empty());
+}
+
+/// A known weak point (merging.md section 9): order follows the later side, so a move goes
+/// back when the other machine wrote later, even if it only edited words.
+#[test]
+fn a_move_on_the_earlier_side_goes_back_where_it_was() {
+    let (base, mover, editor) = moved_and_edited();
+    let result = merged(&base, editor.document(), mover.document());
+    assert_eq!(texts(&result.doc), ["a", "b", "c", "After all."]);
+    assert_eq!(result.doc.annotations, base.annotations);
+    assert!(
+        result.notes.is_empty(),
+        "no words are lost, so there's no note"
+    );
+}
+
 #[test]
 fn splitting_a_paragraph_while_the_other_side_edits_it_loses_nothing() {
     let base = document(vec![block(1, "Before the break. After the break.")]);

@@ -898,6 +898,11 @@ impl Session {
         if self.editor.gathering() {
             return true;
         }
+        // After a failed write the log is short of memory, and a step written now would land over
+        // the missing one. Only a retry or a Save As, which write the whole history, end that.
+        if self.save_failed {
+            return false;
+        }
         self.check_file();
         if self.replaced || self.newer {
             return false;
@@ -5293,6 +5298,39 @@ mod tests {
             .unwrap();
         session.rehome_images(Some(&document), Some(&root));
         assert_eq!(image_paths(&session), ["../static/plate.png"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_step_stops_later_ones_landing_over_it() {
+        let (root, plate) = plate_folder("rehomefailedstep");
+        let other = root.join("static/other.png");
+        std::fs::write(&other, "another plate").unwrap();
+        let document = root.join("maritain/essay.kame");
+        let mut session = open(&document);
+        session.insert_image(plate.display().to_string());
+        session.insert_image(other.display().to_string());
+        let whole = image_paths(&session);
+        let history = session.history();
+        // The first image's step can't be written; the second's could be.
+        let outside = rusqlite::Connection::open(&document).unwrap();
+        outside
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON ops \
+                 WHEN NEW.json LIKE '%../static/plate.png%' \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        session.rehome_images(Some(&document), Some(&root));
+        outside.execute_batch("DROP TRIGGER refuse").unwrap();
+        assert!(
+            session.save_failed,
+            "still failed, as nothing more was written"
+        );
+        drop(session);
+        let reopened = open(&document);
+        assert_eq!(image_paths(&reopened), whole, "neither step is in the file");
+        assert_eq!(reopened.history(), history);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

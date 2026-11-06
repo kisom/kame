@@ -76,12 +76,12 @@ fn wal_path(path: &Path) -> PathBuf {
 
 /// Which file a path leads to, as opposed to what is in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
+pub(crate) struct FileIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
 }
 
-fn file_identity(path: &Path) -> Option<FileIdentity> {
+pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     let found = std::fs::metadata(path).ok()?;
     Some(FileIdentity {

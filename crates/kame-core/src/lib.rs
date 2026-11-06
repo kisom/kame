@@ -6,6 +6,7 @@ pub mod edit;
 pub mod export;
 pub mod import;
 pub mod links;
+pub mod lock;
 pub mod model;
 pub mod references;
 pub mod session;

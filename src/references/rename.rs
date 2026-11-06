@@ -537,7 +537,8 @@ mod tests {
 
         assert!(reference_file(&page, "knuth1981").exists());
         assert_eq!(only_text(&page), "see [knuth1981]");
-        assert!(page.sees("doc.kame: its citations could not be rewritten"));
+        assert!(page
+            .sees("doc.kame: it was written by a newer version of kame; update kame to change it"));
     }
 
     #[test]

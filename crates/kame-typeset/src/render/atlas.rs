@@ -180,15 +180,11 @@ impl GlyphAtlas {
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
     ) -> Painting {
-        let mut lines: Vec<Vec<Mark>> = Vec::new();
+        let mut lines: Vec<Vec<Mark>> = Vec::with_capacity(layout.runs.len());
         let mut bounds: Option<(i32, i32, i32, i32)> = None;
-        let mut line_i = None;
+        // Each run is one line as it is drawn.
         for run in &layout.runs {
-            if line_i != Some(run.line_i) {
-                lines.push(Vec::new());
-                line_i = Some(run.line_i);
-            }
-            let line = lines.last_mut().expect("a line was just pushed");
+            let mut line = Vec::with_capacity(run.glyphs.len());
             let base = layout.line_start(run.line_i);
             // `glyph.y` is line-relative: the run's baseline is the anchor.
             for glyph in run.glyphs.iter() {
@@ -230,12 +226,68 @@ impl GlyphAtlas {
                 });
                 line.push(mark);
             }
+            lines.push(line);
         }
         Painting {
             lines,
             bounds,
             scale,
         }
+    }
+
+    /// The bands of `before`'s image to paint again to make it `after`'s, or `None` if the
+    /// image must be drawn whole: when the two differ in their scale, the bounds of their ink or
+    /// their number of lines, or nothing is drawn.
+    ///
+    /// Each pixel is what the masks over it make, painted in order, so where both paint the
+    /// same masks in the same order the pixels are the same. Those differ only in the rows where
+    /// a line's masks differ, before or after, and each band takes in every mask that reaches
+    /// it, from whichever line, so a descender or an accent from the next line is painted too.
+    pub fn redraw(
+        &mut self,
+        fs: &mut FontSystem,
+        before: &Painting,
+        after: &Painting,
+    ) -> Option<Vec<Patch>> {
+        let (min_x, min_y, max_x, _) = after.bounds?;
+        if before.scale != after.scale
+            || before.bounds != after.bounds
+            || before.lines.len() != after.lines.len()
+        {
+            return None;
+        }
+        let mut rows: Vec<(i32, i32)> = before
+            .lines
+            .iter()
+            .zip(&after.lines)
+            .filter(|(old, new)| old != new)
+            .flat_map(|(old, new)| old.iter().chain(new))
+            .map(|mark| (mark.top - min_y, mark.right_bottom().1 - min_y))
+            .collect();
+        rows.sort_unstable();
+        let mut bands: Vec<(i32, i32)> = Vec::new();
+        for (top, bottom) in rows {
+            match bands.last_mut() {
+                Some(band) if top <= band.1 => band.1 = band.1.max(bottom),
+                _ => bands.push((top, bottom)),
+            }
+        }
+        let width = (max_x - min_x).max(1) as u32;
+        let patches = bands
+            .into_iter()
+            .map(|(top, bottom)| {
+                let mut canvas = Premultiplied::new(width, (bottom - top) as u32);
+                let reaching = after.lines.iter().flatten().filter(|mark| {
+                    mark.top - min_y < bottom && mark.right_bottom().1 - min_y > top
+                });
+                self.paint(fs, reaching, &mut canvas, (min_x, min_y + top), after.scale);
+                Patch {
+                    top: top as usize,
+                    image: canvas.image,
+                }
+            })
+            .collect();
+        Some(patches)
     }
 
     /// Paints `marks`, in order, onto `canvas`, whose top-left corner sits at block-relative
@@ -285,6 +337,12 @@ pub struct Painting {
     /// `(min_x, min_y, max_x, max_y)` with the maxima exclusive, or `None` if nothing is drawn.
     bounds: Option<(i32, i32, i32, i32)>,
     scale: f32,
+}
+
+/// A band of a block's image, as wide as the image, whose first row is `top`.
+pub struct Patch {
+    pub top: usize,
+    pub image: ColorImage,
 }
 
 /// One glyph mask as a block's image paints it.
@@ -1005,5 +1063,339 @@ dance, on a page, of pen, eye and hand.";
             b.as_raw(),
             "the second rasterize reused the first canvas"
         );
+    }
+
+    // --- redrawing only the lines that changed ---
+
+    const PROSE: &str =
+        "Every machine that writes for us is a promise about who does the thinking, \
+        and a promise is a thing that can be kept or broken quietly, in the margins, over years of \
+        small conveniences that nobody would think to refuse. The page waits; the writer types; \
+        the words arrive set and justified, and nothing about them says how they got there. Quiet \
+        grey paragraphs go by, and the eye, which is lazy, takes the typography for the thought.";
+
+    /// `text` with `insert` put in at byte `at`.
+    fn typed(text: &str, at: usize, insert: &str) -> String {
+        format!("{}{insert}{}", &text[..at], &text[at..])
+    }
+
+    /// What `block` paints at `scale`, in `config`, under `highlights`.
+    fn painting_of(
+        fs: &mut FontSystem,
+        atlas: &mut GlyphAtlas,
+        block: &Block,
+        config: &LayoutConfig,
+        highlights: &[(usize, usize, [u8; 3])],
+        scale: f32,
+    ) -> (BlockLayout, Painting) {
+        let layout = layout_block(fs, block, config);
+        let painting = atlas.painting(
+            fs,
+            &layout,
+            [17, 17, 17],
+            [250, 248, 240],
+            highlights,
+            scale,
+        );
+        (layout, painting)
+    }
+
+    /// Draws `before` whole, lays the bands `redraw` gives over it, and checks that this is the
+    /// image drawing `after` whole gives, byte for byte. Returns the rows the bands cover.
+    fn redrawn_rows(
+        fs: &mut FontSystem,
+        atlas: &mut GlyphAtlas,
+        before: &Painting,
+        after: &Painting,
+    ) -> Vec<std::ops::Range<usize>> {
+        let (mut image, left, top) = atlas.draw_premultiplied(fs, before);
+        let patches = atlas
+            .redraw(fs, before, after)
+            .expect("the image is redrawn in part");
+        let width = image.size[0];
+        let mut rows = Vec::new();
+        for patch in patches {
+            assert_eq!(patch.image.size[0], width, "a band is as wide as the image");
+            let start = patch.top * width;
+            image.pixels[start..start + patch.image.pixels.len()]
+                .copy_from_slice(&patch.image.pixels);
+            rows.push(patch.top..patch.top + patch.image.size[1]);
+        }
+        let (whole, new_left, new_top) = atlas.draw_premultiplied(fs, after);
+        assert_eq!((new_left, new_top), (left, top));
+        assert_eq!(whole.size, image.size);
+        assert!(
+            whole.pixels == image.pixels,
+            "the image redrawn in part is not the one drawn whole"
+        );
+        rows
+    }
+
+    fn rows_in(rows: &[std::ops::Range<usize>]) -> usize {
+        rows.iter().map(|range| range.len()).sum()
+    }
+
+    /// The rows of the image `painting`'s line `line` puts ink on.
+    fn rows_of_line(painting: &Painting, line: usize) -> std::ops::Range<i32> {
+        let (_, min_y, _, _) = painting.bounds.unwrap();
+        let marks = &painting.lines[line];
+        let top = marks.iter().map(|mark| mark.top).min().unwrap();
+        let bottom = marks
+            .iter()
+            .map(|mark| mark.right_bottom().1)
+            .max()
+            .unwrap();
+        top - min_y..bottom - min_y
+    }
+
+    /// Paintings of `PROSE` and of it with `insert` at `at(layout)`, at 1x and 2x, each redrawn
+    /// in part and checked against drawing it whole. Returns the rows redrawn and the image's
+    /// height at each scale.
+    fn redraw_typing(at: impl Fn(&BlockLayout) -> usize, insert: &str) -> Vec<(usize, usize)> {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let mut redrawn = Vec::new();
+        for scale in [1.0, 2.0] {
+            let (layout, before) = painting_of(
+                &mut fs,
+                &mut atlas,
+                &paragraph(PROSE),
+                &config(),
+                &[],
+                scale,
+            );
+            let text = typed(PROSE, at(&layout), insert);
+            let (_, after) = painting_of(
+                &mut fs,
+                &mut atlas,
+                &paragraph(&text),
+                &config(),
+                &[],
+                scale,
+            );
+            let rows = redrawn_rows(&mut fs, &mut atlas, &before, &after);
+            let (_, min_y, _, max_y) = after.bounds.unwrap();
+            redrawn.push((rows_in(&rows), (max_y - min_y) as usize));
+        }
+        redrawn
+    }
+
+    #[test]
+    fn a_letter_typed_mid_line_redraws_only_some_rows() {
+        for (rows, height) in redraw_typing(|layout| layout.lines[3].start + 6, "x") {
+            assert!(rows > 0, "the line typed in is redrawn");
+            assert!(rows < height / 2, "{rows} of {height} rows were redrawn");
+        }
+    }
+
+    #[test]
+    fn a_letter_typed_at_a_lines_end_redraws_as_drawing_whole_does() {
+        let at_end = |layout: &BlockLayout| {
+            let line = layout.lines[2];
+            PROSE[..line.end].trim_end().len()
+        };
+        for (rows, height) in redraw_typing(at_end, "s") {
+            assert!(
+                rows > 0 && rows < height,
+                "{rows} of {height} rows were redrawn"
+            );
+        }
+    }
+
+    /// A word typed in the first line pushes a word down into each line after it, and every one
+    /// of them is redrawn.
+    #[test]
+    fn a_word_that_rewraps_the_rest_redraws_as_drawing_whole_does() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        // A last line short enough to take a word more.
+        let prose = PROSE.replace(", which is lazy,", "");
+        for scale in [1.0, 2.0] {
+            let (layout, before) = painting_of(
+                &mut fs,
+                &mut atlas,
+                &paragraph(&prose),
+                &config(),
+                &[],
+                scale,
+            );
+            let text = typed(&prose, layout.lines[0].start + 6, "obviously ");
+            let (_, after) = painting_of(
+                &mut fs,
+                &mut atlas,
+                &paragraph(&text),
+                &config(),
+                &[],
+                scale,
+            );
+            let changed = (0..before.lines.len())
+                .filter(|line| before.lines[*line] != after.lines[*line])
+                .count();
+            assert!(changed > 3, "only {changed} lines rewrapped");
+            redrawn_rows(&mut fs, &mut atlas, &before, &after);
+        }
+    }
+
+    #[test]
+    fn a_multibyte_character_typed_redraws_as_drawing_whole_does() {
+        for insert in ["é", "—", "ﬁ"] {
+            for (rows, _) in redraw_typing(|layout| layout.lines[4].start + 3, insert) {
+                assert!(rows > 0, "typing {insert} redraws nothing");
+            }
+        }
+    }
+
+    /// Lines are broken a line ahead, so an edit in a line can move the break before it, as
+    /// deleting a word lets the line before take one more, and the line before is redrawn too.
+    #[test]
+    fn an_edit_that_moves_a_line_before_it_redraws_that_line() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let (layout, before) =
+            painting_of(&mut fs, &mut atlas, &paragraph(PROSE), &config(), &[], 2.0);
+        let mut found = 0;
+        for (edited, line) in layout.lines.iter().enumerate().skip(1) {
+            for at in (line.start..line.end).filter(|at| PROSE.as_bytes()[*at] == b' ') {
+                let word = PROSE[at + 1..]
+                    .find(' ')
+                    .map_or(PROSE.len(), |end| at + 1 + end);
+                let deleted = format!("{}{}", &PROSE[..at], &PROSE[word..]);
+                for text in [" a", " an", " the", " quite", " already"]
+                    .map(|insert| typed(PROSE, at, insert))
+                    .into_iter()
+                    .chain([deleted])
+                {
+                    let (_, after) =
+                        painting_of(&mut fs, &mut atlas, &paragraph(&text), &config(), &[], 2.0);
+                    if after.lines.len() != before.lines.len() || after.bounds != before.bounds {
+                        continue;
+                    }
+                    if (0..edited).any(|line| before.lines[line] != after.lines[line]) {
+                        redrawn_rows(&mut fs, &mut atlas, &before, &after);
+                        found += 1;
+                    }
+                }
+            }
+        }
+        assert!(found > 0, "no edit moved a line before it");
+    }
+
+    #[test]
+    fn a_highlight_added_redraws_the_rows_under_it() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let block = paragraph(PROSE);
+        for scale in [1.0, 2.0] {
+            let (layout, before) = painting_of(&mut fs, &mut atlas, &block, &config(), &[], scale);
+            let line = layout.lines[3];
+            let wash = [(line.start + 2, line.start + 12, [250, 226, 140])];
+            let (_, after) = painting_of(&mut fs, &mut atlas, &block, &config(), &wash, scale);
+            let rows = redrawn_rows(&mut fs, &mut atlas, &before, &after);
+            assert_eq!(rows.len(), 1);
+            let line_rows = rows_of_line(&after, 3);
+            assert_eq!(
+                rows[0].start as i32..rows[0].end as i32,
+                line_rows,
+                "only the line under the wash is redrawn"
+            );
+        }
+    }
+
+    /// Set tight, a line's descenders reach down into the line below and its accents up into the
+    /// line above, and italics lean over their neighbours. Redrawing one line must take in what
+    /// reaches its rows from the lines next to it.
+    #[test]
+    fn ink_reaching_over_from_the_next_line_is_redrawn_with_it() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let tight = LayoutConfig {
+            body_line_height: 14.0,
+            ..config()
+        };
+        let text = "Ýgg Éclair, jumpy “quips” gyp Ágape; Ëmpty pyg, Öyster grip. ".repeat(6);
+        let mut block = paragraph(&text);
+        block.spans = vec![Span {
+            start: 0,
+            end: text.len() / 3,
+            style: SpanStyle::Italic,
+        }];
+        for scale in [1.0, 2.0] {
+            let (layout, before) = painting_of(&mut fs, &mut atlas, &block, &tight, &[], scale);
+            let line = 2;
+            let above = rows_of_line(&before, line - 1);
+            let edited = rows_of_line(&before, line);
+            let below = rows_of_line(&before, line + 1);
+            assert!(
+                above.end > edited.start && below.start < edited.end,
+                "the lines' ink overlaps"
+            );
+            let mut typed_in = block.clone();
+            let mut at = layout.lines[line].start + 1;
+            while !text.is_char_boundary(at) {
+                at += 1;
+            }
+            typed_in.text = typed(&text, at, "q");
+            let (_, after) = painting_of(&mut fs, &mut atlas, &typed_in, &tight, &[], scale);
+            redrawn_rows(&mut fs, &mut atlas, &before, &after);
+        }
+    }
+
+    #[test]
+    fn the_same_painting_redraws_nothing() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let (_, painting) =
+            painting_of(&mut fs, &mut atlas, &paragraph(PROSE), &config(), &[], 2.0);
+        let patches = atlas.redraw(&mut fs, &painting, &painting).unwrap();
+        assert!(patches.is_empty());
+    }
+
+    /// A band can only be laid over an image of the same size and place, so a change in the
+    /// number of lines, the ink's bounds or the scale is drawn whole.
+    #[test]
+    fn a_new_crop_line_count_or_scale_is_drawn_whole() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut atlas = GlyphAtlas::new();
+        let config = config();
+        let (_, before) = painting_of(&mut fs, &mut atlas, &paragraph(PROSE), &config, &[], 2.0);
+
+        let longer = format!("{PROSE} And one more sentence goes on to need a line of its own.");
+        let (_, more_lines) =
+            painting_of(&mut fs, &mut atlas, &paragraph(&longer), &config, &[], 2.0);
+        assert_ne!(more_lines.lines.len(), before.lines.len());
+        assert!(atlas.redraw(&mut fs, &before, &more_lines).is_none());
+
+        let (_, one_line) = painting_of(
+            &mut fs,
+            &mut atlas,
+            &paragraph("A short line"),
+            &config,
+            &[],
+            2.0,
+        );
+        let (_, wider) = painting_of(
+            &mut fs,
+            &mut atlas,
+            &paragraph("A short line, then"),
+            &config,
+            &[],
+            2.0,
+        );
+        assert_eq!(one_line.lines.len(), wider.lines.len());
+        assert_ne!(one_line.bounds, wider.bounds);
+        assert!(atlas.redraw(&mut fs, &one_line, &wider).is_none());
+
+        let (_, at_one) = painting_of(&mut fs, &mut atlas, &paragraph(PROSE), &config, &[], 1.0);
+        assert!(atlas.redraw(&mut fs, &at_one, &before).is_none());
+
+        let (_, empty) = painting_of(&mut fs, &mut atlas, &paragraph(""), &config, &[], 2.0);
+        assert!(atlas.redraw(&mut fs, &empty, &empty).is_none());
     }
 }

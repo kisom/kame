@@ -3,4 +3,4 @@
 mod atlas;
 pub mod egui_render;
 
-pub use atlas::GlyphAtlas;
+pub use atlas::{GlyphAtlas, Painting, Patch};

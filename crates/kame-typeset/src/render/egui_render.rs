@@ -18,7 +18,7 @@ pub use kame_core::text::{next_boundary, next_word, prev_boundary, prev_word, wo
 
 use crate::layout::{layout_block_marked, layout_block_with_align, BlockLayout, LayoutConfig};
 use crate::model::{AnnotationId, AnnotationKind, Block, BlockId, BlockKind};
-use crate::render::GlyphAtlas;
+use crate::render::{GlyphAtlas, Painting, Patch};
 
 /// Every face the layout can ask for, compiled into the binary.
 ///
@@ -199,8 +199,10 @@ impl Wanted {
 /// Per-block texture cache, rebuilt only when a block's content changes.
 ///
 /// The key is a hash of the block kind, text, and spans: any edit invalidates
-/// just that block. Textures for blocks that left the document are dropped
-/// (and their GPU resources released) on the next [`TextureCache::sync`].
+/// just that block, and of its image only the rows of lines drawn differently
+/// are drawn again, where it keeps its size and place. Textures for blocks that
+/// left the document are dropped (and their GPU resources released) on the next
+/// [`TextureCache::sync`].
 pub struct TextureCache {
     entries: HashMap<BlockId, CachedTexture>,
 }
@@ -208,6 +210,8 @@ pub struct TextureCache {
 struct CachedTexture {
     fingerprint: u64,
     block: BlockTexture,
+    /// What its image was painted from, to tell what a new layout paints differently.
+    painting: Painting,
 }
 
 impl Default for TextureCache {
@@ -267,8 +271,24 @@ impl TextureCache {
                 continue;
             }
 
-            let (image, left, top) =
-                renderer.rasterize(layout, ink, background, block_highlights, scale);
+            let painting = renderer.painting(layout, ink, background, block_highlights, scale);
+            // An edit usually changes a few of a block's lines, and only those rows are drawn
+            // again and uploaded into the texture it has.
+            if let Some(cached) = self.entries.get_mut(&block.id) {
+                if let Some(patches) = renderer.redraw(&cached.painting, &painting) {
+                    for patch in patches {
+                        cached.block.texture.set_partial(
+                            [0, patch.top],
+                            patch.image,
+                            TextureOptions::NEAREST,
+                        );
+                    }
+                    cached.fingerprint = fingerprint;
+                    cached.painting = painting;
+                    continue;
+                }
+            }
+            let (image, left, top) = renderer.draw(&painting);
             let texture = ctx.load_texture(
                 format!("kame-block-{}", block.id),
                 image,
@@ -284,6 +304,7 @@ impl TextureCache {
                         top,
                         scale,
                     },
+                    painting,
                 },
             );
         }
@@ -292,6 +313,12 @@ impl TextureCache {
 
     pub fn get(&self, block_id: BlockId) -> Option<&BlockTexture> {
         self.entries.get(&block_id).map(|cached| &cached.block)
+    }
+
+    /// What the image of `block_id` was last painted from, which changes whenever it is drawn
+    /// again, whole or in part.
+    pub fn painting(&self, block_id: BlockId) -> Option<&Painting> {
+        self.entries.get(&block_id).map(|cached| &cached.painting)
     }
 
     /// How many blocks it holds an image of.
@@ -674,12 +701,25 @@ impl GlyphRenderer {
         highlights: &[(usize, usize, [u8; 3])],
         scale: f32,
     ) -> (ColorImage, i32, i32) {
+        let painting = self.painting(layout, ink, background, highlights, scale);
+        self.draw(&painting)
+    }
+
+    /// What [`Self::rasterize`] would paint, for drawing it whole or in part.
+    pub fn painting(
+        &mut self,
+        layout: &BlockLayout,
+        ink: [u8; 3],
+        background: [u8; 3],
+        highlights: &[(usize, usize, [u8; 3])],
+        scale: f32,
+    ) -> Painting {
         self.rasterizes_since_clear += 1;
         if self.rasterizes_since_clear >= RASTERIZES_PER_CACHE_CLEAR {
             self.atlas.clear_cache();
             self.rasterizes_since_clear = 0;
         }
-        self.atlas.rasterize_premultiplied(
+        self.atlas.painting(
             &mut self.font_system,
             layout,
             ink,
@@ -687,6 +727,18 @@ impl GlyphRenderer {
             highlights,
             scale,
         )
+    }
+
+    /// The image of `painting` and its offset, as [`Self::rasterize`] gives them.
+    pub fn draw(&mut self, painting: &Painting) -> (ColorImage, i32, i32) {
+        self.atlas
+            .draw_premultiplied(&mut self.font_system, painting)
+    }
+
+    /// The bands of `before`'s image that make it `after`'s, or `None` if it must be drawn
+    /// whole. See [`GlyphAtlas::redraw`].
+    pub fn redraw(&mut self, before: &Painting, after: &Painting) -> Option<Vec<Patch>> {
+        self.atlas.redraw(&mut self.font_system, before, after)
     }
 }
 
@@ -1520,6 +1572,78 @@ mod tests {
             &Wanted::all(blocks.len()),
         );
         assert_eq!(cache.len(), 1, "the removed block's texture is dropped");
+    }
+
+    /// A letter typed in a long paragraph changes some of its lines, and only the rows of those
+    /// are uploaded, into the texture it has. Laid over the image first uploaded, they make the
+    /// image drawing it whole gives.
+    #[test]
+    fn a_letter_typed_updates_only_part_of_its_paragraphs_texture() {
+        let ctx = Context::default();
+        let mut renderer = GlyphRenderer::new(config());
+        let mut blocks = vec![paragraph(
+            &"Every machine that writes for us is a promise about who does the thinking, and a \
+              promise is a thing that can be kept or broken quietly. "
+                .repeat(4),
+        )];
+        let mut cache = TextureCache::new();
+        let sync = |cache: &mut TextureCache, renderer: &mut GlyphRenderer, blocks: &[Block]| {
+            let layouts: Vec<BlockLayout> = blocks.iter().map(|b| renderer.layout(b)).collect();
+            let refs: Vec<&BlockLayout> = layouts.iter().collect();
+            cache.sync(
+                &ctx,
+                renderer,
+                blocks,
+                &refs,
+                [10, 10, 10],
+                [255, 255, 255],
+                &HashMap::new(),
+                &Wanted::all(blocks.len()),
+            );
+            // No backend applies these uploads in a headless test.
+            let mut delta = ctx.tex_manager().write().take_delta();
+            let uploads: HashMap<egui::TextureId, Vec<egui::epaint::ImageDelta>> = delta
+                .set
+                .drain()
+                .map(|(id, deltas)| (id, deltas.into_vec()))
+                .collect();
+            delta.clear();
+            (layouts, uploads)
+        };
+        let (_, delta) = sync(&mut cache, &mut renderer, &blocks);
+        let id = cache.get(blocks[0].id).unwrap().texture.id();
+        let [whole] = delta[&id].as_slice() else {
+            panic!("one upload of the new texture");
+        };
+        assert!(whole.is_whole());
+        let egui::ImageData::Color(image) = &whole.image;
+        let mut image = (**image).clone();
+
+        let at = blocks[0].text.len() / 2;
+        blocks[0].text.insert(at, 'x');
+        let (layouts, delta) = sync(&mut cache, &mut renderer, &blocks);
+        let texture = cache.get(blocks[0].id).unwrap();
+        assert_eq!(texture.texture.id(), id, "the texture is kept");
+        let parts = &delta[&id];
+        let mut rows = 0;
+        for part in parts {
+            let [0, top] = part.pos.expect("only part is uploaded") else {
+                panic!("a band starts at the left edge");
+            };
+            let egui::ImageData::Color(band) = &part.image;
+            assert_eq!(band.size[0], image.size[0]);
+            let start = top * image.size[0];
+            image.pixels[start..start + band.pixels.len()].copy_from_slice(&band.pixels);
+            rows += band.size[1];
+        }
+        assert!(rows < image.size[1] / 2, "{rows} of {} rows", image.size[1]);
+        let (drawn, left, top) =
+            renderer.rasterize(&layouts[0], [10, 10, 10], [255, 255, 255], &[], 1.0);
+        assert_eq!((left, top), (texture.left, texture.top));
+        assert!(
+            drawn.pixels == image.pixels,
+            "the bands make the whole image"
+        );
     }
 
     #[test]

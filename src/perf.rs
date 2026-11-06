@@ -301,9 +301,12 @@ fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
         page.frame(Vec::new());
     }
     let mut frames = Spread::new("  a frame typing one letter");
-    let mut drawing = Spread::new("  drawing its image");
+    let mut drawing = Spread::new("  drawing its image whole");
+    let mut redrawing = Spread::new("  drawing the lines that changed");
     let mut shaping = Spread::new("  shaping it");
     let mut size = [0, 0];
+    let (mut rows, mut whole) = (0, 0);
+    let mut last = None;
     for letter in "the quick brown fox jumps over the lazy dog "
         .chars()
         .cycle()
@@ -318,10 +321,31 @@ fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
         let block = find(app.session.document());
         let ink = app.palette.body_ink;
         let renderer = &mut app.renderer;
+        let hl = highlights.get(&block_id).map(Vec::as_slice).unwrap_or(&[]);
         drawing.time(|| {
-            let hl = highlights.get(&block_id).map(Vec::as_slice).unwrap_or(&[]);
             size = renderer.rasterize(layout, ink, paper, hl, scale).0.size;
         });
+        let mut painting = None;
+        redrawing.time(|| {
+            let after = renderer.painting(layout, ink, paper, hl, scale);
+            match last
+                .as_ref()
+                .and_then(|before| renderer.redraw(before, &after))
+            {
+                Some(patches) => {
+                    rows += patches
+                        .iter()
+                        .map(|patch| patch.image.size[1])
+                        .sum::<usize>()
+                }
+                None => {
+                    whole += 1;
+                    rows += renderer.draw(&after).0.size[1];
+                }
+            }
+            painting = Some(after);
+        });
+        last = painting;
         shaping.time(|| {
             renderer.layout(&block);
         });
@@ -333,6 +357,13 @@ fn time_drawing(path: &Path, block_id: uuid::Uuid, scale: f32) -> Vec<String> {
         ),
         frames.report(),
         drawing.report(),
+        redrawing.report(),
+        format!(
+            "    {:.0} rows a keystroke, of {}; drawn whole {whole} times of {}",
+            rows as f64 / redrawing.times.len() as f64,
+            size[1],
+            redrawing.times.len()
+        ),
         shaping.report(),
     ]
 }

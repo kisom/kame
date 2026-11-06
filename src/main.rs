@@ -11563,15 +11563,15 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
                 .flat_map(|run| &run.glyphs)
                 .any(|glyph| glyph.color_opt.is_some())
         };
-        let texture = |page: &Headless| page.app.textures.get(block.id).unwrap().texture.id();
+        let painting = |page: &Headless| page.app.textures.painting(block.id).unwrap().clone();
         assert!(!coloured(&page.app.layout_of(&block)));
-        let as_text = texture(&page);
+        let as_text = painting(&page);
 
         page.app.refs.list = known_key();
         page.frame(Vec::new());
 
         assert!(coloured(&page.app.layout_of(&block)));
-        assert_ne!(texture(&page), as_text);
+        assert_ne!(painting(&page), as_text);
         assert_eq!(page.app.session.document().blocks[0], block, "only drawn");
     }
 }

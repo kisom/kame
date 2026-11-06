@@ -45,9 +45,13 @@ i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame hold
 
 - [ ] **Spell checking holds about 130 MB,** 117 MB of it Harper's dictionary as Harper builds it. It's loaded only while checking
   is on. A smaller footprint would mean a lighter dictionary from Harper, or our own.
-- [ ] **A keystroke sets its whole paragraph again.** It redraws only the lines whose drawing changed, so in a 390-word paragraph
-  at 2x shaping it and choosing its lines is now 2.2 ms of a 2.8 ms keystroke. Lines are chosen a line ahead, so those before
-  the one above the edit should stay as they were, but they are set again all the same.
+- [ ] **A keystroke sets its whole paragraph again.** It redraws only the lines whose drawing changed: in a 390-word paragraph
+  at 2x, about 50 of the image's 1,137 rows, and one keystroke in nine still draws it whole, when the number of lines or the
+  ink's bounds change. In `src/perf.rs`'s frames, which upload nothing, shaping it and choosing its lines is 2.3 ms of a 2.9 ms
+  keystroke; the upload, timed apart, is about 0.25 ms for a band and 1.3 ms whole. Each line is chosen over up to three lines
+  as first fit sets them, its own and two more, so an edit can move lines above it: of 3,918 edits tried in three texts at
+  three measures, 332 moved the line just above and 2 moved one further up. Setting only from a line or two above the edit would
+  need to know when that's enough.
 - [ ] **Opening shapes every paragraph to know how tall the page is:** 140 ms for 25,000 words. Estimating the height of paragraphs
   far from the screen would make opening independent of length.
 

@@ -646,18 +646,20 @@ impl Db {
         Ok(())
     }
 
-    /// Replaces the head document, the whole op log and the cursor, and the document in each of
-    /// `snapshots` by id, in one transaction, for a history said again throughout, so that a crash
-    /// leaves all of it as it was or all of it new. A snapshot keeps its id, label and time, and
-    /// one that isn't there fails the whole of it.
+    /// Replaces the head document, the whole op log, the cursor and the metadata, and the document
+    /// in each of `snapshots` by id, in one transaction, for a history written whole, so that a
+    /// crash leaves all of it as it was or all of it new. A snapshot keeps its id, label and time,
+    /// and one that isn't there fails the whole of it.
     pub fn replace_history(
         &mut self,
         doc: &Document,
         ops: &[Op],
         cursor: usize,
+        metadata: &crate::model::Metadata,
         snapshots: &[(i64, Document)],
     ) -> Result<(), DbError> {
         let json = serde_json::to_string(doc)?;
+        let metadata = serde_json::to_string(metadata)?;
         let rows = ops
             .iter()
             .map(serde_json::to_string)
@@ -676,6 +678,10 @@ impl Db {
             tx.execute("INSERT INTO ops (json) VALUES (?1)", params![row])?;
         }
         write_cursor(&tx, cursor)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO metadata (id, json) VALUES (1, ?1)",
+            [metadata],
+        )?;
         for (id, json) in &snapshots {
             let changed = tx.execute(
                 "UPDATE snapshots SET json = ?2 WHERE id = ?1",
@@ -1550,14 +1556,20 @@ mod tests {
         again.title = "Said again".to_string();
 
         assert!(matches!(
-            db.replace_history(&again, &[], 0, &[(id, again.clone()), (id + 1, again.clone())]),
+            db.replace_history(
+                &again,
+                &[],
+                0,
+                &Default::default(),
+                &[(id, again.clone()), (id + 1, again.clone())]
+            ),
             Err(DbError::SnapshotNotFound(missing)) if missing == id + 1
         ));
         assert_eq!(db.load_document().unwrap(), doc);
         assert_eq!(db.load_ops().unwrap().len(), 1);
         assert_eq!(db.restore_snapshot(id).unwrap(), doc);
 
-        db.replace_history(&again, &[], 0, &[(id, again.clone())])
+        db.replace_history(&again, &[], 0, &Default::default(), &[(id, again.clone())])
             .unwrap();
         assert_eq!(db.load_document().unwrap(), again);
         assert!(db.load_ops().unwrap().is_empty());

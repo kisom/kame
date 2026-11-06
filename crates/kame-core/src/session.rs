@@ -622,20 +622,22 @@ impl Session {
     /// Saves the document to `path`, carrying its history, snapshots and metadata,
     /// and switches the session to that file so later edits land there.
     ///
-    /// Anything already at `path` is replaced whole: the file dialog has confirmed that. The copy
-    /// is written beside it and renamed into place, so a failure to write it leaves both the old
-    /// file and this session as they were. Failing to say its paths again, below, isn't one: the
-    /// words come first. The result is as private as the old file and the current document,
-    /// whichever is more so.
+    /// The copy holds what's in memory, the head, the whole history, the cursor and the metadata,
+    /// rather than what the old file's log has, which after a failed write is short of it. So the
+    /// old file isn't written first, and one that can't be written doesn't stop this. Anything
+    /// already at `path` is replaced whole: the file dialog has confirmed that. The copy is written
+    /// beside it and renamed into place, so a failure to write it leaves both the old file and
+    /// this session as they were. The result is as private as the old file and the current
+    /// document, whichever is more so.
     ///
     /// Each image's path and each relative link is said again in the copy for where the document
     /// is now, before it's renamed into place, so the file at `path` never says them from where
-    /// it was. If that can't be done, as when the history won't read, the copy goes into place as
-    /// it was, and `last_error` says so. `root` is the notebook it's in now, if any. This is part
-    /// of saving it elsewhere rather than an edit, so the whole history is said again the same
-    /// way: undo and redo go on as they were, and none of it is a step of its own. Each snapshot
-    /// says them again too, the same way, keeping its label and time, so that restoring one leads
-    /// where it did. A snapshot this build can't read whole is kept as it was.
+    /// it was. `root` is the notebook it's in now, if any. This is part of saving it elsewhere
+    /// rather than an edit, so the whole history is said again the same way: undo and redo go on
+    /// as they were, and none of it is a step of its own. Each snapshot says them again too, the
+    /// same way, keeping its label and time, so that restoring one leads where it did. A snapshot
+    /// this build can't read whole is kept as it was, and if the snapshots can't be read at all,
+    /// they're all kept, and `last_error` says so, as the words matter more.
     ///
     /// An image is said again as [`Session::rehome_images`] has it. A link to the document itself
     /// goes on leading to it. A web link or `#Heading` depends on nothing of the kind and stays,
@@ -660,9 +662,10 @@ impl Session {
             self.clear_save_error();
             return Ok(());
         }
-        let doc = self.editor.document().clone();
-        self.db.save_state(&doc, self.editor.cursor())?;
-        self.db.save_metadata(&self.metadata)?;
+        // The copy is given what's in memory, so the old file needn't be written first, and one
+        // that can't be still lets the words out. Its properties are worth a try, for whoever keeps
+        // it; its head isn't, as after a failed write it would hold an edit its log lacks.
+        let _ = self.db.save_metadata(&self.metadata);
 
         let name = path
             .file_name()
@@ -686,7 +689,7 @@ impl Session {
             (Ok(target), Ok(source)) => saved_mode(target, source, PRIVATE_MODE),
             _ => PRIVATE_MODE,
         };
-        let written = (|| -> AppResult<Result<Option<Editor>, DbError>> {
+        let written = (|| -> AppResult<Rehomed> {
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
             std::fs::OpenOptions::new()
                 .write(true)
@@ -697,9 +700,16 @@ impl Session {
             let mut copy = Db::open(&partial)?;
             // The copy is a different file, and what a sync tool recorded was about the original.
             copy.clear_sync_state()?;
-            // Saving the words comes first, so a copy whose paths can't be said again goes into
-            // place as it was copied, which the transaction leaves it as.
-            let rehomed = rehome(&mut copy, &doc, from, path, root, &there);
+            // What's in memory goes into the copy, in one transaction, as the old file's log may be
+            // short of it, as after a failed write.
+            let rehomed = rehome(&copy, &self.editor, from, path, root, &there);
+            copy.replace_history(
+                &rehomed.document,
+                &rehomed.ops,
+                rehomed.cursor,
+                &self.metadata,
+                &rehomed.snapshots,
+            )?;
             #[cfg(test)]
             BEFORE_CLOSE.with_borrow_mut(|hook| {
                 if let Some(hook) = hook {
@@ -736,14 +746,10 @@ impl Session {
         };
 
         self.db = Db::open(path)?;
-        let unsaid = match rehomed {
-            Ok(Some(editor)) => {
-                self.editor = editor;
-                None
-            }
-            Ok(None) => None,
-            Err(err) => Some(err),
-        };
+        let unsaid = rehomed.unsaid;
+        if rehomed.changed {
+            self.editor = Editor::with_cursor(rehomed.document, rehomed.ops, rehomed.cursor);
+        }
         self.path = Some(path.to_path_buf());
         self.on_disk = file_identity(path);
         self.log_on_disk = file_identity(&wal_path(path));
@@ -751,7 +757,7 @@ impl Session {
         self.clear_save_error();
         if let Some(err) = unsaid {
             self.last_error = Some(format!(
-                "could not say links and images again from here — {err}"
+                "could not say the snapshots' links and images again from here — {err}"
             ));
         }
         Ok(())
@@ -3182,23 +3188,36 @@ fn rehomed_image(
         .then(|| stored_image_path(&file, document, root))
 }
 
-/// Says each image's path and each relative link again in `copy`, a copy of the document whose
-/// head is `head`, for where it's saved as `to` having been at `from`, as [`Session::save_as`]
-/// has it. All of it is written in one transaction. Returns the editor to go on with, or `None`
-/// when nothing is said differently and nothing was written.
+/// What a Save As writes into its copy: the head, history and cursor in memory, and the
+/// snapshots that say something differently, each with its paths said again for where it's going.
+struct Rehomed {
+    document: Document,
+    ops: Vec<Op>,
+    cursor: usize,
+    snapshots: Vec<(i64, Document)>,
+    /// Whether anything is said differently.
+    changed: bool,
+    /// Why the snapshots couldn't be read, and so are kept as they were.
+    unsaid: Option<DbError>,
+}
+
+/// Says each image's path and each relative link again, in the head and history of `editor` and
+/// in each snapshot in `copy`, for where it's saved as `to` having been at `from`, as
+/// [`Session::save_as`] has it.
 fn rehome(
-    copy: &mut Db,
-    head: &Document,
+    copy: &Db,
+    editor: &Editor,
     from: Option<&Path>,
     to: &Path,
     root: Option<&Path>,
     there: &dyn Fn(&str, &Path) -> bool,
-) -> Result<Option<Editor>, DbError> {
-    let ops = copy.load_ops()?;
-    let cursor = copy.cursor()?;
-    let mut snapshots = copy.snapshot_documents()?;
-    let mut ops: Vec<Op> = ops.into_iter().map(|(_, op)| op).collect();
-    let cursor = cursor.min(ops.len());
+) -> Rehomed {
+    let (mut snapshots, unsaid) = match copy.snapshot_documents() {
+        Ok(snapshots) => (snapshots, None),
+        Err(err) => (Vec::new(), Some(err)),
+    };
+    let mut ops = editor.log();
+    let cursor = editor.cursor();
     // Worked out once for each, so that every state in the history says it the same way.
     let mut links: HashMap<(String, bool), String> = HashMap::new();
     let mut images: HashMap<String, String> = HashMap::new();
@@ -3237,7 +3256,7 @@ fn rehome(
             changes.set(changes.get() + 1);
         }
     };
-    let mut document = head.clone();
+    let mut document = editor.document().clone();
     places_in_document(&mut document, &mut visit);
     for op in &mut ops {
         places_in_op(op, &mut visit);
@@ -3248,11 +3267,14 @@ fn rehome(
         places_in_document(snapshot, &mut visit);
         changes.get() != before
     });
-    if changes.get() == 0 {
-        return Ok(None);
+    Rehomed {
+        document,
+        ops,
+        cursor,
+        snapshots,
+        changed: changes.get() != 0,
+        unsaid,
     }
-    copy.replace_history(&document, &ops, cursor, &snapshots)?;
-    Ok(Some(Editor::with_cursor(document, ops, cursor)))
 }
 
 /// Something in a document that says where a thing is.
@@ -4828,25 +4850,22 @@ mod tests {
     }
 
     #[test]
-    fn a_save_as_elsewhere_that_cant_say_links_again_still_saves_the_words() {
-        let root = scratch_dir("rehomefail").canonicalize().unwrap();
+    fn a_save_as_leaves_behind_a_step_the_old_files_log_cant_read() {
+        let root = scratch_dir("rehomespoiled").canonicalize().unwrap();
         let mut session = document_with_each_link(&root);
-        let before = link_targets(&session);
         spoil_history(&root.join("one/a.kame"));
-        std::fs::create_dir_all(root.join("three")).unwrap();
-        let to = root.join("three/a.kame");
+        std::fs::create_dir_all(root.join("three/deep")).unwrap();
+        let to = root.join("three/deep/a.kame");
         session.save_as(&to, None, |_, _| false).unwrap();
-        assert_eq!(names_in(&root.join("three")), ["a.kame"]);
-        assert_eq!(session.path(), Some(to.as_path()));
-        let said = session.last_error.clone().unwrap_or_default();
-        assert!(
-            said.contains("could not say links and images again from here"),
-            "{said:?}"
-        );
-        assert_eq!(link_targets(&session), before, "as it was copied");
-        assert!(session.insert("more"));
+        assert!(session.last_error.is_none(), "{:?}", session.last_error);
+        assert_eq!(link_targets(&session), EACH_LINK_FROM_DEEPER);
+        assert_agrees_with_its_file(&session);
+        let history = session.history();
         drop(session);
-        assert_eq!(link_targets(&open(&to)), before);
+        let reopened = open(&to);
+        assert!(reopened.last_error.is_none(), "{:?}", reopened.last_error);
+        assert_eq!(reopened.history(), history);
+        assert_eq!(link_targets(&reopened), EACH_LINK_FROM_DEEPER);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -4902,6 +4921,116 @@ mod tests {
         assert_eq!(session.path(), Some(to.as_path()));
         drop(session);
         assert_eq!(open(&to).document().blocks[0].text, "Words");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A session at `root/one/a.kame` whose paragraph "see notes" links to `root/two/notes.md`, and
+    /// whose last edit, making it a heading, is in memory but not in the log, as when a write fails.
+    fn session_after_a_failed_edit(root: &Path) -> Session {
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        std::fs::write(root.join("two/notes.md"), "").unwrap();
+        let path = root.join("one/a.kame");
+        let mut session = open(&path);
+        session.insert("see notes");
+        let block = session.document().blocks[0].id;
+        assert!(session.set_link(block, 4, 9, "../two/notes.md".to_string()));
+        let outside = rusqlite::Connection::open(&path).unwrap();
+        outside
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON ops \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let heading = BlockKind::Heading {
+            level: 1,
+            centered: false,
+        };
+        assert!(!session.set_block_kind(block, heading));
+        outside.execute_batch("DROP TRIGGER refuse").unwrap();
+        assert!(session.save_failed);
+        assert_eq!(session.history(), (3, 0));
+        session
+    }
+
+    /// That undoing in `session` takes back the heading the failed edit made, and nothing else.
+    fn undoes_the_heading(session: &mut Session) {
+        assert!(session.undo());
+        let block = &session.document().blocks[0];
+        assert_eq!(block.kind, BlockKind::Paragraph);
+        assert_eq!(block.text, "see notes");
+        assert_eq!(link_targets(session).len(), 1, "the link is still there");
+    }
+
+    #[test]
+    fn a_save_as_after_a_failed_edit_carries_it_and_undoes_it() {
+        for to in ["one/b.kame", "three/deep/a.kame"] {
+            let root = scratch_dir("failededit").canonicalize().unwrap();
+            let mut session = session_after_a_failed_edit(&root);
+            let to = root.join(to);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            session.save_as(&to, None, |_, _| false).unwrap();
+            assert!(!session.save_failed);
+            assert_agrees_with_its_file(&session);
+            undoes_the_heading(&mut session);
+            drop(session);
+
+            let mut session = session_after_a_failed_edit(&root.join("again"));
+            let again = root.join("again").join(to.strip_prefix(&root).unwrap());
+            std::fs::create_dir_all(again.parent().unwrap()).unwrap();
+            session.save_as(&again, None, |_, _| false).unwrap();
+            drop(session);
+            let mut reopened = open(&again);
+            assert_eq!(reopened.history(), (3, 0));
+            undoes_the_heading(&mut reopened);
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_save_as_saves_the_words_when_the_old_file_cant_be_written() {
+        let root = scratch_dir("oldlocked").canonicalize().unwrap();
+        let from = root.join("a.kame");
+        let mut session = open(&from);
+        session.insert("Words");
+        // Another writer holds the old file, so nothing more can be written to it.
+        let outside = rusqlite::Connection::open(&from).unwrap();
+        outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+        session
+            .db
+            .set_busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        std::fs::create_dir_all(root.join("c")).unwrap();
+        let to = root.join("c/a.kame");
+        let saved = session.save_as(&to, None, |_, _| false);
+        outside.execute_batch("COMMIT").unwrap();
+        saved.unwrap();
+        assert_eq!(session.path(), Some(to.as_path()));
+        assert_agrees_with_its_file(&session);
+        drop(session);
+        assert_eq!(open(&to).document().blocks[0].text, "Words");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_save_as_whose_copy_wont_take_the_words_fails_and_leaves_nothing() {
+        let root = scratch_dir("copyrefuses").canonicalize().unwrap();
+        let from = root.join("a.kame");
+        let mut session = open(&from);
+        session.insert("Words");
+        // Carried into the copy, where writing the head is refused.
+        rusqlite::Connection::open(&from)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON documents \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        std::fs::create_dir_all(root.join("c")).unwrap();
+        let to = root.join("c/a.kame");
+        assert!(session.save_as(&to, None, |_, _| false).is_err());
+        assert!(names_in(&root.join("c")).is_empty());
+        assert_eq!(session.path(), Some(from.as_path()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

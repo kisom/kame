@@ -411,6 +411,16 @@ impl Editor {
         std::mem::take(&mut self.refused)
     }
 
+    /// The whole history, oldest first, as it's logged: what can be undone and then what can be
+    /// redone, with [`Editor::cursor`] the number of the first that are applied.
+    pub fn log(&self) -> Vec<Op> {
+        self.undo
+            .iter()
+            .chain(self.redo.iter().rev())
+            .cloned()
+            .collect()
+    }
+
     /// `(undo depth, redo depth)` — how many edits can be undone and redone.
     pub fn history(&self) -> (usize, usize) {
         (self.undo.len(), self.redo.len())

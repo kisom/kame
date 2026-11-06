@@ -2171,3 +2171,18 @@ fn a_logged_document_with_a_kind_from_a_newer_kame_moves_with_its_logs() {
     assert_eq!(report.left[0].relative, "b.kame");
     assert_eq!(report.left[0].why, NEWER_LEFT);
 }
+
+/// A retired copy is told to be a document's by its id, and the id of one from a newer kame is read
+/// as far as this build can, so the copy goes with it.
+#[test]
+fn a_retired_copy_moves_with_a_document_from_a_newer_kame() {
+    let (root, nb) = plain_notebook("move-newer-retired");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    std::fs::copy(&a, root.join(".a.retired.kame")).unwrap();
+    let copy = std::fs::read(root.join(".a.retired.kame")).unwrap();
+    add_a_newer_block(&a);
+    make_move(&nb, &a, &root.join("b.kame"));
+    assert!(!root.join(".a.retired.kame").exists());
+    assert_eq!(std::fs::read(root.join(".b.retired.kame")).unwrap(), copy);
+}

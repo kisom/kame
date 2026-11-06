@@ -3152,3 +3152,26 @@ fn a_stranded_database_from_a_newer_kame_is_left_for_an_updated_one() {
         assert_eq!(std::fs::read(&c).unwrap(), bytes, "{name}");
     }
 }
+
+/// Whether the home a stranded database's logs went to is its own is told by its id, read as far as
+/// this build can for one a newer kame wrote. Opened there, it retires the stranded one.
+#[test]
+fn a_home_from_a_newer_kame_retires_the_old_database_left_behind() {
+    let (root, nb) = logged_notebook("stranded-newer-home");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    as_a_newer_kame_wrote_it(&b, r#""kind":"Paragraph""#, r#""kind":"Table""#);
+    let home = std::fs::read(&b).unwrap();
+    assert_eq!(
+        reconcile(&nb, just(&a), None, Locks::NONE),
+        [Done::Retired {
+            from: a.clone(),
+            to: root.join(".a.retired.kame"),
+            opened_there: true,
+            unsynced: false,
+        }]
+    );
+    assert_eq!(std::fs::read(&b).unwrap(), home);
+}

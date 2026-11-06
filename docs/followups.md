@@ -40,6 +40,10 @@ written by one version has to be safe in another.
 - [ ] **A stale database from before places were recorded,** whose logs left before a pass first saw it, has no place, so it isn't
   recognised as stale until it's next synced, and opening one on another machine after a delete can bring the document back, as it
   did before. A pass stamps every other one.
+- [ ] **A list item moved on one machine goes back after a later edit on another.** A merge takes the order of the later
+  side, so a move is undone by a revision written later elsewhere, even one that only edited words, with no note. Nothing is
+  lost. A three-way order rule would keep it, but it changes merged bytes between versions, so it's for before 1.0 or not at
+  all. See `docs/spec/merging.md`, section 9.
 - [ ] **A partial log folder after a move.** If a machine edits X offline while another renames X to Y, its surviving
   `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
   X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.

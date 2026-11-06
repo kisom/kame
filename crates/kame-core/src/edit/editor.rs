@@ -1047,8 +1047,10 @@ impl Editor {
     /// they move as one, at the level of the first.
     ///
     /// `None`, with nothing changed, at either end of the list, for anything that isn't a
-    /// list item, and for a selection that climbs out of the first item's level. Nothing
-    /// leaves its list or changes level.
+    /// list item, and for a selection that climbs out of the first item's level or reaches
+    /// into another list. Nothing leaves its list or changes level. Bullets and numbers at
+    /// the same level are two lists, as they export, and so are items with anything else
+    /// between them.
     ///
     /// It's made of the edits there have always been, so any kame can read it. Each block
     /// keeps its id and its notes, which are taken off and put back with it. The first item
@@ -1066,7 +1068,15 @@ impl Editor {
             .collect();
         let (&first, &last) = (selected.first()?, selected.last()?);
         let level = depth(first)?;
-        if (first..=last).any(|at| depth(at).is_none_or(|depth| depth < level)) {
+        // Where the items at this level change between bullets and numbers, one list ends and
+        // another begins, as they export.
+        let ordered =
+            |at: usize| matches!(blocks[at].kind, BlockKind::ListItem { ordered: true, .. });
+        let sibling = |at: usize| depth(at) == Some(level) && ordered(at) == ordered(first);
+        if (first..=last).any(|at| {
+            depth(at).is_none_or(|depth| depth < level)
+                || (depth(at) == Some(level) && !sibling(at))
+        }) {
             return None;
         }
         // Where the unit starting at `at` ends: past every item nested under it.
@@ -1081,12 +1091,12 @@ impl Editor {
             let before = (0..first)
                 .rev()
                 .find(|&at| depth(at).is_none_or(|depth| depth <= level))?;
-            if depth(before) != Some(level) {
+            if !sibling(before) {
                 return None;
             }
             (before, first, end)
         } else {
-            if depth(end) != Some(level) {
+            if end == blocks.len() || !sibling(end) {
                 return None;
             }
             (first, end, unit_end(end))
@@ -3941,6 +3951,92 @@ mod tests {
             assert_eq!(shown(&editor), [0, 1, 2, 1]);
             editor.undo().unwrap();
             assert_eq!(state(editor.document()), start);
+        }
+
+        fn numbered(depth: u8, text: &str) -> Block {
+            Block {
+                kind: BlockKind::ListItem {
+                    ordered: true,
+                    depth,
+                },
+                ..item(depth, text)
+            }
+        }
+
+        /// They're two lists on export, so a move would break one in two.
+        #[test]
+        fn a_bulleted_list_and_a_numbered_one_after_it_are_two_lists() {
+            let mut editor = editor_of(vec![
+                item(0, "a"),
+                item(0, "b"),
+                numbered(0, "c"),
+                numbered(0, "d"),
+            ]);
+            let before = editor.document().clone();
+            for (selected, up) in [
+                (vec!["b"], false),
+                (vec!["c"], true),
+                (vec!["b", "c"], true),
+                (vec!["b", "c"], false),
+            ] {
+                let at = ids(&editor, &selected);
+                assert!(
+                    editor.move_list_items(&at, up).is_none(),
+                    "{selected:?} {up}"
+                );
+            }
+            assert_eq!(*editor.document(), before);
+            assert_eq!(editor.history(), (0, 0));
+            let a = ids(&editor, &["a"]);
+            editor.move_list_items(&a, false).unwrap();
+            let d = ids(&editor, &["d"]);
+            editor.move_list_items(&d, true).unwrap();
+            assert_eq!(texts(&editor), ["b", "a", "d", "c"]);
+        }
+
+        #[test]
+        fn a_nested_list_of_the_other_kind_moves_with_its_item_and_in_itself() {
+            let mut editor = editor_of(vec![
+                item(0, "a"),
+                numbered(1, "a1"),
+                numbered(1, "a2"),
+                item(0, "b"),
+            ]);
+            let a2 = ids(&editor, &["a2"]);
+            editor.move_list_items(&a2, true).unwrap();
+            assert_eq!(texts(&editor), ["a", "a2", "a1", "b"]);
+            let a = ids(&editor, &["a"]);
+            editor.move_list_items(&a, false).unwrap();
+            assert_eq!(texts(&editor), ["b", "a", "a2", "a1"]);
+        }
+
+        #[test]
+        fn notes_outside_the_moved_items_stay_as_they_were() {
+            let mut editor = editor_of(vec![
+                paragraph("before"),
+                item(0, "a"),
+                item(0, "b"),
+                item(0, "c"),
+                paragraph("after"),
+            ]);
+            let [before, a, c, after] = ["before", "a", "c", "after"].map(|text| id(&editor, text));
+            for (kind, anchor) in [
+                (AnnotationKind::Note, Anchor::range(before, 0, 3)),
+                (AnnotationKind::Footnote, Anchor::range(after, 5, 5)),
+                (AnnotationKind::Marginal, Anchor::block(after)),
+                (AnnotationKind::Note, Anchor::range(c, 0, 1)),
+                (AnnotationKind::Footnote, Anchor::range(a, 1, 1)),
+            ] {
+                editor.add_annotation(kind, anchor, "x").unwrap();
+            }
+            let start = state(editor.document());
+            editor.move_list_items(&[a], false).unwrap();
+            assert_eq!(texts(&editor), ["before", "b", "a", "c", "after"]);
+            assert_eq!(state(editor.document()).annotations, start.annotations);
+            editor.undo().unwrap();
+            assert_eq!(state(editor.document()), start);
+            editor.redo().unwrap();
+            assert_eq!(state(editor.document()).annotations, start.annotations);
         }
 
         /// kame 0.1.2 and every build since read these, so a document with a move in its

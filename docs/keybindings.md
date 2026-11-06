@@ -57,7 +57,8 @@ so a list's first item stays put. An item's children stay where they are when it
 Ctrl-Shift-Up and Ctrl-Shift-Down move an item a place up or down in its list, past the item before
 or after it at its level, and each takes the items nested under it. With several items selected they
 move together, at the level of the first. At either end of its list an item stays put: a move never
-leaves the list or changes an item's level. The caret stays on the item's words, numbers follow the
+leaves the list or changes an item's level. Bullets and numbers at the same level are two lists, as they
+export, so an item never moves from a bulleted list into a numbered one right after it, or back. The caret stays on the item's words, numbers follow the
 new order, and notes, footnotes and marginals go with the item. A move is one undo step.
 Numbers nest as `1.`, `1.1`, `1.1.1`, on the page and in HTML. Markdown has no way to write
 that, so it exports plain numbers and leaves the numbering to whatever renders it. Enter on an empty nested

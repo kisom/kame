@@ -1224,6 +1224,11 @@ impl KameApp {
                 .session
                 .path()
                 .map_or_else(|| PathBuf::from("this document"), Path::to_path_buf);
+            if !self.take_in_from_logs() {
+                let why = "what other machines wrote to it couldn't be taken in, so it may still \
+                           cite this";
+                renamed.failed.push((here.clone(), why.to_string()));
+            }
             match self.rename_in_open_document(&old, &new) {
                 Ok(true) => renamed.rewritten.push(here),
                 Ok(false) => {}
@@ -1241,6 +1246,24 @@ impl KameApp {
         said.extend(not_removed);
         self.say_in_references(said);
         self.reload_references();
+    }
+
+    /// Merges what has arrived in the open document's logs, as leaving it does, so that a citation
+    /// another machine wrote is in it. Whether nothing is left there to merge, which is so for a
+    /// document whose folder doesn't sync, and for a new one nobody has written in, which has no
+    /// logs yet.
+    fn take_in_from_logs(&mut self) -> bool {
+        let Some(path) = self.session.path().map(Path::to_path_buf) else {
+            return true;
+        };
+        if kame_sync::logs::logging_root(&path).is_none() || self.on_untouched_fresh() {
+            return true;
+        }
+        self.set_open_note(None);
+        self.sync_logs();
+        self.logged
+            .as_ref()
+            .is_some_and(|logged| !logged.has_news())
     }
 
     /// Renames `old` in the open document, returning whether it cited it, or why it still does.
@@ -4058,6 +4081,84 @@ mod tests {
         );
         assert!(page.sees("knuth1981 was kept"));
         assert!(page.sees("doc.kame: "), "the document left behind is named");
+    }
+
+    /// A page on `doc.kame` saying `see`, in a notebook whose folder syncs through logs, with the
+    /// reference `knuth1981`, synced once.
+    fn page_in_a_logged_notebook() -> Headless {
+        let root = notebook_folder("logged").canonicalize().unwrap();
+        std::fs::write(root.join(kame_sync::logs::MARKER), "").unwrap();
+        write_reference(&root, "knuth1981", GOOD);
+        let mut session = Session::open(&root.join("doc.kame")).unwrap();
+        session.insert("see");
+        let mut page = Headless::new(session);
+        page.app.device = "titan-bbbb".to_string();
+        page.read_references();
+        page.app.sync_logs();
+        page
+    }
+
+    /// Writes ` and [knuth1981]` to the end of the open document on another machine, whose log
+    /// then arrives here, with nothing merged.
+    fn cite_from_another_machine(page: &Headless) {
+        use kame_sync::logs::{build_from_logs, log_folder, Logged, MARKER};
+        let copy_logs = |from: &Path, to: &Path| {
+            let (from, to) = (log_folder(from), log_folder(to));
+            std::fs::create_dir_all(&to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap().flatten() {
+                std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
+        };
+        let here = page.app.session.path().unwrap().to_path_buf();
+        let there = test_temp_dir().join(format!("there-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&there).unwrap();
+        std::fs::write(there.join(MARKER), "").unwrap();
+        let there = there.canonicalize().unwrap().join("doc.kame");
+        copy_logs(&here, &there);
+        build_from_logs(&there).unwrap();
+        let mut elsewhere = Session::open(&there).unwrap();
+        let end = elsewhere.document_edge(true).unwrap();
+        elsewhere.set_caret(end);
+        elsewhere.insert(" and [knuth1981]");
+        Logged::open(&elsewhere, "talos-aaaa")
+            .unwrap()
+            .sync(&mut elsewhere, 200)
+            .unwrap();
+        copy_logs(&there, &here);
+    }
+
+    #[test]
+    fn a_rename_takes_in_what_another_machine_cited_in_the_open_document_first() {
+        let mut page = page_in_a_logged_notebook();
+        cite_from_another_machine(&page);
+        assert_eq!(only_text(&page), "see");
+        open_list(&mut page);
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert_eq!(only_text(&page), "see and [plass1981]");
+        assert!(!reference_file(&page, "knuth1981").exists());
+        assert!(page.sees("Renamed knuth1981 to plass1981 in 1 document."));
+    }
+
+    #[test]
+    fn a_rename_keeps_the_old_key_when_the_open_documents_logs_cant_be_read() {
+        let mut page = page_in_a_logged_notebook();
+        cite_from_another_machine(&page);
+        let logs = kame_sync::logs::log_folder(page.app.session.path().unwrap());
+        // A log that is a folder can't be read.
+        std::fs::create_dir_all(logs.join("other.log")).unwrap();
+        page.app.logged = None;
+        open_list(&mut page);
+
+        rename_only_key(&mut page, "plass1981");
+
+        assert!(
+            reference_file(&page, "knuth1981").exists(),
+            "[old] may yet arrive"
+        );
+        assert!(page.sees("knuth1981 was kept"));
+        assert!(page.sees("doc.kame: "), "the document is named");
     }
 
     #[test]

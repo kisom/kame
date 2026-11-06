@@ -542,8 +542,7 @@ fn a_document_from_a_newer_version_finds_its_copies_and_merges_none() {
     assert!(session.lossy);
     assert_eq!(conflict_copies(&doc), std::slice::from_ref(&copy));
     let said = merge_copy_into(&mut session, &copy)
-        .err()
-        .expect("nothing is merged")
+        .expect_err("nothing is merged")
         .to_string();
     assert_eq!(
         said,

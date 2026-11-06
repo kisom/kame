@@ -279,6 +279,16 @@ Nor is a revision with a field this build doesn't know merged, and that's the ru
 
 That's for a document whose own file this build reads whole. One whose file holds something from a newer version is read-only from the moment it opens ([document format, section 1.5](document-format.md)), and a sync of it writes nothing and merges nothing. What's on the screen can be only a view, leaving out kinds and styles this build doesn't know, and written down as a revision it would have every machine lose them.
 
+### 6.9 Logs across versions
+
+What any version of kame writes to a log, every later 1.x reads and merges, as the [document format's](document-format.md) section 7 promises for files. Every revision at a document's name is read and merged, whatever document it's of (section 6.4). A later build merges an earlier one's heads to the same revision the earlier one would, so that machines at different versions converge rather than going on merging each other's merges (section 1). The document format's weak points ([section 8](document-format.md)) say where that doesn't hold yet.
+
+There's no version number in a log. So a change that older readers would misread must not be made. It has to come as something they can't fully read, a new field or kind, which they notice and hold off from as section 6.8 says. A new field must be left out when it holds its default (section 9). The golden tests at the end of `crates/kame-sync/src/revlog.rs` pin the bytes written for a revision and its blocks.
+
+Each release's samples ([document format, section 7.3](document-format.md)) hold the logs of a document two machines wrote, with a merge in them and two heads after it that change the same sentence. Every later build's tests read them, find the same heads, merge them to the same revision, and write on from there.
+
+Revision logs are still a trial, opted into by folder, and whether 1.0 holds them to this is still to be decided.
+
 ## 7. Conflict copies and replaced files
 
 These are for a tool like Syncthing carrying the `.kame` file itself, and the app looks for them in logged folders too. There's no shared history to read here, so the base is found from the op logs:

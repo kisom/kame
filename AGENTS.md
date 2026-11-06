@@ -17,6 +17,8 @@ or use the flake devshell (`nix develop`, or `direnv allow` with the bundled `.e
 
 Both `cargo build` and `cargo test` must pass (`make all` and `make test`). The test suite is headless (no display/GPU); fonts resolve via `env!("CARGO_MANIFEST_DIR")/fonts/`.
 
+Every release keeps samples of what it writes, which every later build's tests read: a document and a folder of revision logs, with what reading them gave, in `crates/kame-core/tests/samples/VERSION/`. At the release commit, once every version says the new one and before tagging, run `cargo run -p kame-sync --example write_samples` and commit the folder it writes. It's never run in tests. Nothing in a folder already there is ever changed, not even to make a test pass, and the release workflow refuses a tag whose version has none.
+
 To run the app with no display on NixOS, use Xvfb and the software Vulkan driver:
 
 ```sh
@@ -55,6 +57,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
 - `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk
 - `text.rs` — moving through text by character and word
+- `tests/samples/` — what each release wrote, with what reading it gave, which `tests/written_by_releases.rs` and `kame-sync`'s `tests/logs_from_releases.rs` read
 
 `crates/kame-typeset` — how a document looks, reading it and never changing it:
 
@@ -64,7 +67,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-site` — the static site generator, a command line tool on `kame-core` and `kame-notebook`, which the app also runs as `kame site`. `config` reads `site.yaml`, `source` and `pages` read what publishes, `refs` works out where links and images lead, `plan` works out the whole site with nothing written, and `write` replaces `output/` atomically. A notebook's site ends each page with the references it cites and warns about keys that look lost, and a `site.yaml` site has no references. Either publishes what this build can read of a document from a newer kame, and warns of it. The starting theme is under `theme/`, embedded for `kame-site new`.
 
-`crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies, and `logs` and `revlog` for revision logs in folders that turn them on. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
+`crates/kame-sync` — merging one person's diverged documents, on `kame-core`. The app uses `merge` and `files` for conflict copies, and `logs` and `revlog` for revision logs in folders that turn them on. `examples/write_samples` writes a release's samples. See `docs/superpowers/specs/2026-11-03-sync-design.md`.
 
 `crates/kame-notebook` — a notebook: a folder with a `notebook.yaml`, on `kame-core` and `kame-sync`. It finds one, lists what's in it (a `.yaml` file directly in the root's `references/` is a reference, not an entry, and is read and written there as `KEY.yaml`), reading a document from a newer kame as far as this build can, searches it, works out where links lead and when one can create a document, and copies images in from outside. `manage` checks where a document may go, moves or renames one and rewrites the links to it, and deletes one. `stranded` settles databases left behind when a document was moved or deleted on another machine. Nothing derived is stored. The app's side of it is `src/notebook.rs`, and `kame-site` builds one as a site in `notebook.rs`. See `docs/superpowers/specs/2026-11-03-notebook-design.md`.
 
@@ -82,7 +85,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.
 
-`.github/workflows/release.yml` and `packaging/aur/` — releasing: a `v*` tag builds the macOS app, creates the GitHub release, bumps the Homebrew tap (`kisom/homebrew-tap`: the `kame` cask for the app, the `kame-site` formula) and installs both from it on a clean Mac to check them; the PKGBUILD and `.SRCINFO` are the AUR package, whose version, like the tag's, must match every `Cargo.toml` and `packaging/macos/Info.plist`.
+`.github/workflows/release.yml` and `packaging/aur/` — releasing: a `v*` tag, refused without its version's samples, builds the macOS app, creates the GitHub release, bumps the Homebrew tap (`kisom/homebrew-tap`: the `kame` cask for the app, the `kame-site` formula) and installs both from it on a clean Mac to check them; the PKGBUILD and `.SRCINFO` are the AUR package, whose version, like the tag's, must match every `Cargo.toml` and `packaging/macos/Info.plist`.
 
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 

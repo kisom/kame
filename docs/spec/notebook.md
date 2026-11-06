@@ -127,7 +127,7 @@ Reading a document for a list, a search or a site must change nothing:
 
 A document that can't be read stays in the list under its file name. Search and the links list skip it with no message, and publishing skips it with a warning.
 
-A document holding something only a newer version of kame knows is read as far as this build can, and what it doesn't know is left out, with nothing in its place ([document format, section 7](document-format.md)). Lists, search and the links list say nothing of it, as the document says so itself when it's opened. Publishing warns (section 7.1).
+A document holding something only a newer version of kame knows is read as far as this build can, and what it doesn't know is left out, with nothing in its place ([document format, section 7.2](document-format.md)). Lists, search and the links list say nothing of it, as the document says so itself when it's opened. Publishing warns (section 7.1).
 
 Search reads what's on the screen in place of the file for the open document, since that can be ahead of the disk, but for the paragraphs standing for what a newer version wrote, which aren't the document's words. The links list reads files only, and is worked out when a document opens, not as it's edited.
 

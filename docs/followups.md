@@ -21,8 +21,6 @@ unless daily writing finds something that fails it.
 Releases now put different versions on different machines (Homebrew, the GitHub release and the AUR), so a file or a log
 written by one version has to be safe in another.
 
-- [ ] **Freeze the v1 file format.** `docs/spec/document-format.md` becomes the promise: what 1.x writes, every later 1.x reads.
-  Keep sample files and logs written by each release, and have every later build's tests read them.
 - [ ] **Decide what sync promises at 1.0.** Revision logs are built and in trial on `notebook-test`, opted in by folder
   (`docs/superpowers/specs/2026-11-03-sync-design.md`). Still to learn: how often conflict notes appear in real writing, and
   whether snapshots should travel in the logs. Either they're stable at 1.0, or they stay opt-in and say they're a trial. Then

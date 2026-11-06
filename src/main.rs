@@ -716,8 +716,66 @@ const POSITION_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_se
 const RULE_WIDTH: f32 = 0.25;
 /// Gap between a list marker's right edge and its item's text.
 const LIST_MARKER_GAP: f32 = 6.0;
-/// The bullet at each level of nesting, starting over past the last.
-const LIST_BULLETS: [&str; 3] = ["•", "◦", "▪"];
+/// The bullet at each level of nesting, starting over past the last. Bullets are
+/// drawn as shapes, not set as text: the page's markers are painted with egui's fonts,
+/// not the embedded body face, and a glyph the font lacks ("▪") came from an emoji font
+/// as a large black square.
+const LIST_BULLETS: [Bullet; 3] = [Bullet::Disc, Bullet::Ring, Bullet::Square];
+/// How far a bullet reaches from its centre, as a share of the body size. The three
+/// shapes all fill the same box.
+const BULLET_REACH: f32 = 0.14;
+/// A ring's line, and a square's side, as shares of the box they fill.
+const BULLET_RING_LINE: f32 = 0.5;
+const BULLET_SQUARE_SIDE: f32 = 0.92;
+
+/// The shape of a list bullet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bullet {
+    Disc,
+    Ring,
+    Square,
+}
+
+impl Bullet {
+    /// How far the bullet reaches from its centre, for body type of this size.
+    fn half_width(self, body_size: f32) -> f32 {
+        body_size * BULLET_REACH
+    }
+
+    /// Draws the bullet with its right edge at `right` and its middle at `y`.
+    fn paint(self, painter: &egui::Painter, right: f32, y: f32, body_size: f32, ink: Color32) {
+        let reach = self.half_width(body_size);
+        let centre = Pos2::new(right - reach, y);
+        match self {
+            Bullet::Disc => {
+                painter.circle_filled(centre, reach, ink);
+            }
+            Bullet::Ring => {
+                let line = reach * BULLET_RING_LINE;
+                painter.circle_stroke(centre, reach - line / 2.0, egui::Stroke::new(line, ink));
+            }
+            Bullet::Square => {
+                let half = reach * BULLET_SQUARE_SIDE;
+                painter.rect_filled(
+                    egui::Rect::from_center_size(centre, egui::vec2(half * 2.0, half * 2.0)),
+                    0.0,
+                    ink,
+                );
+            }
+        }
+    }
+}
+
+/// The bullet for a list item this many levels deep.
+fn bullet_at(depth: u8) -> Bullet {
+    LIST_BULLETS[usize::from(depth) % LIST_BULLETS.len()]
+}
+
+/// What stands in the gutter before a list item.
+enum ListMarker {
+    Bullet(Bullet),
+    Number(String),
+}
 /// Font-size step for the Ctrl + / Ctrl - chords, and the clamp bounds (body
 /// size in px). Everything else scales off the body size.
 const FONT_SIZE_STEP: f32 = 1.0;
@@ -4407,14 +4465,13 @@ impl KameApp {
         let caret = self.session.caret;
 
         // List markers: a bullet that changes with the level, or a number.
-        let list_markers: Vec<Option<String>> = list_positions(blocks, false)
+        let list_markers: Vec<Option<ListMarker>> = list_positions(blocks, false)
             .into_iter()
             .zip(list_labels(blocks))
             .map(|(position, label)| {
-                position.map(|position| {
-                    label.unwrap_or_else(|| {
-                        LIST_BULLETS[usize::from(position.depth) % LIST_BULLETS.len()].to_string()
-                    })
+                position.map(|position| match label {
+                    Some(label) => ListMarker::Number(label),
+                    None => ListMarker::Bullet(bullet_at(position.depth)),
                 })
             })
             .collect();
@@ -4729,16 +4786,26 @@ impl KameApp {
             // A list item's marker sits in the gutter before its text, its
             // right edge held a fixed gap short of the text so numbers align.
             if let Some(marker) = &list_markers[index] {
-                painter.text(
-                    Pos2::new(
-                        body_left + indent - LIST_MARKER_GAP,
-                        tops[index] + config.body_line_height * 0.5,
+                let right = body_left + indent - LIST_MARKER_GAP;
+                let middle = tops[index] + config.body_line_height * 0.5;
+                match marker {
+                    ListMarker::Bullet(bullet) => bullet.paint(
+                        &painter,
+                        right,
+                        middle,
+                        config.body_size,
+                        self.palette.list_marker_ink,
                     ),
-                    Align2::RIGHT_CENTER,
-                    marker,
-                    FontId::proportional(config.body_size),
-                    self.palette.list_marker_ink,
-                );
+                    ListMarker::Number(label) => {
+                        painter.text(
+                            Pos2::new(right, middle),
+                            Align2::RIGHT_CENTER,
+                            label,
+                            FontId::proportional(config.body_size),
+                            self.palette.list_marker_ink,
+                        );
+                    }
+                }
             }
             if let Some(texture) = self.textures.get(block.id) {
                 let origin = Pos2::new(body_left + indent - sideways[index], tops[index]);
@@ -7833,6 +7900,35 @@ mod tests {
 
     fn open(path: &Path) -> Session {
         Session::open(path).expect("open a session")
+    }
+
+    // --- list bullets --------------------------------------------------------
+
+    #[test]
+    fn the_bullets_are_three_shapes_of_one_size_that_start_over() {
+        let shapes: Vec<Bullet> = (0..6).map(bullet_at).collect();
+        assert_eq!(shapes[0], Bullet::Disc);
+        assert_eq!(shapes[1], Bullet::Ring);
+        assert_eq!(shapes[2], Bullet::Square);
+        assert_eq!(shapes[3..], shapes[..3], "the cycle starts over");
+        assert_ne!(shapes[0], shapes[1]);
+        assert_ne!(shapes[1], shapes[2]);
+        assert_ne!(shapes[0], shapes[2]);
+        // Every shape fills about the same box, a part of the body size, so the third
+        // level cannot come out larger than the first two as a fallback glyph did.
+        for body in [12.0_f32, 16.0, 24.0] {
+            let sizes: Vec<f32> = shapes[..3].iter().map(|b| b.half_width(body)).collect();
+            for size in &sizes {
+                assert!(
+                    *size > body * 0.08 && *size < body * 0.2,
+                    "{size} at {body}"
+                );
+            }
+            let (least, most) = sizes
+                .iter()
+                .fold((f32::MAX, 0.0_f32), |(l, m), s| (l.min(*s), m.max(*s)));
+            assert!(most - least <= body * 0.01, "{sizes:?} at {body}");
+        }
     }
 
     // --- distraction-free modes ---------------------------------------------

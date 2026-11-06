@@ -454,16 +454,6 @@ impl Db {
     /// Whether this file holds something from a newer version of kame: a field this build would
     /// drop by saving, or a step of history it can't read.
     pub fn holds_newer(&self) -> bool {
-        fn drops_something<T: serde::Serialize + serde::de::DeserializeOwned>(json: &str) -> bool {
-            let Ok(written) = serde_json::from_str::<serde_json::Value>(json) else {
-                return false;
-            };
-            let Ok(read) = serde_json::from_str::<T>(json) else {
-                return false;
-            };
-            serde_json::to_value(read)
-                .is_ok_and(|known| crate::model::has_unknown_fields(&written, &known))
-        }
         let row =
             |sql: &str| -> Option<String> { self.conn.query_row(sql, [], |row| row.get(0)).ok() };
         if row("SELECT json FROM documents WHERE id = 1")
@@ -632,19 +622,26 @@ impl Db {
         Ok(())
     }
 
-    /// Replaces the head document, the whole op log and the cursor in one transaction, for a
-    /// history said again throughout, so that a crash leaves all of it as it was or all of it new.
+    /// Replaces the head document, the whole op log and the cursor, and the document in each of
+    /// `snapshots` by id, in one transaction, for a history said again throughout, so that a crash
+    /// leaves all of it as it was or all of it new. A snapshot keeps its id, label and time, and
+    /// one that isn't there fails the whole of it.
     pub fn replace_history(
         &mut self,
         doc: &Document,
         ops: &[Op],
         cursor: usize,
+        snapshots: &[(i64, Document)],
     ) -> Result<(), DbError> {
         let json = serde_json::to_string(doc)?;
         let rows = ops
             .iter()
             .map(serde_json::to_string)
             .collect::<Result<Vec<String>, _>>()?;
+        let snapshots = snapshots
+            .iter()
+            .map(|(id, doc)| Ok((*id, serde_json::to_string(doc)?)))
+            .collect::<Result<Vec<(i64, String)>, DbError>>()?;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO documents (id, json) VALUES (1, ?1)",
@@ -655,6 +652,15 @@ impl Db {
             tx.execute("INSERT INTO ops (json) VALUES (?1)", params![row])?;
         }
         write_cursor(&tx, cursor)?;
+        for (id, json) in &snapshots {
+            let changed = tx.execute(
+                "UPDATE snapshots SET json = ?2 WHERE id = ?1",
+                params![id, json],
+            )?;
+            if changed == 0 {
+                return Err(DbError::SnapshotNotFound(*id));
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -749,6 +755,29 @@ impl Db {
         Ok(snapshots)
     }
 
+    /// Every snapshot this build can read whole, by id, oldest first, for saying something in each
+    /// of them again. One that won't parse, or holds a field from a newer version that writing it
+    /// again would lose, is left out, so that it's kept as it was.
+    pub fn snapshot_documents(&self) -> Result<Vec<(i64, Document)>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, json FROM snapshots ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut snapshots = Vec::new();
+        for row in rows {
+            let (id, json) = row?;
+            if drops_something::<Document>(&json) {
+                continue;
+            }
+            if let Ok(doc) = serde_json::from_str(&json) {
+                snapshots.push((id, doc));
+            }
+        }
+        Ok(snapshots)
+    }
+
     /// Reads snapshot `id` back as a [`Document`].
     ///
     /// This is a pure read: the head document and op log are not modified, so
@@ -772,6 +801,18 @@ impl Db {
         let doc = serde_json::from_str(&json)?;
         Ok(doc)
     }
+}
+
+/// Whether reading `json` as a `T` and writing it again would lose something, a field from a newer
+/// version. JSON that isn't a `T` at all loses nothing this way.
+fn drops_something<T: Serialize + serde::de::DeserializeOwned>(json: &str) -> bool {
+    let Ok(written) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let Ok(read) = serde_json::from_str::<T>(json) else {
+        return false;
+    };
+    serde_json::to_value(read).is_ok_and(|known| crate::model::has_unknown_fields(&written, &known))
 }
 
 /// Current time as a Unix timestamp in whole seconds.
@@ -1436,6 +1477,36 @@ mod tests {
             Err(DbError::SnapshotNotFound(missing)) => assert_eq!(missing, id + 1),
             other => panic!("expected DbError::SnapshotNotFound, got {other:?}"),
         }
+    }
+
+    /// A history said again changes each snapshot named in place, keeping its label and time, and
+    /// one that isn't there leaves the head, the log, the cursor and every snapshot as they were.
+    #[test]
+    fn replacing_the_history_says_its_snapshots_again_or_nothing() {
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let doc = sample_document();
+        db.save_document(&doc).unwrap();
+        db.append_op(&insert_op(0)).unwrap();
+        let id = db.create_snapshot(&doc, Some("kept")).unwrap();
+        let listed = db.list_snapshots().unwrap();
+        let mut again = doc.clone();
+        again.title = "Said again".to_string();
+
+        assert!(matches!(
+            db.replace_history(&again, &[], 0, &[(id, again.clone()), (id + 1, again.clone())]),
+            Err(DbError::SnapshotNotFound(missing)) if missing == id + 1
+        ));
+        assert_eq!(db.load_document().unwrap(), doc);
+        assert_eq!(db.load_ops().unwrap().len(), 1);
+        assert_eq!(db.restore_snapshot(id).unwrap(), doc);
+
+        db.replace_history(&again, &[], 0, &[(id, again.clone())])
+            .unwrap();
+        assert_eq!(db.load_document().unwrap(), again);
+        assert!(db.load_ops().unwrap().is_empty());
+        assert_eq!(db.restore_snapshot(id).unwrap(), again);
+        assert_eq!(db.list_snapshots().unwrap(), listed);
     }
 
     /// A snapshot stays independent of the head document: further saves change

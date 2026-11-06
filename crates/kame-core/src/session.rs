@@ -1864,7 +1864,9 @@ impl Session {
     /// is now, having been at `from` until then. `root` is the notebook it's in now, if any. This
     /// is part of saving it elsewhere rather than an edit, so the whole history is said again the
     /// same way, and the new file starts out saying them from where it is: undo and redo go on as
-    /// they were, and none of it is a step of its own. Snapshots are kept as they were taken.
+    /// they were, and none of it is a step of its own. Each snapshot says them again too, the same
+    /// way, keeping its label and time, so that restoring one leads where it did. A snapshot this
+    /// build can't read whole is kept as it was.
     ///
     /// An image is said again as [`Session::rehome_images`] has it. A link to the document itself
     /// goes on leading to it. A web link or `#Heading` depends on nothing of the kind and stays,
@@ -1890,8 +1892,8 @@ impl Session {
         let history = self
             .db
             .load_ops()
-            .and_then(|ops| Ok((ops, self.db.cursor()?)));
-        let (ops, cursor) = match history {
+            .and_then(|ops| Ok((ops, self.db.cursor()?, self.db.snapshot_documents()?)));
+        let (ops, cursor, mut snapshots) = match history {
             Ok(history) => history,
             Err(err) => {
                 self.last_error = Some(failed(err));
@@ -1903,7 +1905,8 @@ impl Session {
         // Worked out once for each, so that every state in the history says it the same way.
         let mut links: HashMap<(String, bool), String> = HashMap::new();
         let mut images: HashMap<String, String> = HashMap::new();
-        let mut changed = false;
+        // How many places have been said differently so far.
+        let changes = std::cell::Cell::new(0usize);
         let mut visit = |place: Place| {
             let (written, new) = match place {
                 Place::Link(link, to_document) => {
@@ -1934,7 +1937,7 @@ impl Session {
             };
             if *written != new {
                 *written = new;
-                changed = true;
+                changes.set(changes.get() + 1);
             }
         };
         let mut document = self.editor.document().clone();
@@ -1942,10 +1945,16 @@ impl Session {
         for op in &mut ops {
             places_in_op(op, &mut visit);
         }
-        if !changed {
+        // Only a snapshot that says something differently is written again.
+        snapshots.retain_mut(|(_, snapshot)| {
+            let before = changes.get();
+            places_in_document(snapshot, &mut visit);
+            changes.get() != before
+        });
+        if changes.get() == 0 {
             return;
         }
-        match self.db.replace_history(&document, &ops, cursor) {
+        match self.db.replace_history(&document, &ops, cursor, &snapshots) {
             Ok(()) => self.editor = Editor::with_cursor(document, ops, cursor),
             Err(err) => self.last_error = Some(failed(err)),
         }
@@ -4690,6 +4699,130 @@ mod tests {
         session.save_as(&root.join("three/a.kame")).unwrap();
         session.rehome(Some(&from), None, |_, _| false);
         assert_eq!(session.selection, selection);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A document at `root/a/doc.kame`, in the notebook at `root`, with a snapshot labelled
+    /// "before" of it linking to `root/a/other.kame`, to the web and to a heading of its own, and
+    /// showing `root/a/plate.png`. The text has changed since, so only the snapshot says them.
+    fn document_with_a_snapshot(root: &Path) -> (Session, i64) {
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a/other.kame"), "").unwrap();
+        std::fs::write(root.join("a/plate.png"), "a plate").unwrap();
+        let mut session = open(&root.join("a/doc.kame"));
+        let mut document = session.document().clone();
+        document.blocks[0].text = "xyz".to_string();
+        document.blocks[0].spans = [
+            SpanStyle::DocumentLink {
+                target: "other.kame".to_string(),
+            },
+            SpanStyle::Link {
+                url: "https://example.com/a".to_string(),
+            },
+            SpanStyle::DocumentLink {
+                target: "#Heading".to_string(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(at, style)| Span {
+            start: at,
+            end: at + 1,
+            style,
+        })
+        .collect();
+        session.replace_document(document);
+        session.insert_image("plate.png".to_string());
+        let id = session.snapshot(Some("before")).unwrap();
+        session.replace_document(Document::new("After"));
+        (session, id)
+    }
+
+    #[test]
+    fn saving_as_elsewhere_says_a_snapshots_links_and_images_again() {
+        let root = scratch_dir("rehomesnapshot").canonicalize().unwrap();
+        let from = root.join("a/doc.kame");
+        for (to, other, plate) in [
+            ("a/b/doc.kame", "../other.kame", "../plate.png"),
+            ("c/doc.kame", "../a/other.kame", "../a/plate.png"),
+        ] {
+            let (mut session, id) = document_with_a_snapshot(&root);
+            let taken = session.snapshots().unwrap();
+            let to = root.join(to);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            session.save_as(&to).unwrap();
+            session.rehome(Some(&from), Some(&root), |_, _| false);
+            drop(session);
+            let mut session = open(&to);
+            assert_eq!(
+                session.snapshots().unwrap(),
+                taken,
+                "the same id, label and time"
+            );
+            assert!(session.restore(id));
+            assert_eq!(
+                link_targets(&session),
+                [other, "https://example.com/a", "#Heading"]
+            );
+            assert_eq!(image_paths(&session), [plate]);
+            let folder = to.parent().unwrap();
+            assert_eq!(
+                folder.join(other).canonicalize().unwrap(),
+                root.join("a/other.kame")
+            );
+            assert_eq!(
+                folder.join(plate).canonicalize().unwrap(),
+                root.join("a/plate.png")
+            );
+            drop(session);
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn saving_as_leaves_a_snapshot_it_cant_read_whole_as_it_was() {
+        let root = scratch_dir("rehomesnapshotbad").canonicalize().unwrap();
+        let from = root.join("a/doc.kame");
+        let (mut session, id) = document_with_a_snapshot(&root);
+        let conn = rusqlite::Connection::open(&from).unwrap();
+        let good: String = conn
+            .query_row("SELECT json FROM snapshots WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        // One that won't parse, and one with a field from a newer version, which saying it
+        // again would lose.
+        let newer = good.replacen("\"blocks\":", "\"future\":1,\"blocks\":", 1);
+        assert_ne!(newer, good);
+        let unreadable = "{\"title\":".to_string();
+        for json in [&unreadable, &newer] {
+            conn.execute(
+                "INSERT INTO snapshots (timestamp, label, json) VALUES (1, 'kept', ?1)",
+                [json],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let to = root.join("c/doc.kame");
+        std::fs::create_dir_all(root.join("c")).unwrap();
+        session.save_as(&to).unwrap();
+        session.rehome(Some(&from), Some(&root), |_, _| false);
+        assert!(session.last_error.is_none(), "{:?}", session.last_error);
+        drop(session);
+        let conn = rusqlite::Connection::open(&to).unwrap();
+        let rows: Vec<String> = conn
+            .prepare("SELECT json FROM snapshots WHERE id > ?1 ORDER BY id")
+            .unwrap()
+            .query_map([id], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        drop(conn);
+        assert_eq!(rows, [unreadable, newer]);
+        let mut session = open(&to);
+        assert!(session.restore(id));
+        assert_eq!(link_targets(&session)[0], "../a/other.kame");
+        drop(session);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

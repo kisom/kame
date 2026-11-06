@@ -6,10 +6,6 @@ Open work, most pressing first. Delete items as they land.
 
 Found while writing `docs/spec/`, most pressing first. Each spec's last section has the detail.
 
-- [ ] **A snapshot taken before a Save As to another folder still says its links and images from the old one.** Save As says them
-  again through the history, but leaves snapshots as they were taken, so restoring one brings back paths that lead from where the
-  document was.
-
 - [ ] **Save As tells a saved document what exists on this machine (accepted for now).** A relative `Link` is rewritten only if what it names is there, and
   nothing limits that to the notebook, so a document from elsewhere that comes back after a Save As to another depth shows whether its
   paths exist here. No contents are read. It should only ask about what resolves inside the notebook, or the document's own folder.

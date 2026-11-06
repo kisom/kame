@@ -189,7 +189,8 @@ instead, with `~` expanded and relative paths resolved beside the current docume
 Save As carries the history, snapshots and properties to the new file and continues
 there, leaving the old file as it was. Images and relative links are said again from
 the new folder, so they lead where they did, all through the history: it isn't an undo
-step, and what Redo could bring back is still there. Snapshots stay as they were taken.
+step, and what Redo could bring back is still there. Snapshots say them again too, keeping
+their labels and times, so restoring one leads where it did.
 Saving over an existing file replaces it whole.
 
 A snapshot is a complete copy of the document stored in the `.kame` file,

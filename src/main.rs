@@ -6851,6 +6851,15 @@ impl KameApp {
     fn merge_conflict_copies(&mut self) {
         let (mut merged, mut notes) = (0, 0);
         for copy in std::mem::take(&mut self.conflict_copies) {
+            // Held until it's renamed, as another kame with it open would go on writing into a
+            // file nothing reads again.
+            let _claimed = match self.claim_document(&copy) {
+                Ok(claimed) => claimed,
+                Err(held) => {
+                    self.session.last_error = Some(format!("could not merge — {held}"));
+                    continue;
+                }
+            };
             match kame_sync::files::merge_copy_into(&mut self.session, &copy) {
                 Ok(result) => {
                     merged += 1;
@@ -9613,6 +9622,45 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             Some("could not merge — doc.kame is open in another kame window")
         );
         assert_eq!(on_disk(&path), before);
+    }
+
+    /// Merging it would rename it from under that kame, whose words would then go nowhere.
+    #[test]
+    fn a_conflict_copy_another_kame_has_is_not_merged() {
+        let path = written_document("doc.kame");
+        let copy = path.with_file_name("doc.sync-conflict-20261103-011500-ABCDEFG.kame");
+        std::fs::copy(&path, &copy).unwrap();
+        Session::open(&copy).unwrap().insert(" Theirs.");
+        let mut page = page_holding(&path);
+        page.app.conflict_copies = vec![copy.clone()];
+        let other = held_elsewhere_lock(&copy);
+        let before = on_disk(&path);
+        page.app.merge_conflict_copies();
+        assert_eq!(
+            page.app.session.last_error.as_deref(),
+            Some(
+                "could not merge — doc.sync-conflict-20261103-011500-ABCDEFG.kame is open in \
+                 another kame window"
+            )
+        );
+        assert_eq!(on_disk(&path), before);
+        assert!(!page.app.session.document().blocks[0]
+            .text
+            .contains("Theirs"));
+        drop(other);
+
+        page.app.session.last_error = None;
+        page.app.conflict_copies = vec![copy.clone()];
+        page.app.merge_conflict_copies();
+        assert_eq!(page.app.session.last_error, None);
+        assert!(!copy.exists());
+        assert!(page.app.session.document().blocks[0]
+            .text
+            .contains("Theirs"));
+        assert!(!is_held(&copy.with_file_name(format!(
+            "{}.merged",
+            copy.file_name().unwrap().to_string_lossy()
+        ))));
     }
 
     fn type_marked(session: &mut Session, text: &str) {

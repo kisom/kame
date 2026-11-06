@@ -145,6 +145,11 @@ impl<'a> Locks<'a> {
         Locks { folder, own }
     }
 
+    /// Whether `document` is the one the caller holds already, which it has open.
+    pub fn is_own(&self, document: &Path) -> bool {
+        self.own.is_some_and(|own| own.is_for(document))
+    }
+
     /// Takes the lock on each of `documents`, to be held while they're written, so that another
     /// kame can't open one halfway through. `Err` is the first another holder has, and then none
     /// of them is held. The caller's own document needs no other lock, and nor does one named
@@ -401,6 +406,21 @@ mod tests {
             DocumentLock::take(&folder, &document),
             Err(LockError::Held)
         ));
+    }
+
+    #[test]
+    fn the_callers_own_document_is_told_by_the_file() {
+        let (folder, document) = setup();
+        let own = DocumentLock::take(&folder, &document).unwrap();
+        let symlink = document.with_file_name("link.kame");
+        std::os::unix::fs::symlink(&document, &symlink).unwrap();
+        let other = document.with_file_name("other.kame");
+        std::fs::write(&other, b"").unwrap();
+        let locks = Locks::new(Some(&folder), Some(&own));
+        assert!(locks.is_own(&document));
+        assert!(locks.is_own(&symlink));
+        assert!(!locks.is_own(&other));
+        assert!(!Locks::new(Some(&folder), None).is_own(&document));
     }
 
     #[test]

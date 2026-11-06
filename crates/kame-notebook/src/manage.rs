@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use kame_core::links::{moved_target, own_target_after_move};
-use kame_core::lock::{LockError, Locks};
+use kame_core::lock::Locks;
 use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::storage::Db;
@@ -169,16 +169,27 @@ fn with_side_files(old: &Path, new: &Path) -> Vec<(PathBuf, PathBuf)> {
 /// logs of its own, and one whose logs can't be shown to be its own may not: what's at its log
 /// folder stays, as removing it could remove another document on every machine. This returns whether
 /// it left logs there, since the document at that path still lists, and a second delete would take
-/// them. A document another kame has open is refused with nothing removed, and its lock is held
-/// while it goes, so that nobody opens it halfway.
+/// them.
+///
+/// If another kame has the document or any of those copies open, or the caller has one open, it's
+/// refused with nothing removed. The caller has to leave a document before deleting it. The lock
+/// on each is held while it goes, so that nobody opens one halfway.
 pub fn delete_document(path: &Path, locks: Locks<'_>) -> Result<bool, DeleteError> {
-    let _holding = locks.take([path]).map_err(|_| DeleteError::HeldElsewhere)?;
+    // Found first, since which copies are this document's is told by reading it.
+    let belonging = if is_database(path) {
+        belonging_files(path)
+    } else {
+        Vec::new()
+    };
+    let going = || std::iter::once(path).chain(belonging.iter().map(PathBuf::as_path));
+    if let Some(open) = going().find(|file| locks.is_own(file)) {
+        return Err(DeleteError::OpenHere(open.to_path_buf()));
+    }
+    let _holding = locks.take(going()).map_err(DeleteError::HeldElsewhere)?;
     if !is_database(path) {
         std::fs::remove_file(path)?;
         return Ok(false);
     }
-    // Found first, since which copies are this document's is told by reading it.
-    let belonging = belonging_files(path);
     // Before the file goes, since it's the file that says.
     let its_own = logs_are_its_own(path);
     // A document this machine hasn't opened yet has only its logs.
@@ -211,8 +222,10 @@ pub fn delete_document(path: &Path, locks: Locks<'_>) -> Result<bool, DeleteErro
 /// Why a document couldn't be deleted.
 #[derive(Debug)]
 pub enum DeleteError {
-    /// Another kame has it open, and nothing was removed.
-    HeldElsewhere,
+    /// Another kame has this file open, the document or a copy of it, and nothing was removed.
+    HeldElsewhere(PathBuf),
+    /// The caller has this copy of the document open, and nothing was removed.
+    OpenHere(PathBuf),
     Io(std::io::Error),
 }
 
@@ -225,13 +238,24 @@ impl From<std::io::Error> for DeleteError {
 impl std::fmt::Display for DeleteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DeleteError::HeldElsewhere => LockError::Held.fmt(f),
+            DeleteError::HeldElsewhere(path) => {
+                write!(f, "{} is open in another kame window", file_name(path))
+            }
+            DeleteError::OpenHere(path) => write!(f, "{} is open in this window", file_name(path)),
             DeleteError::Io(err) => err.fmt(f),
         }
     }
 }
 
 impl std::error::Error for DeleteError {}
+
+/// A file's name, or its whole path if it has none.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
 
 /// A document a move couldn't change, and why.
 #[derive(Clone, Debug, PartialEq)]
@@ -712,8 +736,9 @@ fn move_files(notebook: &Notebook, from: &Path, to: &Path) -> Result<(), String>
 /// be on the moving document, since no connection may be open across the rename. A change to it
 /// is saved here, and reaches its logs when the app next syncs it.
 ///
-/// If another kame has the moving document open, or one whose links this would change, the move is
-/// refused before anything changes. Each of their locks is held until it's done, so that nobody
+/// If another kame has the moving document open, a copy of it that moves with it, or a document
+/// whose links this would change, the move is refused before any file moves or any link is
+/// rewritten, and so is one with a copy the caller has open. Each of their locks is held until it's done, so that nobody
 /// opens one halfway. A lock is for the file, which keeps it across the rename.
 pub fn carry_out(
     notebook: &Notebook,
@@ -743,7 +768,22 @@ pub fn carry_out(
     if from == to {
         return Ok(report);
     }
-    let writing = std::iter::once(&from).chain(rewrites.iter().map(|(path, _)| path));
+    // Its copies are renamed with it. The moving document itself may be the caller's, which keeps
+    // its lock while it has left it, but a copy the caller has open would move from under it.
+    let copies = if is_database(&from) {
+        belonging_files(&from)
+    } else {
+        Vec::new()
+    };
+    if let Some(open) = copies.iter().find(|copy| locks.is_own(copy)) {
+        return Err(format!(
+            "{} is open in this window",
+            relative_in(notebook, open)
+        ));
+    }
+    let writing = std::iter::once(&from)
+        .chain(&copies)
+        .chain(rewrites.iter().map(|(path, _)| path));
     let _holding = locks.take(writing).map_err(|held| {
         format!(
             "{} is open in another kame window",

@@ -1950,12 +1950,102 @@ fn deleting_a_document_another_kame_has_open_is_refused_with_nothing_removed() {
 
     let theirs = DocumentLock::take(&folder, &x).unwrap();
     let err = delete_document(&x, locks).unwrap_err();
-    assert!(matches!(err, DeleteError::HeldElsewhere), "{err:?}");
-    assert_eq!(err.to_string(), "it is open in another kame window");
+    assert!(
+        matches!(&err, DeleteError::HeldElsewhere(held) if *held == x),
+        "{err:?}"
+    );
+    assert_eq!(err.to_string(), "X.kame is open in another kame window");
     assert_eq!(everything_in(&root), before);
     drop(theirs);
 
     delete_document(&x, locks).unwrap();
     assert!(!x.exists());
     assert!(no_locks_left(&folder));
+}
+
+const CONFLICT: &str = "X.sync-conflict-20261103-011500-ABCDEFG.kame";
+
+/// A document with a retired copy and a conflicting copy beside it, either of which File > Open Path
+/// opens.
+fn with_copies(root: &Path) -> (PathBuf, [PathBuf; 2]) {
+    let x = root.join("X.kame");
+    document(&x, "X.");
+    let copies = [root.join(".X.retired.kame"), root.join(CONFLICT)];
+    for copy in &copies {
+        std::fs::copy(&x, copy).unwrap();
+    }
+    (x, copies)
+}
+
+#[test]
+fn deleting_is_refused_while_another_kame_has_a_copy_of_the_document_open() {
+    let (root, _nb) = plain_notebook("delete-held-copy");
+    let (x, copies) = with_copies(&root);
+    let folder = locks_folder("delete-held-copy");
+    let locks = Locks::new(Some(&folder), None);
+    let before = everything_in(&root);
+
+    for copy in &copies {
+        let theirs = DocumentLock::take(&folder, copy).unwrap();
+        let err = delete_document(&x, locks).unwrap_err();
+        assert!(
+            matches!(&err, DeleteError::HeldElsewhere(held) if held == copy),
+            "{err:?}"
+        );
+        assert_eq!(everything_in(&root), before);
+        drop(theirs);
+    }
+    assert!(no_locks_left(&folder));
+}
+
+/// It would be removed from under the window's own session.
+#[test]
+fn deleting_is_refused_while_the_caller_has_a_copy_of_the_document_open() {
+    let (root, _nb) = plain_notebook("delete-own-copy");
+    let (x, [retired, _]) = with_copies(&root);
+    let folder = locks_folder("delete-own-copy");
+    let own = DocumentLock::take(&folder, &retired).unwrap();
+    let before = everything_in(&root);
+
+    let err = delete_document(&x, Locks::new(Some(&folder), Some(&own))).unwrap_err();
+    assert!(
+        matches!(&err, DeleteError::OpenHere(held) if *held == retired),
+        "{err:?}"
+    );
+    assert_eq!(err.to_string(), ".X.retired.kame is open in this window");
+    assert_eq!(everything_in(&root), before);
+}
+
+#[test]
+fn a_move_is_refused_while_another_kame_has_a_copy_of_the_document_open() {
+    let (root, nb) = plain_notebook("move-held-copy");
+    let (x, copies) = with_copies(&root);
+    let folder = locks_folder("move-held-copy");
+    let locks = Locks::new(Some(&folder), None);
+    let before = everything_in(&root);
+
+    for (copy, name) in copies.iter().zip([".X.retired.kame", CONFLICT]) {
+        let theirs = DocumentLock::take(&folder, copy).unwrap();
+        let plan = plan_move(&nb, &x, &root.join("Y.kame"), None, locks, DEVICE, NOW);
+        let err = carry_out(&nb, plan, None, locks, DEVICE, NOW).unwrap_err();
+        assert_eq!(err, format!("{name} is open in another kame window"));
+        assert_eq!(everything_in(&root), before);
+        drop(theirs);
+    }
+    assert!(no_locks_left(&folder));
+}
+
+#[test]
+fn a_move_is_refused_while_the_caller_has_a_copy_of_the_document_open() {
+    let (root, nb) = plain_notebook("move-own-copy");
+    let (x, [retired, _]) = with_copies(&root);
+    let folder = locks_folder("move-own-copy");
+    let own = DocumentLock::take(&folder, &retired).unwrap();
+    let locks = Locks::new(Some(&folder), Some(&own));
+    let before = everything_in(&root);
+
+    let plan = plan_move(&nb, &x, &root.join("Y.kame"), None, locks, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, locks, DEVICE, NOW).unwrap_err();
+    assert_eq!(err, ".X.retired.kame is open in this window");
+    assert_eq!(everything_in(&root), before);
 }

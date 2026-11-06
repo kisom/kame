@@ -1802,12 +1802,14 @@ impl KameApp {
         // Leaving a new document nobody has written in has already taken it away.
         let mut left_logs = false;
         if path.symlink_metadata().is_ok() || log_folder(path).exists() {
-            // Leaving it, if it was open here, has let go of its lock.
+            // Leaving it, if it was open here, has let go of its lock. What's open now may be a
+            // copy of it, which is refused.
             let folder = crate::locks_folder();
-            match delete_document(path, Locks::new(folder.as_deref(), None)) {
+            let locks = Locks::new(folder.as_deref(), self.document_lock.as_ref());
+            match delete_document(path, locks) {
                 Ok(left) => left_logs = left,
-                Err(DeleteError::HeldElsewhere) => {
-                    self.session.last_error = Some(crate::held_elsewhere(path));
+                Err(refused @ (DeleteError::HeldElsewhere(_) | DeleteError::OpenHere(_))) => {
+                    self.session.last_error = Some(refused.to_string());
                     self.notebook_files_changed();
                     return;
                 }
@@ -2848,6 +2850,32 @@ mod tests {
         assert!(!path.exists());
         assert!(page.app.document_lock.is_none());
         DocumentLock::take(&crate::locks_folder().unwrap(), &keep).unwrap();
+    }
+
+    /// Deleting it would take a copy of it from under this window's session.
+    #[test]
+    fn deleting_a_document_whose_copy_is_open_here_is_refused() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-delete-copy-open")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let x = root.join("X.kame");
+        Session::open(&x).unwrap().insert("X.");
+        let retired = root.join(".X.retired.kame");
+        std::fs::copy(&x, &retired).unwrap();
+        let mut page = crate::Headless::new(Session::open(&retired).unwrap());
+        page.app.hold_document(None);
+
+        page.app.delete_from_notebook(&x, "X");
+        assert!(x.is_file());
+        assert!(retired.is_file());
+        assert_eq!(
+            page.app.session.last_error.as_deref(),
+            Some(".X.retired.kame is open in this window")
+        );
+        assert_eq!(page.app.session.path(), Some(retired.as_path()));
     }
 
     #[test]

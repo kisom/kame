@@ -365,7 +365,7 @@ Redo applies the original operation.
 
 ### 4.3 Commands
 
-Commands choose which operations to write, and the format doesn't fix those choices. Most commands that need several changes, such as splitting a block, write one `Batch`, so one undo reverses them. A multi-line paste, typing over a selection and rewriting image paths each write several entries. A split moves the tail by deleting it from one block and adding it to a new one, and it moves the anchors in the tail with it.
+Commands choose which operations to write, and the format doesn't fix those choices. Most commands that need several changes, such as splitting a block, write one `Batch`, so one undo reverses them. A multi-line paste, typing over a selection and rewriting image paths each write several entries. A split moves the tail by deleting it from one block and adding it to a new one, and it moves the anchors in the tail with it. Moving list items up or down writes one `Batch` that deletes the blocks that move, inserts them again, ids and all, where they go, and adds back the annotations the deletes took. It also sets the `depth` of the first item on each side to its level when the two differ (section 2.6), as that item would otherwise show at another level where it lands. So one step can delete and insert the same block.
 
 ## 5. History on disk
 

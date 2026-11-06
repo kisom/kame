@@ -24,6 +24,7 @@ macOS (`Modifiers::command`).
 | wheel or trackpad | scroll the page, bringing the caret along when it would leave the page, unless text is selected or typewriter mode is on |
 | Ctrl-Shift-Left / Ctrl-Shift-Right | extend the selection a whole word at a time |
 | Ctrl-A | select the caret's whole block (again for the whole document) |
+| Ctrl-Shift-Up / Ctrl-Shift-Down | move the caret's list item, or the selected items, a place up / down in its list, with the items nested under it |
 | Ctrl-F | find — open the find bar |
 | Ctrl + / Ctrl - / Ctrl-0 | increase / decrease / reset the type size |
 | drag, shift-click, Shift-arrows | select / extend the selection |
@@ -53,6 +54,11 @@ Esc counts as a prefix when it has nothing to close, and for two seconds.
 In a list item, Tab moves it a level in and Shift-Tab a level out, and with several items
 selected they all move together. An item can only go one level below the item before it,
 so a list's first item stays put. An item's children stay where they are when it moves.
+Ctrl-Shift-Up and Ctrl-Shift-Down move an item a place up or down in its list, past the item before
+or after it at its level, and each takes the items nested under it. With several items selected they
+move together, at the level of the first. At either end of its list an item stays put: a move never
+leaves the list or changes an item's level. The caret stays on the item's words, numbers follow the
+new order, and notes, footnotes and marginals go with the item. A move is one undo step.
 Numbers nest as `1.`, `1.1`, `1.1.1`, on the page and in HTML. Markdown has no way to write
 that, so it exports plain numbers and leaves the numbering to whatever renders it. Enter on an empty nested
 item comes out a level, and on an empty top-level item returns to body text.

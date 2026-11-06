@@ -76,3 +76,6 @@ i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame hold
 - [ ] **Several windows open at once.** Needs a design. kame runs as one instance today, held by `instance.lock`, so the
   choice is between windows in one process, as egui's viewports allow, and several processes. Then what they share: the
   notebook, settings, sync and the checks for files changing on disk. And what happens when the same document is open in two.
+- [ ] **An essay's thesis and arguments in the left gutter.** The margin on the right holds marginals beside their blocks;
+  the gutter on the left could hold what the essay argues, its thesis and the arguments for it, to keep in view while
+  writing. Needs a design: what's kept there, whether it belongs to blocks or to the document, and whether it exports.

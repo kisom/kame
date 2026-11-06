@@ -1,7 +1,7 @@
 # Maintainer: Kyle Isom
 
 pkgname=kame
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Kyle's marginalia editor: a WYSIWYG prose editor for writing ideas and thinking"
 arch=('x86_64' 'aarch64')
@@ -16,7 +16,7 @@ options=('!lto')
 optdepends=('vulkan-driver: draws the window; any Vulkan driver will do'
             'perl-file-mimeinfo: lets xdg-open recognise .kame files')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/kisom/kame/archive/refs/tags/v$pkgver.tar.gz")
-# The controller fills this in after tagging v0.1.0, with the tarball's sum.
+# The controller fills this in after tagging v0.1.1, with the tarball's sum.
 sha256sums=('SKIP')
 
 prepare() {

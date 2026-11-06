@@ -21,9 +21,6 @@ unless daily writing finds something that fails it.
 Releases now put different versions on different machines (Homebrew, the GitHub release and the AUR), so a file or a log
 written by one version has to be safe in another.
 
-- [ ] **A newer build's revisions stop an older one following.** Readers drop fields they don't know and recompute digests and
-  ids from what they parsed, so one new field leaves an older machine unable to follow until it's updated. See
-  `docs/spec/merging.md`, section 9.
 - [ ] **Freeze the v1 file format.** `docs/spec/document-format.md` becomes the promise: what 1.x writes, every later 1.x reads.
   Keep sample files and logs written by each release, and have every later build's tests read them.
 - [ ] **Decide what sync promises at 1.0.** Revision logs are built and in trial on `notebook-test`, opted in by folder

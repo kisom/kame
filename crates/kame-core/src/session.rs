@@ -1792,13 +1792,42 @@ impl Session {
         }
         self.valid_caret();
         let blocks = self.tabbed_blocks();
-        match self.editor.move_list_items(&blocks, up) {
-            Some(op) => {
-                self.record(&op);
-                true
+        // A selection ending at the start of the item after the last selected one, as Shift-Down
+        // from the start of a line leaves it, doesn't take that item. It stays at the start of
+        // whatever follows the selected items once they've moved.
+        let left_out = self
+            .ordered_selection()
+            .map(|(_, end)| end)
+            .filter(|end| end.offset == 0 && !blocks.contains(&end.block_id));
+        let Some(op) = self.editor.move_list_items(&blocks, up) else {
+            return false;
+        };
+        if let (Some(was), Some(&last)) = (left_out, blocks.last()) {
+            let document = self.editor.document();
+            let at = self.block_index(last).expect("the moved block is there");
+            let end = match document.blocks.get(at + 1) {
+                Some(next) => Cursor {
+                    block_id: next.id,
+                    offset: 0,
+                },
+                None => Cursor {
+                    block_id: last,
+                    offset: document.blocks[at].text.len(),
+                },
+            };
+            if let Some(selection) = self.selection.as_mut() {
+                for edge in [&mut selection.start, &mut selection.end] {
+                    if *edge == was {
+                        *edge = end;
+                    }
+                }
             }
-            None => false,
+            if self.caret == was {
+                self.caret = end;
+            }
         }
+        self.record(&op);
+        true
     }
 
     /// Joins up a saved history word by word, as typing now does, returning how many entries
@@ -10059,6 +10088,102 @@ mod tests {
             ["one", "two", "three", "five", "four"]
         );
         assert_eq!(session.caret, caret);
+    }
+
+    /// The caret at the start of an item and Shift-Down: the selection ends at the start of the
+    /// next item, which isn't selected.
+    fn select_lines(session: &mut Session, from: usize, to: usize) {
+        let id = |at: usize| session.document().blocks[at].id;
+        let (from, to) = (id(from), id(to));
+        session.set_caret(Cursor {
+            block_id: from,
+            offset: 0,
+        });
+        session.select_to(Cursor {
+            block_id: to,
+            offset: 0,
+        });
+    }
+
+    /// The selected items' texts, as Tab and a move take them.
+    fn selected_items(session: &Session) -> Vec<String> {
+        session
+            .tabbed_blocks()
+            .into_iter()
+            .map(|id| {
+                session.document().blocks[session.block_index(id).unwrap()]
+                    .text
+                    .clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_whole_line_selected_moves_down_again_and_again() {
+        let mut session = five_items();
+        select_lines(&mut session, 1, 2);
+        assert_eq!(selected_items(&session), ["two"]);
+        assert!(session.move_list_item(false));
+        assert_eq!(selected_items(&session), ["two"]);
+        assert!(session.move_list_item(false));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "three", "four", "two", "five"]
+        );
+        assert_eq!(selected_items(&session), ["two"]);
+        assert_eq!(Some(session.caret), session.selection.map(|s| s.end));
+    }
+
+    #[test]
+    fn a_whole_line_selected_moves_up_again_and_again() {
+        let mut session = five_items();
+        select_lines(&mut session, 2, 3);
+        assert!(session.move_list_item(true));
+        assert_eq!(selected_items(&session), ["three"]);
+        assert!(session.move_list_item(true));
+        assert_eq!(
+            item_texts(&session),
+            ["three", "one", "two", "four", "five"]
+        );
+        assert_eq!(selected_items(&session), ["three"]);
+    }
+
+    #[test]
+    fn a_whole_line_selected_upwards_stays_on_the_item_it_moves() {
+        let mut session = five_items();
+        select_lines(&mut session, 3, 2);
+        assert!(session.move_list_item(true));
+        assert!(session.move_list_item(true));
+        assert_eq!(
+            item_texts(&session),
+            ["three", "one", "two", "four", "five"]
+        );
+        assert_eq!(selected_items(&session), ["three"]);
+        assert!(session.move_list_item(false));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "three", "two", "four", "five"]
+        );
+        assert_eq!(selected_items(&session), ["three"]);
+    }
+
+    #[test]
+    fn a_whole_line_selected_moved_to_the_end_stays_selected() {
+        let mut session = five_items();
+        select_lines(&mut session, 3, 4);
+        assert!(session.move_list_item(false));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "two", "three", "five", "four"]
+        );
+        assert_eq!(selected_items(&session), ["four"]);
+        assert!(!session.move_list_item(false));
+        assert!(session.move_list_item(true));
+        assert_eq!(
+            item_texts(&session),
+            ["one", "two", "three", "four", "five"]
+        );
+        assert_eq!(selected_items(&session), ["four"]);
     }
 
     #[test]

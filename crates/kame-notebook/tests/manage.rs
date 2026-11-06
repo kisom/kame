@@ -2049,3 +2049,125 @@ fn a_move_is_refused_while_the_caller_has_a_copy_of_the_document_open() {
     assert_eq!(err, ".X.retired.kame is open in this window");
     assert_eq!(everything_in(&root), before);
 }
+
+/// Adds a block after the rest, as a build knowing tables would have written one, and returns its
+/// words.
+fn add_a_newer_block(path: &Path) -> &'static str {
+    let words = "A table of otters.";
+    {
+        let mut session = Session::open(path).unwrap();
+        let mut doc = session.document().clone();
+        doc.blocks.push(kame_core::model::Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: words.to_string(),
+            spans: Vec::new(),
+        });
+        assert!(session.replace_document(doc));
+    }
+    make_a_table_of(path, words);
+    words
+}
+
+/// The block holding `words`, as a build knowing tables would have written it.
+fn make_a_table_of(path: &Path, words: &str) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let head: String = connection
+        .query_row("SELECT json FROM documents WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let paragraph = format!(r#""kind":"Paragraph","text":"{words}"#);
+    let table = format!(r#""kind":"Table","text":"{words}"#);
+    let newer = head.replacen(&paragraph, &table, 1);
+    assert_ne!(newer, head);
+    connection
+        .execute("UPDATE documents SET json = ?1 WHERE id = 1", [&newer])
+        .unwrap();
+}
+
+/// What a move says of a document from a newer kame that it can't change.
+const NEWER_LEFT: &str = "it was written by a newer version of kame; update kame to change it";
+
+/// A document from a newer kame whose links to the moving document would change is left as it was,
+/// and named with why, whether it holds a kind or a field only a newer kame knows.
+#[test]
+fn a_document_from_a_newer_kame_whose_links_would_change_is_named_and_untouched() {
+    let (root, nb) = plain_notebook("move-newer-kind");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let kinds = root.join("kinds.kame");
+    document(&kinds, "");
+    link(&kinds, "one", document_link("a.kame"));
+    add_a_newer_block(&kinds);
+    let fields = root.join("fields.kame");
+    document(&fields, "");
+    link(&fields, "one", document_link("a.kame"));
+    make_newer(&fields);
+    let bytes = [&kinds, &fields].map(|path| std::fs::read(path).unwrap());
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty());
+    let mut left: Vec<(&str, &str)> = report
+        .left
+        .iter()
+        .map(|left| (left.relative.as_str(), left.why.as_str()))
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [("fields.kame", NEWER_LEFT), ("kinds.kame", NEWER_LEFT)]
+    );
+    assert_eq!(
+        [&kinds, &fields].map(|path| std::fs::read(path).unwrap()),
+        bytes
+    );
+}
+
+/// What a build can't read of a document from a newer kame may link to the moving document, so the
+/// document is named even when nothing it can read does.
+#[test]
+fn a_document_from_a_newer_kame_that_may_link_here_is_named() {
+    let (root, nb) = plain_notebook("move-newer-hidden");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let hidden = root.join("hidden.kame");
+    document(&hidden, "");
+    link(&hidden, "one", document_link("a.kame"));
+    make_a_table_of(&hidden, "one");
+    let elsewhere = root.join("elsewhere.kame");
+    document(&elsewhere, "Nothing newer and no links.");
+    let bytes = std::fs::read(&hidden).unwrap();
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert_eq!(report.left.len(), 1, "{:?}", report.left);
+    assert_eq!(report.left[0].relative, "hidden.kame");
+    assert!(
+        report.left[0].why.contains("newer version of kame")
+            && report.left[0].why.contains("update kame"),
+        "{}",
+        report.left[0].why
+    );
+    assert_eq!(std::fs::read(&hidden).unwrap(), bytes);
+}
+
+/// A logged document from a newer kame is its logs' own as much as any other, so it moves with
+/// them, and is named for its own links.
+#[test]
+fn a_logged_document_with_a_kind_from_a_newer_kame_moves_with_its_logs() {
+    let (root, nb) = logged_notebook("move-newer-logged");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    sync(&a);
+    add_a_newer_block(&a);
+    let bytes = std::fs::read(&a).unwrap();
+    let b = root.join("b.kame");
+    let report = make_move(&nb, &a, &b);
+    assert!(!a.exists());
+    assert!(!log_folder(&a).exists());
+    assert!(log_folder(&b).is_dir());
+    assert_eq!(std::fs::read(&b).unwrap(), bytes);
+    assert_eq!(report.left.len(), 1, "{:?}", report.left);
+    assert_eq!(report.left[0].relative, "b.kame");
+    assert_eq!(report.left[0].why, NEWER_LEFT);
+}

@@ -16,7 +16,7 @@ use kame_sync::revlog::Store;
 
 use crate::links::{is_relative, tidied, Follow};
 use crate::search::same_file;
-use crate::{read_document, Notebook};
+use crate::{read_document, read_noting_newer, Notebook, Read};
 
 /// Where `typed` puts `document`, or why it can't go there. The path is taken from the notebook's
 /// root, and gets the document's extension if it names none. Nothing is changed on disk.
@@ -282,7 +282,11 @@ pub struct MoveReport {
     pub left: Vec<Left>,
 }
 
-const NEWER: &str = "it has changes from a newer version of kame";
+const NEWER: &str = "it was written by a newer version of kame; update kame to change it";
+/// What's said of a document from a newer version whose links, as far as this build can read
+/// them, don't change. What it can't read may hold some that would.
+const NEWER_MAY_LINK: &str = "it was written by a newer version of kame, so it may link here in \
+     parts this kame can't read; update kame to change it";
 const OTHERS_LOGS: &str =
     "the logs at its path may be another document's, so it isn't syncing. Save As gives it logs of \
      its own";
@@ -347,7 +351,7 @@ pub(crate) fn is_on_others_logs_database(path: &Path) -> bool {
     };
     let revision = db.load_sync_state();
     revision.is_some()
-        && db.load_document().map_or(true, |document| {
+        && db.load_readable().map_or(true, |document| {
             !logs_can_be_its_own(path, document.id, revision.as_deref())
         })
 }
@@ -361,7 +365,7 @@ fn logs_are_its_own(path: &Path) -> bool {
         return true;
     }
     let read =
-        Db::open_read_only(path).and_then(|db| Ok((db.load_document()?, db.load_sync_state())));
+        Db::open_read_only(path).and_then(|db| Ok((db.load_readable()?, db.load_sync_state())));
     let Ok((document, revision)) = read else {
         return !log_folder(path).exists();
     };
@@ -544,14 +548,17 @@ pub fn plan_move(
             .filter(|(path, _)| same_file(path, &entry.path))
             .map(|(_, document)| document);
         let read;
-        let document = match on_screen {
-            Some(document) => document,
+        let (document, newer) = match on_screen {
+            Some(document) => (document, false),
             None => {
-                let Some((document, _)) = read_document(&entry.path) else {
+                let Some(Read {
+                    document, newer, ..
+                }) = read_noting_newer(&entry.path)
+                else {
                     continue;
                 };
                 read = document;
-                &read
+                (&read, newer)
             }
         };
         let mut targets: BTreeSet<String> = links_leading_to(notebook, document, &entry.path, from)
@@ -587,6 +594,12 @@ pub fn plan_move(
             plan.rewrites.push((from.to_path_buf(), rewrites));
         } else if rewrites.iter().any(|(old, new)| old != new) {
             plan.rewrites.push((entry.path.clone(), rewrites));
+        } else if newer {
+            plan.left.push(Left {
+                path: entry.path.clone(),
+                relative: entry.relative.clone(),
+                why: NEWER_MAY_LINK.to_string(),
+            });
         }
     }
     plan

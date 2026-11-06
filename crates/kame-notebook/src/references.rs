@@ -13,7 +13,7 @@ use kame_core::references::{cited, valid_key, Reference, References};
 use kame_core::session::is_markdown_path;
 
 use crate::manage::{edit_closed, versions_in_logs};
-use crate::{read_document, Notebook};
+use crate::{read_document, read_noting_newer, Notebook, Read};
 
 /// The folder, under the notebook's root, that holds the references.
 pub const FOLDER: &str = "references";
@@ -249,6 +249,11 @@ pub fn citing(notebook: &Notebook) -> BTreeMap<String, Vec<PathBuf>> {
     found
 }
 
+/// What a rename says of a document from a newer version of kame that doesn't cite the old key as
+/// far as this build can read it.
+const NEWER_MAY_CITE: &str = "it was written by a newer version of kame, so it may cite this in \
+     parts this kame can't read; update kame to change it";
+
 /// What a rename did to the documents that cite the old key.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Renamed {
@@ -353,7 +358,12 @@ pub fn rename(
         if matches!(open, Open::File(open) if same_file(open, &path)) {
             continue;
         }
-        let Some((doc, _)) = read_document(&path) else {
+        let Some(Read {
+            document: doc,
+            newer,
+            ..
+        }) = read_noting_newer(&path)
+        else {
             if holds_no_logs(&path) {
                 continue;
             }
@@ -365,6 +375,10 @@ pub fn rename(
         let cites_old =
             |doc: &Document| cited(doc, &loaded, true).iter().any(|(key, _)| *key == old);
         if !cites_old(&doc) && !versions_in_logs(&path).iter().any(cites_old) {
+            // What this build can't read of it may cite the old key.
+            if newer {
+                renamed.failed.push((path, NEWER_MAY_CITE.to_string()));
+            }
             continue;
         }
         // Held while it's rewritten, so that nobody opens it halfway.
@@ -1106,6 +1120,73 @@ mod tests {
             renamed.failed
         );
         assert_eq!(text_of(&good), "[fresh]");
+    }
+
+    /// A document from a newer kame is never rewritten, and is named with why: one citing the old
+    /// key where this build can read it, and one that may cite it where this build can't.
+    #[test]
+    fn renaming_names_documents_with_a_kind_from_a_newer_kame() {
+        let notebook = notebook("ref-rename-newer-kind");
+        save(&notebook, "old", &article()).unwrap();
+        let with_a_table = |name: &str, first: &str, table: &str| {
+            let path = notebook.root.join(name);
+            let mut doc = Document::new("T");
+            doc.blocks[0].text = first.to_string();
+            let mut last = doc.blocks[0].clone();
+            last.id = uuid::Uuid::new_v4();
+            last.text = table.to_string();
+            doc.blocks.push(last);
+            Db::open(&path).unwrap().save_document(&doc).unwrap();
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            let paragraph = format!(r#""kind":"Paragraph","text":"{table}""#);
+            let newer = format!(r#""kind":"Table","text":"{table}""#);
+            let changed = connection
+                .execute(
+                    "UPDATE documents SET json = replace(json, ?1, ?2) WHERE id = 1",
+                    [&paragraph, &newer],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+            assert!(Db::open_read_only(&path).unwrap().holds_newer());
+            path
+        };
+        let shown = with_a_table("shown.kame", "[old]", "A table.");
+        let hidden = with_a_table("hidden.kame", "Nothing cited.", "[old] in a table.");
+        let bytes = [&shown, &hidden].map(|path| std::fs::read(path).unwrap());
+        let renamed = rename(
+            &notebook,
+            "old",
+            "fresh",
+            Open::Nothing,
+            Locks::NONE,
+            DEVICE,
+            NOW,
+        )
+        .unwrap();
+        assert!(renamed.rewritten.is_empty());
+        let mut failed = renamed.failed.clone();
+        failed.sort();
+        assert_eq!(
+            failed,
+            [
+                (
+                    hidden.clone(),
+                    "it was written by a newer version of kame, so it may cite this in parts this \
+                     kame can't read; update kame to change it"
+                        .to_string()
+                ),
+                (
+                    shown.clone(),
+                    "it was written by a newer version of kame; update kame to change it"
+                        .to_string()
+                ),
+            ]
+        );
+        assert!(renamed.old_kept);
+        assert_eq!(
+            [&shown, &hidden].map(|path| std::fs::read(path).unwrap()),
+            bytes
+        );
     }
 
     #[test]

@@ -163,8 +163,9 @@ pub fn read_document(
 pub struct Read {
     pub document: kame_core::model::Document,
     pub metadata: kame_core::model::Metadata,
-    /// Whether what was read leaves out something a newer version of kame wrote: in the document's
-    /// file, or in its logs, whose revisions from a newer version can't be read here at all.
+    /// Whether what was read leaves out something a newer version of kame wrote: in its file, or,
+    /// for a document with only logs, in those, whose revisions from a newer version can't be read
+    /// here at all. A file's logs aren't asked, as what's in them reaches the file when it syncs.
     pub newer: bool,
 }
 

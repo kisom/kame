@@ -44,12 +44,13 @@ itself is a structured, first-class file, never a pile of markup.
 **Homebrew:**
 
 ```sh
-brew install kisom/tap/kame                      # builds kame and kame-site from source
-brew install --cask --no-quarantine kisom/tap/kame   # installs kame.app from the GitHub release
+brew install kisom/tap/kame          # builds kame and kame-site from source
+brew install --cask kisom/tap/kame   # installs kame.app from the GitHub release
 ```
 
 The cask is the same app that `make mac-app` builds: ad-hoc signed and not
-notarized, for Apple Silicon only, which is why it needs `--no-quarantine`.
+notarized, for Apple Silicon only. It takes the app out of quarantine as it
+installs it, as macOS would otherwise refuse to open it.
 
 **GitHub release:** each [release](https://github.com/kisom/kame/releases) has
 `kame.app.zip`, the macOS app, with the same limits as the cask.

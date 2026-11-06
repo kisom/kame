@@ -445,6 +445,27 @@ fn documents(count: usize) -> String {
     }
 }
 
+/// What a notebook search reads in place of the open document's file: what's on the screen, but for
+/// the paragraphs standing for what a newer version of kame wrote, which aren't the document's
+/// words, and the notes on them, as an export leaves them out.
+fn searched_in_place(session: &Session) -> Option<(PathBuf, kame_core::model::Document)> {
+    let path = session.path()?.to_path_buf();
+    let mut document = session.document().clone();
+    let left_out: Vec<BlockId> = document
+        .blocks
+        .iter()
+        .filter(|block| session.is_newer_part(block))
+        .map(|block| block.id)
+        .collect();
+    document
+        .blocks
+        .retain(|block| !left_out.contains(&block.id));
+    document
+        .annotations
+        .retain(|annotation| !left_out.contains(&annotation.anchor.block_id()));
+    Some((path, document))
+}
+
 /// What a move says when there's nothing in it to read further.
 fn moved_notice(relative: &str, changed: usize) -> String {
     match changed {
@@ -1245,10 +1266,9 @@ impl KameApp {
             cancel: cancel.clone(),
         });
         let query = search_list.query.clone();
-        let path = self.session.path().map(Path::to_path_buf);
-        let doc = self.session.document().clone();
+        let in_place = searched_in_place(&self.session);
         std::thread::spawn(move || {
-            let open = path.as_deref().map(|path| (path, &doc));
+            let open = in_place.as_ref().map(|(path, doc)| (path.as_path(), doc));
             search(&notebook, &query, open, &cancel, |hit| {
                 let _ = send.send(hit);
             });
@@ -1933,6 +1953,51 @@ mod tests {
             text: text.to_string(),
             spans: Vec::new(),
         }
+    }
+
+    /// A view of a document from a newer kame shows paragraphs standing for what it can't show.
+    /// They aren't the document's words, so a notebook search doesn't find them, and finds the rest.
+    #[test]
+    fn a_notebook_search_finds_none_of_what_stands_in_for_a_newer_kames_words() {
+        let root = test_temp_dir().join(format!("newer-search-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let path = root.join("doc.kame");
+        let mut doc = Document::new("doc");
+        doc.blocks = vec![
+            paragraph_block("Only a newer kame shows this."),
+            paragraph_block("Words of its own."),
+        ];
+        kame_core::storage::Db::open(&path)
+            .unwrap()
+            .save_document(&doc)
+            .unwrap();
+        // A kind of the same length, as a newer build would write it, in the file itself.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (from, to) = (br#""kind":"Paragraph""#, br#""kind":"Pullquote""#);
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .unwrap();
+        bytes[at..at + from.len()].copy_from_slice(to);
+        std::fs::write(&path, &bytes).unwrap();
+        let session = Session::open(&path).unwrap();
+        assert!(session.lossy);
+        let notebook = Notebook::open(&root).unwrap();
+        let in_place = searched_in_place(&session);
+        let found = |query: &str| {
+            let mut lines = Vec::new();
+            search(
+                &notebook,
+                query,
+                in_place.as_ref().map(|(path, doc)| (path.as_path(), doc)),
+                &AtomicBool::new(false),
+                |hit| lines.push(hit.line),
+            );
+            lines
+        };
+        assert_eq!(found("newer version"), Vec::<String>::new());
+        assert_eq!(found("own"), ["Words of its own."]);
     }
 
     /// A page outside any notebook holding `blocks`, with the caret where it starts.

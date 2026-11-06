@@ -5122,6 +5122,14 @@ mod tests {
             .db
             .set_busy_timeout(std::time::Duration::from_millis(10))
             .unwrap();
+        // Properties given now are in memory only.
+        let mut metadata = session.metadata.clone();
+        metadata.title = "Given while locked".to_string();
+        session.set_metadata(metadata.clone());
+        assert!(
+            session.last_error.is_some(),
+            "the old file didn't take them"
+        );
         std::fs::create_dir_all(root.join("c")).unwrap();
         let to = root.join("c/a.kame");
         let saved = session.save_as(&to, None, |_, _| false);
@@ -5130,7 +5138,10 @@ mod tests {
         assert_eq!(session.path(), Some(to.as_path()));
         assert_agrees_with_its_file(&session);
         drop(session);
-        assert_eq!(open(&to).document().blocks[0].text, "Words");
+        let copy = open(&to);
+        assert_eq!(copy.document().blocks[0].text, "Words");
+        assert_eq!(copy.metadata, metadata);
+        assert_ne!(open(&from).metadata, metadata);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

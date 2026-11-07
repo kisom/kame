@@ -1349,10 +1349,11 @@ mod tests {
     }
 
     /// A field this build knows, written at the default it leaves out, as another program can write
-    /// it, is this build's own. A block's digest is taken over it as read back, so a writer that
-    /// gave it that digest, as the format says, wrote a revision that's used as any other. One that
-    /// took it over its own bytes wrote a revision waiting on a block it never finds, as any line
-    /// that isn't written as read back does, and it isn't taken for a newer build's either.
+    /// it, is this build's own, and the logs aren't taken for a newer build's. Only that changed: a
+    /// block's digest is taken over it as read back, so a writer that gave it that digest, as the
+    /// format says, wrote a revision that was always used, and one that took it over its own bytes
+    /// wrote a revision that always waited on a block it never finds, as any line that isn't
+    /// written as read back does.
     #[test]
     fn a_field_written_at_its_default_is_not_taken_for_a_newer_build() {
         let canonical = r#"{"Image":{"path":"p"}}"#;
@@ -1380,24 +1381,6 @@ mod tests {
         );
         assert!(!own_bytes.holds_newer());
         assert!(own_bytes.heads().is_empty());
-    }
-
-    /// [`kame_core::model::has_unknown_fields`] tells a field left out at its default from one this
-    /// build doesn't know only in the kinds of block and steps of history kame-core lists. A
-    /// revision and a line are structs, which it can't name, so neither may leave out a field.
-    #[test]
-    fn a_revision_and_a_line_leave_out_no_field() {
-        let needle = concat!("skip_serializing", "_if = \"");
-        let source = include_str!("revlog.rs");
-        let found: Vec<&str> = source
-            .lines()
-            .filter(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
-            .collect();
-        assert!(
-            found.is_empty(),
-            "{found:?}: a field left out at its default here would make every line written with \
-             it at its default by another program read as a newer build's"
-        );
     }
 
     #[test]

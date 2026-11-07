@@ -578,8 +578,9 @@ impl Db {
         let row =
             |sql: &str| -> Option<String> { self.conn.query_row(sql, [], |row| row.get(0)).ok() };
         row("SELECT json FROM documents WHERE id = 1").is_some_and(|json| view::is_newer(&json))
-            || row("SELECT json FROM metadata WHERE id = 1")
-                .is_some_and(|json| drops_something::<crate::model::Metadata>(&json))
+            || row("SELECT json FROM metadata WHERE id = 1").is_some_and(|json| {
+                drops_something_held_at::<crate::model::Metadata>(Some("metadata"), &json)
+            })
     }
 
     /// Writes the document in a single transaction, replacing any prior one.
@@ -910,6 +911,15 @@ impl Db {
 /// a field, or a level or depth past what this build's model has, which it would fit. JSON that
 /// isn't a `T` at all loses nothing this way.
 fn drops_something<T: Serialize + serde::de::DeserializeOwned>(json: &str) -> bool {
+    drops_something_held_at::<T>(None, json)
+}
+
+/// [`drops_something`], for a `T` that's elsewhere written under the key `held_at`, as metadata is
+/// under `metadata` in a revision, so that a field it leaves out at its default is known here too.
+fn drops_something_held_at<T: Serialize + serde::de::DeserializeOwned>(
+    held_at: Option<&str>,
+    json: &str,
+) -> bool {
     let Ok(written) = serde_json::from_str::<serde_json::Value>(json) else {
         return false;
     };
@@ -917,8 +927,10 @@ fn drops_something<T: Serialize + serde::de::DeserializeOwned>(json: &str) -> bo
         return false;
     };
     crate::model::holds_newer_values(&written)
-        || serde_json::to_value(read)
-            .is_ok_and(|known| crate::model::has_unknown_fields(&written, &known))
+        || serde_json::to_value(read).is_ok_and(|known| match held_at {
+            Some(key) => crate::model::has_unknown_fields_held_at(key, &written, &known),
+            None => crate::model::has_unknown_fields(&written, &known),
+        })
 }
 
 /// Current time as a Unix timestamp in whole seconds.

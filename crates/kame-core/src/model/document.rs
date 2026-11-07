@@ -293,62 +293,119 @@ const BOUNDED: [Bounded; 2] = [
     },
 ];
 
-/// A field this build leaves out when it holds its default, as the kind of block or step of history
-/// holding it and the field are written, with that default as JSON. Written at its default by
-/// another program, it's gone once read and written again, as a field this build doesn't know is,
-/// so this is what tells the two apart: the JSON alone can't, since reading drops both alike.
+/// A field this build leaves out when it holds its default, with that default as JSON. Written at
+/// its default by another program, it's gone once read and written again, as a field this build
+/// doesn't know is, so this is what tells the two apart: the JSON alone can't, since reading drops
+/// both alike.
 ///
-/// Every `skip_serializing_if` in the model and the steps of history has to be here, which a test
-/// holds it to, so that one added later isn't taken for a newer version's.
+/// Every `skip_serializing_if` on anything a document, a step of history or a revision holds has to
+/// be here, which a test holds it to, so that one added later isn't taken for a newer version's.
 struct LeftOut {
-    holder: &'static str,
+    /// The kind of block, step of history or struct the field is in, as the source names it,
+    /// which the test holding this to the source reads.
+    #[cfg_attr(not(test), allow(dead_code))]
+    of: &'static str,
+    /// The keys what holds the field is written under: a kind or a step under its own name, and a
+    /// struct under the field holding it, with `[]` after where that field is a list of them. A
+    /// struct written alone, as the metadata table holds a document's metadata, is named by
+    /// [`has_unknown_fields_held_at`].
+    held_at: &'static [&'static str],
     field: &'static str,
     default: &'static str,
 }
 
-const LEFT_OUT: [LeftOut; 7] = [
+const LEFT_OUT: &[LeftOut] = &[
     LeftOut {
-        holder: "Heading",
+        of: "Heading",
+        held_at: &["Heading"],
         field: "centered",
         default: "false",
     },
     LeftOut {
-        holder: "ListItem",
+        of: "ListItem",
+        held_at: &["ListItem"],
         field: "depth",
         default: "0",
     },
     LeftOut {
-        holder: "Image",
+        of: "Image",
+        held_at: &["Image"],
         field: "link",
         default: "null",
     },
     LeftOut {
-        holder: "Image",
+        of: "Image",
+        held_at: &["Image"],
         field: "align",
         default: r#""Left""#,
     },
     LeftOut {
-        holder: "Code",
+        of: "Code",
+        held_at: &["Code"],
         field: "language",
         default: "null",
     },
     LeftOut {
-        holder: "DeleteText",
+        of: "DeleteText",
+        held_at: &["DeleteText"],
         field: "old_spans",
         default: "null",
     },
     LeftOut {
-        holder: "DeleteText",
+        of: "DeleteText",
+        held_at: &["DeleteText"],
         field: "clipped",
         default: "[]",
     },
+    // A struct only the tests know, so that a struct's field is held to all this as well.
+    #[cfg(test)]
+    LeftOut {
+        of: "Pinned",
+        held_at: &["test_pinned", "test_pinned_list[]"],
+        field: "pinned",
+        default: "false",
+    },
 ];
 
-/// The field `key` of what's held at `holder`, if this build leaves it out at its default.
-fn left_out(holder: Option<&str>, key: &str) -> Option<&'static LeftOut> {
+/// Where a value is written: under the key `key`, or as an item of the list under it.
+#[derive(Clone, Copy)]
+struct At<'a> {
+    key: Option<&'a str>,
+    item: bool,
+}
+
+impl<'a> At<'a> {
+    const TOP: At<'static> = At {
+        key: None,
+        item: false,
+    };
+
+    fn under(key: &'a str) -> At<'a> {
+        At {
+            key: Some(key),
+            item: false,
+        }
+    }
+
+    fn items(self) -> At<'a> {
+        At { item: true, ..self }
+    }
+
+    /// Whether it's at `place`, as [`LeftOut::held_at`] names one.
+    fn is(self, place: &str) -> bool {
+        match (self.key, self.item) {
+            (None, _) => false,
+            (Some(key), false) => place == key,
+            (Some(key), true) => place.strip_suffix("[]") == Some(key),
+        }
+    }
+}
+
+/// The field `key` of what's written at `at`, if this build leaves it out at its default.
+fn left_out(at: At<'_>, key: &str) -> Option<&'static LeftOut> {
     LEFT_OUT
         .iter()
-        .find(|left_out| holder == Some(left_out.holder) && key == left_out.field)
+        .find(|left_out| key == left_out.field && left_out.held_at.iter().any(|place| at.is(place)))
 }
 
 impl BlockKind {
@@ -393,27 +450,33 @@ pub fn holds_newer_values(written: &serde_json::Value) -> bool {
 /// nothing. A list item's `depth` below 0, which a damaged file can hold, is read as 0 too, and
 /// [`fitted_on_reading`] tells of that.
 pub fn has_unknown_fields(written: &serde_json::Value, known: &serde_json::Value) -> bool {
-    unknown_fields_in(None, written, known)
+    unknown_fields_in(At::TOP, written, known)
 }
 
-/// [`has_unknown_fields`], for the value of the field `field`, if it's one.
-fn unknown_fields_in(
-    field: Option<&str>,
+/// [`has_unknown_fields`], for JSON written alone that's elsewhere written under the key `key`, as
+/// a document's metadata is kept alone in its table and under `metadata` in a revision.
+pub fn has_unknown_fields_held_at(
+    key: &str,
     written: &serde_json::Value,
     known: &serde_json::Value,
 ) -> bool {
+    unknown_fields_in(At::under(key), written, known)
+}
+
+/// [`has_unknown_fields`], for what's written at `at`.
+fn unknown_fields_in(at: At<'_>, written: &serde_json::Value, known: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (written, known) {
         (Value::Object(written), Value::Object(known)) => {
             written.iter().any(|(key, value)| match known.get(key) {
-                Some(kept) => unknown_fields_in(Some(key), value, kept),
-                None => left_out(field, key).is_none(),
+                Some(kept) => unknown_fields_in(At::under(key), value, kept),
+                None => left_out(at, key).is_none(),
             })
         }
         (Value::Array(written), Value::Array(known)) => written
             .iter()
             .zip(known)
-            .any(|(value, kept)| unknown_fields_in(None, value, kept)),
+            .any(|(value, kept)| unknown_fields_in(at.items(), value, kept)),
         _ => false,
     }
 }
@@ -423,16 +486,16 @@ fn unknown_fields_in(
 /// written below 0 is read as 0 and left out, so it counts too: a field left out at its default
 /// ([`LEFT_OUT`]) written as anything but that default. A field missing either way doesn't.
 pub fn fitted_on_reading(written: &serde_json::Value, known: &serde_json::Value) -> bool {
-    fitted_in(None, written, known)
+    fitted_in(At::TOP, written, known)
 }
 
-fn fitted_in(field: Option<&str>, written: &serde_json::Value, known: &serde_json::Value) -> bool {
+fn fitted_in(at: At<'_>, written: &serde_json::Value, known: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (written, known) {
         (Value::Object(written), Value::Object(known)) => {
             written.iter().any(|(key, value)| match known.get(key) {
-                Some(kept) => fitted_in(Some(key), value, kept),
-                None => left_out(field, key).is_some_and(|left_out| {
+                Some(kept) => fitted_in(At::under(key), value, kept),
+                None => left_out(at, key).is_some_and(|left_out| {
                     serde_json::from_str::<Value>(left_out.default)
                         .ok()
                         .as_ref()
@@ -443,7 +506,7 @@ fn fitted_in(field: Option<&str>, written: &serde_json::Value, known: &serde_jso
         (Value::Array(written), Value::Array(known)) => written
             .iter()
             .zip(known)
-            .any(|(value, kept)| fitted_in(None, value, kept)),
+            .any(|(value, kept)| fitted_in(at.items(), value, kept)),
         (Value::Number(written), Value::Number(known)) => written != known,
         _ => false,
     }
@@ -791,34 +854,119 @@ mod tests {
 mod left_out_tests {
     use super::*;
 
-    /// The smallest JSON of what holds `field`, with the field written as `value`, and that JSON
-    /// read and written again.
-    fn holding(left_out: &LeftOut, value: &str) -> (serde_json::Value, serde_json::Value) {
+    /// A struct with a field left out at its default, as `Metadata` or `Annotation` could come to
+    /// have, held as one and as a list of them. Only the tests know it, and [`LEFT_OUT`] lists it
+    /// only for them.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct Pinned {
+        body: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pinned: bool,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct HoldsPinned {
+        test_pinned: Pinned,
+        test_pinned_list: Vec<Pinned>,
+    }
+
+    fn pinned_round_trip(json: &str) -> (serde_json::Value, serde_json::Value) {
+        let written = serde_json::from_str(json).unwrap();
+        let read: HoldsPinned = serde_json::from_str(json).unwrap();
+        (written, serde_json::to_value(read).unwrap())
+    }
+
+    /// A struct's field left out at its default is this build's own wherever the struct is written,
+    /// and only there: under the field holding it, or as an item of a list of them.
+    #[test]
+    fn a_struct_field_written_at_its_default_is_this_builds_own() {
+        for json in [
+            r#"{"test_pinned":{"body":"a","pinned":false},"test_pinned_list":[]}"#,
+            r#"{"test_pinned":{"body":"a"},"test_pinned_list":[{"body":"b","pinned":false}]}"#,
+        ] {
+            let (written, known) = pinned_round_trip(json);
+            assert!(!has_unknown_fields(&written, &known), "{json}");
+            assert!(!fitted_on_reading(&written, &known), "{json}");
+            let beside = json.replacen(r#""pinned":false"#, r#""pinned":false,"boxed":false"#, 1);
+            let (written, known) = pinned_round_trip(&beside);
+            assert!(has_unknown_fields(&written, &known), "{beside}");
+        }
+        let (written, known) = pinned_round_trip(
+            r#"{"test_pinned":{"body":"a","pinned":true},"test_pinned_list":[]}"#,
+        );
+        assert_eq!(known["test_pinned"]["pinned"], true);
+        assert!(!has_unknown_fields(&written, &known));
+
+        // Written alone, as the metadata table holds a document's metadata, it's named by where
+        // that's kept, and nowhere else is it known.
+        let alone: serde_json::Value =
+            serde_json::from_str(r#"{"body":"a","pinned":false}"#).unwrap();
+        let known =
+            serde_json::to_value(serde_json::from_value::<Pinned>(alone.clone()).unwrap()).unwrap();
+        assert!(!has_unknown_fields_held_at("test_pinned", &alone, &known));
+        assert!(
+            has_unknown_fields(&alone, &known),
+            "a field of whatever is at the top"
+        );
+        assert!(has_unknown_fields_held_at("elsewhere", &alone, &known));
+    }
+
+    /// The smallest JSON of what holds the field at `place`, with the field written as `value`,
+    /// that JSON read and written again, and where in it what holds the field is.
+    fn holding(
+        left_out: &LeftOut,
+        place: &str,
+        value: &str,
+    ) -> (serde_json::Value, serde_json::Value, String) {
         const ID: &str = "00000000-0000-0000-0000-000000000001";
         let field = format!(r#""{}":{value}"#, left_out.field);
-        let json = match left_out.holder {
-            "Heading" => format!(r#"{{"Heading":{{"level":1,{field}}}}}"#),
-            "ListItem" => format!(r#"{{"ListItem":{{"ordered":true,{field}}}}}"#),
-            "Image" => format!(r#"{{"Image":{{"path":"a.png",{field}}}}}"#),
-            "Code" => format!(r#"{{"Code":{{{field}}}}}"#),
-            "DeleteText" => format!(
-                r#"{{"DeleteText":{{"block_id":"{ID}","start":0,"end":0,"text":"","removed":[],{field}}}}}"#
+        let (json, pointer) = match place {
+            "Heading" => (
+                format!(r#"{{"Heading":{{"level":1,{field}}}}}"#),
+                "/Heading",
             ),
-            other => panic!("nothing here holds {other}: add it"),
+            "ListItem" => (
+                format!(r#"{{"ListItem":{{"ordered":true,{field}}}}}"#),
+                "/ListItem",
+            ),
+            "Image" => (
+                format!(r#"{{"Image":{{"path":"a.png",{field}}}}}"#),
+                "/Image",
+            ),
+            "Code" => (format!(r#"{{"Code":{{{field}}}}}"#), "/Code"),
+            "DeleteText" => (
+                format!(
+                    r#"{{"DeleteText":{{"block_id":"{ID}","start":0,"end":0,"text":"","removed":[],{field}}}}}"#
+                ),
+                "/DeleteText",
+            ),
+            "test_pinned" => (
+                format!(r#"{{"test_pinned":{{"body":"",{field}}},"test_pinned_list":[]}}"#),
+                "/test_pinned",
+            ),
+            "test_pinned_list[]" => (
+                format!(
+                    r#"{{"test_pinned":{{"body":""}},"test_pinned_list":[{{"body":"",{field}}}]}}"#
+                ),
+                "/test_pinned_list/0",
+            ),
+            other => panic!("nothing here holds what's at {other}: add it"),
         };
         let written: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let known = if left_out.holder == "DeleteText" {
-            serde_json::to_value(serde_json::from_str::<crate::edit::Op>(&json).unwrap())
-        } else {
-            serde_json::to_value(serde_json::from_str::<BlockKind>(&json).unwrap())
+        let known = match left_out.of {
+            "DeleteText" => {
+                serde_json::to_value(serde_json::from_str::<crate::edit::Op>(&json).unwrap())
+            }
+            "Pinned" => serde_json::to_value(serde_json::from_str::<HoldsPinned>(&json).unwrap()),
+            _ => serde_json::to_value(serde_json::from_str::<BlockKind>(&json).unwrap()),
         }
         .unwrap();
-        (written, known)
+        (written, known, pointer.to_string())
     }
 
     /// A value of each field other than its default.
     fn another_value(left_out: &LeftOut) -> &'static str {
-        match (left_out.holder, left_out.field) {
+        match (left_out.of, left_out.field) {
             ("Heading", "centered") => "true",
             ("ListItem", "depth") => "2",
             ("Image", "link") => r#""https://example.com""#,
@@ -828,18 +976,31 @@ mod left_out_tests {
             ("DeleteText", "clipped") => {
                 r#"[{"id":"00000000-0000-0000-0000-000000000002","kind":"Note","anchor":"00000000-0000-0000-0000-000000000001","body":""}]"#
             }
+            ("Pinned", "pinned") => "true",
             other => panic!("no other value for {other:?}: add one"),
         }
     }
 
-    /// Each field is left out at the default listed, and at no other value, so that it's named
-    /// as it's written, and listed at the default it really has.
+    /// Every place each field is listed at, with what holds it there.
+    fn every_place() -> impl Iterator<Item = (&'static LeftOut, &'static str)> {
+        LEFT_OUT.iter().flat_map(|left_out| {
+            assert!(
+                !left_out.held_at.is_empty(),
+                "{} is nowhere",
+                left_out.field
+            );
+            left_out.held_at.iter().map(move |place| (left_out, *place))
+        })
+    }
+
+    /// Each field is left out at the default listed, and at no other value, wherever it's listed,
+    /// so that it's named as it's written, and listed at the default it really has.
     #[test]
     fn each_field_left_out_is_left_out_at_its_default_and_kept_otherwise() {
-        for left_out in &LEFT_OUT {
-            let name = format!("{}.{}", left_out.holder, left_out.field);
-            let (written, known) = holding(left_out, left_out.default);
-            let fields = |value: &serde_json::Value| value[left_out.holder].clone();
+        for (left_out, place) in every_place() {
+            let name = format!("{}.{} at {place}", left_out.of, left_out.field);
+            let (written, known, pointer) = holding(left_out, place, left_out.default);
+            let fields = |value: &serde_json::Value| value.pointer(&pointer).unwrap().clone();
             assert!(
                 fields(&known).get(left_out.field).is_none(),
                 "{name} is kept"
@@ -847,7 +1008,7 @@ mod left_out_tests {
             assert!(!has_unknown_fields(&written, &known), "{name} is unknown");
             assert!(!fitted_on_reading(&written, &known), "{name} is fitted");
 
-            let (written, known) = holding(left_out, another_value(left_out));
+            let (written, known, _) = holding(left_out, place, another_value(left_out));
             assert_eq!(
                 fields(&known),
                 fields(&written),
@@ -861,34 +1022,89 @@ mod left_out_tests {
     /// whatever it holds.
     #[test]
     fn a_field_beside_them_that_this_build_does_not_know_is_unknown() {
-        for left_out in &LEFT_OUT {
+        for (left_out, place) in every_place() {
             for value in [left_out.default, "false", "null", "0"] {
-                let mut unknown = holding(left_out, left_out.default);
-                unknown.0[left_out.holder]["boxed"] = serde_json::from_str(value).unwrap();
+                let (mut written, known, pointer) = holding(left_out, place, left_out.default);
+                written.pointer_mut(&pointer).unwrap()["boxed"] =
+                    serde_json::from_str(value).unwrap();
                 assert!(
-                    has_unknown_fields(&unknown.0, &unknown.1),
-                    "{}: boxed {value}",
-                    left_out.holder
+                    has_unknown_fields(&written, &known),
+                    "{} at {place}: boxed {value}",
+                    left_out.of
                 );
             }
         }
     }
 
-    /// Every field the model or a step of history leaves out at its default is listed, so that one
-    /// added later can't be forgotten, and taken for a newer version's when written at its default.
-    /// Each is named by the kind or step it's in, as it's written: a field of a struct would be
-    /// named by the field holding the struct, or by nothing in a list, which [`LEFT_OUT`] can't say.
+    /// Types with fields left out at their defaults that no document, step of history or revision
+    /// holds, so that what reads those needn't know them.
+    const NOT_IN_DOCUMENTS: &[&str] = &[
+        // A notebook's references, each in a YAML file of its own, read with unknown fields denied.
+        "Reference",
+    ];
+
+    /// Every `.rs` file under `folder`, however deep.
+    fn sources_in(folder: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources_in(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// What a line opening a type or a variant opens, if it opens one: a struct or a variant by
+    /// name, or `None` for an enum, whose fields are only in its variants.
+    fn opened_by(line: &str) -> Option<Option<(&str, &str)>> {
+        let line = line.trim();
+        let line = line
+            .strip_prefix("pub(crate) ")
+            .or_else(|| line.strip_prefix("pub "))
+            .unwrap_or(line);
+        fn name(rest: &str) -> &str {
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            &rest[..end]
+        }
+        if let Some(rest) = line.strip_prefix("struct ") {
+            return Some(Some(("struct", name(rest))));
+        }
+        if line.starts_with("enum ") {
+            return Some(None);
+        }
+        let variant = line.strip_suffix(" {")?;
+        (variant.starts_with(|c: char| c.is_ascii_uppercase())
+            && variant.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then_some(Some(("variant", variant)))
+    }
+
+    /// Every field left out at its default in the sources of every crate, and the app's, is listed,
+    /// so that one added later can't be forgotten, and taken for a newer version's when written at
+    /// its default. Each is named by the struct, kind or step it's in.
     #[test]
     fn every_field_left_out_at_its_default_is_listed() {
-        let needle = concat!("skip_serializing", "_if = \"");
-        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files: Vec<std::path::PathBuf> = ["model", "edit"]
-            .iter()
-            .flat_map(|folder| std::fs::read_dir(source.join(folder)).unwrap())
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
-            .collect();
+        let needle = concat!("skip_serializing", "_if");
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(crates).unwrap() {
+            sources_in(&entry.unwrap().path().join("src"), &mut files);
+        }
+        sources_in(&crates.join("../src"), &mut files);
         files.sort();
+        assert!(
+            files
+                .iter()
+                .any(|path| path.ends_with("kame-sync/src/revlog.rs")),
+            "the revision logs aren't read"
+        );
         let mut found = Vec::new();
         for path in &files {
             let text = std::fs::read_to_string(path).unwrap();
@@ -897,6 +1113,7 @@ mod left_out_tests {
                 if !line.contains(needle) || line.trim_start().starts_with("//") {
                     continue;
                 }
+                let place = format!("{}:{}", path.display(), at + 1);
                 let field = lines[at + 1..]
                     .iter()
                     .find_map(|line| {
@@ -907,46 +1124,40 @@ mod left_out_tests {
                             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                             .then_some(name)
                     })
-                    .unwrap_or_else(|| panic!("{}:{}: no field", path.display(), at + 1));
-                let holder = lines[..at]
+                    .unwrap_or_else(|| panic!("{place}: no field"));
+                let (_, of) = lines[..at]
                     .iter()
                     .rev()
-                    .find_map(|line| {
-                        if let Some(variant) = line.strip_prefix("    ") {
-                            let variant = variant.strip_suffix(" {")?;
-                            return (variant.chars().all(|c| c.is_ascii_alphanumeric())
-                                && variant.starts_with(|c: char| c.is_ascii_uppercase()))
-                            .then_some(Ok(variant));
-                        }
-                        let line = line.strip_prefix("pub ").unwrap_or(line);
-                        line.strip_prefix("struct ")
-                            .map(|rest| Err(rest.trim_end_matches(" {")))
-                    })
-                    .unwrap_or_else(|| panic!("{}:{}: in nothing", path.display(), at + 1));
-                match holder {
-                    Ok(variant) => found.push((variant.to_string(), field.to_string())),
-                    Err(structure) => panic!(
-                        "{}:{}: {field} is left out at its default in the struct {structure}, which \
-                         LEFT_OUT can't name. Telling it from a field this build doesn't know needs \
-                         that saying first.",
-                        path.display(),
-                        at + 1
-                    ),
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .find_map(|line| opened_by(line))
+                    .flatten()
+                    .unwrap_or_else(|| panic!("{place}: {field} is in nothing this can name"));
+                if !NOT_IN_DOCUMENTS.contains(&of) {
+                    found.push((of.to_string(), field.to_string(), place));
                 }
             }
         }
-        let listed: Vec<(String, String)> = LEFT_OUT
+        let listed: Vec<(&str, &str)> = LEFT_OUT
             .iter()
-            .map(|left_out| (left_out.holder.to_string(), left_out.field.to_string()))
+            .map(|left_out| (left_out.of, left_out.field))
             .collect();
-        for field in &found {
+        for (of, field, place) in &found {
             assert!(
-                listed.contains(field),
-                "{field:?} is left out at its default and not in LEFT_OUT, so another program \
-                 writing it at its default would make a document read-only as a newer version's"
+                listed.contains(&(of.as_str(), field.as_str())),
+                "{place}: {of}.{field} is left out at its default and not in LEFT_OUT, so another \
+                 program writing it at its default would make a document read-only as a newer \
+                 version's. List it with the keys what holds it is written under."
             );
         }
-        assert_eq!(found.len(), listed.len(), "{found:?} against {listed:?}");
+        let mut named: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(of, field, _)| (of.as_str(), field.as_str()))
+            .collect();
+        named.sort();
+        named.dedup();
+        let mut listed = listed;
+        listed.sort();
+        assert_eq!(named, listed, "found against listed");
     }
 }
 

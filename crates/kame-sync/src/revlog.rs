@@ -110,6 +110,19 @@ fn drops_something(raw: &[u8], line: &Line) -> bool {
         .is_ok_and(|known| kame_core::model::has_unknown_fields(&written, &known))
 }
 
+/// Whether a parsed line holds a number other than the one written, as a level, depth or offset
+/// past what its type holds is read as the nearest one it does.
+fn fitted_on_reading(raw: &[u8], line: &Line) -> bool {
+    if serde_json::to_vec(line).is_ok_and(|same| same == raw) {
+        return false;
+    }
+    let Ok(written) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return false;
+    };
+    serde_json::to_value(line)
+        .is_ok_and(|known| kame_core::model::fitted_on_reading(&written, &known))
+}
+
 thread_local! {
     static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -199,6 +212,13 @@ impl Store {
                         continue;
                     }
                 };
+                // A value no number of its type holds stopped a line parsing before reading took it
+                // wider, and is damage still: what it holds can't be known as it was written.
+                if fitted_on_reading(raw, &line) {
+                    self.dropped.corrupt = true;
+                    self.dropped.documents.extend(document_named_in(raw));
+                    continue;
+                }
                 self.newer |= drops_something(raw, &line);
                 // A level or depth past what this build has is a newer build's, and its digest
                 // checks, so it would be merged and written back fitted. It waits, as a revision
@@ -1110,6 +1130,22 @@ mod tests {
         }
         let ours = line_from_a_newer_build(r#"{"Heading":{"level":6}}"#, "");
         assert!(!log_holding("newer-value-ours", &ours).holds_newer());
+    }
+
+    /// A level or offset no number of its type holds, as a damaged line can have, used to stop
+    /// the line parsing, so it was corrupt, with a notice. Read wider, it parses, and its block's
+    /// digest no longer matches what its revision names, so it would wait for good, unsaid.
+    #[test]
+    fn a_line_holding_a_value_reading_has_to_fit_is_corrupt() {
+        for kind in [
+            r#"{"Heading":{"level":300}}"#,
+            r#"{"ListItem":{"ordered":true,"depth":-1}}"#,
+        ] {
+            let store = log_holding("fitted-value", &line_from_a_newer_build(kind, ""));
+            assert!(store.corrupt_lines(), "{kind}: not said");
+            assert!(!store.holds_newer(), "{kind}");
+            assert!(store.heads().is_empty(), "{kind}");
+        }
     }
 
     #[test]

@@ -366,6 +366,37 @@ fn unknown_fields_in(
     }
 }
 
+/// Whether JSON as written holds a number that reading it and writing it again gives as another,
+/// as a level, depth or offset past what its type holds is read as the nearest one it does. A depth
+/// written below 0 is read as 0 and left out, so it counts too. A field missing either way doesn't.
+pub fn fitted_on_reading(written: &serde_json::Value, known: &serde_json::Value) -> bool {
+    fitted_in(None, written, known)
+}
+
+fn fitted_in(field: Option<&str>, written: &serde_json::Value, known: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (written, known) {
+        (Value::Object(written), Value::Object(known)) => {
+            written.iter().any(|(key, value)| match known.get(key) {
+                Some(kept) => fitted_in(Some(key), value, kept),
+                None => BOUNDED.iter().any(|bounded| {
+                    field == Some(bounded.kind)
+                        && key == bounded.field
+                        && bounded
+                            .left_out_at
+                            .is_some_and(|left_out| value.as_u64() != Some(left_out))
+                }),
+            })
+        }
+        (Value::Array(written), Value::Array(known)) => written
+            .iter()
+            .zip(known)
+            .any(|(value, kept)| fitted_in(None, value, kept)),
+        (Value::Number(written), Value::Number(known)) => written != known,
+        _ => false,
+    }
+}
+
 /// The style for a link entered as `url`: a document link if it names a `.kame` file or
 /// a heading, and an ordinary link otherwise.
 pub fn link_style(url: String) -> SpanStyle {

@@ -72,8 +72,9 @@ pub struct Store {
 /// What's known of the whole lines that were passed over.
 #[derive(Debug, Default)]
 struct Dropped {
-    /// The ids of lines that parse and fail their check. Every line written before a field was added
-    /// to a revision is one, and it still says what it held, as a database's state names that id.
+    /// The ids of lines that parse and fail their check, or hold a level or depth past what this
+    /// build has. Every line written before a field was added to a revision is one, and it still
+    /// says what it held, as a database's state names that id.
     unchecked: HashSet<String>,
     /// The documents passed-over lines say they're of.
     documents: HashSet<Uuid>,
@@ -199,6 +200,21 @@ impl Store {
                     }
                 };
                 self.newer |= drops_something(raw, &line);
+                // A level or depth past what this build has is a newer build's, and its digest
+                // checks, so it would be merged and written back fitted. It waits, as a revision
+                // with a newer field in a block does.
+                if line
+                    .blocks
+                    .iter()
+                    .any(|block| block.kind.is_past_the_model())
+                    && serde_json::from_slice::<serde_json::Value>(raw)
+                        .is_ok_and(|written| kame_core::model::holds_newer_values(&written))
+                {
+                    self.newer = true;
+                    self.dropped.documents.insert(line.revision.document);
+                    self.dropped.unchecked.insert(line.id);
+                    continue;
+                }
                 if line.revision.id() != line.id {
                     self.dropped.documents.insert(line.revision.document);
                     self.dropped.unchecked.insert(line.id);
@@ -1077,6 +1093,23 @@ mod tests {
         assert!(log_holding("newer-metadata", &in_metadata).holds_newer());
         let new_kind = line_from_a_newer_build(r#""Table""#, "");
         assert!(log_holding("newer-kind", &new_kind).holds_newer());
+    }
+
+    /// A level or depth a byte holds and this build's model doesn't is a newer build's, as a field
+    /// is. Its digest checks, so the revision would be merged with the value fitted, and written
+    /// back fitted for every machine, if it were used.
+    #[test]
+    fn a_level_or_depth_a_newer_build_could_write_is_noticed_and_not_used() {
+        for kind in [
+            r#"{"Heading":{"level":7}}"#,
+            r#"{"ListItem":{"ordered":true,"depth":6}}"#,
+        ] {
+            let store = log_holding("newer-value", &line_from_a_newer_build(kind, ""));
+            assert!(store.holds_newer(), "{kind}");
+            assert!(store.heads().is_empty(), "{kind}: its revision is used");
+        }
+        let ours = line_from_a_newer_build(r#"{"Heading":{"level":6}}"#, "");
+        assert!(!log_holding("newer-value-ours", &ours).holds_newer());
     }
 
     #[test]

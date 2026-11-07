@@ -906,8 +906,9 @@ impl Db {
     }
 }
 
-/// Whether reading `json` as a `T` and writing it again would lose something, a field from a newer
-/// version. JSON that isn't a `T` at all loses nothing this way.
+/// Whether reading `json` as a `T` and writing it again would lose something from a newer version:
+/// a field, or a level or depth past what this build's model has, which it would fit. JSON that
+/// isn't a `T` at all loses nothing this way.
 fn drops_something<T: Serialize + serde::de::DeserializeOwned>(json: &str) -> bool {
     let Ok(written) = serde_json::from_str::<serde_json::Value>(json) else {
         return false;
@@ -915,7 +916,9 @@ fn drops_something<T: Serialize + serde::de::DeserializeOwned>(json: &str) -> bo
     let Ok(read) = serde_json::from_str::<T>(json) else {
         return false;
     };
-    serde_json::to_value(read).is_ok_and(|known| crate::model::has_unknown_fields(&written, &known))
+    crate::model::holds_newer_values(&written)
+        || serde_json::to_value(read)
+            .is_ok_and(|known| crate::model::has_unknown_fields(&written, &known))
 }
 
 /// Current time as a Unix timestamp in whole seconds.

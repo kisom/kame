@@ -38,7 +38,8 @@ pub(crate) fn fit_range(text: &str, start: &mut usize, end: &mut usize) {
 impl Block {
     /// Brings a heading's level into [`HEADING_LEVELS`] and a list item's depth down to
     /// [`MAX_LIST_DEPTH`], for one read from a file, which needn't keep to them. One that keeps to
-    /// them is left as it is.
+    /// them is left as it is. One a byte held past them is a newer version's, and its document is
+    /// only shown fitted, never written ([`crate::model::holds_newer_values`]).
     pub fn fit_kind(&mut self) {
         self.kind.fit();
     }

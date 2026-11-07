@@ -272,12 +272,69 @@ pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// A number in a kind of block that this build's model bounds, as the kind and the field are
+/// written: what the model has, and the value it's left out at, if any.
+struct Bounded {
+    kind: &'static str,
+    field: &'static str,
+    has: std::ops::RangeInclusive<u64>,
+    left_out_at: Option<u64>,
+}
+
+const BOUNDED: [Bounded; 2] = [
+    Bounded {
+        kind: "Heading",
+        field: "level",
+        has: *HEADING_LEVELS.start() as u64..=*HEADING_LEVELS.end() as u64,
+        left_out_at: None,
+    },
+    Bounded {
+        kind: "ListItem",
+        field: "depth",
+        has: 0..=MAX_LIST_DEPTH as u64,
+        left_out_at: Some(0),
+    },
+];
+
+impl BlockKind {
+    /// Whether this holds a level or depth past what this build's model has, as one read from a
+    /// file can, before it's fitted.
+    pub fn is_past_the_model(&self) -> bool {
+        match self {
+            BlockKind::Heading { level, .. } => !HEADING_LEVELS.contains(level),
+            BlockKind::ListItem { depth, .. } => *depth > MAX_LIST_DEPTH,
+            _ => false,
+        }
+    }
+}
+
+/// Whether JSON as written holds a heading's level or a list item's depth that a byte holds and
+/// this build's model doesn't, such as level 7: a newer kame that went further would write it, so
+/// it's from a newer version, as an unknown field is. One a byte can't hold, below 0 or past 255,
+/// or that isn't a whole number, is damage, and doesn't count.
+pub fn holds_newer_values(written: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match written {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            BOUNDED.iter().any(|bounded| {
+                key == bounded.kind
+                    && value
+                        .get(bounded.field)
+                        .and_then(Value::as_u64)
+                        .is_some_and(|n| n <= u64::from(u8::MAX) && !bounded.has.contains(&n))
+            }) || holds_newer_values(value)
+        }),
+        Value::Array(items) => items.iter().any(holds_newer_values),
+        _ => false,
+    }
+}
+
 /// Whether JSON as written holds a field that's missing once read and written again by this
 /// build, which is how something from a newer version of kame looks. A field missing from what was
 /// written is only something added since, so that doesn't count.
 ///
-/// A list item's `depth` is a field this build knows, so it doesn't count either: it's left out
-/// when it's 0, and a depth below 0, which a damaged file can hold, is read as 0.
+/// Nor does a field of a kind of block that this build knows and leaves out at its default, as a
+/// list item's `depth` is at 0: a depth below 0, which a damaged file can hold, is read as 0.
 pub fn has_unknown_fields(written: &serde_json::Value, known: &serde_json::Value) -> bool {
     unknown_fields_in(None, written, known)
 }
@@ -289,11 +346,16 @@ fn unknown_fields_in(
     known: &serde_json::Value,
 ) -> bool {
     use serde_json::Value;
+    let left_out = |key: &str| {
+        BOUNDED.iter().any(|bounded| {
+            field == Some(bounded.kind) && key == bounded.field && bounded.left_out_at.is_some()
+        })
+    };
     match (written, known) {
         (Value::Object(written), Value::Object(known)) => {
             written.iter().any(|(key, value)| match known.get(key) {
                 Some(kept) => unknown_fields_in(Some(key), value, kept),
-                None => !(field == Some("ListItem") && key == "depth"),
+                None => !left_out(key),
             })
         }
         (Value::Array(written), Value::Array(known)) => written

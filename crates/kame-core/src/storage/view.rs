@@ -84,15 +84,19 @@ fn shown(mut value: Value) -> Option<(Document, Vec<Uuid>)> {
 }
 
 /// Whether `json` holds something from a newer version of kame: a field this build would drop by
-/// writing it again, or a kind, style or other value it doesn't know. JSON that's damaged, or isn't
+/// writing it again, a kind, style or other value it doesn't know, or a level or depth past what
+/// its model has. JSON that's damaged, or isn't
 /// a document at all, holds nothing newer. It's read once, which matters when opening a long one.
 pub(crate) fn is_newer(json: &str) -> bool {
     let Ok(written) = serde_json::from_str::<Value>(json) else {
         return false;
     };
     match Document::deserialize(&written) {
-        Ok(read) => serde_json::to_value(read)
-            .is_ok_and(|known| crate::model::has_unknown_fields(&written, &known)),
+        Ok(read) => {
+            crate::model::holds_newer_values(&written)
+                || serde_json::to_value(read)
+                    .is_ok_and(|known| crate::model::has_unknown_fields(&written, &known))
+        }
         Err(_) => view_from(written).is_some(),
     }
 }

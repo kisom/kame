@@ -14,7 +14,7 @@ never the folder.
 | `essay.kame` | A document holding every kind of block, style and annotation, whole-block and range anchors, links, images at relative paths, metadata with words and accepted marks, two snapshots, a history of every kind of step with two waiting to be redone, and where the writer was |
 | `essay.md`, `essay.html` | Its Markdown and HTML export, byte for byte |
 | `essay.json` | The rest of its reading: the document and metadata as read, the steps applied and waiting, where the writer was, each snapshot, and the Markdown with every step redone |
-| `logged/` | A folder with logs turned on, holding the revision logs of another document, `logged/essay.kame`, from two machines, `talos` and `titan`, and no database, as on a machine that hasn't opened it. They hold a merge, and end in two heads that change the same sentence |
+| `logged/` | A folder with logs turned on, holding the revision logs of another document, `logged/essay.kame`, from two machines, `talos` and `titan`, and no database, as on a machine that hasn't opened it. They hold a merge, and end in two heads that change the same sentence, the earlier also moving a list item up, which the merge keeps (in folders from the release after 0.2.0 on; 0.1.2's and 0.2.0's don't have it) |
 | `logged.json` | Their reading: each head's document and metadata, and the merge of the two, with its id |
 
 A release adds its folder with the generator, from the release's commit, before it's tagged:

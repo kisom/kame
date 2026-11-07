@@ -624,7 +624,7 @@ fn append_to(session: &mut Session, index: usize, words: &str) {
 }
 
 /// Writes the logs of a document two machines wrote, which hold a merge and end in two heads that
-/// change the same sentence, and what merging them gives.
+/// change the same sentence, the earlier also moving a list item, and what merging them gives.
 fn write_logs(scratch: &Path, out: &Path) -> Result<()> {
     let talos = Machine::new(scratch, "talos", "talos-aaaa")?;
     let titan = Machine::new(scratch, "titan", "titan-bbbb")?;
@@ -664,6 +664,12 @@ fn write_logs(scratch: &Path, out: &Path) -> Result<()> {
             Anchor::block(two),
             "A marginal that travels.",
         );
+        let item = BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+        };
+        let first = w.split_after(two, item.clone(), "First item.");
+        w.split_after(first, item, "Second item.");
         w.session.set_metadata(Metadata {
             title: "Two machines".to_string(),
             author: "A. Writer".to_string(),
@@ -702,6 +708,16 @@ fn write_logs(scratch: &Path, out: &Path) -> Result<()> {
         });
         assert!(session.insert(&format!(", says {who}")));
     };
+    // The earlier machine also moves the second list item up, and the later one doesn't reorder
+    // anything, so the merge keeps the move (merging.md section 4.1). A build that takes the later
+    // side's order whatever the other did puts the items back, and fails the tests.
+    let second = there.document().blocks[4].id;
+    assert_eq!(there.document().blocks[4].text, "Second item.");
+    there.set_caret(Cursor {
+        block_id: second,
+        offset: 0,
+    });
+    assert!(there.move_list_item(true), "{:?}", there.last_error);
     changed(&mut there, "talos");
     talos.sync(&mut there, clock + 60)?;
     changed(&mut here, "titan");
@@ -746,6 +762,11 @@ fn write_logs(scratch: &Path, out: &Path) -> Result<()> {
     let mut logged = Logged::open(&session, READER).ok_or("the copy isn't logged")?;
     let outcome = logged.sync(&mut session, READ_AT)?;
     assert!(outcome.merged && outcome.notes > 0, "{outcome:?}");
+    let items: Vec<&str> = session.document().blocks[3..]
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect();
+    assert_eq!(items, ["Second item.", "First item."], "the move is kept");
     let merged = Store::load(&log_folder(&path))?.heads();
     assert_eq!(merged.len(), 1);
     let expected = json!({

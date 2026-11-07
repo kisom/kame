@@ -190,7 +190,8 @@ that's missing or differs is not stranded, whatever the logs say. Being wrong th
 wrong the other way hides someone's document.
 
 A database that isn't stranded for this reason does what any database does. `Logged` writes its history as new logs, and it
-records its new place, so that the document has its own logs from then on. Nothing retires it, and it lists as an ordinary
+records its new place, so that the document has its own logs from then on. The exception is one with no place at all and no line
+beside it (below). Nothing retires it, and it lists as an ordinary
 document. It's relative to the logging root so that a database carried to a machine where the notebook is somewhere else is
 still in its place, and it has the root's name in it so that a copy into another notebook isn't. A root named differently on another
 machine, or renamed, is merely not stranded until its next sync, which is the safe side. An older kame ignores the row, as it reads `meta` only by key, so there's no migration. An older kame's Save As
@@ -200,6 +201,15 @@ A database from before places were recorded gets one from a pass. If it has a sy
 beside it, that shows it synced there, so `decide` lists it, and `apply` records the place on the main thread, with the same looks
 again as any other step, never for the open document, and ignoring a failure. Having a place is what stops it being asked again. A
 hand copy with no logs beside it isn't stamped, nor is a database whose revision isn't beside it, whose logs are then read on each pass.
+One with no line at all beside it, whose folder is missing, or empty, or holds only a tear (`Store::holds_nothing`), writes nothing
+when it syncs (`Outcome::unplaced`, `is_unplaced`): its logs may have left it for a move or a delete on another machine, and its
+history written here would bring the document back on every machine. A closed one isn't changed for a move's links either, and is
+listed as left. The app says once that it last synced before kame recorded where, that its logs have gone, so it may have been
+moved or deleted on another machine, that it isn't syncing, and that Save As gives it logs of its own. Logs holding its revision
+coming back beside it let it sync and record its place, and lines of its document beside it merge, as before. Stamping it where it is
+instead would make a hand copy from before places stranded, and retire it with a false notice, which is what places are for, and
+stamping only when its revision is in no log in the notebook can't tell a hand copy of a deleted document from that document's own
+stale database either. So it's left listed and not syncing.
 Neither a stamp nor the place recorded on arrival is written into a database holding something from a newer version of kame, which
 this build writes nothing to, so that one is merely not known to be stranded until it's updated. A stranded database holding
 anything from a newer version is neither retired nor moved: what this build reads of it leaves that out, so it could match
@@ -330,10 +340,11 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   tool's delete and reaches A as a logs-only X with no usable head. B's X isn't stranded, since its own partial log holds its
   revision, so B's edits never reach Y, and X can come back on A as an empty document. It's divergence and not loss: the words
   are in B's database and B's log.
-- A database last synced before places were recorded, whose logs left before a pass first saw it, or before a pass could read them,
-  has none and can't get one, so it isn't recognised as stale until it's next synced. Opening one on another machine after a
-  delete can bring the document back, as it did before this work. After a path is reused, its history stays out of the new document's
-  logs (see above), and it just doesn't sync.
+- A database last synced before places were recorded (only builds before 0.1.0, or one built from its logs before the folder's
+  `.kame-logs` arrived) whose logs left before a pass saw them isn't known to be stale. It stays listed. Opened, it doesn't sync,
+  so it doesn't come back on other machines, and kame says so. Save As gives it logs of its own. A hand copy from before places,
+  with no logs beside it, is the same, so it no longer starts logs of its own when it's opened. After a path is reused, its history
+  stays out of the new document's logs (see above), and it just doesn't sync.
 - A move made by hand, with its logs, simply carries on. Without them it's treated like a copy: it starts logs of its own, and the
   old ones stay as a document with only its logs.
 - A copy put at the same path in another notebook whose root's folder has the same name, with no logs, can't be told from a database

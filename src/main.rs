@@ -6988,6 +6988,16 @@ impl KameApp {
                                 .to_string(),
                         );
                     }
+                    if outcome.unplaced && !self.stranded_mentioned {
+                        self.stranded_mentioned = true;
+                        self.notice_tracker.announced();
+                        self.notice = Some(
+                            "this document last synced before kame recorded where, and its logs \
+                             have gone, so it may have been moved or deleted on another machine. \
+                             It isn't syncing. Save As gives it logs of its own"
+                                .to_string(),
+                        );
+                    }
                     if outcome.merged {
                         self.set_open_note(None);
                         self.notice_tracker.announced();

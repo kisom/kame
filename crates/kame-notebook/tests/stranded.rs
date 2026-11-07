@@ -1747,12 +1747,16 @@ fn a_move_by_hand_without_its_logs_is_like_a_copy() {
     assert!(log_folder(&b).is_dir());
 }
 
+/// With no place it can't be told from a copy made by hand, so it isn't stranded. Its history
+/// written here would bring it back on every machine, so its sync writes nothing either, and it
+/// stays as it is until its logs come back beside it.
 #[test]
 fn a_database_with_no_recorded_place_is_not_stranded() {
     let (root, nb) = logged_notebook("stranded-no-place");
     let a = root.join("a.kame");
     synced(&a, "Words.");
-    remove_logs(&a);
+    let aside = root.join("aside");
+    std::fs::rename(log_folder(&a), &aside).unwrap();
     as_an_older_kame_left_it(&a);
     assert_eq!(place_in(&a), None);
 
@@ -1762,11 +1766,25 @@ fn a_database_with_no_recorded_place_is_not_stranded() {
 
     let mut session = Session::open(&a).unwrap();
     let outcome = sync(&mut session);
-    assert!(!outcome.stranded);
-    assert!(outcome.written > 0);
+    assert!(
+        outcome.unplaced && !outcome.stranded && !outcome.others_logs,
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.written, 0);
+    drop(session);
+    assert!(!log_folder(&a).exists());
+    assert_eq!(place_in(&a), None);
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+
+    // Its logs back beside it, it syncs and records its place, and from then on it can be left behind.
+    std::fs::rename(&aside, log_folder(&a)).unwrap();
+    let mut session = Session::open(&a).unwrap();
+    let outcome = sync(&mut session);
+    assert!(!outcome.unplaced && !outcome.stranded, "{outcome:?}");
     drop(session);
     assert_eq!(place_in(&a), place_of(&a));
-
     remove_logs(&a);
     assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
 }

@@ -466,6 +466,16 @@ impl Store {
         self.dropped.corrupt && (self.names(document) || !self.names_anyone())
     }
 
+    /// Whether no line at all has been read here: none that can be used, none that fails its check,
+    /// none from a newer version and none that's corrupt. A line torn by a crash counts for nothing,
+    /// as ever, so a folder that's missing, empty or holds only a tear holds nothing.
+    pub fn holds_nothing(&self) -> bool {
+        !self.names_anyone()
+            && !self.newer
+            && !self.dropped.corrupt
+            && self.dropped.unchecked.is_empty()
+    }
+
     /// Whether these logs can be taken as this document's: a line says it's of this document, even
     /// one that can't be checked, as a line in an older format can't, or there's nothing here to
     /// lose. A line that can't say whose it is shows nothing, and that isn't enough to write to these

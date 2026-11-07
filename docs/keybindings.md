@@ -448,6 +448,7 @@ A copy made by hand or in Finder is a document of its own. It starts logs of its
 only counts as left behind at the place it last synced. The exception is a copy put at the path of a document with logs, or at the same path in
 another notebook with logs turned on and a folder of the same name. Over another document's logs it says they may be another document's and doesn't sync, and Save As gives it
 logs of its own. A delete leaves those logs, and a move is refused. In another notebook it can't be told from a stale copy, and is retired, which is undone as below.
+A document that last synced before kame recorded where documents are, with no logs beside it at all, may have been moved or deleted on another machine, so it doesn't sync, and says so. Save As gives it logs of its own.
 
 To get a retired file back, rename it to a `.kame` name of your choice, without the leading dot, and open it. It's then a document of its own, with
 its own logs. The name it left is the one that doesn't work if its logs are still gone, as that's where it was left behind, and it's retired

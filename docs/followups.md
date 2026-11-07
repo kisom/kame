@@ -37,9 +37,6 @@ written by one version has to be safe in another.
 
 - [ ] **A stretch of daily writing with no lost words,** on two machines at different versions, with sync on. How long is
   still to agree.
-- [ ] **A stale database from before places were recorded,** whose logs left before a pass first saw it, has no place, so it isn't
-  recognised as stale until it's next synced, and opening one on another machine after a delete can bring the document back, as it
-  did before. A pass stamps every other one.
 - [ ] **A list item moved on one machine goes back after a later edit on another.** A merge takes the order of the later
   side, so a move is undone by a revision written later elsewhere, even one that only edited words, with no note. Nothing is
   lost. A three-way order rule would keep it, but it changes merged bytes between versions, so it's for before 1.0 or not at

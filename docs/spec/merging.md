@@ -234,7 +234,7 @@ Reads can resume where the last stopped, past lines that failed to parse. A log 
 
 The `sync` key in the file's `meta` table holds the id of the revision this machine last settled on, called `last` here. To sync an open document with the logs:
 
-1. Refresh from the logs. Forget `last` unless it's usable. It may not be in them, as after Save As, or a log it needs may have been cut short. A revision built on an unusable one couldn't be read either, so what's typed would be left out of the document.
+1. Refresh from the logs. If the file remembers a `last` and no place (the `sync_place` key, which builds from before places were recorded didn't write), and the logs hold no line at all, none usable, none failing its check, none corrupt and none from a newer version, with a torn tail counting for nothing as ever, write nothing. It may have been moved or deleted on another machine, and without a place that can't be told from a copy made by hand, so its checkpoints written here would bring it back on every machine. The app says so, and that Save As gives it logs of its own. Forget `last` unless it's usable. It may not be in them, as after Save As, or a log it needs may have been cut short. A revision built on an unusable one couldn't be read either, so what's typed would be left out of the document.
 2. If there's no `last`, use any head with the same document digest and metadata.
 3. If there's still none, **write checkpoints** (below) and use the latest.
 4. If the document or metadata differ from `last`, append a revision with `last` as its parent.

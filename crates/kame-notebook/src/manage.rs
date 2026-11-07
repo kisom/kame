@@ -10,7 +10,8 @@ use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::session::{is_markdown_path, Session};
 use kame_core::storage::Db;
 use kame_sync::logs::{
-    build_from_logs, is_stranded, log_folder, logging_root, logs_can_be_its_own, Logged,
+    build_from_logs, is_stranded, is_unplaced, log_folder, logging_root, logs_can_be_its_own,
+    Logged, UNPLACED,
 };
 use kame_sync::revlog::Store;
 
@@ -431,6 +432,9 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
     if revision.is_some() && !logs_can_be_its_own(path, session.document().id, revision.as_deref())
     {
         return Err(OTHERS_LOGS.to_string());
+    }
+    if is_unplaced(path, revision.as_deref(), place.as_deref()) {
+        return Err(UNPLACED.to_string());
     }
     let logged = Logged::open(&session, device).ok_or("could not read its logs")?;
     Ok((session, Some(logged)))

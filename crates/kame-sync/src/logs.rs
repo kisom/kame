@@ -180,6 +180,21 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
     (!store.corrupt_lines()).then_some(true)
 }
 
+/// Why a database that remembers a revision and no place, with nothing beside it, doesn't sync.
+pub const UNPLACED: &str = "it last synced before kame recorded where, and its logs have gone, so \
+     it may have been moved or deleted on another machine, and isn't syncing";
+
+/// Whether a database remembers a revision and no place, and no line at all is beside it, as read
+/// from the disk. It last synced before kame recorded places, and its logs have gone. That can't be
+/// told from a copy made by hand, so it isn't stranded, but it may have been moved or deleted on
+/// another machine, and its history written here would bring it back there. So it doesn't sync.
+/// Logs holding its revision coming back beside it let it, and Save As gives it logs of its own.
+pub fn is_unplaced(path: &Path, revision: Option<&str>, place: Option<&str>) -> bool {
+    revision.is_some()
+        && place.is_none()
+        && Store::load(&log_folder(path)).is_ok_and(|store| store.holds_nothing())
+}
+
 /// Whether what's beside a database can be taken for its logs: there's nothing there, they hold the
 /// revision it remembers, or a line in them says it's of this document. Otherwise they're another
 /// document's, or can't be shown not to be, which may be so even when it isn't stranded, as when it
@@ -213,6 +228,10 @@ pub struct Outcome {
     /// that nothing was written, and it isn't known to be stranded, so that the clean-up leaves it
     /// alone.
     pub others_logs: bool,
+    /// Whether it last synced before kame recorded where, and nothing at all is beside it, so that it
+    /// may have been moved or deleted on another machine, and nothing was written, as
+    /// [`is_unplaced`] says. Its history written here would bring it back on every machine.
+    pub unplaced: bool,
     /// Revisions written to this machine's log.
     pub written: usize,
     /// Whether the document changed because of what arrived.
@@ -295,6 +314,9 @@ impl StrandedAnswer {
 #[derive(Debug, PartialEq)]
 struct HeldOff {
     stranded: bool,
+    /// Whether it's for having no place and nothing beside it, rather than for another document's
+    /// logs, when it isn't stranded.
+    unplaced: bool,
     logs: Option<Vec<(PathBuf, u64)>>,
 }
 
@@ -437,6 +459,7 @@ impl Logged {
         {
             let held_off = HeldOff {
                 stranded: true,
+                unplaced: false,
                 logs,
             };
             let outcome = held_off.outcome();
@@ -449,13 +472,17 @@ impl Logged {
         let mut local = session.document().clone();
         local.fit();
         let metadata = session.metadata.clone();
-        if self
-            .last
-            .as_ref()
-            .is_some_and(|last| !self.store.could_hold(last) && !self.store.can_be_for(local.id))
+        // With no place and nothing here, it may have been moved or deleted elsewhere, and can't be
+        // told from a copy, so its history written here could bring it back on every machine.
+        let unplaced = self.last.is_some() && self.place.is_none() && self.store.holds_nothing();
+        if unplaced
+            || self.last.as_ref().is_some_and(|last| {
+                !self.store.could_hold(last) && !self.store.can_be_for(local.id)
+            })
         {
             let held_off = HeldOff {
                 stranded: false,
+                unplaced,
                 logs,
             };
             let outcome = held_off.outcome();
@@ -543,7 +570,8 @@ impl HeldOff {
     fn outcome(&self) -> Outcome {
         Outcome {
             stranded: self.stranded,
-            others_logs: !self.stranded,
+            others_logs: !self.stranded && !self.unplaced,
+            unplaced: self.unplaced,
             ..Outcome::default()
         }
     }

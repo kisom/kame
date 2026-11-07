@@ -1151,20 +1151,69 @@ fn forget_the_place(path: &Path) {
     db.save_sync_state(&state).unwrap();
 }
 
-#[test]
-fn a_database_with_no_place_and_no_logs_starts_them_again() {
-    let (talos, _) = two_machines();
+/// Synced, and left as an older kame leaves one, with its logs put aside, where they can be brought
+/// back from.
+fn with_no_place_and_its_logs_aside(talos: &Machine) -> PathBuf {
     let mut session = talos.session();
     talos.sync(&mut session, 1);
     drop(session);
     forget_the_place(&talos.path);
-    std::fs::remove_dir_all(log_folder(&talos.path)).unwrap();
+    let aside = talos.path.with_file_name("aside");
+    std::fs::rename(log_folder(&talos.path), &aside).unwrap();
+    aside
+}
+
+/// It may have been moved or deleted on another machine, and with no place, that can't be told
+/// from a copy made by hand. Its history written here would bring it back on every machine, so
+/// nothing is written. Its logs coming back beside it let it sync, and it records its place.
+#[test]
+fn a_database_with_no_place_and_no_logs_writes_nothing() {
+    let (talos, _) = two_machines();
+    let aside = with_no_place_and_its_logs_aside(&talos);
+    let folder = log_folder(&talos.path);
 
     let mut session = talos.session();
-    let outcome = talos.sync(&mut session, 2);
-    assert!(!outcome.stranded);
+    let mut logged = talos.logged(&session);
+    let outcome = logged.sync(&mut session, 2).unwrap();
+    assert!(outcome.unplaced, "{outcome:?}");
+    assert!(!outcome.stranded && !outcome.others_logs, "{outcome:?}");
+    assert_eq!(outcome.written, 0);
+    assert!(!folder.exists());
+    assert_eq!(session.sync_place(), None);
+    talos.append(&mut session, 0, " Typed since.");
+    assert!(logged.sync(&mut session, 3).unwrap().unplaced);
+    assert!(!folder.exists());
+
+    std::fs::rename(&aside, &folder).unwrap();
+    let outcome = logged.sync(&mut session, 4).unwrap();
+    assert!(
+        !outcome.unplaced && !outcome.stranded && !outcome.others_logs,
+        "{outcome:?}"
+    );
     assert!(outcome.written > 0);
     assert_eq!(session.sync_place(), place_of(&talos.path));
+}
+
+/// A folder with no line in it, or only one torn by a crash, holds nothing either.
+#[test]
+fn a_database_with_no_place_beside_logs_holding_nothing_writes_nothing() {
+    for torn in [false, true] {
+        let (talos, _) = two_machines();
+        with_no_place_and_its_logs_aside(&talos);
+        let folder = log_folder(&talos.path);
+        std::fs::create_dir_all(&folder).unwrap();
+        if torn {
+            std::fs::write(folder.join("talos-aaaa.log"), "{\"id\":\"half").unwrap();
+        }
+        let before = Store::log_sizes(&folder);
+
+        let mut session = talos.session();
+        let outcome = talos.sync(&mut session, 2);
+        assert!(outcome.unplaced, "torn: {torn}: {outcome:?}");
+        assert_eq!(outcome.written, 0, "torn: {torn}");
+        assert_eq!(Store::log_sizes(&folder), before, "torn: {torn}");
+        assert_eq!(session.sync_place(), None, "torn: {torn}");
+    }
 }
 
 /// Once it has synced here, it's somewhere it can be left behind.

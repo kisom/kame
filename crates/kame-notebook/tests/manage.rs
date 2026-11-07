@@ -1458,6 +1458,43 @@ fn place_in(path: &Path) -> Option<String> {
     Db::open_read_only(path).unwrap().load_sync_place()
 }
 
+/// Last synced before kame recorded where, and its logs gone: it may have been moved or deleted on
+/// another machine, so changing it closed would bring it back there, and it's left as it is.
+#[test]
+fn a_document_with_no_place_and_no_logs_is_listed_and_no_logs_come_back_for_it() {
+    let (root, nb) = logged_notebook("move-no-place");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    let state = Db::open_read_only(&linker)
+        .unwrap()
+        .load_sync_state()
+        .unwrap();
+    {
+        let mut db = Db::open(&linker).unwrap();
+        db.clear_sync_state().unwrap();
+        db.save_sync_state(&state).unwrap();
+    }
+    std::fs::remove_dir_all(log_folder(&linker)).unwrap();
+    assert_eq!(place_in(&linker), None);
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty(), "{:?}", report.changed);
+    assert_eq!(report.left.len(), 1, "{:?}", report.left);
+    assert_eq!(report.left[0].relative, "linker.kame");
+    assert!(
+        report.left[0].why.contains("before kame recorded where"),
+        "{}",
+        report.left[0].why
+    );
+    assert!(!log_folder(&linker).exists());
+    assert_eq!(links_of(&read(&linker)), ["a.kame"]);
+    assert_eq!(place_in(&linker), None);
+}
+
 #[test]
 fn a_rename_with_nothing_else_to_change_records_the_new_place() {
     let (root, nb) = logged_notebook("move-records-place");

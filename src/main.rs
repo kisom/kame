@@ -717,13 +717,16 @@ const RULE_WIDTH: f32 = 0.25;
 /// Gap between a list marker's right edge and its item's text.
 const LIST_MARKER_GAP: f32 = 6.0;
 /// The bullet at each level of nesting, starting over past the last. Bullets are
-/// drawn as shapes, not set as text: the page's markers are painted with egui's fonts,
-/// not the embedded body face, and a glyph the font lacks ("▪") came from an emoji font
-/// as a large black square.
+/// drawn as shapes, not set as text: egui's fallback for a glyph the body face lacks
+/// ("▪") is its emoji font, which set it as a large black square.
 const LIST_BULLETS: [Bullet; 3] = [Bullet::Disc, Bullet::Ring, Bullet::Square];
 /// How far a bullet reaches from its centre, as a share of the body size. The three
 /// shapes all fill the same box.
 const BULLET_REACH: f32 = 0.14;
+/// The least a bullet reaches, in points, so that at the smallest type on a screen of
+/// one pixel to the point the ring is a pixel's line round a hole two pixels across,
+/// and not a grey dot like the disc.
+const BULLET_LEAST_REACH: f32 = 2.0;
 /// A ring's line, and a square's side, as shares of the box they fill.
 const BULLET_RING_LINE: f32 = 0.5;
 const BULLET_SQUARE_SIDE: f32 = 0.92;
@@ -739,7 +742,7 @@ enum Bullet {
 impl Bullet {
     /// How far the bullet reaches from its centre, for body type of this size.
     fn half_width(self, body_size: f32) -> f32 {
-        body_size * BULLET_REACH
+        (body_size * BULLET_REACH).max(BULLET_LEAST_REACH)
     }
 
     /// Draws the bullet with its right edge at `right` and its middle at `y`.
@@ -7985,6 +7988,55 @@ mod tests {
     }
 
     // --- list bullets --------------------------------------------------------
+
+    /// The shapes `bullet` paints for body type of `size`, as egui is handed them.
+    fn painted(bullet: Bullet, size: f32) -> Vec<egui::epaint::CircleShape> {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            bullet.paint(ui.painter(), 100.0, 50.0, size, Color32::BLACK);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .into_iter()
+            .filter_map(|clipped| match clipped.shape {
+                egui::Shape::Circle(circle) => Some(circle),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// At the smallest type on a screen of one pixel to the point, the ring is still a ring: a
+    /// line at least a pixel wide round a hole at least two across, in the disc's own box.
+    #[test]
+    fn the_ring_has_a_hole_at_every_type_size() {
+        let mut size = FONT_SIZE_MIN;
+        while size <= FONT_SIZE_MAX {
+            let disc = painted(Bullet::Disc, size);
+            let ring = painted(Bullet::Ring, size);
+            assert_eq!(
+                (disc.len(), ring.len()),
+                (1, 1),
+                "one circle each at {size}"
+            );
+            let (disc, ring) = (&disc[0], &ring[0]);
+            let line = ring.stroke.width;
+            assert!(line >= 1.0, "a line {line} wide at {size}");
+            assert!(
+                ring.radius - line / 2.0 >= 1.0,
+                "a hole {} across at {size}",
+                2.0 * (ring.radius - line / 2.0)
+            );
+            assert!(
+                (ring.radius + line / 2.0 - disc.radius).abs() < 1e-4,
+                "the ring reaches {} and the disc {} at {size}",
+                ring.radius + line / 2.0,
+                disc.radius
+            );
+            assert_eq!(ring.center, disc.center);
+            size += FONT_SIZE_STEP;
+        }
+    }
 
     #[test]
     fn the_bullets_are_three_shapes_of_one_size_that_start_over() {

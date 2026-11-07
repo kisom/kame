@@ -1,6 +1,6 @@
 [package]
 name = "kame-sync"
-version = "0.1.2"
+version = "0.2.0"
 license = "Apache-2.0"
 edition = "2021"
 description = "Proof of concept: merging one person's diverged kame documents. See docs/superpowers/specs/2026-11-03-sync-design.md."

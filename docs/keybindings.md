@@ -502,7 +502,8 @@ with everything that arrives between your own edits as one undo step. Sentences 
 version in the text and the other in a note, after a snapshot. A document with only logs, as on a new machine, is built when opened,
 unless only a newer version of kame can read them, when it isn't opened and the status row says to update kame, or unless they hold only
 changes that build on others that aren't here, when it isn't opened. They may still arrive. If it was moved or deleted on
-another machine they won't: opening it on the machine that made them brings them here, and deleting it removes what's left. Nor is one whose logs hold only lines kame can't use, damaged or
+another machine they won't: opening it on the machine these changes came from, which its log is named for, brings the rest
+here, and deleting it removes what's left. Nor is one whose logs hold only lines kame can't use, damaged or
 in a form it can't check, and if they're damaged, deleting it removes them.
 Two documents of one name merge too, as when two machines each make it from the same link before either's logs reach the other, or
 a document deleted and made again on one machine meets the old one's log. Both keep all their words, and the status row says

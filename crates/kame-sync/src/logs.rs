@@ -788,11 +788,13 @@ pub const NEWER_LOGS: &str =
 
 /// Why a document with only logs, whose revisions all build on others that aren't there, can't be
 /// opened. They may be on the way, or gone for good with a move or a delete on another machine. The
-/// machine that made them still has them, and opening it there writes its history again, so that
-/// comes before deleting it here, which removes what's left.
+/// machine these changes came from, which the log holding them is named for, still has what they
+/// build on, and opening it there writes its history again, so that comes before deleting it here,
+/// which removes what's left.
 pub const WAITING_LOGS: &str = "its logs hold only changes that build on others that aren't here. \
      They may still arrive. If it was moved or deleted on another machine they won't: opening it on \
-     the machine that made them brings them here, and deleting it in kame removes what's left";
+     the machine these changes came from, which its log is named for, brings the rest here, and \
+     deleting it in kame removes what's left";
 
 /// Why a document with only logs, none of whose lines this build can use, can't be opened.
 pub const UNUSABLE_LOGS: &str = "its logs hold no change this version of kame can use, only lines \

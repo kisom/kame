@@ -1277,6 +1277,29 @@ mod tests {
         );
     }
 
+    /// After a failed save the keys for a cut and a link do what the greyed-out rows say:
+    /// nothing. A cut that only copied would seem to have moved the words.
+    #[test]
+    fn after_a_failed_save_the_cut_and_link_keys_are_refused_as_the_menu_is() {
+        let mut page = page();
+        select(&mut page, 0, 0, "Some".len());
+        page.app.session.mark_save_failed("disk full");
+        assert!(!edit_command(&page, "Cut").enabled);
+        assert!(!edit_command(&page, "Link…").enabled);
+
+        page.frame(vec![egui::Event::Cut]);
+        assert_eq!(page.clipboard, "");
+        assert!(page.app.clipped.is_none());
+        assert_eq!(texts(&page), ["Some words."]);
+
+        press(&mut page, egui::Key::K, egui::Modifiers::COMMAND);
+        assert!(page.app.link_prompt.is_none());
+
+        // Copy changes nothing, so it still works.
+        page.frame(vec![egui::Event::Copy]);
+        assert_eq!(page.clipboard, "Some");
+    }
+
     #[test]
     fn the_palette_finds_the_edit_commands_and_runs_them() {
         let (mut page, _, second) = list_page();

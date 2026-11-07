@@ -1694,8 +1694,13 @@ impl Session {
 
     /// What's selected, as [`Session::clipped`] has it, taken out of the document as one step.
     /// Whatever goes with it goes from here, so a block whose words are all cut loses its
-    /// marginal too. `None` when nothing is selected.
+    /// marginal too. `None` when nothing is selected, and in a document that can't be changed
+    /// ([`Session::save_failed`]), where a cut that only copied would leave the words behind
+    /// while seeming to have moved them.
     pub fn cut(&mut self) -> Option<Clipped> {
+        if self.save_failed {
+            return None;
+        }
         let (clipped, taken) = self.clipping()?;
         self.as_one_step(|session| {
             if session.save_failed || !session.delete_selected() {
@@ -9371,6 +9376,21 @@ mod tests {
     fn caret_at(session: &mut Session, index: usize, offset: usize) {
         let block_id = session.document().blocks[index].id;
         session.set_caret(Cursor { block_id, offset });
+    }
+
+    /// A cut that copied and then couldn't take the words out would leave them behind while
+    /// they seemed to have been moved, so in a document that can't be changed, as after a
+    /// failed save or in one from a newer kame, it does nothing at all.
+    #[test]
+    fn a_cut_in_a_document_that_cant_be_changed_takes_nothing() {
+        let mut session = annotated();
+        select(&mut session, (1, 0), (1, 3));
+        session.mark_save_failed("disk full");
+        let before = session.document().clone();
+
+        assert!(session.cut().is_none());
+        assert_eq!(session.document(), &before);
+        assert!(session.clipped().is_some(), "a copy still can");
     }
 
     #[test]

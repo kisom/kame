@@ -7235,6 +7235,10 @@ impl KameApp {
     /// caret when nothing is selected — the mechanism for both adding a link
     /// and editing (or removing) one.
     fn begin_link(&mut self) {
+        // Nothing it set would be kept. The status row says why.
+        if self.session.save_failed {
+            return;
+        }
         let Some((block_id, start, end, current)) = self.session.link_target() else {
             self.notice = Some("select text to link, or place the caret inside a link".into());
             return;

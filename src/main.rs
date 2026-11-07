@@ -602,7 +602,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Ctrl-0", "type back to its usual size"),
     ("Ctrl-Alt +  Ctrl-Alt -", "larger / smaller interface text"),
     ("Ctrl-Alt-0", "interface text back to its usual size"),
-    ("Alt-F/A/V/S/H", "open a menu, on Linux"),
+    ("Alt-F/E/A/V/S/H", "open a menu, on Linux"),
     ("Ctrl-Shift-D", "dark mode"),
     ("F11", "fullscreen"),
     (
@@ -8366,6 +8366,29 @@ mod tests {
             pressed: true,
             repeat: false,
             modifiers,
+        }
+    }
+
+    #[test]
+    fn the_help_names_every_menus_alt_letter() {
+        let (keys, _) = HELP_ROWS
+            .iter()
+            .find(|(_, what)| what.contains("open a menu"))
+            .expect("a help row for the menus' chords");
+        assert_eq!(*keys, "Alt-F/E/A/V/S/H");
+        for (key, letter) in [
+            (egui::Key::F, "F"),
+            (egui::Key::E, "E"),
+            (egui::Key::A, "A"),
+            (egui::Key::V, "V"),
+            (egui::Key::S, "S"),
+            (egui::Key::H, "H"),
+        ] {
+            let mut events = vec![key_event(key, egui::Modifiers::ALT)];
+            assert!(
+                take_menu_chord(&mut events, false).is_some(),
+                "Alt-{letter}"
+            );
         }
     }
 

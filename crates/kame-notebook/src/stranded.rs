@@ -516,7 +516,9 @@ fn homes_of<'a>(revision: &str, logs: &'a [Logs]) -> Vec<&'a Path> {
 }
 
 /// What could be hiding a home for this database: anything that can't be read, or logs with a corrupt
-/// line that could be of its document. A database whose document can't be read could be of any.
+/// line that could be of its document. A database whose document can't be read could be of any. At
+/// its own path that's asked as whether it's stranded asks it, so a log arriving there since that
+/// was asked is judged the same way: one saying nothing of whose it is may be its own, damaged whole.
 ///
 /// Logs whose corrupt line would only change why it's retired don't count: were its revision there,
 /// it would be retired against a database of its document already opened at them, which is the same
@@ -541,6 +543,7 @@ fn what_could_hide_its_home(
         .read
         .iter()
         .filter(|logs| match document {
+            Some(document) if logs.document == path => logs.store.may_hide_its_own(document),
             Some(document) => logs.store.may_hide(document),
             None => logs.store.corrupt_lines(),
         })
@@ -878,5 +881,41 @@ mod tests {
         assert!(!arrive(&gone, &to));
         assert!(wal.is_file());
         assert!(!sqlite_files(&to)[0].exists());
+    }
+
+    fn synced_as(path: &Path, words: &str, device: &str) {
+        let mut session = kame_core::session::Session::open(path).unwrap();
+        session.insert(words);
+        kame_sync::logs::Logged::open(&session, device)
+            .unwrap()
+            .sync(&mut session, 100)
+            .unwrap();
+    }
+
+    /// Found stranded at a path used again for a new document, and then, before its retirement is
+    /// decided, a log arrives at its path saying nothing of whose it is. That may be its own log
+    /// damaged whole, as the verdict would say were it asked again, so it holds the retirement back.
+    #[test]
+    fn a_log_saying_nothing_of_whose_it_is_at_its_own_path_could_hide_its_home() {
+        let root = kame_test_dir::folder("stranded-own-path-veto");
+        std::fs::write(root.join(kame_sync::logs::MARKER), "").unwrap();
+        let (a, made) = (root.join("a.kame"), root.join("made.kame"));
+        synced_as(&a, "Old words.", "titan-bbbb");
+        synced_as(&made, "A different document.", "atlas-aaaa");
+        std::fs::remove_dir_all(log_folder(&a)).unwrap();
+        std::fs::rename(log_folder(&made), log_folder(&a)).unwrap();
+        std::fs::remove_file(&made).unwrap();
+        let revision = last_sync(&a).unwrap().revision;
+        assert!(is_stranded_database(&a));
+        let found = log_folders(std::slice::from_ref(&a));
+        assert_eq!(what_could_hide_its_home(&a, &revision, None, &found), None);
+
+        std::fs::write(log_folder(&a).join("junk-0000.log"), "nonsense\n").unwrap();
+        assert!(!is_stranded_database(&a), "it can't be told now");
+        let found = log_folders(std::slice::from_ref(&a));
+        assert_eq!(
+            what_could_hide_its_home(&a, &revision, None, &found),
+            Some(a.clone())
+        );
     }
 }

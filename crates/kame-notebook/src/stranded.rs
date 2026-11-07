@@ -515,7 +515,8 @@ fn homes_of<'a>(revision: &str, logs: &'a [Logs]) -> Vec<&'a Path> {
 /// Logs whose corrupt line would only change why it's retired don't count: were its revision there,
 /// it would be retired against a database of its document already opened at them, which is the same
 /// rename, and says no more than that it may hold what no log does. A line hiding it never makes it
-/// usable, so that's said either way.
+/// usable, so that's said either way. That holds only for one such folder. Were the revision in two,
+/// it would have two homes and be left alone, so with more than one, each counts.
 fn what_could_hide_its_home(
     path: &Path,
     revision: &str,
@@ -530,21 +531,24 @@ fn what_could_hide_its_home(
         .and_then(|db| db.load_document())
         .ok()
         .map(|document| document.id);
-    logs.read
+    let hiding: Vec<&Logs> = logs
+        .read
         .iter()
         .filter(|logs| match document {
             Some(document) => logs.store.may_hide(document),
             None => logs.store.corrupt_lines(),
         })
-        // Its own logs holding it would mean it isn't stranded, which isn't a retirement either.
-        .find(|hiding| {
-            hiding.document == path
-                || !matches!(
-                    at_home(&hiding.document, revision, contents, &logs.read),
-                    Some(Verdict::Retire { .. })
-                )
-        })
-        .map(|logs| logs.document.clone())
+        .collect();
+    let [only] = hiding[..] else {
+        return hiding.first().map(|logs| logs.document.clone());
+    };
+    // Its own logs holding it would mean it isn't stranded, which isn't a retirement either.
+    let retired_all_the_same = only.document != path
+        && matches!(
+            at_home(&only.document, revision, contents, &logs.read),
+            Some(Verdict::Retire { .. })
+        );
+    (!retired_all_the_same).then(|| only.document.clone())
 }
 
 fn relative_to(root: &Path, path: &Path) -> String {

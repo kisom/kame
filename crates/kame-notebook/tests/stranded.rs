@@ -2200,6 +2200,38 @@ fn a_corrupt_line_at_a_home_already_opened_here_does_not_veto_a_retirement() {
     }
 }
 
+/// Two homes opened here, each with its revision's line damaged, as a hand copy made with its logs
+/// carries the line. Were the revision readable in both, it would have two homes and be left alone,
+/// so being retired against either isn't the same either way, and it waits.
+#[test]
+fn a_corrupt_line_at_two_homes_already_opened_here_still_vetoes() {
+    let (root, nb) = logged_notebook("stranded-corrupt-two-homes");
+    let (a, b, z) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("z.kame"),
+    );
+    synced_with_a_new_block(&a);
+    let revision = Session::open(&a).unwrap().sync_state().unwrap();
+    copy_logs(&a, &z);
+    assert!(build_from_logs(&z).unwrap());
+    damage_line_holding(&z, &revision, false);
+    move_logs(&a, &b);
+    assert!(build_from_logs(&b).unwrap());
+    damage_line_holding(&b, &revision, false);
+
+    let steps = decide(&nb, just(&a));
+    assert_eq!(
+        steps.unsettled(),
+        Some(&Unsettled {
+            waiting: 1,
+            because: "b.kame".to_string()
+        })
+    );
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+}
+
 /// With only logs at the home, the revision being in the damaged line would mean a move, so it
 /// still waits, and says which logs.
 #[test]

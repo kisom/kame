@@ -261,7 +261,8 @@ it's of this document, or none says whose they are), and by any folder or log th
 corrupt line vetoes only where the revision being in it would change what's done: were it there, a database of the document already
 opened at those logs, not stranded and on logs of its own, would retire this one all the same, which is the same rename, so those logs
 don't veto. Logs with no database, or one that's stranded, would mean a move, and one on another document's logs would mean leaving it
-alone, so those still do. A line holding a value no number of its type holds, such as a level of 300, which reading has to fit, is a
+alone, so those still do. That's so only when one folder could hide it: were the revision in two, it would have two homes and be
+left alone, so with more than one, as a hand copy made with its logs carries the line, they all veto. A line holding a value no number of its type holds, such as a level of 300, which reading has to fit, is a
 corrupt line, and is held to the same rule. When
 that stops something that has waited, the person is told once, until there's something new to say: "1 document looks left behind, and
 can't be settled because *relative*'s logs can't all be read" (`Steps::unsettled`). A retirement whose revision is held only in a line that

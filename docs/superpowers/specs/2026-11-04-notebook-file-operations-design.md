@@ -347,7 +347,8 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   there again. Until then, X on A is a document with only logs that can't be opened, rather than an empty one. Nothing is lost, and
   the two are joined by hand. On B, with X closed and no `Y.kame` there, move `X.kame` to `Y.kame`. A database moved by hand without
   its logs syncs with the logs at its new path and merges, as two machines do. Then delete X in kame, which removes its logs on
-  every machine. If B already has a `Y.kame`, move the words across by hand. Telling B's X it's been left behind can't be done
+  every machine. If B already has a `Y.kame`, move the words across by hand. Deleting X on A instead, as its refusal offers,
+  removes B's log too, and B's X is then left behind, and retired with its words in the retired file, as after any delete. Telling B's X it's been left behind can't be done
   safely: B reopening X heals its log before a pass could act, and holding that off would stop a log cut short from healing; a
   Save As copy shares the document id and its checkpoints, so the missing history could be found in a copy; X would be brought
   back to its surviving log and retired again on every pass; and that log is B's live one, which kame on A may not move aside.

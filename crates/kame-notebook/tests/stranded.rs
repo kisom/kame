@@ -3400,7 +3400,9 @@ fn a_partial_folder_after_a_move_waits_and_is_joined_by_hand() {
     );
     assert!(!on_a.exists());
     assert_eq!(words_in_logs(&log_folder(&on_a)), logs);
-    remove_logs(&on_a);
+    // Deleting it in kame, as the refusal says, removes what's left.
+    delete_document(&on_a, Locks::NONE).unwrap();
+    assert!(!on_a.exists() && !log_folder(&on_a).exists());
 
     // A edits at b meanwhile.
     assert!(build_from_logs(&b).unwrap());

@@ -370,7 +370,8 @@ impl KameApp {
     }
 
     /// The Edit menu. What would change the document is greyed out where its key is refused, in
-    /// a document that can't be written, and the rest where it would do nothing: an undo with
+    /// a document that can't be written or while a dialog has the keyboard, and the rest where it
+    /// would do nothing: an undo with
     /// nothing to undo, a cut or copy with nothing selected, a link with nothing to link, and the
     /// list items' commands outside a list. Whether there's anything to paste isn't known without
     /// asking the system, so Paste always can be chosen.
@@ -380,11 +381,19 @@ impl KameApp {
             MenuCommand::new(BarMenu::Edit, label, Some(key), MenuAction::Edit(command))
         };
         let session = &self.session;
-        let refused = session.save_failed.then_some(if session.newer {
-            "This document is read-only until kame is updated."
+        // Why the keys that write are refused now, if they are: the document can't be changed,
+        // or a dialog has the keyboard.
+        let refused = if !session.save_failed {
+            self.dialog_open().then_some("Close the dialog first.")
+        } else if session.newer {
+            Some("This document is read-only until kame is updated.")
+        } else if session.held_elsewhere {
+            Some("Another kame has this file open, so save it under another name first.")
+        } else if session.replaced {
+            Some("This file changed on disk, so save it under another name first.")
         } else {
-            "The last save failed, so retry it first."
-        });
+            Some("The last save failed, so retry it first.")
+        };
         // Those that write: refused as their keys are, or else greyed out unless `can`.
         let writes = |command: MenuCommand, can: bool, why_not: Option<&'static str>| match refused
         {
@@ -1179,6 +1188,93 @@ mod tests {
                 "{label} says why"
             );
         }
+    }
+
+    /// The rows that change the document, those whose keys are refused while a dialog has the
+    /// keyboard.
+    const EDIT_WRITES: [&str; 13] = [
+        "Undo",
+        "Redo",
+        "Cut",
+        "Paste",
+        "Heading 1",
+        "Heading 2",
+        "Heading 3",
+        "Body Text",
+        "Link…",
+        "Move Item Up",
+        "Move Item Down",
+        "Indent Item",
+        "Outdent Item",
+    ];
+
+    /// Under the link prompt, which keeps the words it opened on, an undo from the menu would
+    /// shift them, and setting the link would then write over others. The keys are refused
+    /// there, and so is the menu.
+    #[test]
+    fn while_a_dialog_is_up_what_would_change_the_document_is_greyed_out() {
+        let (mut page, _, _) = list_page();
+        page.app.session.split();
+        page.app.session.insert("More.");
+        select(&mut page, 2, 0, "Se".len());
+        let can = |page: &Headless, label| edit_command(page, label).enabled;
+        // Redo has nothing to redo yet.
+        for label in EDIT_WRITES.iter().filter(|label| **label != "Redo") {
+            assert!(can(&page, label), "{label} can before the dialog");
+        }
+
+        page.app.begin_link();
+        page.frame(Vec::new());
+        assert!(page.app.link_prompt.is_some());
+
+        for label in EDIT_WRITES {
+            let command = edit_command(&page, label);
+            assert!(!command.enabled, "{label} waits for the dialog");
+            assert_eq!(command.why_not, Some("Close the dialog first."), "{label}");
+        }
+        for label in ["Copy", "Select All", "Find"] {
+            assert!(can(&page, label), "{label} changes nothing");
+        }
+        open_menu(&mut page, BarMenu::Edit);
+        let undo = row(&page, BarMenu::Edit, "Undo");
+        assert!(middle_of(&page, &undo).is_some() && !page.can_press(&undo));
+    }
+
+    /// Each greyed-out row says what's actually in the way, and so what to do about it.
+    #[test]
+    fn the_greyed_out_rows_say_why() {
+        let why = |page: &Headless| edit_command(page, "Undo").why_not;
+
+        let mut page = page();
+        page.app.session.mark_save_failed("disk full");
+        assert_eq!(why(&page), Some("The last save failed, so retry it first."));
+
+        let mut page = self::page();
+        page.app.session.mark_newer();
+        assert_eq!(
+            why(&page),
+            Some("This document is read-only until kame is updated.")
+        );
+
+        let mut page = self::page();
+        page.app
+            .session
+            .mark_held_elsewhere("doc.kame is open in another kame".to_string());
+        assert_eq!(
+            why(&page),
+            Some("Another kame has this file open, so save it under another name first.")
+        );
+
+        let mut page = self::page();
+        let path = page.app.session.path().unwrap().to_path_buf();
+        std::fs::rename(&path, path.with_extension("moved")).unwrap();
+        std::fs::write(&path, b"someone else's").unwrap();
+        assert!(page.app.session.check_file());
+        assert!(page.app.session.replaced && !page.app.session.held_elsewhere);
+        assert_eq!(
+            why(&page),
+            Some("This file changed on disk, so save it under another name first.")
+        );
     }
 
     #[test]

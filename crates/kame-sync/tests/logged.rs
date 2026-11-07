@@ -13,7 +13,7 @@ use kame_core::session::Session;
 use kame_core::storage::Db;
 use kame_sync::logs::{
     build_from_logs, device_name, display_device, find_or_build, is_stranded, log_folder,
-    logging_root, orphaned_logs, place_of, Logged, MARKER,
+    logging_root, orphaned_logs, place_of, Logged, MARKER, WAITING_LOGS,
 };
 use kame_sync::revlog::{log_reads_here, Store};
 
@@ -471,6 +471,76 @@ fn nothing_is_built_without_logs_or_a_free_path() {
     std::fs::write(&file, "already here").unwrap();
     assert!(!build_from_logs(&file).unwrap());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "already here");
+}
+
+/// What's left at a document's old name after it was moved on one machine while another edited it:
+/// the other machine's log, whose revisions build on a log that went with the move. Opened, an
+/// empty document would be made there, and its first sync would send it to every machine, so it
+/// isn't built or opened until what it builds on arrives.
+#[test]
+fn a_document_with_only_logs_that_all_wait_on_a_missing_log_is_refused() {
+    let (talos, titan) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    talos.append(&mut session, 0, " Written offline.");
+    titan.logged(&session).sync(&mut session, 2).unwrap();
+    drop(session);
+    let (talos_log, titan_log) = (
+        log_folder(&talos.path).join("talos-aaaa.log"),
+        log_folder(&talos.path).join("titan-bbbb.log"),
+    );
+    assert!(talos_log.is_file() && titan_log.is_file());
+
+    let left = talos.path.with_file_name("left.kame");
+    let folder = log_folder(&left);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::copy(&titan_log, folder.join("titan-bbbb.log")).unwrap();
+    let store = Store::load(&folder).unwrap();
+    assert!(store.revision_count() > 0 && store.heads().is_empty());
+    let before = std::fs::read(folder.join("titan-bbbb.log")).unwrap();
+
+    let err = build_from_logs(&left).unwrap_err().to_string();
+    assert_eq!(err, WAITING_LOGS);
+    assert!(!left.exists());
+    assert!(!left.with_file_name("left.kame.building").exists());
+    assert_eq!(names_in(&folder), ["titan-bbbb.log"]);
+    assert_eq!(
+        std::fs::read(folder.join("titan-bbbb.log")).unwrap(),
+        before
+    );
+    assert_eq!(
+        find_or_build("left", &talos.path).unwrap_err().to_string(),
+        WAITING_LOGS
+    );
+    assert!(!left.exists());
+
+    // What it builds on arriving, it's built.
+    std::fs::copy(&talos_log, folder.join("talos-aaaa.log")).unwrap();
+    assert!(build_from_logs(&left).unwrap());
+    let session = Session::open(&left).unwrap();
+    assert!(session.document().blocks[0]
+        .text
+        .ends_with(" Written offline."));
+}
+
+/// An empty folder holds no document to wait for, and nothing is built, as ever.
+#[test]
+fn a_document_with_only_an_empty_log_folder_builds_nothing_and_is_not_refused() {
+    let (talos, _) = two_machines();
+    let left = talos.path.with_file_name("left.kame");
+    std::fs::create_dir_all(log_folder(&left)).unwrap();
+    assert!(!build_from_logs(&left).unwrap());
+    assert!(!left.exists());
+}
+
+fn names_in(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 #[test]

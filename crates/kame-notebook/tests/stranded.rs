@@ -3323,3 +3323,89 @@ fn a_home_from_a_newer_kame_retires_the_old_database_left_behind() {
     );
     assert_eq!(std::fs::read(&b).unwrap(), home);
 }
+
+/// B edits a offline while A renames it to b. B's own log at a survives the sync tool's delete, so
+/// on A, a is logs that all build on what went with the move, and isn't opened, rather than made
+/// empty. On B it isn't stranded. Moved by hand onto b, where B has no database, B's database merges
+/// with A's later edits there, and every word is kept, as the design says to do.
+#[test]
+fn a_partial_folder_after_a_move_waits_and_is_joined_by_hand() {
+    let (root, nb) = logged_notebook("stranded-partial-folder");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    let other = "ares-aaaa";
+    {
+        let mut session = Session::open(&a).unwrap();
+        session.insert("Words.");
+        Logged::open(&session, other)
+            .unwrap()
+            .sync(&mut session, 100)
+            .unwrap();
+    }
+    {
+        let mut session = Session::open(&a).unwrap();
+        let block = session.document().blocks[0].clone();
+        session.set_caret(kame_core::edit::Cursor {
+            block_id: block.id,
+            offset: block.text.len(),
+        });
+        session.insert(" Offline.");
+        sync(&mut session);
+    }
+    // A renamed a to b before B's edits reached it, and its delete reached its own log at a.
+    std::fs::create_dir_all(log_folder(&b)).unwrap();
+    let a_log = log_folder(&a).join(format!("{other}.log"));
+    std::fs::copy(&a_log, log_folder(&b).join(format!("{other}.log"))).unwrap();
+    std::fs::remove_file(&a_log).unwrap();
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+
+    // On A, the remnant isn't made into an empty document.
+    let on_a = root.join("on-a.kame");
+    copy_logs(&a, &on_a);
+    let logs = words_in_logs(&log_folder(&on_a));
+    assert_eq!(
+        build_from_logs(&on_a).unwrap_err().to_string(),
+        kame_sync::logs::WAITING_LOGS
+    );
+    assert!(!on_a.exists());
+    assert_eq!(words_in_logs(&log_folder(&on_a)), logs);
+    remove_logs(&on_a);
+
+    // A edits at b meanwhile.
+    assert!(build_from_logs(&b).unwrap());
+    {
+        let mut session = Session::open(&b).unwrap();
+        session.set_caret(kame_core::edit::Cursor {
+            block_id: session.document().blocks[0].id,
+            offset: 0,
+        });
+        session.insert("Moved.");
+        session.split();
+        Logged::open(&session, other)
+            .unwrap()
+            .sync(&mut session, 150)
+            .unwrap();
+    }
+    // On B, which has no database at b: a moved there by hand.
+    std::fs::remove_file(&b).unwrap();
+    std::fs::rename(&a, &b).unwrap();
+    let mut session = Session::open(&b).unwrap();
+    let outcome = sync(&mut session);
+    assert!(
+        !outcome.stranded && !outcome.others_logs && !outcome.unplaced,
+        "{outcome:?}"
+    );
+    let notes: Vec<String> = session
+        .document()
+        .annotations
+        .iter()
+        .map(|note| note.body.clone())
+        .collect();
+    drop(session);
+    // The sentence both changed is A's in the text and B's in a note.
+    assert!(outcome.merged && outcome.notes == 1, "{outcome:?}");
+    assert_eq!(text_of(&b), "Moved.\nWords.");
+    assert!(
+        notes.iter().any(|note| note.contains("Words. Offline.")),
+        "{notes:?}"
+    );
+}

@@ -41,9 +41,6 @@ written by one version has to be safe in another.
   side, so a move is undone by a revision written later elsewhere, even one that only edited words, with no note. Nothing is
   lost. A three-way order rule would keep it, but it changes merged bytes between versions, so it's for before 1.0 or not at
   all. See `docs/spec/merging.md`, section 9.
-- [ ] **A partial log folder after a move.** If a machine edits X offline while another renames X to Y, its surviving
-  `.X.kame.sync/` reaches the other as a logs-only X with no usable head. Its X isn't stranded, so its edits never reach Y, and
-  X can come back as an empty document. It's divergence and not loss. See "Accepted limits" in the file operations design.
 
 ### Polish
 

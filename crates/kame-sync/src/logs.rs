@@ -784,6 +784,11 @@ pub const NEWER_LOGS: &str =
     "its logs hold only changes from a newer version of kame, so it can't \
      be opened here until kame is updated";
 
+/// Why a document with only logs, whose revisions all build on others that aren't there, can't be
+/// opened.
+pub const WAITING_LOGS: &str = "its logs hold only changes that build on others that aren't \
+     there, so it can't be opened until they arrive";
+
 /// Builds the database of a document that has logs and no file yet, as on a fresh machine,
 /// returning whether it did. Nothing is written unless the logs hold a whole document. This doesn't
 /// need the folder's marker: without it the document won't sync, and says so, but opening it would
@@ -791,7 +796,11 @@ pub const NEWER_LOGS: &str =
 ///
 /// Logs holding no revision this build can use, and something from a newer version, are refused
 /// with [`NEWER_LOGS`]: the document is all in what this build can't read, and a blank one made at
-/// its name would be taken for it.
+/// its name would be taken for it. Logs whose revisions all build on others that aren't there, as
+/// a log arriving ahead of the one it builds on, or one left at a document's old name after a move,
+/// are refused with [`WAITING_LOGS`] for the same reason: a blank document made there would sync
+/// to every machine. A line that fails its check isn't a revision here, so logs holding only those
+/// build nothing, as ever.
 pub fn build_from_logs(path: &Path) -> Result<bool> {
     if path.exists() {
         return Ok(false);
@@ -802,6 +811,9 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
     let Some(head) = heads.first() else {
         if store.holds_newer() {
             return Err(NEWER_LOGS.into());
+        }
+        if store.revision_count() > 0 {
+            return Err(WAITING_LOGS.into());
         }
         return Ok(false);
     };

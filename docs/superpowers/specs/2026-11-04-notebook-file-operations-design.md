@@ -335,11 +335,19 @@ is dealt with by the pass after it's left. Its edits are then in the database th
 **Accepted limits:**
 
 - A machine that wrote logs offline and reconnects after a delete can leave a partial log folder at the old path, and the
-  document may come back from it. Nothing here tries to tell that apart.
+  document may come back from it: its database there isn't stranded, since its log holds its revision, and nothing here tries to
+  tell that apart. Elsewhere it's a document with only logs. Where every revision in them builds on what was deleted, it isn't
+  opened, and says so, rather than coming back as an empty document (`WAITING_LOGS`).
 - The same goes for a move. If B edits X offline, A renames X to Y and B reconnects, B's `.X.kame.sync/B.log` survives the sync
-  tool's delete and reaches A as a logs-only X with no usable head. B's X isn't stranded, since its own partial log holds its
-  revision, so B's edits never reach Y, and X can come back on A as an empty document. It's divergence and not loss: the words
-  are in B's database and B's log.
+  tool's delete and reaches A as a logs-only X with no usable head. B's X isn't stranded, since its own surviving log holds its
+  revision, so B's edits stay in X: in B's database and B's log, and on every machine once B next opens X and writes its history
+  there again. Until then, X on A is a document with only logs that can't be opened, rather than an empty one. Nothing is lost, and
+  the two are joined by hand. On B, with X closed and no `Y.kame` there, move `X.kame` to `Y.kame`. A database moved by hand without
+  its logs syncs with the logs at its new path and merges, as two machines do. Then delete X in kame, which removes its logs on
+  every machine. If B already has a `Y.kame`, move the words across by hand. Telling B's X it's been left behind can't be done
+  safely: B reopening X heals its log before a pass could act, and holding that off would stop a log cut short from healing; a
+  Save As copy shares the document id and its checkpoints, so the missing history could be found in a copy; X would be brought
+  back to its surviving log and retired again on every pass; and that log is B's live one, which kame on A may not move aside.
 - A database last synced before places were recorded (only builds before 0.1.0, or one built from its logs before the folder's
   `.kame-logs` arrived) whose logs left before a pass saw them isn't known to be stale. It stays listed. Opened, it doesn't sync,
   so it doesn't come back on other machines, and kame says so. Save As gives it logs of its own. A hand copy from before places,

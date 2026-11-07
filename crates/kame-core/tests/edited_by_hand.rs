@@ -101,3 +101,35 @@ fn undoing_a_new_block_that_has_words_it_was_not_made_with_is_refused() {
     assert_eq!(session.document().blocks[1].text, "Typed into it.");
     assert!(session.last_error.is_some(), "the refusal isn't said");
 }
+
+/// As for a block, which fuzzing found as well (seed 1105775): a log missing the step that wrote a
+/// note's words. Undoing the step that added the note took it out, words and all, as nothing was
+/// checked, and redoing it put back the note it added, with none.
+#[test]
+fn undoing_a_new_note_that_has_words_it_was_not_added_with_is_refused() {
+    use kame_core::model::{Anchor, Annotation, AnnotationKind};
+    let path = kame_test_dir::folder("by-hand").join("noted.kame");
+    let mut doc = Document::new("Noted");
+    doc.blocks = vec![paragraph("Some words.")];
+    let added = Annotation {
+        id: Uuid::new_v4(),
+        kind: AnnotationKind::Note,
+        anchor: Anchor::range(doc.blocks[0].id, 0, 4),
+        body: String::new(),
+    };
+    let step = Op::AddAnnotation {
+        annotation: added.clone(),
+    };
+    // The head has the note's words, and the log lost the step that wrote them.
+    doc.annotations.push(Annotation {
+        body: "Written into it.".to_string(),
+        ..added
+    });
+    let mut db = Db::open(&path).unwrap();
+    db.record_edit(&doc, &step).unwrap();
+    drop(db);
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(!session.undo(), "the note was taken out with its words");
+    assert_eq!(session.document().annotations[0].body, "Written into it.");
+}

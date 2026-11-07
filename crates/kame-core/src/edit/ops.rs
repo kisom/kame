@@ -774,7 +774,16 @@ pub fn apply(doc: &mut Document, op: &Op) {
             let annotation = fitted_to(doc, annotation);
             doc.annotations.push(annotation);
         }
+        // Its words are checked, which are what removing it would lose, as a history that lost the
+        // step writing a new note's words would otherwise have its undo take them.
         Op::RemoveAnnotation { annotation } => {
+            assert!(
+                doc.annotations
+                    .iter()
+                    .filter(|existing| existing.id == annotation.id)
+                    .all(|existing| existing.body == annotation.body),
+                "RemoveAnnotation payload body does not match the document"
+            );
             doc.annotations
                 .retain(|existing| existing.id != annotation.id);
         }

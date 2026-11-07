@@ -265,7 +265,7 @@ Metadata isn't part of history. Changing it writes the `metadata` row directly, 
 
 Each row in `ops` is one JSON object with a single key naming the operation. **All text changes must go through an operation**, so that history can always put the document back.
 
-Removals carry what they remove, so that undoing one needs nothing else. `apply` checks `DeleteText.text`, `DeleteText.removed`, `DeleteBlock.annotations`, the id and text of `DeleteBlock.block` and the words of `ReplaceDocument.old`. `RemoveAnnotation` isn't checked, a missing id does nothing, and undo restores what the op carries, so a wrong payload there changes the document silently.
+Removals carry what they remove, so that undoing one needs nothing else. `apply` checks `DeleteText.text`, `DeleteText.removed`, `DeleteBlock.annotations`, the id and text of `DeleteBlock.block`, the words of `ReplaceDocument.old` and the body of `RemoveAnnotation.annotation`. The rest of `RemoveAnnotation` isn't checked, a missing id does nothing, and undo restores what the op carries, so a wrong kind or anchor there changes the document silently.
 
 A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payload, because that would lose notes. An implementation should validate before changing anything. For a new edit, kame panics, so its disk stays as it was, but its memory doesn't, because `DeleteText` checks `removed` after changing the text. Undo and redo run on a copy and refuse the step instead.
 
@@ -323,7 +323,7 @@ A writer must set `clipped` to every range anchor that step 3 changes, in terms 
 
 **`SetSpans`.** Replaces the block's spans. `old_spans` isn't checked, because spans are only formatting and older histories can drift from them.
 
-**`AddAnnotation`.** Appends. **`RemoveAnnotation`.** Removes by `id`.
+**`AddAnnotation`.** Appends. **`RemoveAnnotation`.** Removes by `id`. A note with that id must have the body `annotation` has, so that undoing an `AddAnnotation` under a note that has words it wasn't added with is refused rather than taking them.
 
 **`SetAnnotationBody`.** The annotation must exist and `old_body` must match.
 

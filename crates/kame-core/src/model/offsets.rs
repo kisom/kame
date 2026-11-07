@@ -52,13 +52,16 @@ impl Document {
     /// Makes a document just read from a file fit the rules its readers rely on, for one that's
     /// damaged or hand-made. A document kame wrote comes back unchanged.
     ///
-    /// - A block repeating an earlier block's id is given an id of its own ([`Document::fit_ids`]).
+    /// - A block repeating an earlier block's id is given an id of its own ([`Document::fit_ids`]),
+    ///   and so is an annotation repeating an earlier annotation's
+    ///   ([`Document::fit_annotation_ids`]).
     /// - Spans are as [`Block::fit_spans`] has them.
     /// - An anchor is brought into its block's text and down to character boundaries, and one left
     ///   reversed becomes a point at its start, as a footnote's is. An anchor whose block is gone,
     ///   a whole-block anchor and one that already fits are left as they are.
     pub fn fit(&mut self) {
         self.fit_ids();
+        self.fit_annotation_ids();
         for block in &mut self.blocks {
             block.fit_spans();
         }
@@ -92,26 +95,44 @@ impl Document {
     /// of the same document gives the same, and a block put in or taken out elsewhere, as on
     /// another machine, changes nothing.
     pub fn fit_ids(&mut self) {
-        let mut taken: HashSet<BlockId> = self.blocks.iter().map(|block| block.id).collect();
-        if taken.len() == self.blocks.len() {
-            return;
+        own_ids(self.blocks.iter_mut().map(|block| &mut block.id).collect());
+    }
+
+    /// Gives each annotation that repeats an earlier annotation's id one of its own, as
+    /// [`Document::fit_ids`] does for blocks, so that taking one out, or a merge, which keeps notes
+    /// by id, doesn't take the other with it.
+    pub fn fit_annotation_ids(&mut self) {
+        own_ids(
+            self.annotations
+                .iter_mut()
+                .map(|annotation| &mut annotation.id)
+                .collect(),
+        );
+    }
+}
+
+/// Gives each of `ids` that repeats an earlier one an id of its own, from the old one and which
+/// repeat of it it is, and never one already among them.
+fn own_ids(mut ids: Vec<&mut Uuid>) {
+    let mut taken: HashSet<Uuid> = ids.iter().map(|id| **id).collect();
+    if taken.len() == ids.len() {
+        return;
+    }
+    let mut seen: HashSet<Uuid> = HashSet::with_capacity(ids.len());
+    let mut repeats: HashMap<Uuid, u128> = HashMap::new();
+    for id in ids.iter_mut() {
+        if seen.insert(**id) {
+            continue;
         }
-        let mut seen: HashSet<BlockId> = HashSet::with_capacity(self.blocks.len());
-        let mut repeats: HashMap<BlockId, u128> = HashMap::new();
-        for block in &mut self.blocks {
-            if seen.insert(block.id) {
-                continue;
-            }
-            let repeat = repeats.entry(block.id).or_insert(0);
-            *repeat += 1;
-            let mut id = block.id.as_u128().wrapping_add(*repeat);
-            while taken.contains(&Uuid::from_u128(id)) {
-                id = id.wrapping_add(1);
-            }
-            block.id = Uuid::from_u128(id);
-            taken.insert(block.id);
-            seen.insert(block.id);
+        let repeat = repeats.entry(**id).or_insert(0);
+        *repeat += 1;
+        let mut fresh = id.as_u128().wrapping_add(*repeat);
+        while taken.contains(&Uuid::from_u128(fresh)) {
+            fresh = fresh.wrapping_add(1);
         }
+        **id = Uuid::from_u128(fresh);
+        taken.insert(**id);
+        seen.insert(**id);
     }
 }
 
@@ -291,6 +312,53 @@ mod tests {
             "a block that didn't repeat keeps its id"
         );
         let ids: HashSet<BlockId> = doc.blocks.iter().map(|block| block.id).collect();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn a_note_repeating_an_id_gets_its_own_the_same_way_each_time() {
+        let mut doc = document("Café au lait");
+        let block = doc.blocks[0].id;
+        let first = note(block, 0, 4);
+        let mut twin = note(block, 5, 7);
+        twin.id = first.id;
+        twin.kind = AnnotationKind::Footnote;
+        let mut third = twin.clone();
+        third.body = "a third".to_string();
+        doc.annotations = vec![first.clone(), twin, third];
+        let mut again = doc.clone();
+        doc.fit();
+        again.fit();
+
+        assert_eq!(doc, again);
+        let ids: Vec<Uuid> = doc.annotations.iter().map(|note| note.id).collect();
+        assert_eq!(ids[0], first.id, "the first keeps its id");
+        assert!(ids[1] != first.id && ids[2] != first.id && ids[1] != ids[2]);
+        let bodies: Vec<&str> = doc
+            .annotations
+            .iter()
+            .map(|note| note.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["a note", "a note", "a third"]);
+    }
+
+    #[test]
+    fn a_notes_new_id_is_never_another_notes() {
+        let mut doc = document("Café au lait");
+        let block = doc.blocks[0].id;
+        let first = note(block, 0, 4);
+        let mut twin = note(block, 5, 7);
+        twin.id = first.id;
+        // Where the repeat would go first.
+        let mut next = note(block, 0, 0);
+        next.id = Uuid::from_u128(first.id.as_u128().wrapping_add(1));
+        doc.annotations = vec![first, twin, next.clone()];
+        doc.fit();
+        assert_eq!(
+            doc.annotations[2].id, next.id,
+            "a note that didn't repeat keeps its id"
+        );
+        let ids: HashSet<Uuid> = doc.annotations.iter().map(|note| note.id).collect();
         assert_eq!(ids.len(), 3);
     }
 

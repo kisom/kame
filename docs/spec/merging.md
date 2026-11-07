@@ -97,7 +97,7 @@ Each source text gets a map of `(source range, merged range, fate)` for its non-
 
 ## 4. Merging documents
 
-`merge(base, one, other)` takes an optional base, the latest version both descend from, and two sides, each a document, a `label` for notes and a `when`.
+`merge(base, one, other)` takes an optional base, the latest version both descend from, and two sides, each a document, a `label` for notes and a `when`. Each is first fitted as a document read from a file is ([format, section 2.1](document-format.md)), so its offsets fit its text, and no two of its blocks, nor two of its annotations, share an id.
 
 **Shortcuts.** If the two sides have the same digest, return one. If the base has the same digest as one side, return the other. No notes are added.
 

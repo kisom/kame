@@ -434,6 +434,52 @@ fn a_note_on_a_block_only_the_other_side_kept_takes_that_sides_place() {
     );
 }
 
+/// Fuzzing found this (`fuzz_logs.rs`, damaged merges, seed 514). Two notes sharing an id, as a
+/// damaged file can hold, were matched by id, so a merge kept one of them and lost the other.
+#[test]
+fn notes_sharing_an_id_both_come_through_a_merge() {
+    let mut one = document(vec![block(1, "Both share this one."), block(2, "Mine.")]);
+    let note = |kind, anchor, body: &str| kame_core::model::Annotation {
+        id: Uuid::from_u128(50),
+        kind,
+        anchor,
+        body: body.to_string(),
+    };
+    one.annotations = vec![
+        note(
+            AnnotationKind::Footnote,
+            Anchor::range(Uuid::from_u128(1), 5, 10),
+            "A footnote that travels.",
+        ),
+        note(
+            AnnotationKind::Marginal,
+            Anchor::block(Uuid::from_u128(1)),
+            "A marginal that travels.",
+        ),
+    ];
+    let mut other = one.clone();
+    other.blocks[1].text = "Yours.".to_string();
+
+    let result = merge(
+        None,
+        Side {
+            doc: &one,
+            label: "a",
+            when: 2,
+        },
+        Side {
+            doc: &other,
+            label: "b",
+            when: 1,
+        },
+    );
+
+    check_valid(&result.doc);
+    let words = all_words(&result.doc);
+    assert!(words.contains("A footnote that travels."), "{words}");
+    assert!(words.contains("A marginal that travels."), "{words}");
+}
+
 #[test]
 fn formatting_follows_and_removal_sticks() {
     let mut base = document(vec![block(1, "One bold word. Second one plain.")]);

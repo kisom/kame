@@ -465,3 +465,37 @@ fn redoing_damaged_formatting_gives_what_fits() {
 
     assert_eq!(spans_of(session.document())[0], [(0, 3)]);
 }
+
+/// Two notes sharing an id, as a damaged file can hold. Taking one out took the other with it, and
+/// undoing that gave back only one.
+#[test]
+fn taking_out_one_of_two_notes_that_shared_an_id_leaves_the_other() {
+    let path = file("repeated-note");
+    let mut doc = Document::new("Damaged");
+    doc.blocks = vec![paragraph(CAFE, Vec::new())];
+    let first = annotation(AnnotationKind::Note, &doc.blocks[0], 0, 4);
+    let twin = Annotation {
+        body: "the other note".to_string(),
+        ..annotation(AnnotationKind::Footnote, &doc.blocks[0], 7, 7)
+    };
+    doc.annotations = vec![
+        first.clone(),
+        Annotation {
+            id: first.id,
+            ..twin
+        },
+    ];
+    write(&path, &doc);
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(session.remove_annotation(first.id));
+    let bodies: Vec<&str> = session
+        .document()
+        .annotations
+        .iter()
+        .map(|note| note.body.as_str())
+        .collect();
+    assert_eq!(bodies, ["the other note"]);
+    assert!(session.undo());
+    assert_eq!(session.document().annotations.len(), 2);
+}

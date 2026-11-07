@@ -409,7 +409,7 @@ pub(crate) fn versions_in_logs(path: &Path) -> InLogs {
 /// A closed document, ready to change: built from its logs if it has only those, and with those
 /// logs if it's logged. This says no before anything has changed if a change couldn't reach them.
 fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>), String> {
-    build_from_logs(path).map_err(|err| format!("could not build it from its logs: {err}"))?;
+    build_from_logs(path).map_err(|err| format!("could not build it: {err}"))?;
     if !path.exists() {
         return Err("it's no longer there".to_string());
     }

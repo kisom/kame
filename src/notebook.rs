@@ -944,7 +944,7 @@ impl KameApp {
             Follow::Open(found) => {
                 if let Err(err) = kame_sync::logs::build_from_logs(&found) {
                     self.session.last_error =
-                        Some(format!("could not build {} — {err}", found.display()));
+                        Some(format!("could not open {} — {err}", found.display()));
                     return Some(None);
                 }
                 Some(Some(found))

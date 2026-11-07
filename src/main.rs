@@ -6727,10 +6727,7 @@ impl KameApp {
         self.save_position_now();
         self.sync_logs();
         if let Err(err) = kame_sync::logs::build_from_logs(&path) {
-            self.session.last_error = Some(format!(
-                "could not build {} from its logs — {err}",
-                path.display()
-            ));
+            self.session.last_error = Some(format!("could not open {} — {err}", path.display()));
             return;
         }
         match Session::open_any(&path) {

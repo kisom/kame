@@ -292,11 +292,15 @@ pub fn merge_copy_into(session: &mut Session, copy: &Path) -> Result<MergedIn> {
 /// that file with the merge as its last undo step. `old` still has the words if this fails, and
 /// it is for the caller to drop it.
 ///
-/// A view of a newer version's document ([`Session::lossy`]) isn't merged: it leaves out what this
-/// build doesn't know, which the merge would then take out of the file.
+/// A newer version's document ([`Session::newer`]) isn't merged, as it isn't with a conflict copy:
+/// what's on the screen leaves out or fits what this build doesn't know, which the merge would then
+/// write into the file. Nothing can have been typed into it, so refusing loses nothing.
 pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
-    if old.lossy {
-        return Err("this document has changes from a newer version of kame".into());
+    if old.newer {
+        return Err(
+            "this document was written by a newer version of kame; update kame to merge the              file there now into it"
+                .into(),
+        );
     }
     let path = old.path().ok_or("this document has no file")?.to_path_buf();
     // Opening a missing path would create a document there.

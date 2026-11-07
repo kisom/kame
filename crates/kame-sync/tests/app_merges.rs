@@ -212,6 +212,34 @@ fn a_view_of_a_newer_document_is_not_merged_with_the_file_that_replaced_it() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
+/// A document holding a depth only a newer kame writes reads whole, so it isn't a view, but it's
+/// shown fitted, and a merge would write the fitted depth into the file that replaced it.
+#[test]
+fn a_newer_document_that_reads_whole_is_not_merged_with_the_file_that_replaced_it() {
+    use kame_core::model::BlockKind;
+    let (path, other) = with_copy();
+    edit_file(&other, 1, 1, " grand");
+    // As a newer kame would write it: this build's model holds the depth, and never writes one.
+    let mut doc = Session::open(&path).unwrap().document().clone();
+    doc.blocks[0].kind = BlockKind::ListItem {
+        ordered: false,
+        depth: 7,
+    };
+    kame_core::storage::Db::open(&path)
+        .unwrap()
+        .save_document(&doc)
+        .unwrap();
+    let old = Session::open(&path).unwrap();
+    assert!(old.newer && !old.lossy);
+    std::fs::rename(&other, &path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let refused = merge_replaced(&old).map(|_| ()).unwrap_err().to_string();
+
+    assert!(refused.contains("newer version of kame"), "{refused}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 #[test]
 fn a_file_gone_altogether_cannot_be_merged_with() {
     let (path, _) = with_copy();

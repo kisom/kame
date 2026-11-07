@@ -2104,6 +2104,136 @@ fn a_corrupt_line_beside_this_documents_lines_vetoes_its_retirement() {
     assert!(a.is_file());
 }
 
+/// Damages the line in a document's logs that holds a revision: as a line that doesn't parse, or as
+/// one holding a level no level can be, which reading has to fit. Either is a corrupt line.
+fn damage_line_holding(path: &Path, revision: &str, fitted: bool) {
+    let mut damaged = 0;
+    for entry in std::fs::read_dir(log_folder(path)).unwrap().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        let changed: String = text
+            .lines()
+            .map(|line| {
+                if !line.starts_with(&format!("{{\"id\":\"{revision}\"")) {
+                    return format!("{line}\n");
+                }
+                damaged += 1;
+                if fitted {
+                    let wrong = line.replace(
+                        r#""kind":"Paragraph""#,
+                        r#""kind":{"Heading":{"level":300}}"#,
+                    );
+                    assert_ne!(wrong, line);
+                    format!("{wrong}\n")
+                } else {
+                    "nonsense\n".to_string()
+                }
+            })
+            .collect();
+        std::fs::write(entry.path(), changed).unwrap();
+    }
+    assert_eq!(damaged, 1);
+    let store = Store::load(&log_folder(path)).unwrap();
+    assert!(store.corrupt_lines() && !store.could_hold(revision) && !store.holds_newer());
+}
+
+/// Synced twice, so that the line holding its revision holds a block of its own as well.
+fn synced_with_a_new_block(path: &Path) {
+    synced(path, "Words.");
+    let mut session = Session::open(path).unwrap();
+    session.split();
+    session.insert("More.");
+    sync(&mut session);
+}
+
+/// Moved, and opened at its new home, where the line holding its revision is damaged. Were the
+/// revision in that line, it would be retired against that home's database, and without it it's
+/// retired as having no home: the same rename either way, so the line doesn't hold it back.
+#[test]
+fn a_corrupt_line_at_a_home_already_opened_here_does_not_veto_a_retirement() {
+    for fitted in [false, true] {
+        let (root, nb) = logged_notebook(&format!("stranded-corrupt-opened-home-{fitted}"));
+        let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+        synced_with_a_new_block(&a);
+        let revision = Session::open(&a).unwrap().sync_state().unwrap();
+        move_logs(&a, &b);
+        assert!(build_from_logs(&b).unwrap());
+        damage_line_holding(&b, &revision, fitted);
+        let logs = words_in_logs(&log_folder(&b));
+
+        let steps = decide(&nb, just(&a));
+        assert_eq!(steps.unsettled(), None, "fitted: {fitted}");
+        let retired = root.join(".a.retired.kame");
+        assert_eq!(
+            apply(&nb, steps, None, Locks::NONE),
+            [Done::Retired {
+                from: a.clone(),
+                to: retired.clone(),
+                opened_there: false,
+                unsynced: true,
+            }],
+            "fitted: {fitted}"
+        );
+        assert!(text_of(&retired).contains("Words."));
+        assert!(b.is_file());
+        // Nothing in any log changed, and the next pass leaves it retired.
+        assert!(reconcile(&nb, &[], None, Locks::NONE).is_empty());
+        assert!(retired.is_file() && !a.exists());
+        assert_eq!(words_in_logs(&log_folder(&b)), logs);
+    }
+}
+
+/// With only logs at the home, the revision being in the damaged line would mean a move, so it
+/// still waits, and says which logs.
+#[test]
+fn a_corrupt_line_at_a_logs_only_home_still_vetoes() {
+    for fitted in [false, true] {
+        let (root, nb) = logged_notebook(&format!("stranded-corrupt-logs-only-home-{fitted}"));
+        let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+        synced_with_a_new_block(&a);
+        let revision = Session::open(&a).unwrap().sync_state().unwrap();
+        move_logs(&a, &b);
+        damage_line_holding(&b, &revision, fitted);
+
+        let steps = decide(&nb, just(&a));
+        assert_eq!(
+            steps.unsettled(),
+            Some(&Unsettled {
+                waiting: 1,
+                because: "b.kame".to_string()
+            }),
+            "fitted: {fitted}"
+        );
+        assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
+        assert!(a.is_file() && !b.exists());
+    }
+}
+
+/// The database at the home is another document's, on these logs, so with the revision there it
+/// would be left alone, and that isn't a retirement.
+#[test]
+fn a_corrupt_line_at_a_home_on_another_documents_logs_still_vetoes() {
+    let (root, nb) = logged_notebook("stranded-corrupt-others-home");
+    let (a, b) = (root.join("a.kame"), root.join("b.kame"));
+    synced(&a, "Words.");
+    let revision = Session::open(&a).unwrap().sync_state().unwrap();
+    synced(&b, "Other words.");
+    remove_logs(&b);
+    move_logs(&a, &b);
+    damage_line_holding(&b, &revision, false);
+
+    let steps = decide(&nb, just(&a));
+    assert_eq!(
+        steps.unsettled(),
+        Some(&Unsettled {
+            waiting: 1,
+            because: "b.kame".to_string()
+        })
+    );
+    assert!(apply(&nb, steps, None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+    assert!(text_of(&b).contains("Other words."));
+}
+
 /// What's beside the corrupt line is another document, so it can't be hiding this one's revision.
 #[test]
 fn a_corrupt_line_in_another_documents_logs_does_not_veto_a_retirement() {

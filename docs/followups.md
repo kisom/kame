@@ -37,8 +37,6 @@ written by one version has to be safe in another.
 
 - [ ] **A stretch of daily writing with no lost words,** on two machines at different versions, with sync on. How long is
   still to agree.
-- [ ] **A corrupt log line stays for good.** Logs are only added to, so a line that doesn't parse, and isn't torn, stays until it's
-  removed by hand. Until then a document it could belong to can't be retired as having no home. A notice says which logs.
 - [ ] **A stale database from before places were recorded,** whose logs left before a pass first saw it, has no place, so it isn't
   recognised as stale until it's next synced, and opening one on another machine after a delete can bring the document back, as it
   did before. A pass stamps every other one.

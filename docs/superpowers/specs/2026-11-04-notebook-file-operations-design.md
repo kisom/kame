@@ -246,7 +246,12 @@ there. Nor does one whose file can't be read. With no file at all, the logs are 
 A pass needs every log only to rule out a home, which matters only for retiring a database as having no home. A move, a retirement
 because the document has already been opened at its home, and a return have found their home, so they go ahead whatever else can't be
 read. A no-home retirement is vetoed by a corrupt line in logs that could be of its document (`Store::may_hide`: a line there says
-it's of this document, or none says whose they are), and by any folder or log that can't be read or holds lines from a newer kame. When
+it's of this document, or none says whose they are), and by any folder or log that can't be read or holds lines from a newer kame. A
+corrupt line vetoes only where the revision being in it would change what's done: were it there, a database of the document already
+opened at those logs, not stranded and on logs of its own, would retire this one all the same, which is the same rename, so those logs
+don't veto. Logs with no database, or one that's stranded, would mean a move, and one on another document's logs would mean leaving it
+alone, so those still do. A line holding a value no number of its type holds, such as a level of 300, which reading has to fit, is a
+corrupt line, and is held to the same rule. When
 that stops something that has waited, the person is told once, until there's something new to say: "1 document looks left behind, and
 can't be settled because *relative*'s logs can't all be read" (`Steps::unsettled`). A retirement whose revision is held only in a line that
 fails its check is reported as `unsynced`, as what it holds can't be compared.
@@ -344,8 +349,11 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   words, and the app says it merged with another document of this name.
 - A Save As copy shares its original's document id, so a hand copy of one, put on the other's logs, isn't told from its own and
   merges with them.
-- A corrupt line that could be a document's stays until it's removed by hand, as logs are only added to, and until then that document
-  can't be retired as having no home. The notice says which logs.
+- A corrupt line that could be a document's stays until it's removed by hand, as logs are only added to. Where it's at logs with no
+  database here, the document's revision being in it would mean a move, and a retirement and a move are both guesses: a Save As copy
+  shares the document id, so a line naming the document doesn't prove those logs are its home. So that document isn't retired as having
+  no home until the home is opened on this machine, when the rule above lets it go, or until the line is removed by hand. The notice
+  says which logs.
 - Deliberately deleting a document's `.sync` folder while keeping the marker now retires its database. The docs only ever
   told people to remove both.
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a

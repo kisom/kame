@@ -511,7 +511,17 @@ fn homes_of<'a>(revision: &str, logs: &'a [Logs]) -> Vec<&'a Path> {
 
 /// What could be hiding a home for this database: anything that can't be read, or logs with a corrupt
 /// line that could be of its document. A database whose document can't be read could be of any.
-fn what_could_hide_its_home(path: &Path, logs: &AllLogs) -> Option<PathBuf> {
+///
+/// Logs whose corrupt line would only change why it's retired don't count: were its revision there,
+/// it would be retired against a database of its document already opened at them, which is the same
+/// rename, and says no more than that it may hold what no log does. A line hiding it never makes it
+/// usable, so that's said either way.
+fn what_could_hide_its_home(
+    path: &Path,
+    revision: &str,
+    contents: Option<&Contents>,
+    logs: &AllLogs,
+) -> Option<PathBuf> {
     if let Some(first) = logs.cannot_read.first() {
         return Some(first.clone());
     }
@@ -522,9 +532,17 @@ fn what_could_hide_its_home(path: &Path, logs: &AllLogs) -> Option<PathBuf> {
         .map(|document| document.id);
     logs.read
         .iter()
-        .find(|logs| match document {
+        .filter(|logs| match document {
             Some(document) => logs.store.may_hide(document),
             None => logs.store.corrupt_lines(),
+        })
+        // Its own logs holding it would mean it isn't stranded, which isn't a retirement either.
+        .find(|hiding| {
+            hiding.document == path
+                || !matches!(
+                    at_home(&hiding.document, revision, contents, &logs.read),
+                    Some(Verdict::Retire { .. })
+                )
         })
         .map(|logs| logs.document.clone())
 }
@@ -555,17 +573,31 @@ fn what_to_do(
     let home = match homes[..] {
         [] => {
             // Having no home has to be sure, or a retirement would be a guess.
-            return Some(match what_could_hide_its_home(path, all) {
-                Some(because) => Verdict::CantRuleOutAHome { because },
-                None => Verdict::Retire {
-                    opened_there: false,
-                    unsynced: true,
+            return Some(
+                match what_could_hide_its_home(path, revision, contents, all) {
+                    Some(because) => Verdict::CantRuleOutAHome { because },
+                    None => Verdict::Retire {
+                        opened_there: false,
+                        unsynced: true,
+                    },
                 },
-            });
+            );
         }
         [home] if home != path => home,
         _ => return None,
     };
+    at_home(home, revision, contents, logs)
+}
+
+/// What's to be done with a stranded database whose revision is in the logs at `home`, another
+/// path than its own: moved there if nothing's there, or a database that's leaving too is, retired
+/// if its document has been opened there, and otherwise left alone.
+fn at_home(
+    home: &Path,
+    revision: &str,
+    contents: Option<&Contents>,
+    logs: &[Logs],
+) -> Option<Verdict> {
     let moves_in = Verdict::Move {
         home: home.to_path_buf(),
     };

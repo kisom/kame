@@ -442,7 +442,7 @@ beside where it was (`.X.retired-2.kame` if that's taken), and a notice says whe
 start with a dot, so the browser doesn't show them. `ls -a` finds them, and File > Open Path opens one. A database open in this window or
 another kame window is left until it has been closed. One written by a newer version of kame is left as it is, for an updated kame.
 
-If a log that could be its home can't all be read, a document with nowhere to go isn't retired, and a notice says which logs are in the way.
+If a log that could be its home can't all be read, and it would go there rather than be retired, a document with nowhere to go isn't retired, and a notice says which logs are in the way.
 
 A copy made by hand or in Finder is a document of its own. It starts logs of its own when it's opened, and nothing retires it, since a database
 only counts as left behind at the place it last synced. The exception is a copy put at the path of a document with logs, or at the same path in

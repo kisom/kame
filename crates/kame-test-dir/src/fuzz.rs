@@ -232,6 +232,45 @@ pub fn random_bytes(random: &mut Random, most: usize) -> Vec<u8> {
         .collect()
 }
 
+/// Whether `text` starts with a UUID, written as kame writes one: lowercase and hyphenated.
+fn starts_with_uuid(text: &[u8]) -> bool {
+    text.len() >= 36
+        && text[..36].iter().enumerate().all(|(at, byte)| match at {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
+        })
+}
+
+/// `text` with each UUID in it replaced by one that depends only on the order the UUIDs come in,
+/// across every call with the same `seen`, so that what kame's commands made with random ids is
+/// the same input in every run. `seen` holds each UUID met so far, the first being the first.
+pub fn fixed_ids(text: &str, seen: &mut Vec<String>) -> String {
+    let bytes = text.as_bytes();
+    let mut fixed = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut copied = 0;
+    while at < bytes.len() {
+        if starts_with_uuid(&bytes[at..]) {
+            let id = &text[at..at + 36];
+            let index = match seen.iter().position(|known| known == id) {
+                Some(index) => index,
+                None => {
+                    seen.push(id.to_string());
+                    seen.len() - 1
+                }
+            };
+            fixed.push_str(&text[copied..at]);
+            fixed.push_str(&format!("00000000-0000-4000-8000-{:012x}", index + 1));
+            at += 36;
+            copied = at;
+        } else {
+            at += 1;
+        }
+    }
+    fixed.push_str(&text[copied..]);
+    fixed
+}
+
 /// Where each value in `value` is, as a JSON pointer, the whole first.
 pub fn pointers(value: &Value) -> Vec<String> {
     fn walk(value: &Value, at: String, found: &mut Vec<String>) {
@@ -544,6 +583,21 @@ mod tests {
             let again = damaged_json(&mut Random::new(seed), json, &donor, 3);
             assert_eq!(one, again);
         }
+    }
+
+    #[test]
+    fn fixed_ids_depend_only_on_their_order() {
+        let mut seen = Vec::new();
+        let one = fixed_ids(
+            r#"["7d3c0b5e-1f2a-4b6c-9d8e-0a1b2c3d4e5f","é","f0e1d2c3-b4a5-4968-8776-655443322110","7d3c0b5e-1f2a-4b6c-9d8e-0a1b2c3d4e5f"]"#,
+            &mut seen,
+        );
+        assert_eq!(
+            one,
+            r#"["00000000-0000-4000-8000-000000000001","é","00000000-0000-4000-8000-000000000002","00000000-0000-4000-8000-000000000001"]"#
+        );
+        let two = fixed_ids("f0e1d2c3-b4a5-4968-8776-655443322110 and more", &mut seen);
+        assert_eq!(two, "00000000-0000-4000-8000-000000000002 and more");
     }
 
     #[test]

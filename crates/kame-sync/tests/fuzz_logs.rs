@@ -20,6 +20,7 @@ use kame_sync::merge::{merge, Side};
 use kame_sync::revlog::{Revision, Store};
 use kame_test_dir::fuzz::{self, damage_bytes, damage_json, Random};
 use serde_json::Value;
+use uuid::Uuid;
 
 const READER: &str = "reader-cccc";
 
@@ -484,6 +485,12 @@ fn edited(random: &mut Random, doc: &Document, tag: &str) -> Document {
     if doc.blocks.is_empty() {
         return doc;
     }
+    let before: HashSet<Uuid> = doc
+        .blocks
+        .iter()
+        .map(|block| block.id)
+        .chain(doc.annotations.iter().map(|note| note.id))
+        .collect();
     let mut session = Session::anonymous().unwrap();
     session.editor = Editor::new(doc);
     for edit in 0..random.below(6) {
@@ -533,7 +540,26 @@ fn edited(random: &mut Random, doc: &Document, tag: &str) -> Document {
             }
         }
     }
-    session.document().clone()
+    with_ids_from(random, session.document(), &before)
+}
+
+/// `doc` with each block and note id that `before` doesn't have, which kame's commands made at
+/// random, taken from `random` instead, in the order they come in, so that a seed gives the same
+/// input in every run.
+fn with_ids_from(random: &mut Random, doc: &Document, before: &HashSet<Uuid>) -> Document {
+    let made: Vec<Uuid> = doc
+        .blocks
+        .iter()
+        .map(|block| block.id)
+        .chain(doc.annotations.iter().map(|note| note.id))
+        .filter(|id| !before.contains(id))
+        .collect();
+    let mut json = serde_json::to_string(doc).unwrap();
+    for id in made {
+        let fixed = Uuid::from_u64_pair(random.next_u64(), random.next_u64());
+        json = json.replace(&id.to_string(), &fixed.to_string());
+    }
+    serde_json::from_str(&json).unwrap()
 }
 
 fn merge_one(seed: u64) {

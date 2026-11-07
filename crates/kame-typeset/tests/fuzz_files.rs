@@ -130,7 +130,55 @@ fn built() -> PathBuf {
     session.undo();
     assert!(session.last_error.is_none(), "{:?}", session.last_error);
     drop(session);
+    fix_ids_and_times(&path);
     path
+}
+
+/// Gives what kame's commands made with random ids, and the clock, the same ids and times in every
+/// run, so that a seed gives the same input wherever it runs.
+fn fix_ids_and_times(path: &Path) {
+    let connection = Connection::open(path).unwrap();
+    let mut seen = Vec::new();
+    for (table, key, column) in [
+        ("documents", "id", "json"),
+        ("ops", "seq", "json"),
+        ("snapshots", "id", "json"),
+        ("metadata", "id", "json"),
+        ("meta", "key", "value"),
+    ] {
+        let rows: Vec<(String, String)> = connection
+            .prepare(&format!(
+                "SELECT CAST({key} AS TEXT), {column} FROM {table} ORDER BY {key}"
+            ))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .flatten()
+            .collect();
+        for (row, text) in rows {
+            let fixed = kame_test_dir::fuzz::fixed_ids(&text, &mut seen);
+            connection
+                .execute(
+                    &format!("UPDATE {table} SET {column} = ?1 WHERE CAST({key} AS TEXT) = ?2"),
+                    params![fixed, row],
+                )
+                .unwrap();
+        }
+    }
+    connection
+        .execute("UPDATE snapshots SET timestamp = 1790000000", [])
+        .unwrap();
+    let metadata: String = connection
+        .query_row("SELECT json FROM metadata", [], |row| row.get(0))
+        .unwrap();
+    let mut metadata: Value = serde_json::from_str(&metadata).unwrap();
+    metadata["created"] = Value::from("2026-11-06");
+    connection
+        .execute(
+            "UPDATE metadata SET json = ?1",
+            [serde_json::to_string(&metadata).unwrap()],
+        )
+        .unwrap();
 }
 
 /// A stored value as bytes, whatever type SQLite holds it as.

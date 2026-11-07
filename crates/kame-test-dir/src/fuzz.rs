@@ -18,7 +18,8 @@
 //! a destructor while a failure unwinds does, is printed the same way as the abort comes. A run that
 //! passes ends by counting the panics it caught, one line for each place they were, so that a new
 //! one shows without the noise coming back. Other threads' panics are printed as ever, and the hook
-//! before is put back when the last long run ends.
+//! before is put back when the last long run ends, unless it ends in a panic, when a hook can't be
+//! set and the one left behind only hands panics on ([`Quiet`]).
 
 use std::backtrace::{Backtrace, BacktraceStatus};
 use std::cell::RefCell;

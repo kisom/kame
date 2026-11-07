@@ -406,6 +406,7 @@ fn a_move_in_either_copy_stands_beside_words_added_in_the_other() {
         offset: 0,
     });
     assert!(session.move_list_item(true));
-    merge_copy_into(&mut session, &copy).unwrap();
+    let merged = merge_copy_into(&mut session, &copy).unwrap();
+    assert_eq!(merged.notes, 0);
     assert_eq!(texts(&session), ["b", "a", "c", "After all."]);
 }

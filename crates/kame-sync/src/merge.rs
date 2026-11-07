@@ -306,8 +306,9 @@ fn merged_spans(base: Option<&Block>, ours: &Block, theirs: &Block, text: &Merge
 
 /// The order of the side that changed the order of the blocks all three have, or ours if neither
 /// did or both did, with what only the other side has put after whatever it followed there. Moving
-/// list items is the only edit that changes that order, so a move stands beside the other side's
-/// edits whichever was later.
+/// list items is the editing command that does, so a move stands beside the other side's edits
+/// whichever was later. (Undoing a merge or restoring a snapshot can reorder too, and counts the
+/// same: merging.md section 9.)
 fn merged_order(
     base: &Document,
     ours: &Document,
@@ -529,11 +530,31 @@ pub(crate) mod as_0_2_0 {
         PLAYING.with(Cell::get)
     }
 
+    /// Puts back what the flag was, when `run` ends or unwinds.
+    struct Restore(bool);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PLAYING.with(|p| p.set(self.0));
+        }
+    }
+
     /// Runs `f` merging as 0.2.0 does.
     pub(crate) fn run<T>(f: impl FnOnce() -> T) -> T {
-        PLAYING.with(|p| p.set(true));
-        let out = f();
-        PLAYING.with(|p| p.set(false));
-        out
+        let _restore = Restore(PLAYING.with(|p| p.replace(true)));
+        f()
+    }
+
+    #[test]
+    fn the_old_rule_ends_with_the_call_even_when_it_panics_or_nests() {
+        assert!(!playing());
+        run(|| {
+            run(|| assert!(playing()));
+            assert!(playing(), "the outer call is still playing 0.2.0");
+        });
+        assert!(!playing());
+        let result = std::panic::catch_unwind(|| run(|| panic!("a refusal")));
+        assert!(result.is_err());
+        assert!(!playing(), "a panic leaves the new rule on");
     }
 }

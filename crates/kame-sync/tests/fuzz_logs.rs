@@ -527,7 +527,7 @@ fn edited(random: &mut Random, doc: &Document, tag: &str) -> Document {
         }
         let block_id = session.document().blocks[block].id;
         session.set_caret(Cursor { block_id, offset });
-        match random.below(6) {
+        match random.below(8) {
             0 | 1 => {
                 session.insert(&format!(" zq{tag}{edit}q "));
             }
@@ -557,9 +557,36 @@ fn edited(random: &mut Random, doc: &Document, tag: &str) -> Document {
                     },
                 );
             }
-            _ => {
+            5 => {
                 if let Some(note) = session.add_annotation(AnnotationKind::Note) {
                     session.set_annotation_body(note, &format!("zn{tag}{edit}q"));
+                }
+            }
+            6 => {
+                let kind = BlockKind::ListItem {
+                    ordered: false,
+                    depth: random.below(2) as u8,
+                };
+                session.set_block_kind(block_id, kind);
+            }
+            _ => {
+                // The editor's own move, of an item and what's nested under it.
+                let items: Vec<usize> = (0..count)
+                    .filter(|at| {
+                        matches!(
+                            session.document().blocks[*at].kind,
+                            BlockKind::ListItem { .. }
+                        )
+                    })
+                    .collect();
+                if !items.is_empty() {
+                    let item = items[random.below(items.len())];
+                    let block_id = session.document().blocks[item].id;
+                    session.set_caret(Cursor {
+                        block_id,
+                        offset: 0,
+                    });
+                    session.move_list_item(random.one_in(2));
                 }
             }
         }

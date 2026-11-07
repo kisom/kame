@@ -363,6 +363,32 @@ fn a_move_on_the_earlier_side_stands_beside_the_later_sides_edits() {
     assert_eq!(texts(&result.doc), ["b", "a", "c", "After all."]);
 }
 
+/// With no base nothing is known to have been reordered, so the later side's order stands, as it
+/// always has: the move is kept when the mover is later and goes back when it is earlier.
+#[test]
+fn a_move_merged_with_no_base_follows_the_later_side() {
+    let (_, mover, editor) = moved_and_edited();
+    let side = |doc, label, when| Side { doc, label, when };
+    for (mover_when, editor_when, expected) in [
+        (2, 1, ["b", "a", "c", "After."]),
+        (1, 2, ["a", "b", "c", "After all."]),
+    ] {
+        let one = merge(
+            None,
+            side(mover.document(), "talos", mover_when),
+            side(editor.document(), "titan", editor_when),
+        );
+        let other = merge(
+            None,
+            side(editor.document(), "titan", editor_when),
+            side(mover.document(), "talos", mover_when),
+        );
+        assert_eq!(document_digest(&one.doc), document_digest(&other.doc));
+        check_valid(&one.doc);
+        assert_eq!(texts(&one.doc)[..3], expected[..3]);
+    }
+}
+
 /// A list `a b c d` and a paragraph after it.
 fn four_items() -> Document {
     document(vec![
@@ -780,7 +806,7 @@ fn random_edits(
             random.below(len + 1),
         );
         at(session, which, offset);
-        match random.below(10) {
+        match random.below(12) {
             0..=3 => {
                 let word = format!(" zq{tag}{edit}q ");
                 session.insert(&word);
@@ -819,13 +845,47 @@ fn random_edits(
             }
             8 => {
                 let block_id = session.document().blocks[which].id;
-                session.set_block_kind(
-                    block_id,
-                    BlockKind::Heading {
+                let kind = match random.below(3) {
+                    0 => BlockKind::Heading {
                         level: 2,
                         centered: false,
                     },
-                );
+                    depth => BlockKind::ListItem {
+                        ordered: false,
+                        depth: depth as u8 - 1,
+                    },
+                };
+                session.set_block_kind(block_id, kind);
+            }
+            10 | 11 => {
+                // Moved as the editor moves it, an item with what's nested under it, or a selection.
+                let items: Vec<usize> = (0..count)
+                    .filter(|at| {
+                        matches!(
+                            session.document().blocks[*at].kind,
+                            BlockKind::ListItem { .. }
+                        )
+                    })
+                    .collect();
+                if !items.is_empty() {
+                    let item = items[random.below(items.len())];
+                    at(session, item, 0);
+                    if random.below(4) == 0 {
+                        let last = items[random.below(items.len())];
+                        let (from, to) = (item.min(last), item.max(last));
+                        session.selection = Some(Selection {
+                            start: Cursor {
+                                block_id: session.document().blocks[from].id,
+                                offset: 0,
+                            },
+                            end: Cursor {
+                                block_id: session.document().blocks[to].id,
+                                offset: 0,
+                            },
+                        });
+                    }
+                    session.move_list_item(random.below(2) == 0);
+                }
             }
             _ => {
                 let text = &session.document().blocks[which].text;
@@ -869,6 +929,21 @@ fn sample() -> Document {
         ),
     ]);
     doc.blocks[4].kind = BlockKind::Code { language: None };
+    // A list, with an item nested under one, to be moved.
+    for (id, text, depth) in [
+        (7, "first", 0),
+        (8, "second", 0),
+        (9, "inside", 1),
+        (10, "third", 0),
+    ] {
+        doc.blocks.push(Block {
+            kind: BlockKind::ListItem {
+                ordered: false,
+                depth,
+            },
+            ..block(id, text)
+        });
+    }
     doc.blocks[0].spans = vec![Span {
         start: 0,
         end: 10,

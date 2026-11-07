@@ -256,18 +256,19 @@ there. Nor does one whose file can't be read. With no file at all, the logs are 
   revision is found elsewhere (`Store::corrupt_lines`).
 
 A pass needs every log only to rule out a home, which matters only for retiring a database as having no home. A move, a retirement
-because the document has already been opened at its home, and a return have found their home, so they go ahead whatever else can't be
-read. A no-home retirement is vetoed by a corrupt line in logs that could be of its document (`Store::may_hide`: a line there says
-it's of this document, or none says whose they are), and by any folder or log that can't be read or holds lines from a newer kame. A
-corrupt line vetoes only where the revision being in it would change what's done: were it there, a database of the document already
-opened at those logs, not stranded and on logs of its own, would retire this one all the same, which is the same rename, so those logs
-don't veto. Logs with no database, or one that's stranded, would mean a move, and one on another document's logs would mean leaving it
-alone, so those still do. That's so only when one folder could hide it: were the revision in two, it would have two homes and be
-left alone, so with more than one, as a hand copy made with its logs carries the line, they all veto. A line holding a value no number of its type holds, such as a level of 300, which reading has to fit, is a
-corrupt line, and is held to the same rule. When
-that stops something that has waited, the person is told once, until there's something new to say: "1 document looks left behind, and
-can't be settled because *relative*'s logs can't all be read" (`Steps::unsettled`). A retirement whose revision is held only in a line that
-fails its check is reported as `unsynced`, as what it holds can't be compared.
+because the document has already been opened at its home, and a return have found their home, so they go ahead whatever else can't
+be read. A no-home retirement is vetoed by a corrupt line in logs that could be of its document (`Store::may_hide`: a line there
+says it's of this document, or none says whose they are), and by any folder or log that can't be read or holds lines from a newer
+kame. A corrupt line vetoes only where the revision being in it would change what's done: were it there, a database of the document
+already opened at those logs, not stranded and on logs of its own, would retire this one all the same, which is the same rename, so
+those logs don't veto. Logs with no database, or one that's stranded, would mean a move, and one on another document's logs would
+mean leaving it alone, and one that can't be read would mean leaving it alone too, so those still do. That's so only when one folder
+could hide it: were the revision in two, it would have two homes and be left alone, so with more than one, as a hand copy made with
+its logs carries the line, they all veto. A line holding a value no number of its type holds, such as a level of 300, which reading
+has to fit, is a corrupt line, and is held to the same rule. When that stops something that has waited, the person is told once,
+until there's something new to say: "1 document looks left behind, and can't be settled because *relative*'s logs can't all be read"
+(`Steps::unsettled`). A retirement whose revision is held only in a line that fails its check is reported as `unsynced`, as what it
+holds can't be compared.
 
 The two places that write a sync state (`Logged::write_and_merge` and `build_from_logs`) both write a revision from the
 logs at that path, so a database in its right place always passes. The state is saved only once the log it names has been
@@ -353,10 +354,11 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   Save As copy shares the document id and its checkpoints, so the missing history could be found in a copy; X would be brought
   back to its surviving log and retired again on every pass; and that log is B's live one, which kame on A may not move aside.
 - A database last synced before places were recorded (only builds before 0.1.0, or one built from its logs before the folder's
-  `.kame-logs` arrived) whose logs left before a pass saw them isn't known to be stale. It stays listed. Opened, it doesn't sync,
-  so it doesn't come back on other machines, and kame says so. Save As gives it logs of its own. A hand copy from before places,
-  with no logs beside it, is the same, so it no longer starts logs of its own when it's opened. After a path is reused, its history
-  stays out of the new document's logs (see above), and it just doesn't sync.
+  `.kame-logs` arrived) whose logs left before a pass saw them isn't known to be stale. It stays listed. Opened in this version, it
+  doesn't sync, so it doesn't come back on other machines, and kame says so. Save As gives it logs of its own. A 0.2.0 build opening
+  its own such copy still writes its history, and brings it back, as before. A hand copy from before places, with no logs beside it,
+  is the same, so it no longer starts logs of its own when it's opened. After a path is reused, its history stays out of the new
+  document's logs (see above), and it just doesn't sync.
 - A move made by hand, with its logs, simply carries on. Without them it's treated like a copy: it starts logs of its own, and the
   old ones stay as a document with only its logs.
 - A copy put at the same path in another notebook whose root's folder has the same name, with no logs, can't be told from a database
@@ -375,8 +377,9 @@ is dealt with by the pass after it's left. Its edits are then in the database th
 - A corrupt line that could be a document's stays until it's removed by hand, as logs are only added to. Where it's at logs with no
   database here, the document's revision being in it would mean a move, and a retirement and a move are both guesses: a Save As copy
   shares the document id, so a line naming the document doesn't prove those logs are its home. So that document isn't retired as having
-  no home until the home is opened on this machine, when the rule above lets it go, or until the line is removed by hand. The notice
-  says which logs.
+  no home until the home is opened on this machine, when the rule above lets it go, or until the line is removed by hand. A home
+  whose logs all wait on others that aren't here can't be opened, so there only removing the line ends it. The notice says which
+  logs.
 - Deliberately deleting a document's `.sync` folder while keeping the marker now retires its database. The docs only ever
   told people to remove both.
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a

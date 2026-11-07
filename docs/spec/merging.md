@@ -285,7 +285,7 @@ What any version of kame writes to a log, every later 1.x reads and merges, as t
 
 There's no version number in a log. So a change that older readers would misread must not be made. It has to come as something they can't fully read, a new field or kind, which they notice and hold off from as section 6.8 says. A new field must be left out when it holds its default (section 9). The golden tests at the end of `crates/kame-sync/src/revlog.rs` pin the bytes written for a revision and its blocks.
 
-Each release's samples ([document format, section 7.3](document-format.md)) hold the logs of a document two machines wrote, with a merge in them and two heads after it that change the same sentence. Every later build's tests read them, find the same heads, merge them to the same revision, and write on from there.
+Each release's samples ([document format, section 7.3](document-format.md)) hold the logs of a document two machines wrote, with a merge in them and two heads after it that change the same sentence, the earlier one also moving a list item, which the merge keeps (section 4.1). The release after 0.2.0 is the first to write that, so 0.1.2's and 0.2.0's samples don't hold a later build to the order rule. Every later build's tests read them, find the same heads, merge them to the same revision, and write on from there.
 
 Revision logs are still a trial, opted into by folder, and whether 1.0 holds them to this is still to be decided.
 

@@ -1351,8 +1351,9 @@ mod tests {
             assert!(!page.sees("Typewriter") && !page.sees("Save As…") && !page.sees("Footnote"));
         }
         open_menu(&mut page, BarMenu::Annotate);
-        assert!(page.sees("Cite…"));
-        assert!(!page.can_press("Cite…"), "greyed out outside a notebook");
+        let cite = row(&page, BarMenu::Annotate, "Cite…");
+        assert!(middle_of(&page, &cite).is_some(), "Cite… is drawn");
+        assert!(!page.can_press(&cite), "greyed out outside a notebook");
     }
 
     #[test]

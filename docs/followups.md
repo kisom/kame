@@ -41,9 +41,6 @@ written by one version has to be safe in another.
 ### Polish
 
 - [ ] **Rough edges daily writing finds,** added here as they're found.
-- [ ] **The long fuzzing runs are noisy.** Undo and redo refuse a step that no longer fits by catching its panic, and
-  the default panic hook prints each one, so a long run's output is mostly those lines, and a failure is hard to find in
-  it. A quiet hook for the long runs, printing only what fails, would help.
 
 Performance, worth doing if daily writing feels it. Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a
 keystroke in the page, a little more for a long paragraph, and nothing yet is close to a frame. On macOS, Metal keeps about 450 MB

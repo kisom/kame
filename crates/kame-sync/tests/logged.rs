@@ -892,7 +892,7 @@ fn undo_takes_an_idle_copy_back_before_everything_that_arrived_and_an_edit_ends_
 
 /// Whether a database at `path` that last synced there, and remembers `state`, is stranded.
 fn stranded_there(path: &Path, state: &str) -> bool {
-    is_stranded(path, Some(state), place_of(path).as_deref())
+    is_stranded(path, Some(state), place_of(path).as_deref(), || None)
 }
 
 /// A path in a marked folder, with no logs.
@@ -914,7 +914,12 @@ fn another_document(machine: &Machine, name: &str) -> PathBuf {
 #[test]
 fn a_database_without_a_sync_state_is_never_stranded() {
     let path = path_with_no_logs();
-    assert!(!is_stranded(&path, None, place_of(&path).as_deref()));
+    assert!(!is_stranded(
+        &path,
+        None,
+        place_of(&path).as_deref(),
+        || None
+    ));
 }
 
 #[test]
@@ -925,14 +930,19 @@ fn a_recorded_revision_with_no_logs_is_stranded() {
 #[test]
 fn a_recorded_revision_with_no_logs_and_no_place_or_another_is_not_stranded() {
     let path = path_with_no_logs();
-    assert!(!is_stranded(&path, Some("r"), None));
-    assert!(!is_stranded(&path, Some("r"), Some("elsewhere.kame")));
+    assert!(!is_stranded(&path, Some("r"), None, || None));
+    assert!(!is_stranded(
+        &path,
+        Some("r"),
+        Some("elsewhere.kame"),
+        || None
+    ));
 }
 
 #[test]
 fn nothing_is_stranded_with_nothing_above_it_turning_logs_on() {
     let path = common::test_folder("stranded-no-marker").join("a.kame");
-    assert!(!is_stranded(&path, Some("r"), Some("a.kame")));
+    assert!(!is_stranded(&path, Some("r"), Some("a.kame"), || None));
 }
 
 #[test]
@@ -1859,17 +1869,22 @@ fn a_sync_with_news_goes_by_a_check_read_on_another_thread() {
     let mut here = talos.session();
     let mut logged = talos.logged(&here);
     logged.sync(&mut here, 1).unwrap();
-    assert!(logged.stranded_check().is_none(), "nothing has arrived");
+    assert!(
+        logged.stranded_check(&here).is_none(),
+        "nothing has arrived"
+    );
     titan.receive_from(&talos);
     let mut there = titan.session();
     titan.append(&mut there, 0, " From titan.");
     titan.sync(&mut there, 2);
     talos.receive_from(&titan);
 
-    let check = logged.stranded_check().expect("words may have arrived");
+    let check = logged
+        .stranded_check(&here)
+        .expect("words may have arrived");
     let answer = std::thread::spawn(move || check.run()).join().unwrap();
     logged.know(answer);
-    assert!(logged.stranded_check().is_none(), "it's known");
+    assert!(logged.stranded_check(&here).is_none(), "it's known");
     let reads = log_reads_here();
     let outcome = logged.sync(&mut here, 3).unwrap();
 
@@ -1889,14 +1904,14 @@ fn a_check_from_before_the_logs_changed_again_is_not_gone_by() {
     titan.append(&mut there, 0, " From titan.");
     titan.sync(&mut there, 2);
     talos.receive_from(&titan);
-    let answer = logged.stranded_check().unwrap().run();
+    let answer = logged.stranded_check(&here).unwrap().run();
 
     titan.append(&mut there, 0, " And more.");
     titan.sync(&mut there, 3);
     talos.receive_from(&titan);
     logged.know(answer);
     assert!(
-        logged.stranded_check().is_some(),
+        logged.stranded_check(&here).is_some(),
         "what it rested on has changed"
     );
     let reads = log_reads_here();
@@ -1919,14 +1934,77 @@ fn a_check_finding_the_logs_gone_holds_a_sync_off() {
     std::fs::rename(log_folder(&other), &folder).unwrap();
     let before = Store::load(&folder).unwrap().revision_count();
 
-    logged.know(logged.stranded_check().unwrap().run());
+    logged.know(logged.stranded_check(&here).unwrap().run());
     talos.append(&mut here, 0, " Old words.");
     let reads = log_reads_here();
     assert!(logged.sync(&mut here, 2).unwrap().stranded);
 
     assert_eq!(log_reads_here(), reads);
     assert_eq!(Store::load(&folder).unwrap().revision_count(), before);
-    assert!(logged.stranded_check().is_none(), "it's held off");
+    assert!(logged.stranded_check(&here).is_none(), "it's held off");
+}
+
+/// Deleted on another machine and a new document made at its name, whose log holds a corrupt line
+/// as well as its own. That line can't be holding this one's revision, so it's held off as
+/// stranded, and not as being on another document's logs, and nothing is written.
+#[test]
+fn opening_a_database_on_a_reused_path_with_a_corrupt_line_is_held_off_as_stranded() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    drop(session);
+    let folder = log_folder(&talos.path);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let other = another_document(&talos, "different.kame");
+    std::fs::rename(log_folder(&other), &folder).unwrap();
+    std::fs::remove_file(&other).unwrap();
+    let logs = logs_in(&folder);
+    assert_eq!(logs.len(), 1);
+    std::fs::write(&logs[0].0, format!("{}nonsense\n", logs[0].1)).unwrap();
+    let before = logs_in(&folder);
+
+    let mut session = talos.session();
+    talos.append(&mut session, 0, " Old words.");
+    let outcome = talos.sync(&mut session, 3);
+    assert!(outcome.stranded && !outcome.others_logs, "{outcome:?}");
+    assert_eq!(outcome.written, 0);
+    drop(session);
+    assert_eq!(logs_in(&folder), before);
+}
+
+/// What a check found is for the document it asked about. Undoing a merge with another document
+/// brings back the id from before it, with the revision and place as they were, so an answer read
+/// for the other id isn't gone by, and it's asked again.
+#[test]
+fn an_answer_read_for_another_document_is_not_gone_by() {
+    let (talos, titan) = two_machines_without_it("linked.kame");
+    let mut here = talos.session();
+    here.insert("Written on talos.");
+    let mut there = titan.session();
+    there.insert("Written on titan.");
+    let talos_id = here.document().id;
+    let mut logged = talos.logged(&here);
+    logged.sync(&mut here, 1).unwrap();
+    titan.sync(&mut there, 2);
+    talos.receive_from(&titan);
+    assert!(logged.sync(&mut here, 3).unwrap().another_document);
+    assert_ne!(here.document().id, talos_id, "the later one's id won");
+    titan.append(&mut there, 0, " More.");
+    titan.sync(&mut there, 4);
+    talos.receive_from(&titan);
+
+    let answer = logged
+        .stranded_check(&here)
+        .expect("words may have arrived")
+        .run();
+    logged.know(answer);
+    assert!(logged.stranded_check(&here).is_none(), "it's known");
+    assert!(here.undo());
+    assert_eq!(here.document().id, talos_id);
+    assert!(
+        logged.stranded_check(&here).is_some(),
+        "it was read for another document"
+    );
 }
 
 /// A damaged document, already in the logs as it is in the file, as a build that didn't fit offsets

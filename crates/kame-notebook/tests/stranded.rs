@@ -2364,6 +2364,174 @@ fn a_corrupt_line_elsewhere_lets_a_retired_database_come_back() {
     assert!(b.is_file());
 }
 
+/// The other machine, whose lines go to a log named for it.
+const THERE: &str = "atlas-aaaa";
+
+/// A document that has synced on the other machine, as its logs would arrive here.
+fn synced_there(path: &Path, words: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut session = Session::open(path).unwrap();
+    session.insert(words);
+    Logged::open(&session, THERE)
+        .expect("the folder is opted in")
+        .sync(&mut session, 100)
+        .unwrap();
+}
+
+fn append_line(log: &Path, line: &str) {
+    let mut bytes = std::fs::read(log).unwrap();
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    std::fs::write(log, bytes).unwrap();
+}
+
+/// Every log at a document's path, with its bytes, in order.
+fn bytes_of_logs(path: &Path) -> Vec<(String, Vec<u8>)> {
+    let folder = log_folder(path);
+    names_in(&folder)
+        .into_iter()
+        .map(|name| {
+            let bytes = std::fs::read(folder.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect()
+}
+
+/// On the other machine, `a` was deleted and a new document made at its name, and its logs have
+/// reached here with a corrupt line among them: in the new document's own log, as damage to a line
+/// there leaves it, or else in a log of its own, which says nothing of whose it is.
+fn reused_with_a_corrupt_line(root: &Path, a: &Path, in_its_log: bool) {
+    let made = root.join("elsewhere/made.kame");
+    synced(a, "Old words that were deleted.");
+    synced_there(&made, "A different document.");
+    remove_logs(a);
+    move_logs(&made, a);
+    std::fs::remove_file(&made).unwrap();
+    if in_its_log {
+        append_line(&only_log(a), "nonsense");
+    } else {
+        std::fs::write(log_folder(a).join("junk-0000.log"), "nonsense\n").unwrap();
+    }
+}
+
+/// A line in a log of another document's lines can't be holding this one's revision, so it's
+/// stranded, and retired as any is at a path used again, with the new document's logs untouched.
+#[test]
+fn a_corrupt_line_in_another_documents_logs_at_its_path_does_not_keep_it_from_being_retired() {
+    let (root, nb) = logged_notebook("stranded-corrupt-reused");
+    let a = root.join("a.kame");
+    reused_with_a_corrupt_line(&root, &a, true);
+    let before = bytes_of_logs(&a);
+
+    assert_eq!(find_stranded(&nb, &mut Healthy::default()), just(&a));
+    assert_eq!(
+        reconcile(&nb, just(&a), None, Locks::NONE),
+        [Done::Retired {
+            from: a.clone(),
+            to: root.join(".a.retired.kame"),
+            opened_there: false,
+            unsynced: true,
+        }]
+    );
+    assert!(text_of(&root.join(".a.retired.kame")).contains("Old words"));
+    assert_eq!(bytes_of_logs(&a), before);
+    assert!(build_from_logs(&a).unwrap());
+    assert!(text_of(&a).contains("A different document."));
+    let mut session = Session::open(&a).unwrap();
+    sync(&mut session);
+    drop(session);
+    assert!(!words_in_logs(&log_folder(&a)).contains("Old words"));
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
+    assert!(root.join(".a.retired.kame").is_file());
+}
+
+/// Moved on the other machine, and a new document made at its old name, with a corrupt line in the
+/// new one's log. It follows its document.
+#[test]
+fn a_corrupt_line_in_another_documents_logs_at_its_path_does_not_keep_it_from_following_its_document(
+) {
+    let (root, nb) = logged_notebook("stranded-corrupt-reused-moved");
+    let (a, b, made) = (
+        root.join("a.kame"),
+        root.join("b.kame"),
+        root.join("elsewhere/made.kame"),
+    );
+    synced(&a, "Words that moved.");
+    synced_there(&made, "A different document.");
+    move_logs(&a, &b);
+    move_logs(&made, &a);
+    std::fs::remove_file(&made).unwrap();
+    append_line(&only_log(&a), "nonsense");
+    let before = bytes_of_logs(&a);
+
+    assert_eq!(
+        reconcile(&nb, just(&a), None, Locks::NONE),
+        [Done::Moved {
+            from: a.clone(),
+            to: b.clone()
+        }]
+    );
+    assert!(text_of(&b).contains("Words that moved."));
+    assert_eq!(bytes_of_logs(&a), before);
+}
+
+/// A log of nothing but damage says nothing of whose it is, and may be this database's own.
+#[test]
+fn a_log_of_only_corrupt_lines_at_its_path_still_keeps_it_waiting() {
+    let (root, nb) = logged_notebook("stranded-corrupt-reused-alone");
+    let a = root.join("a.kame");
+    reused_with_a_corrupt_line(&root, &a, false);
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+}
+
+/// Made at one name on two machines, as through a link, with the other's log arriving before this
+/// one synced again, and then this machine's own log damaged whole. Its revision is in that log,
+/// and only the other document's lines can be read, so it mustn't be taken for stranded.
+#[test]
+fn its_own_log_damaged_whole_beside_another_documents_lines_keeps_it_waiting() {
+    let (root, nb) = logged_notebook("stranded-corrupt-own-log");
+    let (a, made) = (root.join("a.kame"), root.join("elsewhere/a.kame"));
+    synced(&a, "Made here through a link.");
+    synced_there(&made, "Made there through the same link.");
+    let theirs = only_log(&made);
+    std::fs::copy(&theirs, log_folder(&a).join(theirs.file_name().unwrap())).unwrap();
+    remove_logs(&made);
+    std::fs::remove_file(&made).unwrap();
+    let ours = log_folder(&a).join(format!("{DEVICE}.log"));
+    let lines = std::fs::read_to_string(&ours).unwrap().lines().count();
+    std::fs::write(&ours, "nonsense\n".repeat(lines)).unwrap();
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+}
+
+/// A line that doesn't parse, but still says it's of this document, may be holding its revision.
+#[test]
+fn a_corrupt_line_naming_its_document_at_its_path_still_keeps_it_waiting() {
+    let (root, nb) = logged_notebook("stranded-corrupt-reused-named");
+    let (a, made) = (root.join("a.kame"), root.join("elsewhere/made.kame"));
+    synced(&a, "Old words.");
+    let ours = std::fs::read_to_string(only_log(&a)).unwrap();
+    let ours = ours.lines().last().unwrap().to_string();
+    synced_there(&made, "A different document.");
+    remove_logs(&a);
+    move_logs(&made, &a);
+    std::fs::remove_file(&made).unwrap();
+    // Its JSON whole, so it says whose it is, and its blocks spoiled.
+    let spoiled = ours.replace("\"blocks\":[", "\"blocks\":7,\"x\":[");
+    assert_ne!(spoiled, ours);
+    append_line(&only_log(&a), &spoiled);
+    assert!(Store::load(&log_folder(&a)).unwrap().corrupt_lines());
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+}
+
 /// One document in the older format, healed or not, keeps those lines for good, and that says nothing
 /// about any other document.
 #[test]

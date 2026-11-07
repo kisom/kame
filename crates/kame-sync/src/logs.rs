@@ -149,17 +149,29 @@ pub fn is_where_it_synced(path: &Path, place: Option<&str>) -> bool {
 /// belong to another document now. This is the case after a document is deleted or moved on another
 /// machine. Being wrong here hides someone's document, so it's false anywhere else, as for a copy
 /// made by hand, and when it can't be told, for logs that can't be read, that came from a newer kame,
-/// or with a corrupt line, as the revision may be in it. Nothing is done on a guess. A line that only
-/// fails its check says what it held, so it counts as holding that revision, which is what keeps a
-/// document in an older format from being taken for stranded.
+/// or with a corrupt line that could be holding the revision ([`Store::may_hide_its_own`]). Nothing
+/// is done on a guess. A line that only fails its check says what it held, so it counts as holding
+/// that revision, which is what keeps a document in an older format from being taken for stranded.
 ///
-/// Every part of kame asking this asks here, with what the database says about itself.
-pub fn is_stranded(path: &Path, revision: Option<&str>, place: Option<&str>) -> bool {
-    stranded_verdict(path, revision, place).unwrap_or(false)
+/// Every part of kame asking this asks here, with what the database says about itself: `document`
+/// gives its document's id, asked only when there's a corrupt line, or `None` if it can't be read,
+/// and then any corrupt line could be holding the revision.
+pub fn is_stranded(
+    path: &Path,
+    revision: Option<&str>,
+    place: Option<&str>,
+    document: impl FnOnce() -> Option<uuid::Uuid>,
+) -> bool {
+    stranded_verdict(path, revision, place, document).unwrap_or(false)
 }
 
 /// The same, with `None` for when it can't be told, for a caller that remembers the answer.
-pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>) -> Option<bool> {
+pub fn stranded_verdict(
+    path: &Path,
+    revision: Option<&str>,
+    place: Option<&str>,
+    document: impl FnOnce() -> Option<uuid::Uuid>,
+) -> Option<bool> {
     let Some(revision) = revision else {
         return Some(false);
     };
@@ -177,7 +189,16 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
     if store.could_hold(revision) {
         return Some(false);
     }
-    (!store.corrupt_lines()).then_some(true)
+    if !store.corrupt_lines() {
+        return Some(true);
+    }
+    // Lines saying they're another document's, as at a path used again for a new one, can't be
+    // hiding this one's revision.
+    let may_be_here = match document() {
+        Some(document) => store.may_hide_its_own(document),
+        None => true,
+    };
+    (!may_be_here).then_some(true)
 }
 
 /// What the app says of a database that remembers a revision and no place, with nothing beside it,
@@ -275,6 +296,7 @@ pub struct StrandedCheck {
     path: PathBuf,
     revision: String,
     place: Option<String>,
+    document: uuid::Uuid,
     /// Each log's name and size from before any reading, which the answer rests on.
     logs: Option<Vec<(PathBuf, u64)>>,
 }
@@ -289,7 +311,13 @@ pub struct StrandedAnswer {
 impl StrandedCheck {
     /// Reads every log, on whatever thread this is.
     pub fn run(self) -> StrandedAnswer {
-        let stranded = is_stranded(&self.path, Some(&self.revision), self.place.as_deref());
+        let document = self.document;
+        let stranded = is_stranded(
+            &self.path,
+            Some(&self.revision),
+            self.place.as_deref(),
+            || Some(document),
+        );
         StrandedAnswer {
             check: self,
             stranded,
@@ -298,12 +326,19 @@ impl StrandedCheck {
 }
 
 impl StrandedAnswer {
-    /// Whether this answers what a sync of `logged` would ask now, with the logs as `logs` says.
-    fn holds_for(&self, logged: &Logged, logs: Option<&Vec<(PathBuf, u64)>>) -> bool {
+    /// Whether this answers what a sync of `logged`, for `document`, would ask now, with the logs as
+    /// `logs` says.
+    fn holds_for(
+        &self,
+        logged: &Logged,
+        document: uuid::Uuid,
+        logs: Option<&Vec<(PathBuf, u64)>>,
+    ) -> bool {
         let check = &self.check;
         check.path == logged.path
             && logged.last.as_ref() == Some(&check.revision)
             && check.place == logged.place
+            && check.document == document
             && check.logs.as_ref() == logs
     }
 }
@@ -373,10 +408,11 @@ impl Logged {
     /// What the next sync would have to read first, if anything: every log, when it has to find out
     /// whether they've left this database, and doesn't already know. Logs that are gone take no
     /// reading to tell, and nor does what a held-off sync found while they're unchanged.
-    pub fn stranded_check(&self) -> Option<StrandedCheck> {
+    pub fn stranded_check(&self, session: &Session) -> Option<StrandedCheck> {
         if !self.must_ask() || !self.replica.folder.exists() {
             return None;
         }
+        let document = session.document().id;
         let logs = Store::log_sizes(&self.replica.folder);
         let answered = self
             .held_off
@@ -385,7 +421,7 @@ impl Logged {
             || self
                 .known
                 .as_ref()
-                .is_some_and(|known| known.holds_for(self, logs.as_ref()));
+                .is_some_and(|known| known.holds_for(self, document, logs.as_ref()));
         if answered {
             return None;
         }
@@ -393,6 +429,7 @@ impl Logged {
             path: self.path.clone(),
             revision: self.last.clone()?,
             place: self.place.clone(),
+            document,
             logs,
         })
     }
@@ -451,11 +488,19 @@ impl Logged {
         // Before any refresh or write, which could recreate a folder. An answer read on another
         // thread is what's gone by, if the logs are as they were when it was read.
         let known = self.known.take();
+        let document = session.document().id;
         if self.must_ask()
             && known
-                .filter(|known| known.holds_for(self, logs.as_ref()))
+                .filter(|known| known.holds_for(self, document, logs.as_ref()))
                 .map_or_else(
-                    || is_stranded(&self.path, self.last.as_deref(), self.place.as_deref()),
+                    || {
+                        is_stranded(
+                            &self.path,
+                            self.last.as_deref(),
+                            self.place.as_deref(),
+                            || Some(document),
+                        )
+                    },
                     |known| known.stranded,
                 )
         {

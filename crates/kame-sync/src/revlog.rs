@@ -80,6 +80,10 @@ struct Dropped {
     documents: HashSet<Uuid>,
     /// Whether a line doesn't parse, and isn't torn, so that what it held can't be known.
     corrupt: bool,
+    /// The logs holding such a line.
+    corrupt_in: HashSet<PathBuf>,
+    /// The logs holding a line that says what document it's of.
+    named_in: HashSet<PathBuf>,
 }
 
 /// The document a line says it's of, when it doesn't parse as a line, if that can still be read.
@@ -190,6 +194,7 @@ impl Store {
                 from = 0;
             }
             let fresh = &bytes[from as usize..];
+            let (mut corrupt_here, mut named_here) = (false, false);
             // Whatever follows the last line ending is still being written.
             let whole = fresh
                 .iter()
@@ -206,16 +211,19 @@ impl Store {
                         // A tear can't hold a revision a database remembers. The state is saved only
                         // after its line is flushed, and a line is never joined on to a tear.
                         if !err.is_eof() {
-                            self.dropped.corrupt = true;
-                            self.dropped.documents.extend(document_named_in(raw));
+                            let named = document_named_in(raw);
+                            corrupt_here = true;
+                            named_here |= named.is_some();
+                            self.dropped.documents.extend(named);
                         }
                         continue;
                     }
                 };
+                named_here = true;
                 // A value no number of its type holds stopped a line parsing before reading took it
                 // wider, and is damage still: what it holds can't be known as it was written.
                 if fitted_on_reading(raw, &line) {
-                    self.dropped.corrupt = true;
+                    corrupt_here = true;
                     self.dropped.documents.extend(document_named_in(raw));
                     continue;
                 }
@@ -250,6 +258,13 @@ impl Store {
                 {
                     found.push(line.id);
                 }
+            }
+            self.dropped.corrupt |= corrupt_here;
+            if corrupt_here {
+                self.dropped.corrupt_in.insert(path.clone());
+            }
+            if named_here {
+                self.dropped.named_in.insert(path.clone());
             }
             self.read
                 .insert(path, (from + whole as u64, bytes.len() as u64));
@@ -464,6 +479,19 @@ impl Store {
     /// logs are this document's, or no line says whose they are.
     pub fn may_hide(&self, document: Uuid) -> bool {
         self.dropped.corrupt && (self.names(document) || !self.names_anyone())
+    }
+
+    /// Whether a corrupt line in a database's own logs could be holding the revision it remembers: as
+    /// [`Store::may_hide`] says, or a log holding one has no line saying what document it's of. Its
+    /// revision is written to its own machine's log, and a log here damaged whole may be that one,
+    /// beside another document's lines, as when two machines made a document at one name.
+    pub fn may_hide_its_own(&self, document: Uuid) -> bool {
+        self.may_hide(document)
+            || self
+                .dropped
+                .corrupt_in
+                .iter()
+                .any(|log| !self.dropped.named_in.contains(log))
     }
 
     /// Whether no line at all has been read here: none that can be used, none that fails its check,
@@ -1463,6 +1491,29 @@ mod tests {
         let beside_older = log_holding("hide-older", &format!("nonsense\n{older}"));
         assert!(beside_older.may_hide(one));
         assert!(!beside_older.may_hide(other));
+    }
+
+    /// A database's own logs are where its revision was written, so a log there that says nothing of
+    /// whose its lines are may be its own machine's, damaged whole.
+    #[test]
+    fn a_log_that_says_nothing_of_whose_it_is_may_hide_a_databases_own_revision() {
+        let (one, other) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let ours = line_from_a_newer_build(r#""Paragraph""#, "");
+        let beside_one = log_holding("own-beside", &format!("nonsense\n{ours}"));
+        assert!(beside_one.may_hide_its_own(one));
+        assert!(!beside_one.may_hide_its_own(other));
+
+        let folder = kame_test_dir::folder("own-a-log-of-its-own");
+        std::fs::write(folder.join("new-0000.log"), &ours).unwrap();
+        std::fs::write(folder.join("old-0000.log"), "nonsense\n").unwrap();
+        let apart = Store::load(&folder).unwrap();
+        assert!(!apart.may_hide(other));
+        assert!(apart.may_hide_its_own(other));
+        assert!(apart.may_hide_its_own(one));
+
+        let alone = log_holding("own-alone", "nonsense\n");
+        assert!(alone.may_hide_its_own(other));
+        assert!(!log_holding("own-clean", &ours).may_hide_its_own(other));
     }
 
     #[test]

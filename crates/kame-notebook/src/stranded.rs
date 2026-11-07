@@ -156,7 +156,13 @@ pub fn find_stranded(notebook: &Notebook, healthy: &mut Healthy) -> Vec<PathBuf>
             healthy.databases.extend(looks.map(|looks| (path, looks)));
             continue;
         }
-        match stranded_verdict(&path, Some(&revision), place.as_deref()) {
+        let document = || {
+            Db::open_read_only(&path)
+                .and_then(|db| db.load_readable())
+                .ok()
+                .map(|document| document.id)
+        };
+        match stranded_verdict(&path, Some(&revision), place.as_deref(), document) {
             Some(true) => stranded.push(path),
             Some(false) => healthy.databases.extend(looks.map(|looks| (path, looks))),
             None => {}

@@ -1355,6 +1355,42 @@ fn a_stranded_document_is_refused_and_another_documents_logs_stay() {
     assert_eq!(links_of(&read(&linker)), ["a.kame"]);
 }
 
+/// The same with a corrupt line among the new document's lines, which can't be holding this one's
+/// revision, so it's refused as stranded, and not as being on another document's logs.
+#[test]
+fn moving_a_database_on_a_reused_path_with_a_corrupt_line_is_refused_as_stranded() {
+    let (root, nb) = logged_notebook("move-stranded-corrupt");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    sync(&a);
+    let other = root.join("other.kame");
+    document(&other, "Another document.");
+    sync(&other);
+    std::fs::remove_dir_all(log_folder(&a)).unwrap();
+    std::fs::rename(log_folder(&other), log_folder(&a)).unwrap();
+    std::fs::remove_file(&other).unwrap();
+    let logs = files_in(&log_folder(&a));
+    assert_eq!(logs.len(), 1);
+    let log = log_folder(&a).join(&logs[0].0);
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"nonsense\n");
+    std::fs::write(&log, bytes).unwrap();
+    let logs = files_in(&log_folder(&a));
+    let bytes = std::fs::read(&a).unwrap();
+
+    let b = root.join("b.kame");
+    let plan = plan_move(&nb, &a, &b, None, Locks::NONE, DEVICE, NOW);
+    let err = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap_err();
+    assert_eq!(
+        err,
+        "this document was moved or deleted on another machine, so it can't be moved until that's settled"
+    );
+    assert_eq!(std::fs::read(&a).unwrap(), bytes);
+    assert!(!b.exists());
+    assert!(!log_folder(&b).exists());
+    assert_eq!(files_in(&log_folder(&a)), logs);
+}
+
 /// Nothing above it turns logs on, so nothing will ever settle it, and the sync state means nothing.
 #[test]
 fn a_database_that_once_synced_can_move_where_logs_are_off() {

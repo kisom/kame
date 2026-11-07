@@ -6931,7 +6931,7 @@ impl KameApp {
         if let Some(check) = self
             .logged
             .as_ref()
-            .and_then(kame_sync::logs::Logged::stranded_check)
+            .and_then(|logged| logged.stranded_check(&self.session))
         {
             let (send, coming) = std::sync::mpsc::channel();
             let ctx = ctx.clone();

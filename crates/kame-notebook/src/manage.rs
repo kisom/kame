@@ -342,6 +342,7 @@ pub(crate) fn is_stranded_database(path: &Path) -> bool {
         path,
         db.load_sync_state().as_deref(),
         db.load_sync_place().as_deref(),
+        || db.load_readable().ok().map(|document| document.id),
     )
 }
 
@@ -426,7 +427,10 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
         return Err(NEWER.to_string());
     }
     let (revision, place) = (session.sync_state(), session.sync_place());
-    if is_stranded(path, revision.as_deref(), place.as_deref()) {
+    let document = session.document().id;
+    if is_stranded(path, revision.as_deref(), place.as_deref(), || {
+        Some(document)
+    }) {
         return Err("it was moved or deleted on another machine, and isn't syncing".to_string());
     }
     if revision.is_some() && !logs_can_be_its_own(path, session.document().id, revision.as_deref())

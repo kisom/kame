@@ -25,6 +25,8 @@ pub struct ImportReport {
     pub raw_html: usize,
     pub image_alt_text: usize,
     pub unanchored_footnotes: usize,
+    /// Footnotes only a table cites, which became marginals on the tables.
+    pub table_footnotes: usize,
 }
 
 impl ImportReport {
@@ -55,6 +57,11 @@ impl ImportReport {
             self.unanchored_footnotes,
             "uncited footnote kept as prose",
             "uncited footnotes kept as prose",
+        );
+        count(
+            self.table_footnotes,
+            "footnote in a table as a marginal",
+            "footnotes in tables as marginals",
         );
         count(
             self.script_links,
@@ -370,6 +377,10 @@ struct Builder<'a> {
     table_source: Option<String>,
     /// The source of the table being read, which becomes one code block when it ends.
     table: Option<String>,
+    /// The labels the table being read cites, in the order it first cites them.
+    table_labels: Vec<String>,
+    /// Each table and the labels it cites.
+    table_cites: Vec<(BlockId, Vec<String>)>,
     report: ImportReport,
 }
 
@@ -394,15 +405,24 @@ impl<'a> Builder<'a> {
             markers: Vec::new(),
             table_source: None,
             table: None,
+            table_labels: Vec::new(),
+            table_cites: Vec::new(),
             report: ImportReport::default(),
         }
     }
 
     /// An event inside a table: nothing in it is read, as its source is kept as written.
     fn table_event(&mut self, event: Event<'_>) {
+        if let Event::FootnoteReference(label) = &event {
+            if self.footnote.is_none() && !self.table_labels.iter().any(|seen| **seen == **label) {
+                self.table_labels.push(label.to_string());
+            }
+            return;
+        }
         if !matches!(event, Event::End(TagEnd::Table)) {
             return;
         }
+        let labels = std::mem::take(&mut self.table_labels);
         let Some(text) = self.table.take() else {
             return;
         };
@@ -415,7 +435,11 @@ impl<'a> Builder<'a> {
                 let kind = BlockKind::Code {
                     language: Some("markdown".to_string()),
                 };
-                self.blocks.push(new_block(kind, text));
+                let block = new_block(kind, text);
+                if !labels.is_empty() {
+                    self.table_cites.push((block.id, labels));
+                }
+                self.blocks.push(block);
             }
         }
     }
@@ -718,12 +742,38 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // A footnote only tables cite is one marginal on each table that cites it: its
+        // marker stays text there, so a footnote has no place to anchor. The body is the
+        // footnotes in the order the table first cites them, one paragraph each, a blank
+        // line between.
+        let mut in_marginals = HashSet::new();
+        for (block_id, labels) in &self.table_cites {
+            let parts: Vec<String> = labels
+                .iter()
+                .filter(|label| !cited.contains(label.as_str()))
+                .filter_map(|label| {
+                    let body = self.footnotes.get(label)?;
+                    in_marginals.insert(label.clone());
+                    Some(format!("[^{label}] {body}"))
+                })
+                .collect();
+            if !parts.is_empty() {
+                annotations.push(Annotation {
+                    id: Uuid::new_v4(),
+                    kind: AnnotationKind::Marginal,
+                    anchor: Anchor::block(*block_id),
+                    body: parts.join("\n\n"),
+                });
+            }
+        }
+        self.report.table_footnotes = in_marginals.len();
+
         // A body nothing anchors would otherwise vanish, so it stays as prose,
         // in source order: a map's order would make imports differ run to run.
         let leftover: Vec<String> = self
             .footnote_order
             .iter()
-            .filter(|label| !cited.contains(label.as_str()))
+            .filter(|label| !cited.contains(label.as_str()) && !in_marginals.contains(*label))
             .filter_map(|label| self.footnotes.get(label).cloned())
             .collect();
         self.report.unanchored_footnotes = leftover.len();
@@ -1289,16 +1339,102 @@ mod tests {
         assert_eq!(text, source.trim_end());
     }
 
+    fn marginals(imported: &Imported) -> Vec<(BlockId, String)> {
+        imported
+            .document
+            .annotations
+            .iter()
+            .filter(|a| a.kind == AnnotationKind::Marginal)
+            .map(|a| (a.anchor.block_id(), a.body.clone()))
+            .collect()
+    }
+
     #[test]
-    fn a_footnote_a_table_cites_is_imported_as_any_other() {
+    fn a_footnote_only_a_table_cites_is_a_marginal_on_the_table() {
         let imported = import("| a[^n] |\n|---|\n| 1 |\n\n[^n]: The note.\n");
-        assert_eq!(imported.document.blocks[0].kind, markdown_code());
-        assert_eq!(imported.document.blocks[0].text, "| a[^n] |\n|---|\n| 1 |");
-        // The marker is text in a code block, so the note has no place to anchor.
-        assert!(imported.document.annotations.is_empty());
-        // The note itself is imported as any uncited footnote is: as a paragraph of its words.
-        assert_eq!(outline(&imported.document)[1], paragraph("The note."));
+        let blocks = &imported.document.blocks;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, markdown_code());
+        assert_eq!(blocks[0].text, "| a[^n] |\n|---|\n| 1 |");
+        assert_eq!(imported.document.annotations.len(), 1);
+        assert_eq!(
+            marginals(&imported),
+            vec![(blocks[0].id, "[^n] The note.".to_string())]
+        );
+        assert_eq!(imported.document.annotations[0].anchor.byte_range(), None);
+        assert_eq!(imported.report.table_footnotes, 1);
+        assert_eq!(imported.report.unanchored_footnotes, 0);
+        assert_eq!(
+            imported.report.summary().unwrap(),
+            "1 table as a code block, 1 footnote in a table as a marginal"
+        );
+    }
+
+    #[test]
+    fn several_footnotes_a_table_cites_are_one_marginal_in_citation_order() {
+        let imported =
+            import("| a[^b] | c[^a] |\n|---|---|\n| 1[^b] | 2 |\n\n[^a]: Alpha.\n[^b]: Beta.\n");
+        assert_eq!(imported.document.blocks.len(), 1);
+        assert_eq!(
+            marginals(&imported),
+            vec![(
+                imported.document.blocks[0].id,
+                "[^b] Beta.\n\n[^a] Alpha.".to_string()
+            )]
+        );
+        assert_eq!(imported.report.table_footnotes, 2);
+    }
+
+    #[test]
+    fn a_footnote_two_tables_cite_is_in_each_marginal() {
+        let imported = import(
+            "| a[^n] |\n|---|\n| 1 |\n\nBetween.\n\n| b[^n] |\n|---|\n| 2 |\n\n[^n]: Shared.\n",
+        );
+        let blocks = &imported.document.blocks;
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            marginals(&imported),
+            vec![
+                (blocks[0].id, "[^n] Shared.".to_string()),
+                (blocks[2].id, "[^n] Shared.".to_string())
+            ]
+        );
+        assert_eq!(imported.report.table_footnotes, 1);
+    }
+
+    #[test]
+    fn a_footnote_cited_in_a_table_and_in_prose_stays_a_footnote() {
+        let imported = import("| a[^n] |\n|---|\n| 1 |\n\nText[^n].\n\n[^n]: The note.\n");
         assert_eq!(imported.document.blocks.len(), 2);
+        assert_eq!(imported.document.annotations.len(), 1);
+        assert_eq!(
+            imported.document.annotations[0].kind,
+            AnnotationKind::Footnote
+        );
+        assert_eq!(imported.document.annotations[0].body, "The note.");
+        assert_eq!(imported.report.table_footnotes, 0);
+        assert_eq!(imported.document.blocks[0].text, "| a[^n] |\n|---|\n| 1 |");
+    }
+
+    #[test]
+    fn a_table_footnote_marginal_is_the_same_on_every_import() {
+        let source = "| a[^y] | b[^x] |\n|---|---|\n| 1 | 2 |\n\n[^x]: X.\n[^y]: Y.\n";
+        let bodies = |i: &Imported| {
+            i.document
+                .annotations
+                .iter()
+                .map(|a| (a.kind, a.body.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bodies(&import(source)), bodies(&import(source)));
+    }
+
+    #[test]
+    fn a_table_footnote_marginal_reaches_the_html_export() {
+        let doc = import("| a[^n] |\n|---|\n| 1 |\n\n[^n]: The note.\n").document;
+        let html = crate::export::to_html(&doc);
+        assert!(html.contains("[^n] The note."));
+        assert!(!crate::export::to_markdown(&doc).contains("The note."));
     }
 
     #[test]

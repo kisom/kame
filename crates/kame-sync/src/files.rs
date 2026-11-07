@@ -298,7 +298,8 @@ pub fn merge_copy_into(session: &mut Session, copy: &Path) -> Result<MergedIn> {
 pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
     if old.newer {
         return Err(
-            "this document was written by a newer version of kame; update kame to merge the              file there now into it"
+            "this document was written by a newer version of kame; update kame to merge \
+                    the file there now into it"
                 .into(),
         );
     }

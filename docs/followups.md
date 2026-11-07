@@ -51,11 +51,9 @@ written by one version has to be safe in another.
 ### Polish
 
 - [ ] **A changelog,** and the release notes on GitHub drawn from it.
-- [ ] **How the app is distributed.** Today's is ad-hoc signed and Apple Silicon only, and the Homebrew cask takes it out of
-  quarantine. Notarizing it needs an Apple Developer ID; an Intel or universal build needs a second target. Both depend on
-  whether 1.0 is for other people as well.
-- [ ] **Adjust the word spacing numbers with use.** They're in `layout/breaks.rs`. The study is in
-  section 14 of `docs/superpowers/specs/2026-11-03-word-spacing-design.md`.
+- [ ] **An Intel or universal build of the app,** if Intel Macs should have it: a second target in the release workflow.
+  The app stays ad-hoc signed and not notarized (an Apple Developer ID isn't worth its yearly fee here), and the Homebrew
+  cask takes it out of quarantine as it installs.
 - [ ] **Rough edges daily writing finds,** added here as they're found.
 
 Performance, worth doing if daily writing feels it. Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a

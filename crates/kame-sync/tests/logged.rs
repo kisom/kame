@@ -523,6 +523,85 @@ fn a_document_with_only_logs_that_all_wait_on_a_missing_log_is_refused() {
         .ends_with(" Written offline."));
 }
 
+fn copy_logs(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+}
+
+/// A 0.2.0 machine still opens a waiting remnant as an empty document, as this build did before it
+/// refused one, and its first sync writes that document's history there. Arriving here, that's a
+/// head, so this build builds the document from it, empty. The waiting changes stay out of it until
+/// the machine they came from opens it and writes its history again, when they merge in as another
+/// document of this name, every word kept.
+#[test]
+fn a_waiting_remnant_an_older_kame_opened_empty_is_built_here_and_merges_the_rest() {
+    let (talos, titan) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    talos.append(&mut session, 0, " Written offline.");
+    titan.logged(&session).sync(&mut session, 2).unwrap();
+    drop(session);
+    // The move took talos's log away. Titan's, beside titan's database, remains.
+    let folder = log_folder(&talos.path);
+    std::fs::remove_file(folder.join("talos-aaaa.log")).unwrap();
+
+    // On the 0.2.0 machine.
+    let older = talos.path.with_file_name("older.kame");
+    copy_logs(&folder, &log_folder(&older));
+    let mut empty = Session::open(&older).unwrap();
+    assert!(empty
+        .document()
+        .blocks
+        .iter()
+        .all(|block| block.text.is_empty()));
+    let outcome = Logged::open(&empty, "older-cccc")
+        .unwrap()
+        .sync(&mut empty, 3)
+        .unwrap();
+    assert!(outcome.written > 0, "{outcome:?}");
+    drop(empty);
+    std::fs::copy(
+        log_folder(&older).join("older-cccc.log"),
+        folder.join("older-cccc.log"),
+    )
+    .unwrap();
+
+    // Here, where the remnant was refused, it's built from that head, empty.
+    let here = talos.path.with_file_name("here.kame");
+    copy_logs(&folder, &log_folder(&here));
+    assert!(build_from_logs(&here).unwrap());
+    let mut at_here = Session::open(&here).unwrap();
+    assert!(at_here
+        .document()
+        .blocks
+        .iter()
+        .all(|block| block.text.is_empty()));
+
+    // Titan opens its own, which writes its history again, and that arrives here.
+    let mut there = talos.session();
+    let outcome = titan.logged(&there).sync(&mut there, 4).unwrap();
+    assert!(outcome.written > 0 && !outcome.stranded, "{outcome:?}");
+    drop(there);
+    copy_logs(&folder, &log_folder(&here));
+    let outcome = Logged::open(&at_here, "here-dddd")
+        .unwrap()
+        .sync(&mut at_here, 5)
+        .unwrap();
+    assert!(outcome.merged && outcome.another_document, "{outcome:?}");
+    let text: Vec<&str> = at_here
+        .document()
+        .blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect();
+    assert!(
+        text.iter().any(|text| text.ends_with(" Written offline.")),
+        "{text:?}"
+    );
+}
+
 /// A document with only logs, none of whose lines this build can use: each is damaged, holds a value
 /// reading has to fit, or fails its check, as a line in an older format does. Opened, an empty
 /// document would be made there, and its first sync would put a new document's lines beside these,

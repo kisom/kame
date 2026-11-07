@@ -790,16 +790,18 @@ pub const NEWER_LOGS: &str =
 /// opened. They may be on the way, or gone for good with a move or a delete on another machine. The
 /// machine these changes came from, which the log holding them is named for, still has what they
 /// build on, and opening it there writes its history again, so that comes before deleting it here,
-/// which removes what's left.
+/// which removes what's left. Delete is in a notebook's browser, so the folder by hand is said too,
+/// for a logged folder that isn't a notebook.
 pub const WAITING_LOGS: &str = "its logs hold only changes that build on others that aren't here. \
      They may still arrive. If it was moved or deleted on another machine they won't: opening it on \
-     the machine these changes came from, which its log is named for, brings the rest here, and \
-     deleting it in kame removes what's left";
+     the machine these changes came from, which its log is named for, brings the rest here. To \
+     remove what's left, delete it in the notebook's browser, or delete its hidden .sync folder \
+     by hand";
 
 /// Why a document with only logs, none of whose lines this build can use, can't be opened.
 pub const UNUSABLE_LOGS: &str = "its logs hold no change this version of kame can use, only lines \
-     that are damaged or that it can't check, so it isn't opened. If they're damaged, deleting it in \
-     kame removes them";
+     that are damaged or that it can't check, so it isn't opened. If they're damaged, delete it in the \
+     notebook's browser, or delete its hidden .sync folder by hand";
 
 /// Builds the database of a document that has logs and no file yet, as on a fresh machine,
 /// returning whether it did. Nothing is written unless the logs hold a whole document. This doesn't

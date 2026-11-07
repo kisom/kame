@@ -4,7 +4,7 @@
 //! and merged directly. Nothing may panic, a merge keeps every word either side added, and what's
 //! typed survives a sync. See `kame_test_dir::fuzz` for running it longer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -316,18 +316,23 @@ fn all_words(doc: &Document) -> String {
     words
 }
 
-/// A document's words, as the merge takes words: runs of letters and digits. What's between
-/// them can be shared by the words on either side of a conflict, and kept with the other.
-fn word_set(doc: &Document) -> HashSet<String> {
-    all_words(doc)
+/// A document's words, as the merge takes words: runs of letters and digits, with how many times
+/// each comes. What's between them can be shared by the words on either side of a conflict, and
+/// kept with the other.
+fn word_counts(doc: &Document) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for word in all_words(doc)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .map(str::to_string)
-        .collect()
+    {
+        *counts.entry(word.to_string()).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// Merges both ways round, checking that the order doesn't matter, the result is one kame can
-/// hold, and every word either side has that the base doesn't is in its text or its notes.
+/// hold, and that every word either side added, and every word both kept from the base, is in its
+/// text or its notes.
 fn merged_keeping_words(
     base: Option<&Document>,
     one: &Document,
@@ -366,13 +371,32 @@ fn merged_keeping_words(
         "the order of the sides matters"
     );
     check_valid(&forwards.doc);
-    let shared = base.map(word_set).unwrap_or_default();
-    let words = all_words(&forwards.doc);
-    for side in [one, other] {
-        let mut fitted = side.clone();
-        fitted.fit();
-        for word in word_set(&fitted).difference(&shared) {
-            assert!(words.contains(word.as_str()), "lost {word:?}: {words}");
+    let fitted = |doc: &Document| {
+        let mut doc = doc.clone();
+        doc.fit();
+        word_counts(&doc)
+    };
+    let based = base.map(fitted).unwrap_or_default();
+    let (one_words, other_words) = (fitted(one), fitted(other));
+    let result = word_counts(&forwards.doc);
+    let lost = |word: &String, why: &str| {
+        assert!(
+            result.contains_key(word),
+            "lost {word:?}, {why}: {}",
+            all_words(&forwards.doc)
+        )
+    };
+    // What either side added.
+    for side in [&one_words, &other_words] {
+        for word in side.keys().filter(|word| !based.contains_key(*word)) {
+            lost(word, "which a side added");
+        }
+    }
+    // What both kept from the base: as many of it as the base had, on both sides. One side can
+    // rightly cut some of a word the base had many of, and the other cut others.
+    for (word, count) in &based {
+        if one_words.get(word) == Some(count) && other_words.get(word) == Some(count) {
+            lost(word, "which both sides kept");
         }
     }
 }

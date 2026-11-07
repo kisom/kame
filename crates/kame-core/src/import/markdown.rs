@@ -355,7 +355,7 @@ impl TableState {
             .max(self.aligns.len());
         let align = |column: usize| self.aligns.get(column).copied().unwrap_or(Alignment::None);
         // Three is the least a centred marker (`:-:`) fits in.
-        let widths: Vec<usize> = (0..columns)
+        let mut widths: Vec<usize> = (0..columns)
             .map(|column| {
                 self.rows
                     .iter()
@@ -366,8 +366,26 @@ impl TableState {
                     .max(3)
             })
             .collect();
+        // Padding can make a table far larger than what was written: one long cell over many
+        // short rows widens every row. Past a few times the table's own size, the rows are
+        // written as they are, unpadded, so that a crafted file can't swell into gigabytes.
+        let unpadded: usize = self
+            .rows
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.len() + 3).sum::<usize>() + 2)
+            .sum::<usize>()
+            + columns * 6;
+        let padded =
+            (self.rows.len() + 1).saturating_mul(widths.iter().sum::<usize>() + 3 * columns + 2);
+        let pad = padded <= unpadded.saturating_mul(4) + 4096;
+        if !pad {
+            widths = vec![3; columns];
+        }
         let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
         let row_line = |row: &[String]| {
+            if !pad {
+                return line(row.to_vec());
+            }
             line(
                 (0..columns)
                     .map(|column| {
@@ -1301,6 +1319,26 @@ mod tests {
     fn a_pipe_in_a_cell_is_escaped() {
         let text = table_text("| a |\n|---|\n| x \\| y |\n");
         assert_eq!(text, "| a      |\n| ------ |\n| x \\| y |");
+    }
+
+    #[test]
+    fn a_table_padding_would_swell_is_written_unpadded() {
+        // One long cell and many one-cell rows under a wide header: padding every row to the
+        // long cell's width and the header's column count would be far larger than the source.
+        let long = "x".repeat(20_000);
+        let mut source = format!("| {long} | b | c | d |\n|---|---|---|---|\n");
+        for _ in 0..2_000 {
+            source.push_str("| y |\n");
+        }
+        let text = table_text(&source);
+        assert!(
+            text.len() < source.len() * 4,
+            "{} bytes from {} of Markdown",
+            text.len(),
+            source.len()
+        );
+        assert!(text.contains(&long), "the long cell's words are all kept");
+        assert_eq!(text.lines().count(), 2 + 2_000, "every row is kept");
     }
 
     #[test]

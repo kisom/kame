@@ -2,7 +2,7 @@
 //! leads to it. A step that no longer fits is refused at undo or redo, with nothing changed, so
 //! that what's in the head isn't lost to what the history remembers.
 
-use kame_core::edit::{Cursor, Op};
+use kame_core::edit::Op;
 use kame_core::model::{Block, BlockKind, Document};
 use kame_core::session::Session;
 use kame_core::storage::Db;
@@ -48,30 +48,51 @@ fn a_merge_undone_over_words_it_did_not_leave_is_refused() {
 }
 
 /// A merge undone and redone where nothing else changed the words goes on working, whatever
-/// order the notes came back in.
+/// order the notes came back in: undoing the delete of a block puts its note back at the end, so
+/// the document's notes are in another order from the merge's when the merge is undone.
 #[test]
-fn a_merge_undoes_and_redoes_over_its_own_words() {
+fn a_merge_undoes_and_redoes_over_its_own_words_whatever_order_its_notes_came_back_in() {
+    use kame_core::model::{Anchor, Annotation, AnnotationKind};
     let path = kame_test_dir::folder("by-hand").join("merged.kame");
     let mut session = Session::open(&path).unwrap();
     session.insert("The end.");
     let mut merged = session.document().clone();
-    merged.blocks[0].text.push_str(" Merged in.");
-    assert!(session.replace_document(merged.clone()));
-    let end = Cursor {
-        block_id: merged.blocks[0].id,
-        offset: merged.blocks[0].text.len(),
+    merged.blocks = vec![paragraph("First, merged in."), paragraph("Second.")];
+    let note = |block: &Block, body: &str| Annotation {
+        id: Uuid::new_v4(),
+        kind: AnnotationKind::Note,
+        anchor: Anchor::block(block.id),
+        body: body.to_string(),
     };
-    session.set_caret(end);
-    session.insert(" Typed after.");
-    assert!(session.undo());
-    assert!(session.undo());
+    merged.annotations = vec![
+        note(&merged.blocks[0], "On the first."),
+        note(&merged.blocks[1], "On the second."),
+    ];
+    assert!(session.replace_document(merged.clone()));
+    let cut = session.editor.apply_edit(Op::DeleteBlock {
+        index: 0,
+        block: merged.blocks[0].clone(),
+        annotations: Vec::new(),
+    });
+    assert!(session.record(&cut));
+
+    assert!(session.undo(), "{:?}", session.last_error);
+    let bodies = |session: &Session| -> Vec<String> {
+        session
+            .document()
+            .annotations
+            .iter()
+            .map(|note| note.body.clone())
+            .collect()
+    };
+    assert_eq!(bodies(&session), ["On the second.", "On the first."]);
+    assert!(session.undo(), "{:?}", session.last_error);
     assert_eq!(session.document().blocks[0].text, "The end.");
-    assert!(session.redo());
-    assert!(session.redo());
-    assert_eq!(
-        session.document().blocks[0].text,
-        "The end. Merged in. Typed after."
-    );
+    assert!(session.redo(), "{:?}", session.last_error);
+    assert_eq!(bodies(&session), ["On the first.", "On the second."]);
+    assert!(session.redo(), "{:?}", session.last_error);
+    assert_eq!(session.document().blocks.len(), 1);
+    assert_eq!(bodies(&session), ["On the second."]);
 }
 
 /// Fuzzing found this (`kame-typeset/tests/fuzz_files.rs`, seed 1052619): a log missing the step

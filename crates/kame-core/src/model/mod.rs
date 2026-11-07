@@ -13,5 +13,6 @@ pub(crate) use offsets::fit_range;
 pub use document::{
     bare_link_ranges, has_unknown_fields, is_script_url, link_ranges, link_style, list_labels,
     list_positions, AcceptedMark, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId,
-    BlockKind, Document, ImageAlign, ListPosition, Metadata, Span, SpanStyle, MAX_LIST_DEPTH,
+    BlockKind, Document, ImageAlign, ListPosition, Metadata, Span, SpanStyle, HEADING_LEVELS,
+    MAX_LIST_DEPTH,
 };

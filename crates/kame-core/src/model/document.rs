@@ -23,6 +23,8 @@ impl ImageAlign {
 pub enum BlockKind {
     Paragraph,
     Heading {
+        /// 1 to 6. Read whatever whole number it is, and fitted to that ([`Block::fit_kind`]).
+        #[serde(deserialize_with = "byte_from_any")]
         level: u8,
         /// Set in the middle of the line. Absent when it isn't, as in files from before it.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -30,8 +32,13 @@ pub enum BlockKind {
     },
     ListItem {
         ordered: bool,
-        /// How many lists this one is nested inside.
-        #[serde(default, skip_serializing_if = "is_zero")]
+        /// How many lists this one is nested inside, up to [`MAX_LIST_DEPTH`]. Read whatever
+        /// whole number it is, and fitted to that ([`Block::fit_kind`]).
+        #[serde(
+            default,
+            skip_serializing_if = "is_zero",
+            deserialize_with = "byte_from_any"
+        )]
         depth: u8,
     },
     /// An indented, italicized quotation.
@@ -92,8 +99,45 @@ fn is_zero(depth: &u8) -> bool {
     *depth == 0
 }
 
+/// A byte from any whole number, the nearest one to it, so that one out of a byte's range, as a
+/// damaged or hand-made file can hold, is fitted rather than making its whole document unreadable.
+/// Anything but a whole number is still an error.
+fn byte_from_any<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    struct Whole;
+    impl serde::de::Visitor<'_> for Whole {
+        type Value = u8;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a whole number")
+        }
+        fn visit_i64<E>(self, value: i64) -> Result<u8, E> {
+            Ok(value.clamp(0, 255) as u8)
+        }
+        fn visit_u64<E>(self, value: u64) -> Result<u8, E> {
+            Ok(value.min(255) as u8)
+        }
+        fn visit_i128<E>(self, value: i128) -> Result<u8, E> {
+            Ok(value.clamp(0, 255) as u8)
+        }
+        fn visit_u128<E>(self, value: u128) -> Result<u8, E> {
+            Ok(value.min(255) as u8)
+        }
+        /// JSON has one kind of number, and one past what a `u64` holds is read as a float.
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<u8, E> {
+            if value.is_finite() && value.fract() == 0.0 {
+                Ok(value.clamp(0.0, 255.0) as u8)
+            } else {
+                Err(E::invalid_type(serde::de::Unexpected::Float(value), &self))
+            }
+        }
+    }
+    deserializer.deserialize_any(Whole)
+}
+
 /// How deeply lists can nest.
 pub const MAX_LIST_DEPTH: u8 = 5;
+
+/// The levels a heading can have: those Markdown and HTML have.
+pub const HEADING_LEVELS: std::ops::RangeInclusive<u8> = 1..=6;
 
 /// Where a list item sits: how deep it really is, and its number if it is ordered.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -219,18 +263,31 @@ pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
 /// Whether JSON as written holds a field that's missing once read and written again by this
 /// build, which is how something from a newer version of kame looks. A field missing from what was
 /// written is only something added since, so that doesn't count.
+///
+/// A list item's `depth` is a field this build knows, so it doesn't count either: it's left out
+/// when it's 0, and a depth below 0, which a damaged file can hold, is read as 0.
 pub fn has_unknown_fields(written: &serde_json::Value, known: &serde_json::Value) -> bool {
+    unknown_fields_in(None, written, known)
+}
+
+/// [`has_unknown_fields`], for the value of the field `field`, if it's one.
+fn unknown_fields_in(
+    field: Option<&str>,
+    written: &serde_json::Value,
+    known: &serde_json::Value,
+) -> bool {
     use serde_json::Value;
     match (written, known) {
-        (Value::Object(written), Value::Object(known)) => written.iter().any(|(key, value)| {
-            known
-                .get(key)
-                .is_none_or(|kept| has_unknown_fields(value, kept))
-        }),
+        (Value::Object(written), Value::Object(known)) => {
+            written.iter().any(|(key, value)| match known.get(key) {
+                Some(kept) => unknown_fields_in(Some(key), value, kept),
+                None => !(field == Some("ListItem") && key == "depth"),
+            })
+        }
         (Value::Array(written), Value::Array(known)) => written
             .iter()
             .zip(known)
-            .any(|(value, kept)| has_unknown_fields(value, kept)),
+            .any(|(value, kept)| unknown_fields_in(None, value, kept)),
         _ => false,
     }
 }

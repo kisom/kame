@@ -338,6 +338,17 @@ mod tests {
         assert!(view.blocks[0].spans.is_empty());
     }
 
+    /// A depth is a field this build knows, written or not. A field beside it isn't.
+    #[test]
+    fn a_depth_written_at_or_below_zero_isnt_newer_but_a_field_beside_it_is() {
+        for depth in ["0", "-2"] {
+            let kind = format!(r#"{{"ListItem":{{"ordered":true,"depth":{depth}}}}}"#);
+            assert!(!is_newer(&document(&block(&kind, ""), "")), "{depth}");
+        }
+        let kind = r#"{"ListItem":{"ordered":true,"depth":0,"indent":2}}"#;
+        assert!(is_newer(&document(&block(kind, ""), "")));
+    }
+
     #[test]
     fn damage_makes_no_view() {
         for json in [

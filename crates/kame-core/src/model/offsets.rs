@@ -1,12 +1,15 @@
-//! Making the offsets in a document read from a file fit its text. kame's own edits keep every
-//! span and anchor in range and on a character boundary, but a damaged or hand-made file needn't,
-//! and slicing text at such an offset panics.
+//! Making a document read from a file fit the rules its readers rely on. kame's own edits keep every
+//! span and anchor in range and on a character boundary, every id its own, and every level and
+//! depth to what the model has, but a damaged or hand-made file needn't, and slicing text at an
+//! offset that doesn't fit it panics.
 
 use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::model::document::{Anchor, Block, BlockId, Document};
+use crate::model::document::{
+    Anchor, Block, BlockId, BlockKind, Document, HEADING_LEVELS, MAX_LIST_DEPTH,
+};
 
 /// `offset` brought into `text` and back to the character boundary at or before it.
 fn fitted(text: &str, offset: usize) -> usize {
@@ -33,6 +36,13 @@ pub(crate) fn fit_range(text: &str, start: &mut usize, end: &mut usize) {
 }
 
 impl Block {
+    /// Brings a heading's level into [`HEADING_LEVELS`] and a list item's depth down to
+    /// [`MAX_LIST_DEPTH`], for one read from a file, which needn't keep to them. One that keeps to
+    /// them is left as it is.
+    pub fn fit_kind(&mut self) {
+        self.kind.fit();
+    }
+
     /// Brings each span into the text, down to character boundaries, and drops one that's left
     /// empty or reversed. A span that already fits is left as it is.
     pub fn fit_spans(&mut self) {
@@ -48,6 +58,19 @@ impl Block {
     }
 }
 
+impl BlockKind {
+    /// As [`Block::fit_kind`] has it.
+    pub fn fit(&mut self) {
+        match self {
+            BlockKind::Heading { level, .. } => {
+                *level = (*level).clamp(*HEADING_LEVELS.start(), *HEADING_LEVELS.end());
+            }
+            BlockKind::ListItem { depth, .. } => *depth = (*depth).min(MAX_LIST_DEPTH),
+            _ => {}
+        }
+    }
+}
+
 impl Document {
     /// Makes a document just read from a file fit the rules its readers rely on, for one that's
     /// damaged or hand-made. A document kame wrote comes back unchanged.
@@ -55,6 +78,7 @@ impl Document {
     /// - A block repeating an earlier block's id is given an id of its own ([`Document::fit_ids`]),
     ///   and so is an annotation repeating an earlier annotation's
     ///   ([`Document::fit_annotation_ids`]).
+    /// - A heading's level and a list item's depth are as [`Block::fit_kind`] has them.
     /// - Spans are as [`Block::fit_spans`] has them.
     /// - An anchor is brought into its block's text and down to character boundaries, and one left
     ///   reversed becomes a point at its start, as a footnote's is. An anchor whose block is gone,
@@ -63,6 +87,7 @@ impl Document {
         self.fit_ids();
         self.fit_annotation_ids();
         for block in &mut self.blocks {
+            block.fit_kind();
             block.fit_spans();
         }
         if self.annotations.is_empty() {
@@ -138,6 +163,7 @@ fn own_ids(mut ids: Vec<&mut Uuid>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::MAX_LIST_DEPTH;
     use crate::model::{Anchor, Annotation, AnnotationKind, Block, BlockKind, Document, Span};
     use crate::model::{BlockId, SpanStyle};
     use std::collections::HashSet;
@@ -360,6 +386,87 @@ mod tests {
         );
         let ids: HashSet<Uuid> = doc.annotations.iter().map(|note| note.id).collect();
         assert_eq!(ids.len(), 3);
+    }
+
+    /// A block with `kind` as JSON, read and fitted.
+    fn kind_after(kind: &str) -> BlockKind {
+        let json = format!(
+            r#"{{"id":"00000000-0000-0000-0000-000000000001","title":"t","blocks":[{{"id":"00000000-0000-0000-0000-000000000010","kind":{kind},"text":"Words.","spans":[]}}],"annotations":[]}}"#
+        );
+        let mut doc: Document =
+            serde_json::from_str(&json).unwrap_or_else(|err| panic!("{kind}: {err}"));
+        doc.fit();
+        doc.blocks[0].kind.clone()
+    }
+
+    #[test]
+    fn a_heading_level_outside_one_to_six_becomes_the_nearest() {
+        let heading = |level| BlockKind::Heading {
+            level,
+            centered: false,
+        };
+        for (written, fitted) in [
+            ("0", 1),
+            ("-1", 1),
+            ("-300", 1),
+            ("1", 1),
+            ("3", 3),
+            ("6", 6),
+            ("7", 6),
+            ("255", 6),
+            ("256", 6),
+            ("4294967296", 6),
+            ("18446744073709551615", 6),
+            ("-9223372036854775808", 1),
+        ] {
+            assert_eq!(
+                kind_after(&format!(r#"{{"Heading":{{"level":{written}}}}}"#)),
+                heading(fitted),
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_list_depth_past_the_deepest_becomes_the_deepest() {
+        let item = |depth| BlockKind::ListItem {
+            ordered: true,
+            depth,
+        };
+        for (written, fitted) in [
+            ("-1", 0),
+            ("-256", 0),
+            ("0", 0),
+            ("2", 2),
+            ("5", MAX_LIST_DEPTH),
+            ("6", MAX_LIST_DEPTH),
+            ("255", MAX_LIST_DEPTH),
+            ("256", MAX_LIST_DEPTH),
+            ("18446744073709551615", MAX_LIST_DEPTH),
+        ] {
+            assert_eq!(
+                kind_after(&format!(
+                    r#"{{"ListItem":{{"ordered":true,"depth":{written}}}}}"#
+                )),
+                item(fitted),
+                "{written}"
+            );
+        }
+    }
+
+    /// A level or depth of the wrong type is damage, as any other value of the wrong type is.
+    #[test]
+    fn a_level_or_depth_that_isnt_a_whole_number_is_still_damage() {
+        for kind in [
+            r#"{"Heading":{"level":1.5}}"#,
+            r#"{"Heading":{"level":"2"}}"#,
+            r#"{"ListItem":{"ordered":true,"depth":null}}"#,
+        ] {
+            let json = format!(
+                r#"{{"id":"00000000-0000-0000-0000-000000000010","kind":{kind},"text":"","spans":[]}}"#
+            );
+            assert!(serde_json::from_str::<Block>(&json).is_err(), "{kind}");
+        }
     }
 
     #[test]

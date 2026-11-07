@@ -219,8 +219,9 @@ impl Op {
 
     /// Makes what this carries fit the text it carries, as a head read from a file is
     /// ([`Document::fit`]), so that undo brings back what fits, and redo then finds what it
-    /// expects in a head that was fitted too: the documents, a block's spans, the notes on a deleted
-    /// block, and the notes a delete took, which lie in the text it took.
+    /// expects in a head that was fitted too: the documents, a block's kind and spans, the kinds
+    /// a block changes between, the notes on a deleted block, and the notes a delete took, which
+    /// lie in the text it took.
     ///
     /// Anything given against a block's text at some point in history that the op doesn't carry
     /// is left as it is here, and fitted to the document when `apply` applies it: a delete's
@@ -232,10 +233,18 @@ impl Op {
                 old.fit();
                 new.fit();
             }
-            Op::InsertBlock { block, .. } => block.fit_spans(),
+            Op::InsertBlock { block, .. } => {
+                block.fit_kind();
+                block.fit_spans();
+            }
+            Op::SetBlockKind { old_kind, kind, .. } => {
+                old_kind.fit();
+                kind.fit();
+            }
             Op::DeleteBlock {
                 block, annotations, ..
             } => {
+                block.fit_kind();
                 block.fit_spans();
                 for annotation in annotations {
                     if let Anchor::Range {

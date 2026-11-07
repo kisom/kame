@@ -141,7 +141,7 @@ Matched by id.
 
 **Moving an anchor.** A whole-block anchor stays if the block survives. A range in a block both sides had goes through that side's map, with `start` through `start()`, and `end` through `end()` but never before the new start. A zero-width anchor stays zero-width, so a footnote's marker doesn't widen. A range in a block only one side had stays as it is, if it's from that side. One from the side without the block, which a note naming a block its side has cut can be, is into no text there is, so it can't be moved, and counts as one whose block is gone.
 
-**Rehoming.** When a note's block is gone, it becomes a whole-block anchor on the nearest earlier block that survives, in the order of the side that had it (ours, if both did), or on the first merged block if there's none.
+**Rehoming.** When a note's anchor can't be moved but its block survives, as when only the other side kept the block, it becomes a whole-block anchor on that block. When a note's block is gone, it becomes a whole-block anchor on the nearest earlier block that survives, in the order of the side that had it (ours, if both did), or on the first merged block if there's none.
 
 **The final list** is every kept annotation, then the new notes whose blocks survive, sorted by id with a stable sort, keeping the first of any with the same id. New notes come from ours' blocks in order, with each block's conflicts in text order, then from blocks only theirs has.
 

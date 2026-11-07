@@ -434,6 +434,42 @@ fn a_note_on_a_block_only_the_other_side_kept_takes_that_sides_place() {
     );
 }
 
+/// A note only the side without its block has, where the other side kept the block, goes on that
+/// block, not on the document's first.
+#[test]
+fn a_note_whose_block_only_the_other_side_kept_goes_on_that_block() {
+    let note = |body: &str| kame_core::model::Annotation {
+        id: Uuid::from_u128(50),
+        kind: AnnotationKind::Note,
+        anchor: Anchor::range(Uuid::from_u128(2), 20, 29),
+        body: body.to_string(),
+    };
+    let mut base = document(vec![
+        block(1, "Kept."),
+        block(2, "A long sentence that goes on."),
+    ]);
+    base.annotations = vec![note("A thought.")];
+    // The later side cut the block, kept its note and wrote more in it.
+    let mut cut = base.clone();
+    cut.blocks.remove(1);
+    cut.annotations = vec![note("A thought, and more.")];
+    // The earlier side edited the block and took the note out.
+    let mut edited = base.clone();
+    edited.blocks[1].text = "Short now.".to_string();
+    edited.annotations.clear();
+
+    let result = merged(&base, &cut, &edited);
+
+    let found = result
+        .doc
+        .annotations
+        .iter()
+        .find(|found| found.id == Uuid::from_u128(50))
+        .expect("the note is kept");
+    assert_eq!(found.body, "A thought, and more.");
+    assert_eq!(found.anchor, Anchor::block(Uuid::from_u128(2)));
+}
+
 /// Fuzzing found this (`fuzz_logs.rs`, damaged merges, seed 514). Two notes sharing an id, as a
 /// damaged file can hold, were matched by id, so a merge kept one of them and lost the other.
 #[test]

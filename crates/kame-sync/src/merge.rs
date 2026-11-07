@@ -398,12 +398,17 @@ fn merged_annotations(
     let placed: HashMap<BlockId, &Block> = blocks.iter().map(|block| (block.id, block)).collect();
     let mut merged: Vec<Annotation> = Vec::new();
 
-    // A note kept when its block is gone goes on the block before it on the side that had it.
+    // A note kept when its block is gone goes on the block before it on the side that had it. One
+    // whose block is there, kept by the side that doesn't have the note, goes on that block, as its
+    // offsets are into the other side's text.
     let rehome = |anchor: &Anchor, doc: &Document| -> Anchor {
         let id = match anchor {
             Anchor::Block(id) => *id,
             Anchor::Range { block_id, .. } => *block_id,
         };
+        if placed.contains_key(&id) {
+            return Anchor::Block(id);
+        }
         let at = doc
             .blocks
             .iter()

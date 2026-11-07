@@ -57,6 +57,17 @@ fn merge_files(one: &Path, other: &Path, out: &Path) -> Result<()> {
     if out.exists() {
         return Err(format!("{} already exists", out.display()).into());
     }
+    // What this build doesn't know of either would be left out of the merge, or written fitted, and
+    // the base comes from their own histories, which that covers too.
+    for file in [one, other] {
+        if Db::open_read_only(file)?.holds_newer() {
+            return Err(format!(
+                "{} was written by a newer version of kame; update kame to merge it",
+                file.display()
+            )
+            .into());
+        }
+    }
     let (first, second) = (Version::read(one)?, Version::read(other)?);
     if first.doc.id != second.doc.id {
         return Err("these are not two versions of one document".into());

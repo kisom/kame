@@ -4185,6 +4185,7 @@ version = "0.2.0"
 dependencies = [
  "kame-core",
  "kame-test-dir",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

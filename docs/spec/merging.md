@@ -308,7 +308,7 @@ A copy holding anything from a newer version of kame ([document format, section 
 
 **A replaced file.** If a new file arrives over the open one, kame stops writing ([document format, section 1.6](document-format.md)) and asks. To merge, the file must still be there with the same document id. The screen is one side, with `when` 1 and the label `this machine`, and the file is the other, with `when` 0 and the label `the other machine`. Open the file, and if the merge differs from it, take a snapshot labelled `before merging with the copy on this machine`, then replace the document with one undo step. Take in the old session's `words` and `accepted`. A file there holding anything from a newer version isn't merged, and nothing is written into it, not even the snapshot. Nor is one merged with a document from a newer version on the screen, even one this build reads whole, as what's shown leaves out or fits what it doesn't know.
 
-**Command line.** `kame-sync merge ONE OTHER OUT` merges two files into a new one. A file doesn't say when it was written, so there the longer history counts as the later. It writes ONE's metadata whole and takes nothing from OTHER's.
+**Command line.** `kame-sync merge ONE OTHER OUT` merges two files into a new one. A file doesn't say when it was written, so there the longer history counts as the later. It writes ONE's metadata whole and takes nothing from OTHER's. Either file holding anything from a newer version, which covers the history the base comes from, is refused, with nothing written and a failing exit.
 
 ## 8. Notes are private
 

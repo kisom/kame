@@ -14,3 +14,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 kame-test-dir = { path = "../kame-test-dir" }
+rusqlite = { version = "0.41", features = ["bundled"] }

@@ -2007,6 +2007,47 @@ fn an_answer_read_for_another_document_is_not_gone_by() {
     );
 }
 
+/// A held-off sync is remembered for the document it was held off for. Here that's the one a merge
+/// with another document of this name made, on logs that hold only this machine's lines from before
+/// the merge, with a corrupt line among them: nothing names the merged document, so it's stranded.
+/// Undoing the merge brings back the id those lines name, so the corrupt line may be holding its
+/// revision, and the logs can be its own. That isn't the answer held off for the other id, so it's
+/// asked again, and it syncs.
+#[test]
+fn a_held_off_sync_for_another_document_is_asked_again() {
+    let (talos, titan) = two_machines_without_it("linked.kame");
+    let mut here = talos.session();
+    here.insert("Written on talos.");
+    let mut there = titan.session();
+    there.insert("Written on titan.");
+    let talos_id = here.document().id;
+    let mut logged = talos.logged(&here);
+    logged.sync(&mut here, 1).unwrap();
+    let folder = log_folder(&talos.path);
+    let before_the_merge = logs_in(&folder);
+    titan.sync(&mut there, 2);
+    talos.receive_from(&titan);
+    assert!(logged.sync(&mut here, 3).unwrap().another_document);
+    assert_ne!(here.document().id, talos_id, "the later one's id won");
+    std::fs::remove_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    for (log, text) in &before_the_merge {
+        std::fs::write(log, format!("{text}nonsense\n")).unwrap();
+    }
+
+    let outcome = logged.sync(&mut here, 4).unwrap();
+    assert!(outcome.stranded, "{outcome:?}");
+    assert!(logged.stranded_check(&here).is_none(), "it's held off");
+    assert!(here.undo());
+    assert_eq!(here.document().id, talos_id);
+    assert!(
+        logged.stranded_check(&here).is_some(),
+        "it was held off for another document"
+    );
+    let outcome = logged.sync(&mut here, 5).unwrap();
+    assert!(!outcome.stranded && !outcome.others_logs, "{outcome:?}");
+}
+
 /// A damaged document, already in the logs as it is in the file, as a build that didn't fit offsets
 /// wrote it. Both are read fitted, so they're the same, and opening it here writes nothing.
 #[test]

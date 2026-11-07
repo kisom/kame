@@ -345,15 +345,17 @@ impl StrandedAnswer {
 
 /// A sync that wrote nothing because the logs have left the database, or may be another document's,
 /// and each log's name and size when it found that out, from looking at them and reading none. Asked
-/// again while they're unchanged, it's the same answer, and nothing is read for it. What the answer
-/// also depends on is the database's revision and place and its document's id, which don't change
-/// while it isn't syncing.
+/// again while they're unchanged, for the same document, it's the same answer, and nothing is read
+/// for it. The answer also depends on the database's revision and place, which don't change while it
+/// isn't syncing. Its document's id can, as when a merge with another document is undone, so that's
+/// kept with it.
 #[derive(Debug, PartialEq)]
 struct HeldOff {
     stranded: bool,
     /// Whether it's for having no place and nothing beside it, rather than for another document's
     /// logs, when it isn't stranded.
     unplaced: bool,
+    document: uuid::Uuid,
     logs: Option<Vec<(PathBuf, u64)>>,
 }
 
@@ -417,7 +419,7 @@ impl Logged {
         let answered = self
             .held_off
             .as_ref()
-            .is_some_and(|held_off| held_off.logs == logs)
+            .is_some_and(|held_off| held_off.holds_for(document, &logs))
             || self
                 .known
                 .as_ref()
@@ -478,8 +480,9 @@ impl Logged {
         }
         // Before any reading, so that logs added to meanwhile are read next time.
         let logs = Store::log_sizes(&self.replica.folder);
+        let document = session.document().id;
         if let Some(held_off) = self.held_off.take() {
-            if held_off.logs == logs {
+            if held_off.holds_for(document, &logs) {
                 let outcome = held_off.outcome();
                 self.held_off = Some(held_off);
                 return Ok(outcome);
@@ -488,7 +491,6 @@ impl Logged {
         // Before any refresh or write, which could recreate a folder. An answer read on another
         // thread is what's gone by, if the logs are as they were when it was read.
         let known = self.known.take();
-        let document = session.document().id;
         if self.must_ask()
             && known
                 .filter(|known| known.holds_for(self, document, logs.as_ref()))
@@ -507,6 +509,7 @@ impl Logged {
             let held_off = HeldOff {
                 stranded: true,
                 unplaced: false,
+                document,
                 logs,
             };
             let outcome = held_off.outcome();
@@ -530,6 +533,7 @@ impl Logged {
             let held_off = HeldOff {
                 stranded: false,
                 unplaced,
+                document,
                 logs,
             };
             let outcome = held_off.outcome();
@@ -614,6 +618,11 @@ impl Logged {
 }
 
 impl HeldOff {
+    /// Whether this answers a sync of `document` now, with the logs as `logs` says.
+    fn holds_for(&self, document: uuid::Uuid, logs: &Option<Vec<(PathBuf, u64)>>) -> bool {
+        self.document == document && self.logs == *logs
+    }
+
     fn outcome(&self) -> Outcome {
         Outcome {
             stranded: self.stranded,

@@ -73,3 +73,31 @@ fn a_merge_undoes_and_redoes_over_its_own_words() {
         "The end. Merged in. Typed after."
     );
 }
+
+/// Fuzzing found this (`kame-typeset/tests/fuzz_files.rs`, seed 1052619): a log missing the step
+/// that typed into a new block. Undoing the step that made the block took it out, words and all,
+/// as only its id was checked, and redoing it put back the empty block it made.
+#[test]
+fn undoing_a_new_block_that_has_words_it_was_not_made_with_is_refused() {
+    let path = kame_test_dir::folder("by-hand").join("typed.kame");
+    let mut doc = Document::new("Typed");
+    doc.blocks = vec![paragraph("First.")];
+    let made = paragraph("");
+    let step = Op::InsertBlock {
+        index: 1,
+        block: made.clone(),
+    };
+    // The head has the words typed into the block, and the log lost the step that typed them.
+    doc.blocks.push(Block {
+        text: "Typed into it.".to_string(),
+        ..made
+    });
+    let mut db = Db::open(&path).unwrap();
+    db.record_edit(&doc, &step).unwrap();
+    drop(db);
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(!session.undo(), "the block was taken out with its words");
+    assert_eq!(session.document().blocks[1].text, "Typed into it.");
+    assert!(session.last_error.is_some(), "the refusal isn't said");
+}

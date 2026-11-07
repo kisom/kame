@@ -733,6 +733,12 @@ pub fn apply(doc: &mut Document, op: &Op) {
                 at_index.id, block.id,
                 "DeleteBlock payload does not match the block at index {index}"
             );
+            // Its words, which are what removing it would lose, as a history that lost the step
+            // typing into a new block would otherwise have its undo take them.
+            assert_eq!(
+                at_index.text, block.text,
+                "DeleteBlock payload text does not match the block at index {index}"
+            );
             let dropped = annotations_in_block(doc, block.id);
             assert_annotation_payload("DeleteBlock", annotations, &dropped);
             doc.blocks.remove(*index);

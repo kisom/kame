@@ -265,7 +265,7 @@ Metadata isn't part of history. Changing it writes the `metadata` row directly, 
 
 Each row in `ops` is one JSON object with a single key naming the operation. **All text changes must go through an operation**, so that history can always put the document back.
 
-Removals carry what they remove, so that undoing one needs nothing else. `apply` checks `DeleteText.text`, `DeleteText.removed`, `DeleteBlock.annotations`, the id of `DeleteBlock.block` and the words of `ReplaceDocument.old`. `RemoveAnnotation` isn't checked, a missing id does nothing, and undo restores what the op carries, so a wrong payload there changes the document silently.
+Removals carry what they remove, so that undoing one needs nothing else. `apply` checks `DeleteText.text`, `DeleteText.removed`, `DeleteBlock.annotations`, the id and text of `DeleteBlock.block` and the words of `ReplaceDocument.old`. `RemoveAnnotation` isn't checked, a missing id does nothing, and undo restores what the op carries, so a wrong payload there changes the document silently.
 
 A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payload, because that would lose notes. An implementation should validate before changing anything. For a new edit, kame panics, so its disk stays as it was, but its memory doesn't, because `DeleteText` checks `removed` after changing the text. Undo and redo run on a copy and refuse the step instead.
 
@@ -317,7 +317,7 @@ A writer must set `clipped` to every range anchor that step 3 changes, in terms 
 
 **`InsertBlock`.** `index` must be at most the number of blocks.
 
-**`DeleteBlock`.** The block at `index` must have the id of `block`. `annotations` must equal the annotations anchored in that block, compared as whole values and in any order. It removes the block and all of them, including whole-block anchors.
+**`DeleteBlock`.** The block at `index` must have the id and the text of `block`, so that undoing an `InsertBlock` under a block that has words it wasn't made with, as when a damaged log lost the step that typed them, is refused rather than taking them. `annotations` must equal the annotations anchored in that block, compared as whole values and in any order. It removes the block and all of them, including whole-block anchors.
 
 **`SetBlockKind`.** `old_kind` must match the block's kind.
 

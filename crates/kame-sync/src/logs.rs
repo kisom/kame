@@ -793,6 +793,11 @@ pub const WAITING_LOGS: &str = "its logs hold only changes that build on others 
      They may still arrive, but if it was moved or deleted on another machine they won't, and \
      deleting it in kame removes what's left";
 
+/// Why a document with only logs, none of whose lines this build can use, can't be opened.
+pub const UNUSABLE_LOGS: &str = "its logs hold no change this version of kame can use, only lines \
+     that are damaged or that it can't check, so it isn't opened. If they're damaged, deleting it in \
+     kame removes them";
+
 /// Builds the database of a document that has logs and no file yet, as on a fresh machine,
 /// returning whether it did. Nothing is written unless the logs hold a whole document. This doesn't
 /// need the folder's marker: without it the document won't sync, and says so, but opening it would
@@ -803,8 +808,10 @@ pub const WAITING_LOGS: &str = "its logs hold only changes that build on others 
 /// its name would be taken for it. Logs whose revisions all build on others that aren't there, as
 /// a log arriving ahead of the one it builds on, or one left at a document's old name after a move,
 /// are refused with [`WAITING_LOGS`] for the same reason: a blank document made there would sync
-/// to every machine. A line that fails its check isn't a revision here, so logs holding only those
-/// build nothing, as ever.
+/// to every machine. So are logs holding lines and no revision this build can use, every one
+/// damaged, holding a value reading has to fit, or failing its check as an older format's does,
+/// with [`UNUSABLE_LOGS`]. Only logs holding no line at all, or only a tear, build nothing and are
+/// opened as a new document.
 pub fn build_from_logs(path: &Path) -> Result<bool> {
     if path.exists() {
         return Ok(false);
@@ -818,6 +825,9 @@ pub fn build_from_logs(path: &Path) -> Result<bool> {
         }
         if store.revision_count() > 0 {
             return Err(WAITING_LOGS.into());
+        }
+        if !store.holds_nothing() {
+            return Err(UNUSABLE_LOGS.into());
         }
         return Ok(false);
     };

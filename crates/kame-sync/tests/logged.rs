@@ -13,7 +13,7 @@ use kame_core::session::Session;
 use kame_core::storage::Db;
 use kame_sync::logs::{
     build_from_logs, device_name, display_device, find_or_build, is_stranded, log_folder,
-    logging_root, orphaned_logs, place_of, Logged, MARKER, WAITING_LOGS,
+    logging_root, orphaned_logs, place_of, Logged, MARKER, UNUSABLE_LOGS, WAITING_LOGS,
 };
 use kame_sync::revlog::{log_reads_here, Store};
 
@@ -521,6 +521,76 @@ fn a_document_with_only_logs_that_all_wait_on_a_missing_log_is_refused() {
     assert!(session.document().blocks[0]
         .text
         .ends_with(" Written offline."));
+}
+
+/// A document with only logs, none of whose lines this build can use: each is damaged, holds a value
+/// reading has to fit, or fails its check, as a line in an older format does. Opened, an empty
+/// document would be made there, and its first sync would put a new document's lines beside these,
+/// which every machine would merge as the latest of that name. So it isn't built or opened, and
+/// nothing is written to the folder.
+#[test]
+fn a_document_with_only_logs_this_build_cannot_use_is_refused() {
+    let (talos, _) = two_machines();
+    let mut session = talos.session();
+    talos.sync(&mut session, 1);
+    let state = session.sync_state().unwrap();
+    drop(session);
+    let written = std::fs::read_to_string(log_folder(&talos.path).join("talos-aaaa.log")).unwrap();
+    let fitted = |line: &str| {
+        if line.contains(r#""kind":"Paragraph""#) {
+            line.replace(
+                r#""kind":"Paragraph""#,
+                r#""kind":{"Heading":{"level":300}}"#,
+            )
+        } else {
+            "nonsense".to_string()
+        }
+    };
+    let aged = {
+        let folder = talos.path.with_file_name(".aged");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("talos-aaaa.log"), &written).unwrap();
+        age_logs(&folder, &state);
+        std::fs::read_to_string(folder.join("talos-aaaa.log")).unwrap()
+    };
+    assert!(written.contains(r#""kind":"Paragraph""#));
+    let junk = [
+        ("nonsense", "nonsense\nmore nonsense\n".to_string()),
+        ("nuls", "\0\0\0\n\0\0\n".to_string()),
+        (
+            "fitted",
+            written.lines().map(|line| fitted(line) + "\n").collect(),
+        ),
+        ("older", aged),
+    ];
+    for (name, lines) in junk {
+        let left = talos.path.with_file_name(format!("{name}.kame"));
+        let folder = log_folder(&left);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("talos-aaaa.log"), &lines).unwrap();
+        let store = Store::load(&folder).unwrap();
+        assert_eq!(store.revision_count(), 0, "{name}");
+        assert!(!store.holds_newer(), "{name}");
+
+        let err = build_from_logs(&left).unwrap_err().to_string();
+        assert_eq!(err, UNUSABLE_LOGS, "{name}");
+        assert!(!left.exists(), "{name}");
+        assert!(!left
+            .with_file_name(format!("{name}.kame.building"))
+            .exists());
+        assert_eq!(names_in(&folder), ["talos-aaaa.log"], "{name}");
+        assert_eq!(
+            std::fs::read_to_string(folder.join("talos-aaaa.log")).unwrap(),
+            lines,
+            "{name}"
+        );
+        assert_eq!(
+            find_or_build(name, &talos.path).unwrap_err().to_string(),
+            UNUSABLE_LOGS,
+            "{name}"
+        );
+        assert!(!left.exists(), "{name}");
+    }
 }
 
 /// An empty folder holds no document to wait for, and nothing is built, as ever.

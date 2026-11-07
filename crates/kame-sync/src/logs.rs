@@ -180,9 +180,11 @@ pub fn stranded_verdict(path: &Path, revision: Option<&str>, place: Option<&str>
     (!store.corrupt_lines()).then_some(true)
 }
 
-/// Why a database that remembers a revision and no place, with nothing beside it, doesn't sync.
-pub const UNPLACED: &str = "it last synced before kame recorded where, and its logs have gone, so \
-     it may have been moved or deleted on another machine, and isn't syncing";
+/// What the app says of a database that remembers a revision and no place, with nothing beside it,
+/// when it doesn't sync.
+pub const UNPLACED: &str = "this document last synced before kame recorded where it was kept, and \
+     its logs are gone, so it may have been moved or deleted on another machine. It isn't syncing. \
+     Save As gives it logs of its own";
 
 /// Whether a database remembers a revision and no place, and no line at all is beside it, as read
 /// from the disk. It last synced before kame recorded places, and its logs have gone. That can't be
@@ -228,8 +230,8 @@ pub struct Outcome {
     /// that nothing was written, and it isn't known to be stranded, so that the clean-up leaves it
     /// alone.
     pub others_logs: bool,
-    /// Whether it last synced before kame recorded where, and nothing at all is beside it, so that it
-    /// may have been moved or deleted on another machine, and nothing was written, as
+    /// Whether it last synced before kame recorded where it was kept, and nothing at all is beside it,
+    /// so that it may have been moved or deleted on another machine, and nothing was written, as
     /// [`is_unplaced`] says. Its history written here would bring it back on every machine.
     pub unplaced: bool,
     /// Revisions written to this machine's log.

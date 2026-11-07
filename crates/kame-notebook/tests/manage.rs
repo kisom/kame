@@ -1472,7 +1472,7 @@ fn as_an_older_kame_left_it_with_no_logs(path: &Path) {
     assert_eq!(place_in(path), None);
 }
 
-/// Last synced before kame recorded where, and its logs gone: it may have been moved or deleted on
+/// Last synced before kame recorded where it was kept, and its logs gone: it may have been moved or deleted on
 /// another machine, so its history mustn't be written anywhere. Its link to a moved document is
 /// changed all the same, here only.
 #[test]

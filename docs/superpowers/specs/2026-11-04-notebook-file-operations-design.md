@@ -203,14 +203,15 @@ again as any other step, never for the open document, and ignoring a failure. Ha
 hand copy with no logs beside it isn't stamped, nor is a database whose revision isn't beside it, whose logs are then read on each pass.
 One with no line at all beside it, whose folder is missing, or empty, or holds only a tear (`Store::holds_nothing`), writes nothing
 when it syncs (`Outcome::unplaced`, `is_unplaced`): its logs may have left it for a move or a delete on another machine, and its
-history written here would bring the document back on every machine. A move still changes a closed one as it changes any document, its
-own links, images and title when it's the one moved, and its links to one that is, but only here: nothing reaches a log
-(`open_to_change` gives it no `Logged`), and the change syncs as any does once logs holding its revision are back. The app says once that it last synced before kame recorded where, that its logs have gone, so it may have been
-moved or deleted on another machine, that it isn't syncing, and that Save As gives it logs of its own. Logs holding its revision
-coming back beside it let it sync and record its place, and lines of its document beside it merge, as before. Stamping it where it is
-instead would make a hand copy from before places stranded, and retire it with a false notice, which is what places are for, and
-stamping only when its revision is in no log in the notebook can't tell a hand copy of a deleted document from that document's own
-stale database either. So it's left listed and not syncing.
+history written here would bring the document back on every machine. A move still changes a closed one as it changes any document,
+its own links, images and title when it's the one moved, and its links to one that is, but only here: nothing reaches a log
+(`open_to_change` gives it no `Logged`), and the change syncs as any does once logs holding its revision are back. The app says
+once: "this document last synced before kame recorded where it was kept, and its logs are gone, so it may have been moved or deleted
+on another machine. It isn't syncing. Save As gives it logs of its own" (`UNPLACED`). Logs holding its revision coming back beside
+it let it sync and record its place, and lines of its document beside it merge, as before. Stamping it where it is instead would
+make a hand copy from before places stranded, and retire it with a false notice, which is what places are for, and stamping only
+when its revision is in no log in the notebook can't tell a hand copy of a deleted document from that document's own stale database
+either. So it's left listed and not syncing.
 Neither a stamp nor the place recorded on arrival is written into a database holding something from a newer version of kame, which
 this build writes nothing to, so that one is merely not known to be stranded until it's updated. A stranded database holding
 anything from a newer version is neither retired nor moved: what this build reads of it leaves that out, so it could match

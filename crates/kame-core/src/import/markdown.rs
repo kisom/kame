@@ -472,6 +472,12 @@ impl<'a> Builder<'a> {
                 table.cell.push_str(&text.replace('|', "\\|"));
             }
             Event::SoftBreak | Event::HardBreak => table.cell.push(' '),
+            // A code block can't hold a footnote, so its marker stays as text, showing where it was.
+            Event::FootnoteReference(label) => {
+                table
+                    .cell
+                    .push_str(&format!("[^{}]", label.replace('|', "\\|")));
+            }
             _ => {}
         }
     }
@@ -1303,6 +1309,20 @@ mod tests {
         assert_eq!(
             text,
             "| a   | b   | c   |\n| --- | --- | --- |\n|     | 2   |     |\n| 1   |     |     |"
+        );
+    }
+
+    #[test]
+    fn a_footnote_reference_in_a_cell_keeps_its_marker() {
+        let imported = import("| a[^n] |\n|---|\n| 1 |\n\n[^n]: The note.\n");
+        assert_eq!(
+            imported.document.blocks[0].kind,
+            BlockKind::Code { language: None }
+        );
+        assert!(
+            imported.document.blocks[0].text.contains("a[^n]"),
+            "{:?}",
+            imported.document.blocks[0].text
         );
     }
 

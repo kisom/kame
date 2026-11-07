@@ -37,6 +37,12 @@ written by one version has to be safe in another.
 
 - [ ] **A stretch of daily writing with no lost words,** on two machines at different versions, with sync on. How long is
   still to agree.
+- [ ] **A corrupt line at a reused path keeps a database waiting for good.** Whether a database is stranded asks whether its
+  own folder has any corrupt line (`stranded_verdict` in `kame-sync/src/logs.rs`), not one that could be of its document
+  (`Store::may_hide`). So a database at a path whose new document's logs hold a corrupt line is never found stranded, and is
+  held off as being on another document's logs instead. Asking `may_hide` would let a pass settle it, but it widens what counts
+  as stranded, the direction where being wrong hides someone's document, and every caller of `is_stranded` would need the
+  document's id. It wants weighing on its own.
 - [ ] **A list item moved on one machine goes back after a later edit on another.** A merge takes the order of the later
   side, so a move is undone by a revision written later elsewhere, even one that only edited words, with no note. Nothing is
   lost. A three-way order rule would keep it, but it changes merged bytes between versions, so it's for before 1.0 or not at

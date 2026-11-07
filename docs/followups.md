@@ -79,8 +79,8 @@ i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame hold
 
 ## Roadmap (after 1.0)
 
-- [ ] **Tables.** Simplified on import because the model has no equivalent.
-  Tables are wanted but too complex for now, and a code block is the stopgap.
+- [ ] **Tables.** The model has no equivalent. Tables are wanted but too complex for now;
+  the stopgap is automatic, as a Markdown table imports as a code block holding a pipe table.
 - [ ] **PDF export.** On hold since the first design, and not needed for 1.0.
 - [ ] **Footnotes in the site's margins.** Sidenotes beside their markers on wide screens, so
   readers don't jump to the foot and back. Held back because kame already separates the two: a

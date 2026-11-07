@@ -133,6 +133,8 @@ Search reads what's on the screen in place of the file for the open document, si
 
 Opening a Markdown document is an import. The result has no file of its own and the original is never written. The first save asks where the `.kame` file goes, and until then links resolve against the Markdown file.
 
+A table has no equivalent in the document, so each one imports as one code block with no language, holding the table as a pipe table: the header row, a separator row that keeps each column's alignment (`---`, `:---`, `:---:`, `---:`), then the body rows, one line each. Every column is as wide as its widest cell, counted in characters, with cells padded on the side their alignment implies and rows with fewer cells padded with empty ones. A cell keeps only its words: formatting, links, code spans, footnote references and images go, a link to its words and an image to its alt text, and a `|` is written `\|`. A table inside a list item or block quote becomes a top-level code block after it. The report says "N tables as code blocks" (or "1 table as a code block"). The block exports as any code block does, so a table imported this way is a fenced block in Markdown and `<pre>` in HTML, never a table.
+
 ### 3.1 Titles
 
 In lists and search, a document goes by the first of these that isn't blank: `metadata.title`, then `document.title`, then its file name up to the first `.`. A site has its own rule (section 7.2).
@@ -317,6 +319,7 @@ Moving a document by hand keeps its new place, and links to the old path don't f
 These describe the code as it stands, and aren't rules to copy.
 
 - **Some untouched documents aren't removed.** Only one newly created document is remembered at a time, so following a link from one untouched new document to create another keeps the first, and it may then write logs. Cancelling the prompt about losing work also keeps it.
+- **An imported table is only text.** It is a code block, so it is set in the code face, doesn't export as a table, and keeps nothing a cell had besides its words. Columns are padded by counting characters, so wide (CJK) or combining characters can leave them misaligned.
 - **A move can't change links in Markdown.** kame imports `.md` and `.markdown` files rather than editing them, so links in them are left as they are, and the report after a move names each one.
 - **Reading every document is the cost of storing nothing.** Lists with titles, search and the links list read each file, so the app does them in the background. While the browser or jump list shows, a periodic check re-reads only if the entries changed. So a title changed on another machine shows when one of those is next opened, another document becomes current, or the entries change.
 - **A stray `notebook.yaml` hides a folder without a word in the app.** One copied or synced into a folder, or a damaged one, makes that folder another notebook, since only the file's being there is checked. The browser, jump list, search and the links list then leave the folder out and show nothing to say why. Only a site build warns, and a move into it says so.

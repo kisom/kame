@@ -181,8 +181,8 @@ prompt for an unsaved document.
 Opening a `.md` or `.markdown` file imports it: with Ctrl-O, File > Import
 Markdown, or `kame notes.md`. The file is only read, and the result is a new
 document with no file, so the first save asks where to put it. Front matter
-names the document and becomes its opening heading. A link to a heading, such as `[x](<#The Intro>)` or `[x](#The%20Intro)`, becomes a link to that heading in the document. Tables and raw HTML become
-plain text, and image descriptions are dropped; the status line reports what was simplified and any images it could
+names the document and becomes its opening heading. A link to a heading, such as `[x](<#The Intro>)` or `[x](#The%20Intro)`, becomes a link to that heading in the document. A table becomes a code block holding it written as a pipe table, and raw HTML becomes
+plain text; image descriptions are dropped; the status line reports what was simplified and any images it could
 not find. Replacing a document that has no file, or whose last save failed,
 asks first.
 

@@ -10,7 +10,7 @@ use crate::model::{
     Document, Metadata, MAX_LIST_DEPTH,
 };
 use crate::model::{Span, SpanStyle};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
@@ -36,7 +36,11 @@ impl ImportReport {
                 parts.push(format!("{n} {}", if n == 1 { one } else { many }));
             }
         };
-        count(self.tables, "table as plain text", "tables as plain text");
+        count(
+            self.tables,
+            "table as a code block",
+            "tables as code blocks",
+        );
         count(
             self.raw_html,
             "raw HTML fragment as plain text",
@@ -326,7 +330,81 @@ struct Builder<'a> {
     footnote_order: Vec<String>,
     pending_markers: Vec<(usize, String)>,
     markers: Vec<(BlockId, usize, String)>,
+    /// The table being read, which becomes one code block when it ends.
+    table: Option<TableState>,
     report: ImportReport,
+}
+
+/// A table's cells as plain text, collected until it ends.
+struct TableState {
+    aligns: Vec<Alignment>,
+    rows: Vec<Vec<String>>,
+    row: Vec<String>,
+    cell: String,
+}
+
+impl TableState {
+    /// The table written as a pipe table, each column as wide as its widest cell.
+    fn pipe_table(&self) -> String {
+        let columns = self
+            .rows
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .max(self.aligns.len());
+        let align = |column: usize| self.aligns.get(column).copied().unwrap_or(Alignment::None);
+        // Three is the least a centred marker (`:-:`) fits in.
+        let widths: Vec<usize> = (0..columns)
+            .map(|column| {
+                self.rows
+                    .iter()
+                    .filter_map(|row| row.get(column))
+                    .map(|cell| cell.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(3)
+            })
+            .collect();
+        let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
+        let row_line = |row: &[String]| {
+            line(
+                (0..columns)
+                    .map(|column| {
+                        let cell = row.get(column).map_or("", String::as_str);
+                        let gap = widths[column] - cell.chars().count();
+                        let (left, right) = match align(column) {
+                            Alignment::Right => (gap, 0),
+                            Alignment::Center => (gap / 2, gap - gap / 2),
+                            _ => (0, gap),
+                        };
+                        format!("{}{cell}{}", " ".repeat(left), " ".repeat(right))
+                    })
+                    .collect(),
+            )
+        };
+        let separator = line(
+            (0..columns)
+                .map(|column| {
+                    let width = widths[column];
+                    match align(column) {
+                        Alignment::None => "-".repeat(width),
+                        Alignment::Left => format!(":{}", "-".repeat(width - 1)),
+                        Alignment::Right => format!("{}:", "-".repeat(width - 1)),
+                        Alignment::Center => format!(":{}:", "-".repeat(width - 2)),
+                    }
+                })
+                .collect(),
+        );
+        let mut lines: Vec<String> = Vec::new();
+        for (index, row) in self.rows.iter().enumerate() {
+            lines.push(row_line(row));
+            if index == 0 {
+                lines.push(separator.clone());
+            }
+        }
+        lines.join("\n")
+    }
 }
 
 impl<'a> Builder<'a> {
@@ -348,11 +426,61 @@ impl<'a> Builder<'a> {
             footnote_order: Vec::new(),
             pending_markers: Vec::new(),
             markers: Vec::new(),
+            table: None,
             report: ImportReport::default(),
         }
     }
 
+    /// An event inside a table: only the words of each cell are kept.
+    fn table_event(&mut self, event: Event<'_>) {
+        let Some(table) = &mut self.table else {
+            return;
+        };
+        match event {
+            Event::Start(Tag::TableCell) => table.cell.clear(),
+            Event::End(TagEnd::TableCell) => {
+                let cell = std::mem::take(&mut table.cell);
+                table.row.push(cell.trim().to_string());
+            }
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                let row = std::mem::take(&mut table.row);
+                table.rows.push(row);
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(table) = self.table.take() {
+                    let text = table.pipe_table();
+                    match &mut self.footnote {
+                        Some((_, body)) => {
+                            body.push_str(&text.replace('\n', " "));
+                            body.push(' ');
+                        }
+                        None => {
+                            let kind = BlockKind::Code { language: None };
+                            self.blocks.push(new_block(kind, text));
+                        }
+                    }
+                }
+            }
+            Event::Start(Tag::Link { dest_url, .. }) if is_script_url(&dest_url) => {
+                self.report.script_links += 1;
+            }
+            Event::Text(text) | Event::Code(text) | Event::Html(text) => {
+                table.cell.push_str(&text.replace('|', "\\|"));
+            }
+            Event::InlineHtml(text) => {
+                self.report.raw_html += 1;
+                table.cell.push_str(&text.replace('|', "\\|"));
+            }
+            Event::SoftBreak | Event::HardBreak => table.cell.push(' '),
+            _ => {}
+        }
+    }
+
     fn event(&mut self, event: Event<'_>) {
+        if self.table.is_some() {
+            self.table_event(event);
+            return;
+        }
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -395,10 +523,19 @@ impl<'a> Builder<'a> {
 
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph | Tag::Table(_) | Tag::CodeBlock(_) | Tag::HtmlBlock => {
+            Tag::Table(aligns) => {
+                self.flush();
+                self.report.tables += 1;
+                self.table = Some(TableState {
+                    aligns,
+                    rows: Vec::new(),
+                    row: Vec::new(),
+                    cell: String::new(),
+                });
+            }
+            Tag::Paragraph | Tag::CodeBlock(_) | Tag::HtmlBlock => {
                 self.flush();
                 match &tag {
-                    Tag::Table(_) => self.report.tables += 1,
                     Tag::CodeBlock(kind) => {
                         let language = match kind {
                             CodeBlockKind::Fenced(info) => {
@@ -426,11 +563,6 @@ impl<'a> Builder<'a> {
                 self.lists.push(first_number.is_some());
             }
             Tag::Item => self.flush(),
-            Tag::TableCell => {
-                if !self.text.is_empty() {
-                    self.push_text(" | ");
-                }
-            }
             Tag::Emphasis => self.open_style(SpanStyle::Italic),
             Tag::Strong => self.open_style(SpanStyle::Bold),
             Tag::Link { dest_url, .. } => {
@@ -488,7 +620,7 @@ impl<'a> Builder<'a> {
                 self.preformatted = false;
                 self.code = None;
             }
-            TagEnd::Paragraph | TagEnd::TableHead | TagEnd::TableRow | TagEnd::Item => self.flush(),
+            TagEnd::Paragraph | TagEnd::Item => self.flush(),
             TagEnd::Heading(_) => {
                 self.flush();
                 self.heading = None;
@@ -1086,14 +1218,137 @@ mod tests {
         assert!(imported.document.annotations.is_empty());
     }
 
+    fn table_text(source: &str) -> String {
+        let imported = import(source);
+        assert_eq!(
+            imported.document.blocks.len(),
+            1,
+            "{:?}",
+            imported.document.blocks
+        );
+        assert_eq!(
+            imported.document.blocks[0].kind,
+            BlockKind::Code { language: None }
+        );
+        imported.document.blocks[0].text.clone()
+    }
+
     #[test]
-    fn a_table_keeps_each_row_as_plain_text_and_is_reported() {
+    fn a_table_becomes_one_code_block_and_is_reported() {
         let imported = import("| a | b |\n|---|---|\n| 1 | 2 |\n");
         assert_eq!(
             outline(&imported.document),
-            vec![paragraph("a | b"), paragraph("1 | 2")]
+            vec![(
+                BlockKind::Code { language: None },
+                "| a   | b   |\n| --- | --- |\n| 1   | 2   |".to_string()
+            )]
         );
         assert_eq!(imported.report.tables, 1);
+        assert_eq!(
+            imported.report.summary().unwrap(),
+            "1 table as a code block"
+        );
+    }
+
+    #[test]
+    fn columns_are_as_wide_as_their_widest_cell_in_characters() {
+        let text = table_text("| name | n |\n|---|---|\n| caf\u{e9} au lait | 12345 |\n");
+        assert_eq!(
+            text,
+            "| name         | n     |\n| ------------ | ----- |\n| caf\u{e9} au lait | 12345 |"
+        );
+    }
+
+    #[test]
+    fn alignment_markers_and_padding_follow_each_column() {
+        let text = table_text(
+            "| none | left | centre | right |\n|---|:---|:---:|---:|\n| a | b | c | d |\n| aaaaaa | bbbbbb | cccccc | dddddd |\n",
+        );
+        assert_eq!(
+            text,
+            "| none   | left   | centre |  right |\n\
+             | ------ | :----- | :----: | -----: |\n\
+             | a      | b      |   c    |      d |\n\
+             | aaaaaa | bbbbbb | cccccc | dddddd |"
+        );
+    }
+
+    #[test]
+    fn a_cell_keeps_its_words_and_loses_formatting_links_and_images() {
+        let text = table_text(
+            "| x |\n|---|\n| **bold** *it* `code` [link](http://e.com) ![alt words](a.png) c |\n",
+        );
+        let words = "bold it code link alt words c";
+        assert_eq!(
+            text,
+            format!(
+                "| {:<29} |
+| {} |
+| {words} |",
+                "x",
+                "-".repeat(29)
+            )
+        );
+    }
+
+    #[test]
+    fn a_pipe_in_a_cell_is_escaped() {
+        let text = table_text("| a |\n|---|\n| x \\| y |\n");
+        assert_eq!(text, "| a      |\n| ------ |\n| x \\| y |");
+    }
+
+    #[test]
+    fn an_empty_cell_and_a_short_row_are_padded() {
+        let text = table_text("| a | b | c |\n|---|---|---|\n| | 2 |\n| 1 |\n");
+        assert_eq!(
+            text,
+            "| a   | b   | c   |\n| --- | --- | --- |\n|     | 2   |     |\n| 1   |     |     |"
+        );
+    }
+
+    #[test]
+    fn a_table_in_a_list_item_or_quote_is_still_a_top_level_code_block() {
+        for source in [
+            "- item\n\n  | a |\n  |---|\n  | 1 |\n",
+            "> | a |\n> |---|\n> | 1 |\n",
+        ] {
+            let imported = import(source);
+            let last = imported.document.blocks.last().unwrap();
+            assert_eq!(last.kind, BlockKind::Code { language: None });
+            assert_eq!(last.text, "| a   |\n| --- |\n| 1   |");
+            assert_eq!(imported.report.tables, 1);
+        }
+    }
+
+    #[test]
+    fn text_around_a_table_stays_separate_and_the_same_source_gives_the_same_block() {
+        let source = "Before.\n\n| a |\n|---|\n| 1 |\n\nAfter.\n";
+        let kinds: Vec<_> = import(source)
+            .document
+            .blocks
+            .iter()
+            .map(|block| block.text.clone())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["Before.", "| a   |\n| --- |\n| 1   |", "After."]
+        );
+        assert_eq!(
+            table_text("| a |\n|---|\n| 1 |\n"),
+            table_text("| a |\n|---|\n| 1 |\n")
+        );
+    }
+
+    #[test]
+    fn an_imported_table_exports_as_a_fenced_code_block_not_a_table() {
+        let doc = import("| a | b |\n|---|---|\n| 1 | 2 |\n").document;
+        assert_eq!(
+            to_markdown(&doc),
+            "```\n| a   | b   |\n| --- | --- |\n| 1   | 2   |\n```\n"
+        );
+        let html = crate::export::to_html(&doc);
+        assert!(html.contains("<pre"), "{html}");
+        assert!(!html.contains("<table"), "{html}");
     }
 
     #[test]
@@ -1215,7 +1470,7 @@ mod tests {
         };
         assert_eq!(
             one.summary().unwrap(),
-            "1 table as plain text, 1 raw HTML fragment as plain text"
+            "1 table as a code block, 1 raw HTML fragment as plain text"
         );
         let two = ImportReport {
             tables: 2,
@@ -1224,7 +1479,7 @@ mod tests {
         };
         assert_eq!(
             two.summary().unwrap(),
-            "2 tables as plain text, 1 front matter field left out"
+            "2 tables as code blocks, 1 front matter field left out"
         );
     }
 

@@ -334,11 +334,15 @@ Body Text; Link…; and Move Item Up, Move Item Down, Indent Item and Outdent It
 key does, so Cut, Copy and Paste carry kame's own formatting, notes and links as Ctrl-X, Ctrl-C and
 Ctrl-V do, and Select All takes the caret's block, then the whole document. What can't act is greyed
 out: Undo or Redo with nothing to do, Cut and Copy with nothing selected, Link… with no words chosen
-and no link under the caret, and the list items' commands outside a list. Only the system knows
-whether there's anything to paste, so Paste can always be chosen, unless the document can't be
-changed: in one that's read-only because a newer kame wrote it, or whose last save failed until it's
-retried, everything that would change it is greyed out, as its keys are refused, and Copy, Select
-All and Find still work.
+in one block and no link under the caret, and the list items' commands outside a list. Only the
+system knows whether there's anything to paste, so Paste can always be chosen, unless the document
+can't be changed. That's one that's read-only because a newer kame wrote it, one whose last save
+failed, until it's retried, and one whose file changed on disk or another kame has open, until it's
+saved under another name. There everything that would change it is greyed out, and hovering says
+which of those it is. Its keys are refused too, Ctrl-X and Ctrl-K included, so a cut never only
+copies. Copy, Select All and Find still work. While a dialog is open, the rows that would change the
+document are greyed out as well, as their keys go to the dialog. A menu longer than the window has
+room for scrolls.
 
 The View menu's first two rows are the type size and the interface's text, each with buttons to
 step it that leave the menu open, so either can be walked to taste. The interface text goes from 80%

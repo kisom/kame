@@ -4194,6 +4194,9 @@ dependencies = [
 [[package]]
 name = "kame-test-dir"
 version = "0.2.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "kame-typeset"
@@ -4204,6 +4207,9 @@ dependencies = [
  "hypher",
  "image",
  "kame-core",
+ "kame-test-dir",
+ "rusqlite",
+ "serde_json",
  "swash",
  "unicode-linebreak",
  "uuid",

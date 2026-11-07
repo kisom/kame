@@ -2,6 +2,11 @@
 //! whole site into it, so what a run writes has to go when the run does. `cargo test` has no hook
 //! for the end of a run, so each test process gets a folder of its own, removed as it exits, whether
 //! its tests passed or not.
+//!
+//! [`fuzz`] holds what the fuzzing tests share: a seeded generator, and ways of damaging bytes and
+//! JSON.
+
+pub mod fuzz;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

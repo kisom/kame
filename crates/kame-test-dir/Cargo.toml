@@ -3,4 +3,7 @@ name = "kame-test-dir"
 version = "0.2.0"
 license = "Apache-2.0"
 edition = "2021"
-description = "Folders for kame's tests, removed when the test process ends. Only ever a dev-dependency."
+description = "Folders for kame's tests, removed when the test process ends, and inputs for fuzzing. Only ever a dev-dependency."
+
+[dependencies]
+serde_json = "1"

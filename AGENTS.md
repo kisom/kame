@@ -17,6 +17,12 @@ or use the flake devshell (`nix develop`, or `direnv allow` with the bundled `.e
 
 Both `cargo build` and `cargo test` must pass (`make all` and `make test`). The test suite is headless (no display/GPU); fonts resolve via `env!("CARGO_MANIFEST_DIR")/fonts/`.
 
+The fuzzing tests (`fuzz_*.rs` in `kame-core`, `kame-typeset` and `kame-sync`) damage the releases' samples and what the tests build: `.kame` files through SQL, revision log lines, documents to merge, and Markdown to import. `cargo test` runs a few hundred seeds of each. Each also has a long run, ignored by default, which takes how many seeds from `KAME_FUZZ_ITERATIONS` (10,000 if unset) and the first from `KAME_FUZZ_SEED` (the clock if unset); a failure prints its seed and how to run it alone:
+
+```sh
+KAME_FUZZ_ITERATIONS=100000 cargo test --release fuzz_ -- --ignored --nocapture
+```
+
 Every release keeps samples of what it writes, which every later build's tests read: a document and a folder of revision logs, with what reading them gave, in `crates/kame-core/tests/samples/VERSION/`. At the release commit, once every version says the new one and before tagging, run `cargo run -p kame-sync --example write_samples` and commit the folder it writes, with the release's section in `CHANGELOG.md`, which becomes its notes on GitHub. It's never run in tests. Nothing in a folder already there is ever changed, not even to make a test pass, and the release workflow refuses a tag whose version has none, or whose tests fail.
 
 To run the app with no display on NixOS, use Xvfb and the software Vulkan driver:
@@ -73,7 +79,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `crates/kame-check` — spelling and some grammar, offline, on `kame-core`, finding mistakes and leaving them to the app to draw, and skipping citations as it skips bare URLs. See `docs/superpowers/specs/2026-11-03-spelling-grammar-design.md`.
 
-`crates/kame-test-dir` — folders for tests, only ever a dev-dependency. Each test process gets one, removed as it exits, so tests put their files here and never directly in the temporary directory.
+`crates/kame-test-dir` — folders for tests, only ever a dev-dependency. Each test process gets one, removed as it exits, so tests put their files here and never directly in the temporary directory. `fuzz` is what the fuzzing tests share: a seeded generator, ways of damaging bytes and JSON, and the short and long runs.
 
 `src/notebook.rs` — the app's jump list, search, browser and what links here.
 

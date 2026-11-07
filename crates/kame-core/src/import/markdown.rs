@@ -10,7 +10,7 @@ use crate::model::{
     Document, Metadata, MAX_LIST_DEPTH,
 };
 use crate::model::{Span, SpanStyle};
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use uuid::Uuid;
@@ -95,7 +95,10 @@ pub fn from_markdown(source: &str, base_dir: &Path, fallback_title: &str) -> Imp
     let mut builder = Builder::new(base_dir);
     builder.report.front_matter = front_matter.is_some();
     builder.report.dropped_front_matter = front_matter.as_ref().map_or(0, |found| found.dropped);
-    for event in Parser::new_ext(body, parser_options()) {
+    for (event, range) in Parser::new_ext(body, parser_options()).into_offset_iter() {
+        if matches!(event, Event::Start(Tag::Table(_))) {
+            builder.table_source = Some(table_source(body, range));
+        }
         builder.event(event);
     }
     let (mut blocks, annotations, report) = builder.finish();
@@ -158,6 +161,39 @@ fn typographic(text: &str) -> String {
         Some(words) if !words.is_empty() => words.to_string(),
         _ => text.to_string(),
     }
+}
+
+/// A table as written in `body`, as it would be at the top level of a file: line endings
+/// are `\n`, and each line after the first loses the quote marks and list indent that the
+/// first line had before the table.
+fn table_source(body: &str, range: std::ops::Range<usize>) -> String {
+    let line_start = body[..range.start].rfind('\n').map_or(0, |at| at + 1);
+    let prefix = &body[line_start..range.start];
+    let text = body[range].replace("\r\n", "\n");
+    let text = text.trim_end_matches('\n');
+    let mut lines = text.split('\n');
+    let mut out = String::from(lines.next().unwrap_or(""));
+    for line in lines {
+        out.push('\n');
+        out.push_str(strip_container(line, prefix));
+    }
+    out
+}
+
+/// `line` without what a container put before it: for each character of `prefix`, the
+/// `>` of a quote, or one space or tab where the first line had a list marker or indent.
+/// A line that stops matching keeps the rest.
+fn strip_container<'l>(line: &'l str, prefix: &str) -> &'l str {
+    let mut rest = line;
+    for mark in prefix.chars() {
+        let mut chars = rest.chars();
+        match chars.next() {
+            Some('>') if mark == '>' => rest = chars.as_str(),
+            Some(' ' | '\t') if mark != '>' => rest = chars.as_str(),
+            _ => break,
+        }
+    }
+    rest
 }
 
 fn new_block(kind: BlockKind, text: String) -> Block {
@@ -330,99 +366,11 @@ struct Builder<'a> {
     footnote_order: Vec<String>,
     pending_markers: Vec<(usize, String)>,
     markers: Vec<(BlockId, usize, String)>,
-    /// The table being read, which becomes one code block when it ends.
-    table: Option<TableState>,
+    /// The source of the table about to start, set by the caller from the parser's range.
+    table_source: Option<String>,
+    /// The source of the table being read, which becomes one code block when it ends.
+    table: Option<String>,
     report: ImportReport,
-}
-
-/// A table's cells as plain text, collected until it ends.
-struct TableState {
-    aligns: Vec<Alignment>,
-    rows: Vec<Vec<String>>,
-    row: Vec<String>,
-    cell: String,
-}
-
-impl TableState {
-    /// The table written as a pipe table, each column as wide as its widest cell.
-    fn pipe_table(&self) -> String {
-        let columns = self
-            .rows
-            .iter()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0)
-            .max(self.aligns.len());
-        let align = |column: usize| self.aligns.get(column).copied().unwrap_or(Alignment::None);
-        // Three is the least a centred marker (`:-:`) fits in.
-        let mut widths: Vec<usize> = (0..columns)
-            .map(|column| {
-                self.rows
-                    .iter()
-                    .filter_map(|row| row.get(column))
-                    .map(|cell| cell.chars().count())
-                    .max()
-                    .unwrap_or(0)
-                    .max(3)
-            })
-            .collect();
-        // Padding can make a table far larger than what was written: one long cell over many
-        // short rows widens every row. Past a few times the table's own size, the rows are
-        // written as they are, unpadded, so that a crafted file can't swell into gigabytes.
-        let unpadded: usize = self
-            .rows
-            .iter()
-            .map(|row| row.iter().map(|cell| cell.len() + 3).sum::<usize>() + 2)
-            .sum::<usize>()
-            + columns * 6;
-        let padded =
-            (self.rows.len() + 1).saturating_mul(widths.iter().sum::<usize>() + 3 * columns + 2);
-        let pad = padded <= unpadded.saturating_mul(4) + 4096;
-        if !pad {
-            widths = vec![3; columns];
-        }
-        let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
-        let row_line = |row: &[String]| {
-            if !pad {
-                return line(row.to_vec());
-            }
-            line(
-                (0..columns)
-                    .map(|column| {
-                        let cell = row.get(column).map_or("", String::as_str);
-                        let gap = widths[column] - cell.chars().count();
-                        let (left, right) = match align(column) {
-                            Alignment::Right => (gap, 0),
-                            Alignment::Center => (gap / 2, gap - gap / 2),
-                            _ => (0, gap),
-                        };
-                        format!("{}{cell}{}", " ".repeat(left), " ".repeat(right))
-                    })
-                    .collect(),
-            )
-        };
-        let separator = line(
-            (0..columns)
-                .map(|column| {
-                    let width = widths[column];
-                    match align(column) {
-                        Alignment::None => "-".repeat(width),
-                        Alignment::Left => format!(":{}", "-".repeat(width - 1)),
-                        Alignment::Right => format!("{}:", "-".repeat(width - 1)),
-                        Alignment::Center => format!(":{}:", "-".repeat(width - 2)),
-                    }
-                })
-                .collect(),
-        );
-        let mut lines: Vec<String> = Vec::new();
-        for (index, row) in self.rows.iter().enumerate() {
-            lines.push(row_line(row));
-            if index == 0 {
-                lines.push(separator.clone());
-            }
-        }
-        lines.join("\n")
-    }
 }
 
 impl<'a> Builder<'a> {
@@ -444,59 +392,31 @@ impl<'a> Builder<'a> {
             footnote_order: Vec::new(),
             pending_markers: Vec::new(),
             markers: Vec::new(),
+            table_source: None,
             table: None,
             report: ImportReport::default(),
         }
     }
 
-    /// An event inside a table: only the words of each cell are kept.
+    /// An event inside a table: nothing in it is read, as its source is kept as written.
     fn table_event(&mut self, event: Event<'_>) {
-        let Some(table) = &mut self.table else {
+        if !matches!(event, Event::End(TagEnd::Table)) {
+            return;
+        }
+        let Some(text) = self.table.take() else {
             return;
         };
-        match event {
-            Event::Start(Tag::TableCell) => table.cell.clear(),
-            Event::End(TagEnd::TableCell) => {
-                let cell = std::mem::take(&mut table.cell);
-                table.row.push(cell.trim().to_string());
+        match &mut self.footnote {
+            Some((_, body)) => {
+                body.push_str(&text.replace('\n', " "));
+                body.push(' ');
             }
-            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
-                let row = std::mem::take(&mut table.row);
-                table.rows.push(row);
+            None => {
+                let kind = BlockKind::Code {
+                    language: Some("markdown".to_string()),
+                };
+                self.blocks.push(new_block(kind, text));
             }
-            Event::End(TagEnd::Table) => {
-                if let Some(table) = self.table.take() {
-                    let text = table.pipe_table();
-                    match &mut self.footnote {
-                        Some((_, body)) => {
-                            body.push_str(&text.replace('\n', " "));
-                            body.push(' ');
-                        }
-                        None => {
-                            let kind = BlockKind::Code { language: None };
-                            self.blocks.push(new_block(kind, text));
-                        }
-                    }
-                }
-            }
-            Event::Start(Tag::Link { dest_url, .. }) if is_script_url(&dest_url) => {
-                self.report.script_links += 1;
-            }
-            Event::Text(text) | Event::Code(text) | Event::Html(text) => {
-                table.cell.push_str(&text.replace('|', "\\|"));
-            }
-            Event::InlineHtml(text) => {
-                self.report.raw_html += 1;
-                table.cell.push_str(&text.replace('|', "\\|"));
-            }
-            Event::SoftBreak | Event::HardBreak => table.cell.push(' '),
-            // A code block can't hold a footnote, so its marker stays as text, showing where it was.
-            Event::FootnoteReference(label) => {
-                table
-                    .cell
-                    .push_str(&format!("[^{}]", label.replace('|', "\\|")));
-            }
-            _ => {}
         }
     }
 
@@ -547,15 +467,10 @@ impl<'a> Builder<'a> {
 
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Table(aligns) => {
+            Tag::Table(_) => {
                 self.flush();
                 self.report.tables += 1;
-                self.table = Some(TableState {
-                    aligns,
-                    rows: Vec::new(),
-                    row: Vec::new(),
-                    cell: String::new(),
-                });
+                self.table = Some(self.table_source.take().unwrap_or_default());
             }
             Tag::Paragraph | Tag::CodeBlock(_) | Tag::HtmlBlock => {
                 self.flush();
@@ -1242,6 +1157,13 @@ mod tests {
         assert!(imported.document.annotations.is_empty());
     }
 
+    fn markdown_code() -> BlockKind {
+        BlockKind::Code {
+            language: Some("markdown".to_string()),
+        }
+    }
+
+    /// The text of the one block a table imports as, which must be a `markdown` code block.
     fn table_text(source: &str) -> String {
         let imported = import(source);
         assert_eq!(
@@ -1252,19 +1174,29 @@ mod tests {
         );
         assert_eq!(
             imported.document.blocks[0].kind,
-            BlockKind::Code { language: None }
+            markdown_code(),
+            "{source:?}"
         );
         imported.document.blocks[0].text.clone()
     }
 
+    /// The text of the last block, for a table that follows other blocks.
+    fn last_table_text(source: &str) -> String {
+        let imported = import(source);
+        assert_eq!(imported.report.tables, 1);
+        let last = imported.document.blocks.last().unwrap();
+        assert_eq!(last.kind, markdown_code());
+        last.text.clone()
+    }
+
     #[test]
-    fn a_table_becomes_one_code_block_and_is_reported() {
+    fn a_table_becomes_one_markdown_code_block_and_is_reported() {
         let imported = import("| a | b |\n|---|---|\n| 1 | 2 |\n");
         assert_eq!(
             outline(&imported.document),
             vec![(
-                BlockKind::Code { language: None },
-                "| a   | b   |\n| --- | --- |\n| 1   | 2   |".to_string()
+                markdown_code(),
+                "| a | b |\n|---|---|\n| 1 | 2 |".to_string()
             )]
         );
         assert_eq!(imported.report.tables, 1);
@@ -1275,122 +1207,118 @@ mod tests {
     }
 
     #[test]
-    fn columns_are_as_wide_as_their_widest_cell_in_characters() {
-        let text = table_text("| name | n |\n|---|---|\n| caf\u{e9} au lait | 12345 |\n");
+    fn a_table_keeps_its_exact_text_whatever_it_holds() {
+        for source in [
+            "| none | left | centre | right |\n|---|:---|:---:|---:|\n| a | b | c | d |",
+            "| a |\n|---|\n| x \\| y |",
+            "| x |\n|---|\n| **bold** *it* `code` [link](http://e.com) ![alt](a.png) c |",
+            "|  odd   spacing |b|\n|:--|--:|\n|   1|2    |\n| | |",
+            "a | b\n-|-\n1 | 2",
+            "| a[^n] |\n|---|\n| 1 |",
+            "| caf\u{e9} \u{4e2d}\u{6587} |\n|---|\n| \"quoted\" -- dashed... |",
+            "| `a\\|b` | <b>x</b> |\n|---|---|\n| [s](javascript:x) | 1 |",
+        ] {
+            assert_eq!(table_text(&format!("{source}\n")), source, "{source}");
+            assert_eq!(table_text(source), source, "no trailing newline: {source}");
+        }
+    }
+
+    #[test]
+    fn a_table_with_crlf_lines_keeps_its_text_with_lf() {
         assert_eq!(
-            text,
-            "| name         | n     |\n| ------------ | ----- |\n| caf\u{e9} au lait | 12345 |"
+            table_text("| a | b |\r\n|---|---|\r\n| 1 | 2 |\r\n"),
+            "| a | b |\n|---|---|\n| 1 | 2 |"
         );
     }
 
     #[test]
-    fn alignment_markers_and_padding_follow_each_column() {
-        let text = table_text(
-            "| none | left | centre | right |\n|---|:---|:---:|---:|\n| a | b | c | d |\n| aaaaaa | bbbbbb | cccccc | dddddd |\n",
+    fn a_table_after_front_matter_is_taken_from_the_right_text() {
+        let source = "---\ntitle: T\n---\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        assert_eq!(last_table_text(source), "| a | b |\n|---|---|\n| 1 | 2 |");
+    }
+
+    #[test]
+    fn a_table_in_a_quote_loses_the_quote_prefix_on_every_line() {
+        assert_eq!(
+            last_table_text("> | a | b |\n> |---|---|\n> | 1 | 2 |\n"),
+            "| a | b |\n|---|---|\n| 1 | 2 |"
         );
         assert_eq!(
-            text,
-            "| none   | left   | centre |  right |\n\
-             | ------ | :----- | :----: | -----: |\n\
-             | a      | b      |   c    |      d |\n\
-             | aaaaaa | bbbbbb | cccccc | dddddd |"
+            last_table_text("Before.\n\n> | a |\n>|---|\n> | 1 |\n"),
+            "| a |\n|---|\n| 1 |"
         );
     }
 
     #[test]
-    fn a_cell_keeps_its_words_and_loses_formatting_links_and_images() {
-        let text = table_text(
-            "| x |\n|---|\n| **bold** *it* `code` [link](http://e.com) ![alt words](a.png) c |\n",
-        );
-        let words = "bold it code link alt words c";
+    fn a_table_in_a_list_item_loses_the_indent_on_every_line() {
         assert_eq!(
-            text,
-            format!(
-                "| {:<29} |
-| {} |
-| {words} |",
-                "x",
-                "-".repeat(29)
-            )
+            last_table_text("- item\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n"),
+            "| a | b |\n|---|---|\n| 1 | 2 |"
+        );
+        assert_eq!(
+            last_table_text("- | a | b |\n  |---|---|\n  | 1 | 2 |\n"),
+            "| a | b |\n|---|---|\n| 1 | 2 |"
         );
     }
 
     #[test]
-    fn a_pipe_in_a_cell_is_escaped() {
-        let text = table_text("| a |\n|---|\n| x \\| y |\n");
-        assert_eq!(text, "| a      |\n| ------ |\n| x \\| y |");
+    fn a_table_nested_two_deep_loses_both_prefixes() {
+        assert_eq!(
+            last_table_text("> - | a |\n>   |---|\n>   | 1 |\n"),
+            "| a |\n|---|\n| 1 |"
+        );
+        assert_eq!(
+            last_table_text("- item\n\n  > | a |\n  > |---|\n  > | 1 |\n"),
+            "| a |\n|---|\n| 1 |"
+        );
+        assert_eq!(
+            last_table_text("> > | a |\n> > |---|\n> > | 1 |\n"),
+            "| a |\n|---|\n| 1 |"
+        );
     }
 
     #[test]
-    fn a_table_padding_would_swell_is_written_unpadded() {
-        // One long cell and many one-cell rows under a wide header: padding every row to the
-        // long cell's width and the header's column count would be far larger than the source.
+    fn a_table_that_is_huge_is_never_larger_than_its_source() {
         let long = "x".repeat(20_000);
         let mut source = format!("| {long} | b | c | d |\n|---|---|---|---|\n");
         for _ in 0..2_000 {
             source.push_str("| y |\n");
         }
         let text = table_text(&source);
-        assert!(
-            text.len() < source.len() * 4,
-            "{} bytes from {} of Markdown",
-            text.len(),
-            source.len()
-        );
-        assert!(text.contains(&long), "the long cell's words are all kept");
-        assert_eq!(text.lines().count(), 2 + 2_000, "every row is kept");
+        assert!(text.len() <= source.len());
+        assert_eq!(text, source.trim_end());
     }
 
     #[test]
-    fn an_empty_cell_and_a_short_row_are_padded() {
-        let text = table_text("| a | b | c |\n|---|---|---|\n| | 2 |\n| 1 |\n");
-        assert_eq!(
-            text,
-            "| a   | b   | c   |\n| --- | --- | --- |\n|     | 2   |     |\n| 1   |     |     |"
-        );
-    }
-
-    #[test]
-    fn a_footnote_reference_in_a_cell_keeps_its_marker() {
+    fn a_footnote_a_table_cites_is_imported_as_any_other() {
         let imported = import("| a[^n] |\n|---|\n| 1 |\n\n[^n]: The note.\n");
-        assert_eq!(
-            imported.document.blocks[0].kind,
-            BlockKind::Code { language: None }
-        );
-        assert!(
-            imported.document.blocks[0].text.contains("a[^n]"),
-            "{:?}",
-            imported.document.blocks[0].text
-        );
+        assert_eq!(imported.document.blocks[0].kind, markdown_code());
+        assert_eq!(imported.document.blocks[0].text, "| a[^n] |\n|---|\n| 1 |");
+        // The marker is text in a code block, so the note has no place to anchor.
+        assert!(imported.document.annotations.is_empty());
+        // The note itself is imported as any uncited footnote is: as a paragraph of its words.
+        assert_eq!(outline(&imported.document)[1], paragraph("The note."));
+        assert_eq!(imported.document.blocks.len(), 2);
     }
 
     #[test]
-    fn a_table_in_a_list_item_or_quote_is_still_a_top_level_code_block() {
-        for source in [
-            "- item\n\n  | a |\n  |---|\n  | 1 |\n",
-            "> | a |\n> |---|\n> | 1 |\n",
-        ] {
-            let imported = import(source);
-            let last = imported.document.blocks.last().unwrap();
-            assert_eq!(last.kind, BlockKind::Code { language: None });
-            assert_eq!(last.text, "| a   |\n| --- |\n| 1   |");
-            assert_eq!(imported.report.tables, 1);
-        }
+    fn a_table_in_a_footnote_definition_is_text_in_the_note() {
+        let imported = import("A[^n].\n\n[^n]: See:\n\n    | a |\n    |---|\n    | 1 |\n");
+        assert_eq!(imported.report.tables, 1);
+        assert_eq!(imported.document.blocks.len(), 1);
+        assert_eq!(imported.document.annotations.len(), 1);
     }
 
     #[test]
     fn text_around_a_table_stays_separate_and_the_same_source_gives_the_same_block() {
         let source = "Before.\n\n| a |\n|---|\n| 1 |\n\nAfter.\n";
-        let kinds: Vec<_> = import(source)
+        let texts: Vec<_> = import(source)
             .document
             .blocks
             .iter()
             .map(|block| block.text.clone())
             .collect();
-        assert_eq!(
-            kinds,
-            vec!["Before.", "| a   |\n| --- |\n| 1   |", "After."]
-        );
+        assert_eq!(texts, vec!["Before.", "| a |\n|---|\n| 1 |", "After."]);
         assert_eq!(
             table_text("| a |\n|---|\n| 1 |\n"),
             table_text("| a |\n|---|\n| 1 |\n")
@@ -1398,15 +1326,23 @@ mod tests {
     }
 
     #[test]
-    fn an_imported_table_exports_as_a_fenced_code_block_not_a_table() {
+    fn an_imported_table_exports_as_a_markdown_fence_not_a_table() {
         let doc = import("| a | b |\n|---|---|\n| 1 | 2 |\n").document;
         assert_eq!(
             to_markdown(&doc),
-            "```\n| a   | b   |\n| --- | --- |\n| 1   | 2   |\n```\n"
+            "```markdown\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n"
         );
         let html = crate::export::to_html(&doc);
         assert!(html.contains("<pre"), "{html}");
         assert!(!html.contains("<table"), "{html}");
+    }
+
+    #[test]
+    fn a_table_holding_backticks_exports_in_a_longer_fence() {
+        let doc = import("| a |\n|---|\n| ```x``` |\n").document;
+        let out = to_markdown(&doc);
+        assert!(out.starts_with("````markdown\n"), "{out}");
+        assert!(out.contains("| ```x``` |"), "{out}");
     }
 
     #[test]

@@ -382,10 +382,10 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   merges with them.
 - A corrupt line that could be a document's stays until it's removed by hand, as logs are only added to. Where it's at logs with no
   database here, the document's revision being in it would mean a move, and a retirement and a move are both guesses: a Save As copy
-  shares the document id, so a line naming the document doesn't prove those logs are its home. So that document isn't retired as having
-  no home until the home is opened on this machine, when the rule above lets it go, or until the line is removed by hand. A home
-  whose logs all wait on others that aren't here can't be opened, so there only removing the line ends it. The notice says which
-  logs.
+  shares the document id, so a line naming the document doesn't prove those logs are its home. So that document isn't retired as
+  having no home until the home is opened on this machine, when the rule above lets it go, or until the line is removed by hand. A
+  home whose logs all wait on others that aren't here, or hold nothing this version can use, can't be opened, so there only removing
+  the line ends it. The notice says which logs.
 - Deliberately deleting a document's `.sync` folder while keeping the marker now retires its database. The docs only ever
   told people to remove both.
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a

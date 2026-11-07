@@ -412,7 +412,7 @@ Within version 1, a change is an addition an older reader can recognise as one, 
 - `depth`, `link`, `align`, `language`, `removed`, `old_spans` and `clipped`, all optional on reading and mostly left out when empty.
 - Range anchors on marginal notes, from before whole-block anchors.
 
-A new optional field must be left out when it holds its default. A reader that doesn't know it would otherwise take every file for a newer version's, and revision logs hash these bytes ([merging, section 9](merging.md)). A new kind of block, style, kind of annotation, or value of a field of that sort is also an addition, which an older build recognises as below, and so is a heading `level` past 6 or a list `depth` past 5, as long as a byte holds it.
+A new optional field must be left out when it holds its default. A reader that doesn't know it would otherwise take every file for a newer version's, and revision logs hash these bytes ([merging, section 9](merging.md)). A new kind of block, style, kind of annotation, or value of a field of that sort is also an addition, which an older build recognises as below, and so is a heading `level` outside 1 to 6, 0 included, or a list `depth` past 5, as long as a byte holds it.
 
 A change that older readers would misread, such as a field they know taking a new meaning or a new shape, or a required field going, must raise `user_version`. Older builds then refuse the file before reading anything, as section 1.1 says, and kame says "the document was written by a newer version of kame (schema N; this build supports 1)". The version that raises it still reads every file at every lower one.
 

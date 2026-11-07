@@ -217,7 +217,7 @@ Each line is one JSON object, followed by a line feed. Lines must be written who
 Read every `*.log` in the folder, in sorted order:
 
 1. Ignore anything after the last line feed, because it's still being written.
-2. Skip any line that won't parse, or whose `id` doesn't match its revision's digest as read back. A line holding a number its type can't hold, such as a `level` of 300 or an offset below 0, which this build reads as the nearest one it can ([document format, section 2.1](document-format.md)), counts as one that won't parse, since what it held can't be known, and so does the notice for one. One holding a `level` or `depth` a newer version could write is skipped too (section 6.8).
+2. Skip any line that won't parse, or whose `id` doesn't match its revision's digest as read back. A line holding a number its type can't hold, such as a `level` of 300 or an offset below 0, which this build reads as the nearest one it can ([document format, section 2.1](document-format.md)), counts as one that won't parse, since what it held can't be known, and it gets the same notice. One holding a `level` or `depth` a newer version could write is skipped too (section 6.8).
 3. Index each block by its digest, also as read back, and each revision by `id`.
 
 Reads can resume where the last stopped, past lines that failed to parse. A log that has got shorter is read from its start, which is harmless since everything is addressed by content. Every revision is read and merged whatever document it's of (section 6.4).

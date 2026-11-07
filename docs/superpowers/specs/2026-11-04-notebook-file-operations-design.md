@@ -234,8 +234,9 @@ copy is put at a path that has logs, or a database with no place was left behind
 reached since a corrupt line there, in a log that says nothing of whose it is, could be holding its revision. Logs count as a
 database's own only if there's nothing there, they hold the revision it remembers, or a line in them says it's of this document
 (`Store::can_be_for`, by `Document::id`). Each line holds its document's id inside its revision, so a line in an older format
-still says, even with an id that fails its check, and a line that doesn't parse says if its JSON can still be read. Only a line with no id to read says nothing. A document's own old lines
-therefore heal, and another document's don't count. Logs that say nothing, or that can't be read, show nothing, and "can't be told" means doing less.
+still says, even with an id that fails its check, and a line that doesn't parse says if its JSON can still be read. Only a line
+with no id to read says nothing. A document's own old lines therefore heal, and another document's don't count. Logs that say
+nothing, or that can't be read, show nothing, and "can't be told" means doing less.
 
 Otherwise `Logged` writes nothing, as its history could reach another document's logs on every machine. `Outcome::others_logs` says
 so, and the app says the logs may be another document's, and that Save As gives this one logs of its own. A delete leaves
@@ -253,25 +254,27 @@ there. Nor does one whose file can't be read. With no file at all, the logs are 
 - A line torn by a crash counts for nothing (`serde_json::Error::is_eof`). It can't hold a remembered revision, as the state is saved only
   after its line is flushed, and `append` starts a new line after a tear rather than joining on to it.
 - What's left is real corruption, and a revision that's missing may be in it, so at the database's own path that's "can't be told",
-  and not stranded, if the line could be holding its revision: the line names its document, or no line there names any, or no other
-  line in the line's own log does, which would be so of its own log damaged whole (`Store::may_hide_its_own`, asked with the
-  database's document id, and as could be anyone's when that can't be read). A corrupt line in a log of another document's lines, as
-  at a path used again for a new document, can't be holding it, and the database is stranded.
+  and not stranded, if the line could be holding its revision: a line there names its document, or no line there names any, or no
+  line in the corrupt line's own log does, the line itself included, which would be so of its own log damaged whole
+  (`Store::may_hide_its_own`, asked with the database's document id, and as could be anyone's when that can't be read). A corrupt
+  line in a log whose lines name only another document, as at a path used again for a new document, can't be holding it, and the
+  database is stranded.
 
 A pass needs every log only to rule out a home, which matters only for retiring a database as having no home. A move, a retirement
 because the document has already been opened at its home, and a return have found their home, so they go ahead whatever else can't
 be read. A no-home retirement is vetoed by a corrupt line in logs that could be of its document (`Store::may_hide`: a line there
-says it's of this document, or none says whose they are), and by any folder or log that can't be read or holds lines from a newer
-kame. A corrupt line vetoes only where the revision being in it would change what's done: were it there, a database of the document
-already opened at those logs, not stranded and on logs of its own, would retire this one all the same, which is the same rename, so
-those logs don't veto. Logs with no database, or one that's stranded, would mean a move, and one on another document's logs would
-mean leaving it alone, and one that can't be read would mean leaving it alone too, so those still do. That's so only when one folder
-could hide it: were the revision in two, it would have two homes and be left alone, so with more than one, as a hand copy made with
-its logs carries the line, they all veto. A line holding a value no number of its type holds, such as a level of 300, which reading
-has to fit, is a corrupt line, and is held to the same rule. When that stops something that has waited, the person is told once,
-until there's something new to say: "1 document looks left behind, and can't be settled because *relative*'s logs can't all be read"
-(`Steps::unsettled`). A retirement whose revision is held only in a line that fails its check is reported as `unsynced`, as what it
-holds can't be compared.
+says it's of this document, or none says whose they are, and at its own path `Store::may_hide_its_own`, as whether it's stranded
+asks, so a log arriving there since then is judged the same way), and by any folder or log that can't be read or holds lines from a
+newer kame. A corrupt line vetoes only where the revision being in it would change what's done: were it there, a database of the
+document already opened at those logs, not stranded and on logs of its own, would retire this one all the same, which is the same
+rename, so those logs don't veto. Logs with no database, or one that's stranded, would mean a move, and one on another document's
+logs would mean leaving it alone, and one that can't be read would mean leaving it alone too, so those still do. That's so only
+when one folder could hide it: were the revision in two, it would have two homes and be left alone, so with more than one, as a
+hand copy made with its logs carries the line, they all veto. A line holding a value no number of its type holds, such as a level
+of 300, which reading has to fit, is a corrupt line, and is held to the same rule. When that stops something that has waited, the
+person is told once, until there's something new to say: "1 document looks left behind, and can't be settled because *relative*'s
+logs can't all be read" (`Steps::unsettled`). A retirement whose revision is held only in a line that fails its check is reported
+as `unsynced`, as what it holds can't be compared.
 
 The two places that write a sync state (`Logged::write_and_merge` and `build_from_logs`) both write a revision from the
 logs at that path, so a database in its right place always passes. The state is saved only once the log it names has been
@@ -393,8 +396,10 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   could be the old database's own log damaged whole, so the old database isn't known to be stranded. A pass says nothing of it and
   reads its logs again each time. It's held off as being on another document's logs and says so. Removing that log by hand, or
   deleting the old database in kame, which leaves the new document's logs, ends it. The other way round, the old database is taken
-  for stranded wrongly only if the one log that held its revision also holds another document's readable lines and every line of
-  its own there is destroyed past reading whose it is. Then it's retired, with every word kept in the retired file the notice names.
+  for stranded wrongly only if the one log that held its revision also holds a line naming another document, as JSON that can still
+  be read, and no line anywhere in its folder still names the old document. That's damage aimed at its own lines: they're all
+  destroyed past reading whose they are, and another document's line is left readable in the same log. Then it's retired, with
+  every word kept in the retired file the notice names.
 - Deliberately deleting a document's `.sync` folder while keeping the marker now retires its database. The docs only ever
   told people to remove both.
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a

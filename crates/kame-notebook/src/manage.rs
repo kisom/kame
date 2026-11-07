@@ -11,7 +11,7 @@ use kame_core::session::{is_markdown_path, Session};
 use kame_core::storage::Db;
 use kame_sync::logs::{
     build_from_logs, is_stranded, is_unplaced, log_folder, logging_root, logs_can_be_its_own,
-    Logged, UNPLACED,
+    Logged,
 };
 use kame_sync::revlog::Store;
 
@@ -433,8 +433,10 @@ fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>)
     {
         return Err(OTHERS_LOGS.to_string());
     }
+    // It may have been moved or deleted on another machine, so it changes here and writes nothing
+    // to any log. When logs holding its revision come back beside it, the change syncs as any does.
     if is_unplaced(path, revision.as_deref(), place.as_deref()) {
-        return Err(UNPLACED.to_string());
+        return Ok((session, None));
     }
     let logged = Logged::open(&session, device).ok_or("could not read its logs")?;
     Ok((session, Some(logged)))

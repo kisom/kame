@@ -1458,41 +1458,82 @@ fn place_in(path: &Path) -> Option<String> {
     Db::open_read_only(path).unwrap().load_sync_place()
 }
 
+/// What a kame from before places were recorded leaves, with its logs since gone: a sync state, no
+/// place and nothing beside it.
+fn as_an_older_kame_left_it_with_no_logs(path: &Path) {
+    sync(path);
+    let state = Db::open_read_only(path).unwrap().load_sync_state().unwrap();
+    {
+        let mut db = Db::open(path).unwrap();
+        db.clear_sync_state().unwrap();
+        db.save_sync_state(&state).unwrap();
+    }
+    std::fs::remove_dir_all(log_folder(path)).unwrap();
+    assert_eq!(place_in(path), None);
+}
+
 /// Last synced before kame recorded where, and its logs gone: it may have been moved or deleted on
-/// another machine, so changing it closed would bring it back there, and it's left as it is.
+/// another machine, so its history mustn't be written anywhere. Its link to a moved document is
+/// changed all the same, here only.
 #[test]
-fn a_document_with_no_place_and_no_logs_is_listed_and_no_logs_come_back_for_it() {
+fn a_document_with_no_place_and_no_logs_is_changed_and_no_logs_come_back_for_it() {
     let (root, nb) = logged_notebook("move-no-place");
     let a = root.join("a.kame");
     document(&a, "A.");
     let linker = root.join("linker.kame");
     document(&linker, "");
     link(&linker, "one", document_link("a.kame"));
-    sync(&linker);
-    let state = Db::open_read_only(&linker)
-        .unwrap()
-        .load_sync_state()
-        .unwrap();
-    {
-        let mut db = Db::open(&linker).unwrap();
-        db.clear_sync_state().unwrap();
-        db.save_sync_state(&state).unwrap();
-    }
-    std::fs::remove_dir_all(log_folder(&linker)).unwrap();
-    assert_eq!(place_in(&linker), None);
+    as_an_older_kame_left_it_with_no_logs(&linker);
 
     let report = make_move(&nb, &a, &root.join("b.kame"));
-    assert!(report.changed.is_empty(), "{:?}", report.changed);
-    assert_eq!(report.left.len(), 1, "{:?}", report.left);
-    assert_eq!(report.left[0].relative, "linker.kame");
-    assert!(
-        report.left[0].why.contains("before kame recorded where"),
-        "{}",
-        report.left[0].why
-    );
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert_eq!(report.changed, ["linker.kame"]);
+    assert_eq!(links_of(&read(&linker)), ["b.kame"]);
     assert!(!log_folder(&linker).exists());
-    assert_eq!(links_of(&read(&linker)), ["a.kame"]);
     assert_eq!(place_in(&linker), None);
+}
+
+/// Moved itself, its own links, images and title follow, and still nothing reaches a log.
+#[test]
+fn a_moved_document_with_no_place_and_no_logs_has_its_links_images_and_title_fixed() {
+    let (root, nb) = logged_notebook("move-no-place-itself");
+    let own = root.join("essays/a.kame");
+    document(&own, "");
+    document(&root.join("notes/b.kame"), "B.");
+    std::fs::create_dir_all(root.join("essays/img")).unwrap();
+    std::fs::write(root.join("essays/img/p.png"), "p").unwrap();
+    link(&own, "one", document_link("../notes/b.kame"));
+    {
+        let mut session = Session::open(&own).unwrap();
+        assert!(session.insert_image("img/p.png".to_string()));
+    }
+    as_an_older_kame_left_it_with_no_logs(&own);
+    assert_eq!(Session::open(&own).unwrap().metadata.title, "a");
+
+    let to = root.join("drafts/deep/c.kame");
+    let report = make_move(&nb, &own, &to);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert_eq!(report.changed, ["drafts/deep/c.kame"]);
+    let session = Session::open(&to).unwrap();
+    let doc = session.document();
+    assert_eq!(links_of(doc), ["../../notes/b.kame"]);
+    let stored = doc
+        .blocks
+        .iter()
+        .find_map(|block| match &block.kind {
+            BlockKind::Image { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(stored, "img/p.png");
+    assert_eq!(std::fs::read(image_file(&stored, Some(&to))).unwrap(), b"p");
+    assert_eq!(session.metadata.title, "c");
+    assert_eq!(doc.title, "c");
+    drop(session);
+    for path in [&own, &to] {
+        assert!(!log_folder(path).exists(), "{}", path.display());
+    }
+    assert_eq!(place_in(&to), None);
 }
 
 #[test]

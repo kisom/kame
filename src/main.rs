@@ -2744,6 +2744,9 @@ struct KameApp {
     metadata_prompt: Option<MetadataPrompt>,
     /// A menu chord waiting for the menu bar to be drawn.
     pending_menu: Option<BarMenu>,
+    /// Where the find bar, the menu bar and the status row end this frame, whichever are drawn,
+    /// for the lists to open below them.
+    pub(crate) chrome_bottom: f32,
     /// Keeps a failed write from being discarded by a stray close, while still
     /// letting the author quit on a second request.
     close: CloseGuard,
@@ -2873,6 +2876,7 @@ impl KameApp {
             notice_tracker: NoticeTracker::default(),
             metadata_prompt: None,
             pending_menu: None,
+            chrome_bottom: 0.0,
             close: CloseGuard::default(),
             close_flow: CloseFlow::default(),
             find: None,
@@ -7558,6 +7562,7 @@ impl eframe::App for KameApp {
         if !self.modes.hide_chrome {
             self.show_status(ui);
         }
+        self.chrome_bottom = ui.available_rect_before_wrap().top();
         self.show_browser(ui);
         // The typewriter's centring offset was measured last frame, against the
         // same geometry, and is applied here where the scroll area is built.
@@ -7682,6 +7687,8 @@ pub(crate) struct Headless {
     pub(crate) clipboard: String,
     /// What the window brings back next frame, for what the last one asked of it.
     asked: Vec<egui::Event>,
+    /// Whether a frame draws the find bar, the menu bar and the status row, as the window does.
+    pub(crate) chrome: bool,
 }
 
 #[cfg(test)]
@@ -7705,6 +7712,7 @@ impl Headless {
             scale: None,
             clipboard: String::new(),
             asked: Vec::new(),
+            chrome: false,
         }
     }
 
@@ -7758,10 +7766,18 @@ impl Headless {
         let app = &mut self.app;
         app.handle_os_requests(&self.ctx, external::Requests::default());
         app.notebook_tick(&self.ctx);
+        let chrome = self.chrome;
         let mut output = self.ctx.run_ui(input, |ui| {
             app.handle_input(ui.ctx());
+            if chrome {
+                app.show_find_bar(ui);
+            }
             let history = app.session.history();
             app.notice_tracker.update(&mut app.notice, history);
+            if chrome {
+                app.show_status(ui);
+            }
+            app.chrome_bottom = ui.available_rect_before_wrap().top();
             app.show_browser(ui);
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)

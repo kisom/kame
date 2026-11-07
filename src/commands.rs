@@ -523,7 +523,7 @@ impl KameApp {
         let (close, confirm) = list_keys(ctx, &mut list.selected, shown.len());
         let mut clicked = None;
         let mac = cfg!(target_os = "macos");
-        list_window(ctx, "kame-commands", |ui| {
+        list_window(ctx, "kame-commands", self.chrome_bottom, |ui| {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut list.query)
                     .hint_text("Run a command")
@@ -1298,6 +1298,38 @@ mod tests {
         // Copy changes nothing, so it still works.
         page.frame(vec![egui::Event::Copy]);
         assert_eq!(page.clipboard, "Some");
+    }
+
+    /// The lists open below the menu bar and the status row however large the interface's text
+    /// makes them.
+    #[test]
+    fn the_lists_open_below_the_status_row_at_any_interface_text() {
+        for scale in [1.0, 1.5, 2.0] {
+            let mut page = page();
+            page.chrome = true;
+            page.app.set_interface_scale(&page.ctx, scale);
+            page.frame(Vec::new());
+            palette_chord(&mut page);
+            page.frame(Vec::new());
+            // The status row's word count, at its right.
+            let status = page
+                .drawn
+                .iter()
+                .flat_map(|tree| &tree.nodes)
+                .find(|(_, node)| node.value() == Some("2 words"))
+                .and_then(|(_, node)| node.bounds())
+                .expect("the status row's count")
+                .y1 as f32;
+            let list = page
+                .ctx
+                .memory(|memory| memory.area_rect(egui::Id::unique("kame-commands")))
+                .expect("the palette");
+            assert!(
+                list.top() >= status,
+                "at {scale} the palette starts at {} over the status row ending at {status}",
+                list.top()
+            );
+        }
     }
 
     #[test]

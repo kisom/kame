@@ -42,6 +42,8 @@ const LIST_WIDTH: f32 = 620.0;
 const LIST_HEIGHT: f32 = 380.0;
 /// The least room a list leaves at the window's edges when it would be bigger than the window.
 const LIST_EDGE: f32 = 16.0;
+/// How far below the menu bar and status row a list opens, at the interface's usual text size.
+const LIST_GAP: f32 = 26.0;
 /// How many recently opened documents the jump list remembers.
 const RECENT: usize = 20;
 /// How often a list on the screen looks for what has arrived, in seconds.
@@ -1152,7 +1154,7 @@ impl KameApp {
         let mut clicked = None;
         let listing = &self.nb.listing;
         let root = self.nb.notebook.as_ref().map(|nb| nb.root.clone());
-        list_window(ctx, "kame-jump", |ui| {
+        list_window(ctx, "kame-jump", self.chrome_bottom, |ui| {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut jump.query)
                     .hint_text("Jump to a document")
@@ -1215,7 +1217,7 @@ impl KameApp {
         let (close, confirm) = list_keys(ctx, &mut list.selected, headings.len());
         let mut clicked = None;
         let none_at_all = list.query.is_empty() && headings.is_empty();
-        list_window(ctx, "kame-headings", |ui| {
+        list_window(ctx, "kame-headings", self.chrome_bottom, |ui| {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut list.query)
                     .hint_text("Jump to a heading")
@@ -1294,7 +1296,7 @@ impl KameApp {
         let mut clicked = None;
         let mut changed = false;
         let running = search_list.running.is_some();
-        list_window(ctx, "kame-search", |ui| {
+        list_window(ctx, "kame-search", self.chrome_bottom, |ui| {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut search_list.query)
                     .hint_text("Search this notebook")
@@ -1397,18 +1399,24 @@ pub(crate) fn focus_field(field: &egui::Response, focus: &mut bool) {
     }
 }
 
-/// A list's window, as big as the interface's text makes it, and no bigger than the window.
-pub(crate) fn list_window(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui)) {
-    const TOP: f32 = 70.0;
+/// A list's window, as big as the interface's text makes it, and no bigger than the window,
+/// opening a little below `chrome`, where the find bar, menu bar and status row end.
+pub(crate) fn list_window(
+    ctx: &egui::Context,
+    id: &str,
+    chrome: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
     let screen = ctx.content_rect();
+    let top = chrome - screen.top() + room(ctx, LIST_GAP);
     let width = room(ctx, LIST_WIDTH).min(screen.width() - LIST_EDGE * 2.0);
-    let height = room(ctx, LIST_HEIGHT).min(screen.height() - TOP - LIST_EDGE * 2.0);
+    let height = room(ctx, LIST_HEIGHT).min(screen.height() - top - LIST_EDGE * 2.0);
     egui::Window::new(id)
         .id(egui::Id::unique(id))
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
-        .anchor(egui::Align2::CENTER_TOP, [0.0, TOP])
+        .anchor(egui::Align2::CENTER_TOP, [0.0, top])
         .fixed_size([width.max(1.0), height.max(1.0)])
         .show(ctx, |ui| {
             ui.set_max_width(width.max(1.0));

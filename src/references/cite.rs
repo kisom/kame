@@ -185,7 +185,7 @@ impl KameApp {
         } else {
             format!("New reference “{typed}”…")
         };
-        list_window(ctx, "kame-cite", |ui| {
+        list_window(ctx, "kame-cite", self.chrome_bottom, |ui| {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut search_list.query)
                     .hint_text("Cite a reference")

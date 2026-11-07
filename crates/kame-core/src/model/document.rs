@@ -273,12 +273,11 @@ pub fn link_ranges(text: &str) -> Vec<(usize, usize)> {
 }
 
 /// A number in a kind of block that this build's model bounds, as the kind and the field are
-/// written: what the model has, and the value it's left out at, if any.
+/// written, and what the model has.
 struct Bounded {
     kind: &'static str,
     field: &'static str,
     has: std::ops::RangeInclusive<u64>,
-    left_out_at: Option<u64>,
 }
 
 const BOUNDED: [Bounded; 2] = [
@@ -286,15 +285,71 @@ const BOUNDED: [Bounded; 2] = [
         kind: "Heading",
         field: "level",
         has: *HEADING_LEVELS.start() as u64..=*HEADING_LEVELS.end() as u64,
-        left_out_at: None,
     },
     Bounded {
         kind: "ListItem",
         field: "depth",
         has: 0..=MAX_LIST_DEPTH as u64,
-        left_out_at: Some(0),
     },
 ];
+
+/// A field this build leaves out when it holds its default, as the kind of block or step of history
+/// holding it and the field are written, with that default as JSON. Written at its default by
+/// another program, it's gone once read and written again, as a field this build doesn't know is,
+/// so this is what tells the two apart: the JSON alone can't, since reading drops both alike.
+///
+/// Every `skip_serializing_if` in the model and the steps of history has to be here, which a test
+/// holds it to, so that one added later isn't taken for a newer version's.
+struct LeftOut {
+    holder: &'static str,
+    field: &'static str,
+    default: &'static str,
+}
+
+const LEFT_OUT: [LeftOut; 7] = [
+    LeftOut {
+        holder: "Heading",
+        field: "centered",
+        default: "false",
+    },
+    LeftOut {
+        holder: "ListItem",
+        field: "depth",
+        default: "0",
+    },
+    LeftOut {
+        holder: "Image",
+        field: "link",
+        default: "null",
+    },
+    LeftOut {
+        holder: "Image",
+        field: "align",
+        default: r#""Left""#,
+    },
+    LeftOut {
+        holder: "Code",
+        field: "language",
+        default: "null",
+    },
+    LeftOut {
+        holder: "DeleteText",
+        field: "old_spans",
+        default: "null",
+    },
+    LeftOut {
+        holder: "DeleteText",
+        field: "clipped",
+        default: "[]",
+    },
+];
+
+/// The field `key` of what's held at `holder`, if this build leaves it out at its default.
+fn left_out(holder: Option<&str>, key: &str) -> Option<&'static LeftOut> {
+    LEFT_OUT
+        .iter()
+        .find(|left_out| holder == Some(left_out.holder) && key == left_out.field)
+}
 
 impl BlockKind {
     /// Whether this holds a level or depth past what this build's model has, as one read from a
@@ -333,8 +388,10 @@ pub fn holds_newer_values(written: &serde_json::Value) -> bool {
 /// build, which is how something from a newer version of kame looks. A field missing from what was
 /// written is only something added since, so that doesn't count.
 ///
-/// Nor does a field of a kind of block that this build knows and leaves out at its default, as a
-/// list item's `depth` is at 0: a depth below 0, which a damaged file can hold, is read as 0.
+/// Nor does a field this build knows and leaves out at its default ([`LEFT_OUT`]), such as a
+/// heading's `centered` written as `false`. Gone once read, it was read as its default, which loses
+/// nothing. A list item's `depth` below 0, which a damaged file can hold, is read as 0 too, and
+/// [`fitted_on_reading`] tells of that.
 pub fn has_unknown_fields(written: &serde_json::Value, known: &serde_json::Value) -> bool {
     unknown_fields_in(None, written, known)
 }
@@ -346,16 +403,11 @@ fn unknown_fields_in(
     known: &serde_json::Value,
 ) -> bool {
     use serde_json::Value;
-    let left_out = |key: &str| {
-        BOUNDED.iter().any(|bounded| {
-            field == Some(bounded.kind) && key == bounded.field && bounded.left_out_at.is_some()
-        })
-    };
     match (written, known) {
         (Value::Object(written), Value::Object(known)) => {
             written.iter().any(|(key, value)| match known.get(key) {
                 Some(kept) => unknown_fields_in(Some(key), value, kept),
-                None => !left_out(key),
+                None => left_out(field, key).is_none(),
             })
         }
         (Value::Array(written), Value::Array(known)) => written
@@ -368,7 +420,8 @@ fn unknown_fields_in(
 
 /// Whether JSON as written holds a number that reading it and writing it again gives as another,
 /// as a level, depth or offset past what its type holds is read as the nearest one it does. A depth
-/// written below 0 is read as 0 and left out, so it counts too. A field missing either way doesn't.
+/// written below 0 is read as 0 and left out, so it counts too: a field left out at its default
+/// ([`LEFT_OUT`]) written as anything but that default. A field missing either way doesn't.
 pub fn fitted_on_reading(written: &serde_json::Value, known: &serde_json::Value) -> bool {
     fitted_in(None, written, known)
 }
@@ -379,12 +432,11 @@ fn fitted_in(field: Option<&str>, written: &serde_json::Value, known: &serde_jso
         (Value::Object(written), Value::Object(known)) => {
             written.iter().any(|(key, value)| match known.get(key) {
                 Some(kept) => fitted_in(Some(key), value, kept),
-                None => BOUNDED.iter().any(|bounded| {
-                    field == Some(bounded.kind)
-                        && key == bounded.field
-                        && bounded
-                            .left_out_at
-                            .is_some_and(|left_out| value.as_u64() != Some(left_out))
+                None => left_out(field, key).is_some_and(|left_out| {
+                    serde_json::from_str::<Value>(left_out.default)
+                        .ok()
+                        .as_ref()
+                        != Some(value)
                 }),
             })
         }
@@ -732,6 +784,169 @@ mod tests {
         assert_eq!(block_json, format!(r#""{id}""#));
         let round: Anchor = serde_json::from_str(&block_json).unwrap();
         assert_eq!(round, Anchor::block(id));
+    }
+}
+
+#[cfg(test)]
+mod left_out_tests {
+    use super::*;
+
+    /// The smallest JSON of what holds `field`, with the field written as `value`, and that JSON
+    /// read and written again.
+    fn holding(left_out: &LeftOut, value: &str) -> (serde_json::Value, serde_json::Value) {
+        const ID: &str = "00000000-0000-0000-0000-000000000001";
+        let field = format!(r#""{}":{value}"#, left_out.field);
+        let json = match left_out.holder {
+            "Heading" => format!(r#"{{"Heading":{{"level":1,{field}}}}}"#),
+            "ListItem" => format!(r#"{{"ListItem":{{"ordered":true,{field}}}}}"#),
+            "Image" => format!(r#"{{"Image":{{"path":"a.png",{field}}}}}"#),
+            "Code" => format!(r#"{{"Code":{{{field}}}}}"#),
+            "DeleteText" => format!(
+                r#"{{"DeleteText":{{"block_id":"{ID}","start":0,"end":0,"text":"","removed":[],{field}}}}}"#
+            ),
+            other => panic!("nothing here holds {other}: add it"),
+        };
+        let written: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let known = if left_out.holder == "DeleteText" {
+            serde_json::to_value(serde_json::from_str::<crate::edit::Op>(&json).unwrap())
+        } else {
+            serde_json::to_value(serde_json::from_str::<BlockKind>(&json).unwrap())
+        }
+        .unwrap();
+        (written, known)
+    }
+
+    /// A value of each field other than its default.
+    fn another_value(left_out: &LeftOut) -> &'static str {
+        match (left_out.holder, left_out.field) {
+            ("Heading", "centered") => "true",
+            ("ListItem", "depth") => "2",
+            ("Image", "link") => r#""https://example.com""#,
+            ("Image", "align") => r#""Center""#,
+            ("Code", "language") => r#""rust""#,
+            ("DeleteText", "old_spans") => "[]",
+            ("DeleteText", "clipped") => {
+                r#"[{"id":"00000000-0000-0000-0000-000000000002","kind":"Note","anchor":"00000000-0000-0000-0000-000000000001","body":""}]"#
+            }
+            other => panic!("no other value for {other:?}: add one"),
+        }
+    }
+
+    /// Each field is left out at the default listed, and at no other value, so that it's named
+    /// as it's written, and listed at the default it really has.
+    #[test]
+    fn each_field_left_out_is_left_out_at_its_default_and_kept_otherwise() {
+        for left_out in &LEFT_OUT {
+            let name = format!("{}.{}", left_out.holder, left_out.field);
+            let (written, known) = holding(left_out, left_out.default);
+            let fields = |value: &serde_json::Value| value[left_out.holder].clone();
+            assert!(
+                fields(&known).get(left_out.field).is_none(),
+                "{name} is kept"
+            );
+            assert!(!has_unknown_fields(&written, &known), "{name} is unknown");
+            assert!(!fitted_on_reading(&written, &known), "{name} is fitted");
+
+            let (written, known) = holding(left_out, another_value(left_out));
+            assert_eq!(
+                fields(&known),
+                fields(&written),
+                "{name} isn't read as written"
+            );
+            assert!(!has_unknown_fields(&written, &known), "{name}");
+        }
+    }
+
+    /// Beside the fields left out at their defaults, a field this build doesn't know is newer still,
+    /// whatever it holds.
+    #[test]
+    fn a_field_beside_them_that_this_build_does_not_know_is_unknown() {
+        for left_out in &LEFT_OUT {
+            for value in [left_out.default, "false", "null", "0"] {
+                let mut unknown = holding(left_out, left_out.default);
+                unknown.0[left_out.holder]["boxed"] = serde_json::from_str(value).unwrap();
+                assert!(
+                    has_unknown_fields(&unknown.0, &unknown.1),
+                    "{}: boxed {value}",
+                    left_out.holder
+                );
+            }
+        }
+    }
+
+    /// Every field the model or a step of history leaves out at its default is listed, so that one
+    /// added later can't be forgotten, and taken for a newer version's when written at its default.
+    /// Each is named by the kind or step it's in, as it's written: a field of a struct would be
+    /// named by the field holding the struct, or by nothing in a list, which [`LEFT_OUT`] can't say.
+    #[test]
+    fn every_field_left_out_at_its_default_is_listed() {
+        let needle = concat!("skip_serializing", "_if = \"");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<std::path::PathBuf> = ["model", "edit"]
+            .iter()
+            .flat_map(|folder| std::fs::read_dir(source.join(folder)).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .collect();
+        files.sort();
+        let mut found = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                if !line.contains(needle) || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let field = lines[at + 1..]
+                    .iter()
+                    .find_map(|line| {
+                        let line = line.trim_start();
+                        let line = line.strip_prefix("pub ").unwrap_or(line);
+                        let (name, _) = line.split_once(": ")?;
+                        name.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                            .then_some(name)
+                    })
+                    .unwrap_or_else(|| panic!("{}:{}: no field", path.display(), at + 1));
+                let holder = lines[..at]
+                    .iter()
+                    .rev()
+                    .find_map(|line| {
+                        if let Some(variant) = line.strip_prefix("    ") {
+                            let variant = variant.strip_suffix(" {")?;
+                            return (variant.chars().all(|c| c.is_ascii_alphanumeric())
+                                && variant.starts_with(|c: char| c.is_ascii_uppercase()))
+                            .then_some(Ok(variant));
+                        }
+                        let line = line.strip_prefix("pub ").unwrap_or(line);
+                        line.strip_prefix("struct ")
+                            .map(|rest| Err(rest.trim_end_matches(" {")))
+                    })
+                    .unwrap_or_else(|| panic!("{}:{}: in nothing", path.display(), at + 1));
+                match holder {
+                    Ok(variant) => found.push((variant.to_string(), field.to_string())),
+                    Err(structure) => panic!(
+                        "{}:{}: {field} is left out at its default in the struct {structure}, which \
+                         LEFT_OUT can't name. Telling it from a field this build doesn't know needs \
+                         that saying first.",
+                        path.display(),
+                        at + 1
+                    ),
+                }
+            }
+        }
+        let listed: Vec<(String, String)> = LEFT_OUT
+            .iter()
+            .map(|left_out| (left_out.holder.to_string(), left_out.field.to_string()))
+            .collect();
+        for field in &found {
+            assert!(
+                listed.contains(field),
+                "{field:?} is left out at its default and not in LEFT_OUT, so another program \
+                 writing it at its default would make a document read-only as a newer version's"
+            );
+        }
+        assert_eq!(found.len(), listed.len(), "{found:?} against {listed:?}");
     }
 }
 

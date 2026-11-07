@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kame_core::edit::Cursor;
+use kame_core::edit::{Cursor, Op};
 use kame_core::model::{
     Anchor, Annotation, AnnotationKind, Block, BlockKind, Document, ImageAlign, Metadata, Span,
     SpanStyle,
@@ -635,4 +635,228 @@ fn a_reader_still_refuses_a_damaged_head() {
     let db = Db::open_read_only(&path).unwrap();
     assert!(db.load_readable().is_err());
     assert!(!db.leaves_out_newer());
+}
+
+/// Every field this build leaves out at its default, written explicitly at that default, as
+/// another program can write it: a heading's `centered`, a list item's `depth`, an image's `link`
+/// and `align`, a code block's `language`, and a delete's `old_spans` and `clipped`.
+fn at_explicit_defaults(json: &str) -> String {
+    let written = json
+        .replace(
+            r#"{"Heading":{"level":1}}"#,
+            r#"{"Heading":{"level":1,"centered":false}}"#,
+        )
+        .replace(
+            r#"{"ListItem":{"ordered":true}}"#,
+            r#"{"ListItem":{"ordered":true,"depth":0}}"#,
+        )
+        .replace(
+            r#"{"Image":{"path":"a.png"}}"#,
+            r#"{"Image":{"path":"a.png","link":null,"align":"Left"}}"#,
+        )
+        .replace(r#"{"Code":{}}"#, r#"{"Code":{"language":null}}"#)
+        .replace(
+            r#""removed":[]}"#,
+            r#""removed":[],"old_spans":null,"clipped":[]}"#,
+        );
+    assert_ne!(written, json, "nothing was written at its default");
+    written
+}
+
+/// A document of every kind of block with a field left out at its default, made by one step, and
+/// cut short by a delete, with a snapshot of it, each row of which `edit` then changes.
+fn written_at_defaults(name: &str, edit: impl Fn(&str) -> String) -> (PathBuf, Document, Document) {
+    let path = kame_test_dir::folder(name).join("doc.kame");
+    let block = |kind: BlockKind, text: &str| Block {
+        id: Uuid::new_v4(),
+        kind,
+        text: text.to_string(),
+        spans: Vec::new(),
+    };
+    let mut first = Document::new("t");
+    first.blocks[0].text = "Kept words.".to_string();
+    let blocks = vec![
+        block(
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
+            "A heading",
+        ),
+        block(
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+            },
+            "An item",
+        ),
+        block(
+            BlockKind::Image {
+                path: "a.png".to_string(),
+                link: None,
+                align: ImageAlign::Left,
+            },
+            "",
+        ),
+        block(BlockKind::Code { language: None }, "let x = 1;"),
+    ];
+    let mut grown = first.clone();
+    grown.blocks.extend(blocks.iter().cloned());
+    let insert = Op::Batch {
+        ops: blocks
+            .into_iter()
+            .enumerate()
+            .map(|(at, block)| Op::InsertBlock {
+                index: at + 1,
+                block,
+            })
+            .collect(),
+    };
+    let mut cut = grown.clone();
+    cut.blocks[0].text = "Kept.".to_string();
+    let delete = Op::DeleteText {
+        block_id: cut.blocks[0].id,
+        start: 4,
+        end: 10,
+        text: " words".to_string(),
+        removed: Vec::new(),
+        old_spans: None,
+        clipped: Vec::new(),
+    };
+    {
+        let mut db = Db::open(&path).unwrap();
+        db.save_document(&first).unwrap();
+        db.record_edit(&grown, &insert).unwrap();
+        db.record_edit(&cut, &delete).unwrap();
+        db.create_snapshot(&cut, Some("cut")).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    for table in ["documents", "ops", "snapshots"] {
+        let key = if table == "ops" { "seq" } else { "id" };
+        let rows: Vec<(i64, String)> = {
+            let mut statement = connection
+                .prepare(&format!("SELECT {key}, json FROM {table}"))
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        for (at, json) in rows {
+            connection
+                .execute(
+                    &format!("UPDATE {table} SET json = ?1 WHERE {key} = ?2"),
+                    rusqlite::params![edit(&json), at],
+                )
+                .unwrap();
+        }
+    }
+    (path, first, cut)
+}
+
+/// A field this build knows, written at the default it's left out at, is this build's own: the
+/// document opens to be edited, its history undoes and redoes, and its snapshot restores.
+#[test]
+fn a_field_written_at_its_default_is_this_builds_own() {
+    let (path, first, cut) = written_at_defaults("explicit-defaults", at_explicit_defaults);
+    let db = Db::open_read_only(&path).unwrap();
+    assert!(!db.holds_newer());
+    assert!(!db.leaves_out_newer());
+    assert_eq!(db.restore_snapshot(1).unwrap(), cut);
+    assert_eq!(db.snapshot_documents().unwrap(), vec![(1, cut.clone())]);
+    drop(db);
+
+    let mut session = Session::open(&path).unwrap();
+    assert!(!session.newer, "{:?}", session.last_error);
+    assert!(!session.lossy);
+    assert_eq!(session.document(), &cut);
+    assert!(session.undo());
+    assert!(session.undo());
+    assert_eq!(session.document(), &first);
+    assert!(session.redo());
+    assert!(session.redo());
+    assert_eq!(session.document(), &cut);
+    assert!(session.restore(1));
+    assert_eq!(session.document(), &cut);
+    session.set_caret(Cursor {
+        block_id: cut.blocks[0].id,
+        offset: 0,
+    });
+    assert!(session.insert("Still "));
+    drop(session);
+    let reopened = Session::open(&path).unwrap();
+    assert!(!reopened.newer);
+    assert_eq!(reopened.document().blocks[0].text, "Still Kept.");
+}
+
+/// A field this build doesn't know is still from a newer version, even beside the defaults, and
+/// even holding what looks like a default itself, in the head, a step of history or a snapshot.
+#[test]
+fn a_field_this_build_does_not_know_beside_the_defaults_is_still_newer() {
+    let unknown = |json: &str| {
+        at_explicit_defaults(json).replacen(
+            r#""centered":false"#,
+            r#""centered":false,"boxed":false"#,
+            1,
+        )
+    };
+    let (path, _, _) = written_at_defaults("explicit-defaults-and-unknown", unknown);
+    let db = Db::open_read_only(&path).unwrap();
+    assert!(db.leaves_out_newer(), "the head");
+    assert!(matches!(
+        db.restore_snapshot(1),
+        Err(kame_core::storage::DbError::Newer)
+    ));
+    assert!(db.snapshot_documents().unwrap().is_empty(), "the snapshot");
+    drop(db);
+    let session = Session::open(&path).unwrap();
+    assert!(session.newer);
+    assert!(session.save_failed, "edits are refused");
+
+    // Only in a step of history.
+    let (path, _, _) = written_at_defaults("explicit-defaults-unknown-op", |json| {
+        if json.contains("InsertBlock") {
+            unknown(json)
+        } else {
+            at_explicit_defaults(json)
+        }
+    });
+    let db = Db::open_read_only(&path).unwrap();
+    assert!(!db.leaves_out_newer());
+    assert!(db.holds_newer(), "the step");
+}
+
+/// A field written at another value than its default is read as it always was.
+#[test]
+fn a_field_written_at_another_value_is_read_as_ever() {
+    let (path, _, cut) = written_at_defaults("explicit-non-defaults", |json| {
+        at_explicit_defaults(json)
+            .replace(r#""centered":false"#, r#""centered":true"#)
+            .replace(r#""align":"Left""#, r#""align":"Right""#)
+            .replace(r#""language":null"#, r#""language":"rust""#)
+    });
+    let session = Session::open(&path).unwrap();
+    assert!(!session.newer);
+    let kinds: Vec<&BlockKind> = session.document().blocks.iter().map(|b| &b.kind).collect();
+    assert_eq!(
+        kinds[1],
+        &BlockKind::Heading {
+            level: 1,
+            centered: true
+        }
+    );
+    assert!(matches!(
+        kinds[3],
+        BlockKind::Image {
+            align: ImageAlign::Right,
+            ..
+        }
+    ));
+    assert_eq!(
+        kinds[4],
+        &BlockKind::Code {
+            language: Some("rust".to_string())
+        }
+    );
+    assert_eq!(session.document().blocks[0].text, cut.blocks[0].text);
 }

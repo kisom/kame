@@ -1320,6 +1320,58 @@ mod tests {
         }
     }
 
+    /// A field this build knows, written at the default it leaves out, as another program can write
+    /// it, is this build's own. A block's digest is taken over it as read back, so a writer that
+    /// gave it that digest, as the format says, wrote a revision that's used as any other. One that
+    /// took it over its own bytes wrote a revision waiting on a block it never finds, as any line
+    /// that isn't written as read back does, and it isn't taken for a newer build's either.
+    #[test]
+    fn a_field_written_at_its_default_is_not_taken_for_a_newer_build() {
+        let canonical = r#"{"Image":{"path":"p"}}"#;
+        let explicit = r#"{"Image":{"path":"p","link":null,"align":"Left"}}"#;
+        let ours = line_from_a_newer_build(canonical, "");
+        let as_read_back = ours.replace(canonical, explicit);
+        assert_ne!(as_read_back, ours);
+        let store = log_holding("explicit-default", &as_read_back);
+        assert!(!store.holds_newer());
+        assert!(!store.corrupt_lines());
+        let heads = store.heads();
+        assert_eq!(heads.len(), 1, "its revision isn't used");
+        assert_eq!(
+            store.document(&heads[0]).blocks[0].kind,
+            kame_core::model::BlockKind::Image {
+                path: "p".to_string(),
+                link: None,
+                align: kame_core::model::ImageAlign::Left,
+            }
+        );
+
+        let own_bytes = log_holding(
+            "explicit-default-own",
+            &line_from_a_newer_build(explicit, ""),
+        );
+        assert!(!own_bytes.holds_newer());
+        assert!(own_bytes.heads().is_empty());
+    }
+
+    /// [`kame_core::model::has_unknown_fields`] tells a field left out at its default from one this
+    /// build doesn't know only in the kinds of block and steps of history kame-core lists. A
+    /// revision and a line are structs, which it can't name, so neither may leave out a field.
+    #[test]
+    fn a_revision_and_a_line_leave_out_no_field() {
+        let needle = concat!("skip_serializing", "_if = \"");
+        let source = include_str!("revlog.rs");
+        let found: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            found.is_empty(),
+            "{found:?}: a field left out at its default here would make every line written with \
+             it at its default by another program read as a newer build's"
+        );
+    }
+
     #[test]
     fn logs_this_build_understands_are_not_taken_for_a_newer_build() {
         let ours = line_from_a_newer_build(r#""Paragraph""#, "");

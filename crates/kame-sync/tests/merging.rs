@@ -329,17 +329,184 @@ fn a_move_on_the_later_side_stands_beside_the_other_sides_edits() {
     assert!(result.notes.is_empty());
 }
 
-/// A known weak point (merging.md section 9): order follows the later side, so a move goes
-/// back when the other machine wrote later, even if it only edited words.
+/// `later` merged with `earlier`, passed both ways round, which give the same document.
+fn merged_both_ways(base: &Document, later: &Document, earlier: &Document) -> Merged {
+    let side = |doc, label, when| Side { doc, label, when };
+    let one = merge(
+        Some(base),
+        side(later, "talos", 2),
+        side(earlier, "titan", 1),
+    );
+    let other = merge(
+        Some(base),
+        side(earlier, "titan", 1),
+        side(later, "talos", 2),
+    );
+    assert_eq!(document_digest(&one.doc), document_digest(&other.doc));
+    check_valid(&one.doc);
+    one
+}
+
+/// The case that was a known weak point: a move on the machine that wrote first, and words
+/// added later on another. The move stands, as the other side didn't reorder anything.
 #[test]
-fn a_move_on_the_earlier_side_goes_back_where_it_was() {
+fn a_move_on_the_earlier_side_stands_beside_the_later_sides_edits() {
     let (base, mover, editor) = moved_and_edited();
-    let result = merged(&base, editor.document(), mover.document());
-    assert_eq!(texts(&result.doc), ["a", "b", "c", "After all."]);
-    assert_eq!(result.doc.annotations, base.annotations);
-    assert!(
-        result.notes.is_empty(),
-        "no words are lost, so there's no note"
+    let result = merged_both_ways(&base, editor.document(), mover.document());
+    assert_eq!(texts(&result.doc), ["b", "a", "c", "After all."]);
+    assert_eq!(
+        result.doc.annotations, base.annotations,
+        "the footnote is on b"
+    );
+    assert!(result.notes.is_empty());
+    let result = merged_both_ways(&base, mover.document(), editor.document());
+    assert_eq!(texts(&result.doc), ["b", "a", "c", "After all."]);
+}
+
+/// A list `a b c d` and a paragraph after it.
+fn four_items() -> Document {
+    document(vec![
+        list_item(1, "a"),
+        list_item(2, "b"),
+        list_item(3, "c"),
+        list_item(4, "d"),
+        block(5, "After."),
+    ])
+}
+
+fn moved(base: &Document, block: usize, up: bool) -> Session {
+    let mut session = editing(base);
+    at(&mut session, block, 0);
+    assert!(session.move_list_item(up));
+    session
+}
+
+/// When both sides reordered, the later side's order stands whole, and the earlier side's move
+/// goes back, with no note. Nothing is lost. Still a known weak point (merging.md section 9).
+#[test]
+fn moves_on_both_sides_take_the_later_sides_order() {
+    let base = four_items();
+    let later = moved(&base, 1, true);
+    let earlier = moved(&base, 3, true);
+    assert_eq!(texts(earlier.document()), ["a", "b", "d", "c", "After."]);
+    let result = merged_both_ways(&base, later.document(), earlier.document());
+    assert_eq!(texts(&result.doc), ["b", "a", "c", "d", "After."]);
+    assert!(result.notes.is_empty());
+}
+
+/// A moved item the other side cut is gone, whichever was later, since moving it changed nothing
+/// in it. Moved and edited, it stays where the mover put it, with the note a cut always gets.
+#[test]
+fn a_move_of_an_item_the_other_side_cut() {
+    let base = four_items();
+    let mover = moved(&base, 1, true);
+    let mut cut = base.clone();
+    cut.blocks.remove(1);
+    for result in [
+        merged_both_ways(&base, &cut, mover.document()),
+        merged_both_ways(&base, mover.document(), &cut),
+    ] {
+        assert_eq!(texts(&result.doc), ["a", "c", "d", "After."]);
+        assert!(result.notes.is_empty());
+    }
+
+    let mut mover = moved(&base, 2, true);
+    at(&mut mover, 1, 1);
+    mover.insert(" too");
+    assert_eq!(texts(mover.document()), ["a", "c too", "b", "d", "After."]);
+    let mut cut = base.clone();
+    cut.blocks.remove(2);
+    for result in [
+        merged_both_ways(&base, &cut, mover.document()),
+        merged_both_ways(&base, mover.document(), &cut),
+    ] {
+        assert_eq!(texts(&result.doc), ["a", "c too", "b", "d", "After."]);
+        assert_eq!(result.notes.len(), 1, "kept because it changed");
+    }
+}
+
+/// A new item the other side wrote follows what it was written after, wherever the move put
+/// that.
+#[test]
+fn a_new_item_beside_a_moved_one_follows_what_it_was_written_after() {
+    let base = four_items();
+    let mover = moved(&base, 1, true);
+    for (after, expected) in [
+        (1, ["b", "x", "a", "c", "d", "After."]),
+        (0, ["b", "a", "x", "c", "d", "After."]),
+        (2, ["b", "a", "c", "x", "d", "After."]),
+    ] {
+        let mut writer = base.clone();
+        writer.blocks.insert(after + 1, list_item(10, "x"));
+        for result in [
+            merged_both_ways(&base, &writer, mover.document()),
+            merged_both_ways(&base, mover.document(), &writer),
+        ] {
+            assert_eq!(texts(&result.doc), expected, "x written after {after}");
+            assert!(result.notes.is_empty());
+        }
+    }
+}
+
+/// Several items moved at once, an item with what's nested under it or a selection of items,
+/// stand together.
+#[test]
+fn several_items_moved_at_once_stand_beside_the_other_sides_edits() {
+    let nested = |id, text| Block {
+        kind: BlockKind::ListItem {
+            ordered: false,
+            depth: 1,
+        },
+        ..block(id, text)
+    };
+    let base = document(vec![
+        list_item(1, "a"),
+        list_item(2, "b"),
+        nested(3, "b1"),
+        nested(4, "b2"),
+        list_item(5, "c"),
+        block(6, "After."),
+    ]);
+    let mut editor = editing(&base);
+    at(&mut editor, 5, "After".len());
+    editor.insert(" all");
+
+    let with_children = moved(&base, 1, false);
+    assert_eq!(
+        texts(with_children.document()),
+        ["a", "c", "b", "b1", "b2", "After."]
+    );
+    let result = merged_both_ways(&base, editor.document(), with_children.document());
+    assert_eq!(
+        texts(&result.doc),
+        ["a", "c", "b", "b1", "b2", "After all."]
+    );
+
+    let mut selected = editing(&base);
+    let (b, c) = (base.blocks[1].id, base.blocks[4].id);
+    selected.set_caret(Cursor {
+        block_id: c,
+        offset: 1,
+    });
+    selected.selection = Some(Selection {
+        start: Cursor {
+            block_id: b,
+            offset: 0,
+        },
+        end: Cursor {
+            block_id: c,
+            offset: 1,
+        },
+    });
+    assert!(selected.move_list_item(true));
+    assert_eq!(
+        texts(selected.document()),
+        ["b", "b1", "b2", "c", "a", "After."]
+    );
+    let result = merged_both_ways(&base, editor.document(), selected.document());
+    assert_eq!(
+        texts(&result.doc),
+        ["b", "b1", "b2", "c", "a", "After all."]
     );
 }
 

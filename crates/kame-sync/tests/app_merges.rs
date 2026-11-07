@@ -341,3 +341,71 @@ fn a_copy_merges_into_a_document_holding_a_note_inside_a_character() {
     body("Café au lait. Sweet.");
     assert_eq!(body("a note").anchor.byte_range(), Some((7, 12)));
 }
+
+/// A document holding a list `a b c` and a paragraph after it, and a copy of it.
+fn with_a_list() -> (PathBuf, PathBuf) {
+    let dir = common::test_folder("app-list");
+    let (path, copy) = (dir.join("doc.kame"), dir.join(COPY));
+    {
+        let mut session = Session::open(&path).unwrap();
+        for (at, words) in ["a", "b", "c"].into_iter().enumerate() {
+            if at > 0 {
+                session.split();
+            }
+            session.insert(words);
+            let block_id = session.document().blocks[at].id;
+            assert!(session.set_block_kind(
+                block_id,
+                kame_core::model::BlockKind::ListItem {
+                    ordered: false,
+                    depth: 0,
+                },
+            ));
+        }
+        session.split();
+        session.insert("After.");
+        let block_id = session.document().blocks[3].id;
+        session.set_block_kind(block_id, kame_core::model::BlockKind::Paragraph);
+    }
+    std::fs::copy(&path, &copy).unwrap();
+    (path, copy)
+}
+
+fn texts(session: &Session) -> Vec<String> {
+    let blocks = &session.document().blocks;
+    blocks.iter().map(|block| block.text.clone()).collect()
+}
+
+/// The screen is the later side of a conflict copy, so this was the weak point there too: the
+/// copy's move went back. Now it stands beside the screen's words, and the other way round.
+#[test]
+fn a_move_in_either_copy_stands_beside_words_added_in_the_other() {
+    let (path, copy) = with_a_list();
+    {
+        let mut moved = Session::open(&copy).unwrap();
+        let block_id = moved.document().blocks[1].id;
+        moved.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        assert!(moved.move_list_item(true));
+    }
+    let mut session = Session::open(&path).unwrap();
+    assert_eq!(texts(&session), ["a", "b", "c", "After."]);
+    edit(&mut session, 3, "After".len(), " all");
+    let merged = merge_copy_into(&mut session, &copy).unwrap();
+    assert_eq!(merged.notes, 0);
+    assert_eq!(texts(&session), ["b", "a", "c", "After all."]);
+
+    let (path, copy) = with_a_list();
+    edit_file(&copy, 3, "After".len(), " all");
+    let mut session = Session::open(&path).unwrap();
+    let block_id = session.document().blocks[1].id;
+    session.set_caret(Cursor {
+        block_id,
+        offset: 0,
+    });
+    assert!(session.move_list_item(true));
+    merge_copy_into(&mut session, &copy).unwrap();
+    assert_eq!(texts(&session), ["b", "a", "c", "After all."]);
+}

@@ -931,6 +931,168 @@ mod tests {
         assert_eq!(synced.doc.blocks[0].text, "Ours. Theirs.");
     }
 
+    /// Whether a machine merges as 0.2.0 did.
+    type Merging = bool;
+    const OLD: Merging = true;
+    const NEW: Merging = false;
+
+    /// A list `a b c` and a paragraph after it.
+    fn listed() -> Document {
+        let item = |id: u128, text: &str| Block {
+            id: Uuid::from_u128(id),
+            kind: kame_core::model::BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
+            text: text.to_string(),
+            spans: Vec::new(),
+        };
+        Document {
+            id: Uuid::from_u128(1),
+            title: "t".to_string(),
+            blocks: vec![
+                item(10, "a"),
+                item(11, "b"),
+                item(12, "c"),
+                Block {
+                    kind: kame_core::model::BlockKind::Paragraph,
+                    ..item(13, "After.")
+                },
+            ],
+            annotations: Vec::new(),
+        }
+    }
+
+    /// One machine's sync, merging as `merging` does.
+    fn sync_as(
+        machine: &Replica,
+        merging: Merging,
+        doc: &Document,
+        last: &str,
+        now: i64,
+    ) -> Synced {
+        let mut store = Store::load(&machine.folder).unwrap();
+        let mut sync = || {
+            machine
+                .sync_in(&mut store, doc, &Metadata::default(), Some(last), now)
+                .unwrap()
+        };
+        if merging {
+            crate::merge::as_0_2_0::run(sync)
+        } else {
+            sync()
+        }
+    }
+
+    /// Each machine's own log, as a sync tool would carry it to the other.
+    fn exchange(one: &Replica, other: &Replica) {
+        for (from, to) in [(one, other), (other, one)] {
+            let name = format!("{}.log", from.device);
+            if from.folder.join(&name).exists() {
+                std::fs::copy(from.folder.join(&name), to.folder.join(&name)).unwrap();
+            }
+        }
+    }
+
+    /// Two machines that moved `b` above `a` on one and later added words on the other, each
+    /// merged as `mover_merges` and `editor_merges` do. With `apart`, each merges before it has
+    /// the other's merge. Returns both machines' last syncs and how many revisions are in the logs.
+    fn moved_on_one_edited_on_other(
+        name: &str,
+        mover_when: i64,
+        mover_merges: Merging,
+        editor_merges: Merging,
+        apart: bool,
+    ) -> (Synced, Synced, usize) {
+        let root = kame_test_dir::folder(name);
+        let (mover, editor) = (
+            replica(&root.join("mover"), "mover"),
+            replica(&root.join("editor"), "editor"),
+        );
+        std::fs::create_dir_all(&mover.folder).unwrap();
+        std::fs::create_dir_all(&editor.folder).unwrap();
+        let start = mover.sync(&listed(), None, 1).unwrap();
+        exchange(&mover, &editor);
+        let mut moved = listed();
+        moved.blocks.swap(0, 1);
+        let mut edited = listed();
+        edited.blocks[3].text = format!("After {mover_when}.");
+        let mut m = sync_as(&mover, mover_merges, &moved, &start.head, mover_when);
+        let mut e = sync_as(&editor, editor_merges, &edited, &start.head, 1000);
+        if apart {
+            exchange(&mover, &editor);
+            m = sync_as(&mover, mover_merges, &m.doc, &m.head, 2000);
+            e = sync_as(&editor, editor_merges, &e.doc, &e.head, 2000);
+        } else {
+            // The editor merges first, and the mover reads its merge.
+            exchange(&mover, &editor);
+            e = sync_as(&editor, editor_merges, &e.doc, &e.head, 2000);
+            exchange(&mover, &editor);
+            m = sync_as(&mover, mover_merges, &m.doc, &m.head, 2000);
+        }
+        for _ in 0..4 {
+            exchange(&mover, &editor);
+            m = sync_as(&mover, mover_merges, &m.doc, &m.head, 3000);
+            e = sync_as(&editor, editor_merges, &e.doc, &e.head, 3000);
+        }
+        let count = Store::load(&mover.folder).unwrap().revision_count();
+        (m, e, count)
+    }
+
+    /// A machine on 0.2.0 and one on this build, each merging the same two heads before it has
+    /// the other's merge, write different merges, since only this build keeps the move. Those
+    /// merge again, and both settle on one head within two more rounds, every block in it once
+    /// and every word kept. Which order it keeps depends on the revisions' ids, so it runs over
+    /// many, and with the move on each version.
+    #[test]
+    fn machines_on_0_2_0_and_this_build_settle_on_one_head_after_a_move() {
+        let (mut kept, mut undone) = (0, 0);
+        for when in 2..34 {
+            for (mover_merges, editor_merges) in [(NEW, OLD), (OLD, NEW)] {
+                let name = format!("revlog-versions-{when}-{}", kept + undone);
+                let (m, e, count) =
+                    moved_on_one_edited_on_other(&name, when, mover_merges, editor_merges, true);
+                assert_eq!(m.head, e.head, "one head on both machines");
+                assert_eq!(m.written + e.written, 0, "and nothing more is written");
+                // The start, the two edits, the two merges of them, two of those, and the last.
+                assert!(count <= 8, "{count} revisions");
+                let mut texts: Vec<&str> = m.doc.blocks.iter().map(|b| b.text.as_str()).collect();
+                if texts[0] == "b" {
+                    kept += 1;
+                } else {
+                    undone += 1;
+                }
+                texts.sort();
+                let after = format!("After {when}.");
+                assert_eq!(texts, [after.as_str(), "a", "b", "c"]);
+                assert!(
+                    m.doc.annotations.is_empty(),
+                    "no notes, since no words are lost"
+                );
+            }
+        }
+        eprintln!("the move was kept {kept} times and undone {undone}");
+        assert!(kept > 0 && undone > 0, "kept {kept}, undone {undone}");
+    }
+
+    /// Where the 0.2.0 machine merges first, this build follows its merge, so the move is undone
+    /// as it was before. And where this build merges first, 0.2.0 follows that, and it stays.
+    #[test]
+    fn whichever_version_merges_first_is_followed() {
+        let (m, e, count) = moved_on_one_edited_on_other("revlog-old-first", 5, NEW, OLD, false);
+        assert_eq!((m.head.as_str(), count), (e.head.as_str(), 4));
+        assert_eq!(
+            m.doc.blocks[0].text, "a",
+            "0.2.0 merged first, and its order stands"
+        );
+        let (m, e, count) = moved_on_one_edited_on_other("revlog-new-first", 5, OLD, NEW, false);
+        assert_eq!((m.head.as_str(), count), (e.head.as_str(), 4));
+        assert_eq!(
+            m.doc.blocks[0].text, "b",
+            "this build merged first, and the move stands"
+        );
+    }
+
     /// Every line of a log, with `change` applied to each.
     fn rewrite_log(
         log: &Path,

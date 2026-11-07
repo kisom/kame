@@ -205,7 +205,7 @@ pub fn merge(base: Option<&Document>, one: Side, other: Side) -> Merged {
         }
     }
 
-    let order = merged_order(ours.doc, theirs.doc, &blocks);
+    let order = merged_order(base, ours.doc, theirs.doc, &blocks);
     let mut merged_blocks: Vec<Block> = order
         .iter()
         .map(|id| blocks.remove(id).expect("ordered blocks exist"))
@@ -304,20 +304,54 @@ fn merged_spans(base: Option<&Block>, ours: &Block, theirs: &Block, text: &Merge
     joined.into_iter().map(|(_, span)| span).collect()
 }
 
-/// The first side's order, with what only the other side has put after whatever it followed.
+/// The order of the side that changed the order of the blocks all three have, or ours if neither
+/// did or both did, with what only the other side has put after whatever it followed there. Moving
+/// list items is the only edit that changes that order, so a move stands beside the other side's
+/// edits whichever was later.
 fn merged_order(
+    base: &Document,
     ours: &Document,
     theirs: &Document,
     kept: &HashMap<BlockId, Block>,
 ) -> Vec<BlockId> {
-    let mut order: Vec<BlockId> = ours
+    #[cfg(test)]
+    if as_0_2_0::playing() {
+        return placed_after(ours, theirs, kept);
+    }
+    let ids =
+        |doc: &Document| -> HashSet<BlockId> { doc.blocks.iter().map(|block| block.id).collect() };
+    let (in_base, in_ours, in_theirs) = (ids(base), ids(ours), ids(theirs));
+    let shared = |doc: &Document| -> Vec<BlockId> {
+        doc.blocks
+            .iter()
+            .map(|block| block.id)
+            .filter(|id| in_base.contains(id) && in_ours.contains(id) && in_theirs.contains(id))
+            .collect()
+    };
+    let was = shared(base);
+    let theirs_moved = shared(theirs) != was;
+    let ours_moved = shared(ours) != was;
+    if theirs_moved && !ours_moved {
+        placed_after(theirs, ours, kept)
+    } else {
+        placed_after(ours, theirs, kept)
+    }
+}
+
+/// `first`'s order, with what only `second` has put after whatever it followed.
+fn placed_after(
+    first: &Document,
+    second: &Document,
+    kept: &HashMap<BlockId, Block>,
+) -> Vec<BlockId> {
+    let mut order: Vec<BlockId> = first
         .blocks
         .iter()
         .map(|block| block.id)
         .filter(|id| kept.contains_key(id))
         .collect();
     let mut after: Option<usize> = None;
-    for block in &theirs.blocks {
+    for block in &second.blocks {
         if !kept.contains_key(&block.id) {
             continue;
         }
@@ -480,5 +514,26 @@ fn anchor_block(anchor: &Anchor) -> BlockId {
     match anchor {
         Anchor::Block(id) => *id,
         Anchor::Range { block_id, .. } => *block_id,
+    }
+}
+
+/// Plays a machine on 0.2.0 or earlier, which took ours' order whatever theirs did. Tests only,
+/// so a release build carries no second rule. It holds for the calling thread.
+#[cfg(test)]
+pub(crate) mod as_0_2_0 {
+    use std::cell::Cell;
+
+    thread_local!(static PLAYING: Cell<bool> = const { Cell::new(false) });
+
+    pub(crate) fn playing() -> bool {
+        PLAYING.with(Cell::get)
+    }
+
+    /// Runs `f` merging as 0.2.0 does.
+    pub(crate) fn run<T>(f: impl FnOnce() -> T) -> T {
+        PLAYING.with(|p| p.set(true));
+        let out = f();
+        PLAYING.with(|p| p.set(false));
+        out
     }
 }

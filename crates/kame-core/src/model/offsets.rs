@@ -127,6 +127,12 @@ impl Document {
     /// Gives each annotation that repeats an earlier annotation's id one of its own, as
     /// [`Document::fit_ids`] does for blocks, so that taking one out, or a merge, which keeps notes
     /// by id, doesn't take the other with it.
+    ///
+    /// Which keeps the id goes by the order the notes are stored in, which means nothing: undo puts
+    /// a note back at the end. So two copies of one damaged document holding the repeats in other
+    /// orders give the new id to different notes, and a merge of them, which matches notes by id,
+    /// finds both bodies changed and keeps both, in each note. That repeats words and never loses
+    /// any, and only a damaged file can bring it about, so the order isn't settled some other way.
     pub fn fit_annotation_ids(&mut self) {
         own_ids(
             self.annotations

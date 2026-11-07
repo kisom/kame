@@ -27,6 +27,12 @@ written by one version has to be safe in another.
   whether logs keep growing (nothing compacts them, and every merge stores both whole documents in the undo log), or 1.0 needs
   a way to compact them.
 
+- [ ] **A field written at its default opens as a newer version's.** A field this build knows and leaves out at its
+  default, such as `centered`, `align`, `link`, `language`, `removed` or `clipped`, written by another program at that
+  default, is gone when the JSON is read and written again, so the document opens read-only as one from a newer version,
+  as an unknown field would. Nothing is lost, but it says to update kame for no reason. Only a list item's `depth` is
+  taken as this build's own. The bounds in `model/document.rs` could list every such field.
+
 ### Reliability
 
 - [ ] **A stretch of daily writing with no lost words,** on two machines at different versions, with sync on. How long is
@@ -47,6 +53,9 @@ written by one version has to be safe in another.
 ### Polish
 
 - [ ] **Rough edges daily writing finds,** added here as they're found.
+- [ ] **The long fuzzing runs are noisy.** Undo and redo refuse a step that no longer fits by catching its panic, and
+  the default panic hook prints each one, so a long run's output is mostly those lines, and a failure is hard to find in
+  it. A quiet hook for the long runs, printing only what fails, would help.
 
 Performance, worth doing if daily writing feels it. Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a
 keystroke in the page, a little more for a long paragraph, and nothing yet is close to a frame. On macOS, Metal keeps about 450 MB

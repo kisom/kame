@@ -11,13 +11,19 @@
 //! Either way, a seed that fails is printed, with how to run it alone.
 //!
 //! Undo and redo refuse a step that no longer fits by catching its panic, and a long run meets
-//! thousands, so while one is going its thread's panics aren't printed as they happen. A panic
-//! that fails the run is printed with its seed instead, as it unwinds through the run: its message,
-//! where it was, and its backtrace if `RUST_BACKTRACE` asks for one. Other threads' panics are
-//! printed as ever, and the hook before is put back when the last long run ends.
+//! thousands, so while one is going its thread's panics aren't printed as they happen. They're kept
+//! for the seed, and a seed that fails prints them all, with where each was, and then the panic that
+//! failed it, with its seed and its backtrace if `RUST_BACKTRACE` asks for one. That shows what
+//! went wrong in a step that was refused before an assertion saw it. A panic that aborts, as one in
+//! a destructor while a failure unwinds does, is printed the same way as the abort comes. A run that
+//! passes ends by counting the panics it caught, one line for each place they were, so that a new
+//! one shows without the noise coming back. Other threads' panics are printed as ever, and the hook
+//! before is put back when the last long run ends.
 
 use std::backtrace::{Backtrace, BacktraceStatus};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::panic::PanicHookInfo;
 use std::sync::{Arc, Mutex};
 
@@ -126,7 +132,7 @@ impl Random {
 }
 
 /// Prints the seed of a target that panics, as the panic unwinds through it, and in a long run,
-/// what the panic said, which the quiet hook kept.
+/// the panics its seed caught and the one that failed it, which the quiet hook kept.
 pub struct OnFailure<'a> {
     pub target: &'a str,
     pub seed: u64,
@@ -134,23 +140,46 @@ pub struct OnFailure<'a> {
 
 impl Drop for OnFailure<'_> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
-            let said = LAST_PANIC
-                .with(RefCell::take)
-                .map_or(String::new(), |last| {
-                    let mut said = format!(": panicked at {}: {}", last.location, last.message);
-                    if last.backtrace.status() == BacktraceStatus::Captured {
-                        said.push_str(&format!("\n{}", last.backtrace));
-                    }
-                    said
-                });
-            eprintln!(
-                "fuzz target {} failed at seed {}{said}\nTo run it alone: \
-                 KAME_FUZZ_SEED={} KAME_FUZZ_ITERATIONS=1 cargo test {} -- --ignored --nocapture",
-                self.target, self.seed, self.seed, self.target
-            );
+        if !std::thread::panicking() {
+            return;
+        }
+        let mut kept = with_run(|run| std::mem::take(&mut run.caught)).unwrap_or_default();
+        let failure = kept.pop();
+        say_failure(self.target, self.seed, &kept, failure.as_ref(), "failed");
+    }
+}
+
+/// Prints what `seed` caught, then `failure`, and how to run the seed alone. Nothing here panics,
+/// since it can be printing as a panic aborts.
+fn say_failure(
+    target: &str,
+    seed: u64,
+    caught: &[Panicked],
+    failure: Option<&Panicked>,
+    how: &str,
+) {
+    let mut said = String::new();
+    for panic in caught {
+        said.push_str(&format!(
+            "fuzz target {target}, seed {seed}: panicked earlier at {}: {}\n",
+            panic.location, panic.message
+        ));
+    }
+    said.push_str(&format!("fuzz target {target} {how} at seed {seed}"));
+    if let Some(failure) = failure {
+        said.push_str(&format!(
+            ": panicked at {}: {}",
+            failure.location, failure.message
+        ));
+        if failure.backtrace.status() == BacktraceStatus::Captured {
+            said.push_str(&format!("\n{}", failure.backtrace));
         }
     }
+    said.push_str(&format!(
+        "\nTo run it alone: KAME_FUZZ_SEED={seed} KAME_FUZZ_ITERATIONS=1 cargo test {target} -- \
+         --ignored --nocapture\n"
+    ));
+    let _ = std::io::stderr().write_all(said.as_bytes());
 }
 
 /// What a panic said, kept by the quiet hook until it's known whether it fails the run.
@@ -160,25 +189,43 @@ struct Panicked {
     backtrace: Backtrace,
 }
 
+/// A long run going on this thread, as the quiet hook keeps it.
+struct Run {
+    target: String,
+    seed: u64,
+    /// Every panic the seed has had so far, the one failing it last, if it's failing.
+    caught: Vec<Panicked>,
+    /// How many panics the run has caught, by where they were.
+    by_place: BTreeMap<String, u64>,
+}
+
 thread_local! {
-    /// Whether this thread is in a long run, so that its panics are kept and not printed.
-    static QUIET: Cell<bool> = const { Cell::new(false) };
-    /// The last panic on this thread while it was quiet.
-    static LAST_PANIC: RefCell<Option<Panicked>> = const { RefCell::new(None) };
+    /// The long run on this thread, if one is going, whose panics are kept and not printed.
+    static RUN: RefCell<Option<Run>> = const { RefCell::new(None) };
+}
+
+/// `change` on this thread's long run, or `None` if there's none, or it can't be had: it's in use
+/// further up, or the thread is ending. Never panics.
+fn with_run<T>(change: impl FnOnce(&mut Run) -> T) -> Option<T> {
+    RUN.try_with(|run| {
+        let mut run = run.try_borrow_mut().ok()?;
+        run.as_mut().map(change)
+    })
+    .ok()
+    .flatten()
 }
 
 type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 /// How many long runs are going, and the hook that was there before the quiet one, while the
-/// quiet one is in place.
+/// quiet one is in place. Only [`Quiet`] takes it, never the hook.
 static HOOKED: Mutex<(usize, Option<Arc<Hook>>)> = Mutex::new((0, None));
 
-/// Keeps a quiet thread's panics, and passes every other thread's to the hook before.
+/// Keeps a long run's panics, and passes every other thread's to the hook before, as it does one
+/// it can't keep. One that aborts is printed with all its seed caught, since nothing else will be.
+/// Nothing here panics: no unwrap, no lock, and the run is borrowed only if it's free.
 fn quiet_hook(before: Arc<Hook>) -> Hook {
     Box::new(move |info| {
-        if !QUIET.with(Cell::get) {
-            return before(info);
-        }
         let payload = info.payload();
         let message = payload
             .downcast_ref::<&str>()
@@ -186,15 +233,45 @@ fn quiet_hook(before: Arc<Hook>) -> Hook {
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "a panic that isn't text".to_string());
         let location = info.location().map_or(String::new(), ToString::to_string);
-        let backtrace = Backtrace::capture();
-        LAST_PANIC.with(|last| {
-            *last.borrow_mut() = Some(Panicked {
-                message,
-                location,
-                backtrace,
-            })
+        let panicked = Panicked {
+            message,
+            location: location.clone(),
+            backtrace: Backtrace::capture(),
+        };
+        let aborting = aborts(&panicked.message);
+        let mut panicked = Some(panicked);
+        let kept = with_run(|run| {
+            *run.by_place.entry(location).or_default() += 1;
+            if aborting {
+                let failure = panicked.take();
+                say_failure(
+                    &run.target,
+                    run.seed,
+                    &run.caught,
+                    failure.as_ref(),
+                    "aborted",
+                );
+            } else if let Some(panicked) = panicked.take() {
+                run.caught.push(panicked);
+            }
         });
+        if kept.is_none() || aborting {
+            before(info);
+        }
     })
+}
+
+/// Whether a panic that said `message` is one that aborts the process: one in a destructor while
+/// another unwinds, or in a function that can't unwind. Telling that from the hook's info isn't
+/// stable yet, so these are the words the standard library raises them with, which the test of an
+/// aborting run holds this to.
+fn aborts(message: &str) -> bool {
+    [
+        "panic in a destructor during cleanup",
+        "panic in a function that cannot unwind",
+    ]
+    .iter()
+    .any(|words| message.starts_with(words))
 }
 
 /// This thread's panics are quiet while it's held. The first long run puts the quiet hook in, and
@@ -203,7 +280,7 @@ fn quiet_hook(before: Arc<Hook>) -> Hook {
 struct Quiet;
 
 impl Quiet {
-    fn new() -> Quiet {
+    fn new(target: &str) -> Quiet {
         let mut hooked = HOOKED
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -213,15 +290,26 @@ impl Quiet {
             hooked.1 = Some(before);
         }
         hooked.0 += 1;
-        QUIET.with(|quiet| quiet.set(true));
+        RUN.with(|run| {
+            *run.borrow_mut() = Some(Run {
+                target: target.to_string(),
+                seed: 0,
+                caught: Vec::new(),
+                by_place: BTreeMap::new(),
+            })
+        });
         Quiet
+    }
+
+    /// How many panics the run caught, by where they were.
+    fn caught(&self) -> BTreeMap<String, u64> {
+        with_run(|run| run.by_place.clone()).unwrap_or_default()
     }
 }
 
 impl Drop for Quiet {
     fn drop(&mut self) {
-        QUIET.with(|quiet| quiet.set(false));
-        LAST_PANIC.with(RefCell::take);
+        let _ = RUN.try_with(|run| run.try_borrow_mut().map(|mut run| run.take()));
         let mut hooked = HOOKED
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -243,6 +331,10 @@ impl Drop for Quiet {
 fn run(target: &str, seeds: impl Iterator<Item = u64>, mut each: impl FnMut(u64)) -> u64 {
     let mut count = 0;
     for seed in seeds {
+        with_run(|run| {
+            run.seed = seed;
+            run.caught.clear();
+        });
         let _guard = OnFailure { target, seed };
         each(seed);
         count += 1;
@@ -256,7 +348,8 @@ pub fn short(target: &str, count: u64, each: impl FnMut(u64)) {
 }
 
 /// Runs `each` over as many seeds as `KAME_FUZZ_ITERATIONS` says, from `KAME_FUZZ_SEED`, and
-/// says how many it ran. Its panics are quiet, and only one that fails it is printed.
+/// says how many it ran. Its panics are quiet: a seed that fails prints them, and a run that passes
+/// counts them by where they were.
 pub fn long(target: &str, each: impl FnMut(u64)) {
     let number = |name: &str| {
         std::env::var(name)
@@ -271,13 +364,21 @@ pub fn long(target: &str, each: impl FnMut(u64)) {
     });
     eprintln!("fuzz target {target}: {iterations} seeds from {first}");
     let started = std::time::Instant::now();
-    let quiet = Quiet::new();
+    let quiet = Quiet::new(target);
     let ran = run(target, (0..iterations).map(|n| first.wrapping_add(n)), each);
+    let caught = quiet.caught();
     drop(quiet);
     eprintln!(
         "fuzz target {target}: ran {ran} seeds from {first} in {:.0} s, none failed",
         started.elapsed().as_secs_f64()
     );
+    let mut places: Vec<(String, u64)> = caught.into_iter().collect();
+    places.sort_by(|one, other| other.1.cmp(&one.1).then_with(|| one.0.cmp(&other.0)));
+    let total: u64 = places.iter().map(|(_, count)| count).sum();
+    eprintln!("fuzz target {target}: caught {total} panics, by where they were:");
+    for (place, count) in places {
+        eprintln!("  {count} at {place}");
+    }
 }
 
 /// Bytes damaged in one of the ways a disk, a sync tool or a program with a bug damages them:
@@ -710,38 +811,59 @@ mod tests {
         assert_eq!(two, "00000000-0000-4000-8000-000000000002 and more");
     }
 
-    /// Long runs for the test below, run only when it asks, so that running the ignored tests
-    /// doesn't fail on them. Each seed refuses something by catching its panic, as undo and redo
-    /// refuse a step that doesn't fit. The first run passes, a panic caught between the runs is
-    /// nobody's to hide, and the second run fails at seed 3.
+    /// Long runs for the tests below, run only when they ask, so that running the ignored tests
+    /// doesn't fail on them. `KAME_FUZZ_SAYING=fail`: each seed refuses something by catching its
+    /// panic, as undo and redo refuse a step that doesn't fit. The first run passes, a panic caught
+    /// between the runs is nobody's to hide, and the second run fails at seed 3, after refusing
+    /// twice. `KAME_FUZZ_SAYING=abort`: seed 2 fails, and a value it drops panics as it unwinds,
+    /// which aborts.
     #[test]
     #[ignore = "run by a_long_run_is_quiet_and_says_what_failed"]
-    fn long_runs_for_the_test_of_what_they_say() {
-        if std::env::var_os("KAME_FUZZ_SAYING").is_none() {
-            return;
-        }
+    fn long_runs_for_the_tests_of_what_they_say() {
         let refuse = |words: &'static str| {
             let refused = std::panic::catch_unwind(|| panic!("{words}"));
             assert!(refused.is_err());
         };
-        long("a_passing_run", |_| refuse("refused in the passing run"));
-        refuse("caught between the runs");
-        long("a_failing_run", |seed| {
-            refuse("refused in the failing run");
-            assert_ne!(seed, 3, "the real failure");
-        });
+        match std::env::var("KAME_FUZZ_SAYING").as_deref() {
+            Ok("fail") => {
+                long("a_passing_run", |_| refuse("refused in the passing run"));
+                refuse("caught between the runs");
+                long("a_failing_run", |seed| {
+                    refuse("refused in the failing run");
+                    if seed == 3 {
+                        refuse("refused again before failing");
+                    }
+                    assert_ne!(seed, 3, "the real failure");
+                });
+            }
+            Ok("abort") => {
+                struct PanicsWhenDropped;
+                impl Drop for PanicsWhenDropped {
+                    fn drop(&mut self) {
+                        panic!("a drop that panics");
+                    }
+                }
+                long("an_aborting_run", |seed| {
+                    let _dropped = PanicsWhenDropped;
+                    assert_ne!(seed, 2, "the first failure");
+                    std::mem::forget(_dropped);
+                });
+            }
+            _ => {}
+        }
     }
 
-    #[test]
-    fn a_long_run_is_quiet_and_says_what_failed() {
+    /// What the child running [`long_runs_for_the_tests_of_what_they_say`] said, and whether it
+    /// passed.
+    fn saying(how: &str) -> (bool, String) {
         let ran = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "fuzz::tests::long_runs_for_the_test_of_what_they_say",
+                "fuzz::tests::long_runs_for_the_tests_of_what_they_say",
                 "--ignored",
                 "--nocapture",
             ])
-            .env("KAME_FUZZ_SAYING", "1")
+            .env("KAME_FUZZ_SAYING", how)
             .env("KAME_FUZZ_SEED", "0")
             .env("KAME_FUZZ_ITERATIONS", "10")
             .env_remove("RUST_BACKTRACE")
@@ -749,20 +871,68 @@ mod tests {
             .unwrap();
         let said = String::from_utf8_lossy(&ran.stderr).to_string()
             + &String::from_utf8_lossy(&ran.stdout);
-        assert!(!ran.status.success(), "{said}");
-        assert!(!said.contains("refused in"), "a refusal is said: {said}");
+        (ran.status.success(), said)
+    }
+
+    #[test]
+    fn a_long_run_is_quiet_and_says_what_failed() {
+        let (passed, said) = saying("fail");
+        assert!(!passed, "{said}");
+        let here = concat!(file!(), ":");
+        assert!(
+            !said.contains("refused in the passing run"),
+            "a refusal is said: {said}"
+        );
         assert!(
             said.contains("caught between the runs"),
             "the hook isn't put back: {said}"
         );
         assert!(said.contains("a_passing_run: ran 10 seeds"), "{said}");
-        let failed = said
-            .lines()
-            .find(|line| line.contains("fuzz target a_failing_run failed at seed 3"))
-            .unwrap_or_else(|| panic!("the seed isn't said: {said}"));
-        assert!(failed.contains("the real failure"), "{failed}");
-        assert!(failed.contains(concat!(file!(), ":")), "{failed}");
+        let lines: Vec<&str> = said.lines().collect();
+        let at = |words: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(words))
+                .unwrap_or_else(|| panic!("{words:?} isn't said: {said}"))
+        };
+        // Where the passing run's panics were, counted, with nothing else of them.
+        let counted = at("fuzz target a_passing_run: caught 10 panics");
+        assert!(lines[counted + 1].contains("10 at ") && lines[counted + 1].contains(here));
+
+        // Every panic the failing seed caught, where it was, then the failure and its seed.
+        let failed = at("fuzz target a_failing_run failed at seed 3");
+        assert!(
+            lines[failed].contains("the real failure"),
+            "{}",
+            lines[failed]
+        );
+        assert!(lines[failed].contains(here), "{}", lines[failed]);
+        for refusal in ["refused in the failing run", "refused again before failing"] {
+            assert_eq!(said.matches(refusal).count(), 1, "{refusal}: {said}");
+            let caught = at(refusal);
+            assert!(caught < failed, "{said}");
+            assert!(lines[caught].contains("seed 3") && lines[caught].contains(here));
+        }
+        assert!(at("refused in the failing run") < at("refused again before failing"));
         assert!(said.contains("KAME_FUZZ_SEED=3"), "{said}");
+    }
+
+    /// A panic as a failing seed unwinds aborts the process, so the run never hears of the
+    /// failure. The hook says it all as the abort comes.
+    #[test]
+    fn a_long_run_that_aborts_still_says_its_seed() {
+        let (passed, said) = saying("abort");
+        assert!(!passed, "{said}");
+        let seed = said
+            .lines()
+            .position(|line| {
+                line.contains("fuzz target an_aborting_run") && line.contains("seed 2")
+            })
+            .unwrap_or_else(|| panic!("the seed isn't said: {said}"));
+        let after = said.lines().skip(seed).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("the first failure"), "{said}");
+        assert!(said.contains("a drop that panics"), "{said}");
+        assert!(after.contains("KAME_FUZZ_SEED=2"), "{said}");
     }
 
     #[test]

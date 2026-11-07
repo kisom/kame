@@ -231,10 +231,10 @@ stranded, whatever its place, since logs for it would go to every machine and be
 
 **Logs that may be another document's.** A database that isn't stranded can still have another document's logs beside it, if a
 copy is put at a path that has logs, or a database with no place was left behind when its path was reused, or a verdict can't be
-reached since a corrupt line is all there is. Logs count as a database's own only if there's nothing there, they hold the
-revision it remembers, or a line in them says it's of this document (`Store::can_be_for`, by `Document::id`). Each line holds its
-document's id inside its revision, so a line in an older format still says, even with an id that fails its check, and a line
-that doesn't parse says if its JSON can still be read. Only a line with no id to read says nothing. A document's own old lines
+reached since a corrupt line there, in a log that says nothing of whose it is, could be holding its revision. Logs count as a
+database's own only if there's nothing there, they hold the revision it remembers, or a line in them says it's of this document
+(`Store::can_be_for`, by `Document::id`). Each line holds its document's id inside its revision, so a line in an older format
+still says, even with an id that fails its check, and a line that doesn't parse says if its JSON can still be read. Only a line with no id to read says nothing. A document's own old lines
 therefore heal, and another document's don't count. Logs that say nothing, or that can't be read, show nothing, and "can't be told" means doing less.
 
 Otherwise `Logged` writes nothing, as its history could reach another document's logs on every machine. `Outcome::others_logs` says
@@ -252,8 +252,11 @@ there. Nor does one whose file can't be read. With no file at all, the logs are 
   nothing. A document last synced in that format isn't stranded, and heals on its first sync, by writing its history again.
 - A line torn by a crash counts for nothing (`serde_json::Error::is_eof`). It can't hold a remembered revision, as the state is saved only
   after its line is flushed, and `append` starts a new line after a tear rather than joining on to it.
-- What's left is real corruption, and a revision that's missing may be in it, so that's "can't be told", and not stranded, unless the
-  revision is found elsewhere (`Store::corrupt_lines`).
+- What's left is real corruption, and a revision that's missing may be in it, so at the database's own path that's "can't be told",
+  and not stranded, if the line could be holding its revision: the line names its document, or no line there names any, or no other
+  line in the line's own log does, which would be so of its own log damaged whole (`Store::may_hide_its_own`, asked with the
+  database's document id, and as could be anyone's when that can't be read). A corrupt line in a log of another document's lines, as
+  at a path used again for a new document, can't be holding it, and the database is stranded.
 
 A pass needs every log only to rule out a home, which matters only for retiring a database as having no home. A move, a retirement
 because the document has already been opened at its home, and a return have found their home, so they go ahead whatever else can't
@@ -386,6 +389,12 @@ is dealt with by the pass after it's left. Its edits are then in the database th
   having no home until the home is opened on this machine, when the rule above lets it go, or until the line is removed by hand. A
   home whose logs all wait on others that aren't here, or hold nothing this version can use, can't be opened, so there only removing
   the line ends it. The notice says which logs.
+- At a path used again for a new document, a log there holding only lines that can't be read, which say nothing of whose they are,
+  could be the old database's own log damaged whole, so the old database isn't known to be stranded. A pass says nothing of it and
+  reads its logs again each time. It's held off as being on another document's logs and says so. Removing that log by hand, or
+  deleting the old database in kame, which leaves the new document's logs, ends it. The other way round, the old database is taken
+  for stranded wrongly only if the one log that held its revision also holds another document's readable lines and every line of
+  its own there is destroyed past reading whose it is. Then it's retired, with every word kept in the retired file the notice names.
 - Deliberately deleting a document's `.sync` folder while keeping the marker now retires its database. The docs only ever
   told people to remove both.
 - `kame-site` doesn't run the clean-up, so a build on a machine before the app has opened the notebook can still publish a

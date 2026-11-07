@@ -892,7 +892,12 @@ fn undo_takes_an_idle_copy_back_before_everything_that_arrived_and_an_edit_ends_
 
 /// Whether a database at `path` that last synced there, and remembers `state`, is stranded.
 fn stranded_there(path: &Path, state: &str) -> bool {
-    is_stranded(path, Some(state), place_of(path).as_deref(), || None)
+    stranded_there_as(path, state, None)
+}
+
+/// The same, with its document's id as `document` gives it.
+fn stranded_there_as(path: &Path, state: &str, document: Option<uuid::Uuid>) -> bool {
+    is_stranded(path, Some(state), place_of(path).as_deref(), || document)
 }
 
 /// A path in a marked folder, with no logs.
@@ -1962,6 +1967,15 @@ fn opening_a_database_on_a_reused_path_with_a_corrupt_line_is_held_off_as_strand
     assert_eq!(logs.len(), 1);
     std::fs::write(&logs[0].0, format!("{}nonsense\n", logs[0].1)).unwrap();
     let before = logs_in(&folder);
+    let (id, state) = {
+        let session = talos.session();
+        (session.document().id, session.sync_state().unwrap())
+    };
+    assert!(stranded_there_as(&talos.path, &state, Some(id)));
+    assert!(
+        !stranded_there_as(&talos.path, &state, None),
+        "with no id to go by, the line may be holding its revision"
+    );
 
     let mut session = talos.session();
     talos.append(&mut session, 0, " Old words.");

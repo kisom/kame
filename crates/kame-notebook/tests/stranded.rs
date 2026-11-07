@@ -2509,6 +2509,24 @@ fn its_own_log_damaged_whole_beside_another_documents_lines_keeps_it_waiting() {
     assert!(a.is_file());
 }
 
+/// Its document can't be read, so it can't be told which document's revision the corrupt line may
+/// be holding, and any corrupt line keeps it waiting, as before.
+#[test]
+fn a_corrupt_line_at_its_path_keeps_a_database_whose_document_cannot_be_read_waiting() {
+    let (root, nb) = logged_notebook("stranded-corrupt-reused-unreadable");
+    let a = root.join("a.kame");
+    reused_with_a_corrupt_line(&root, &a, true);
+    rusqlite::Connection::open(&a)
+        .unwrap()
+        .execute("UPDATE documents SET json = 'nonsense' WHERE id = 1", [])
+        .unwrap();
+    assert!(Db::open_read_only(&a).unwrap().load_sync_state().is_some());
+
+    assert!(find_stranded(&nb, &mut Healthy::default()).is_empty());
+    assert!(reconcile(&nb, just(&a), None, Locks::NONE).is_empty());
+    assert!(a.is_file());
+}
+
 /// A line that doesn't parse, but still says it's of this document, may be holding its revision.
 #[test]
 fn a_corrupt_line_naming_its_document_at_its_path_still_keeps_it_waiting() {

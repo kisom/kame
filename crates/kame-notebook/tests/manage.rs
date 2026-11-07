@@ -1490,6 +1490,44 @@ fn a_stranded_document_is_listed_and_no_logs_come_back_for_it() {
     assert_eq!(links_of(&read(&linker)), ["a.kame"]);
 }
 
+/// A document linking to the moved one sits on a reused path, with a corrupt line among the new
+/// document's lines. Its links aren't changed, as for any stranded document, and it says so, since
+/// that line can't be holding its revision.
+#[test]
+fn a_linking_document_on_a_reused_path_with_a_corrupt_line_is_listed_as_stranded() {
+    let (root, nb) = logged_notebook("move-stranded-linker-corrupt");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    sync(&linker);
+    let other = root.join("other.kame");
+    document(&other, "Another document.");
+    sync(&other);
+    std::fs::remove_dir_all(log_folder(&linker)).unwrap();
+    std::fs::rename(log_folder(&other), log_folder(&linker)).unwrap();
+    std::fs::remove_file(&other).unwrap();
+    let logs = files_in(&log_folder(&linker));
+    assert_eq!(logs.len(), 1);
+    let log = log_folder(&linker).join(&logs[0].0);
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"nonsense\n");
+    std::fs::write(&log, bytes).unwrap();
+    let logs = files_in(&log_folder(&linker));
+
+    let report = make_move(&nb, &a, &root.join("b.kame"));
+    assert!(report.changed.is_empty());
+    assert_eq!(report.left[0].relative, "linker.kame");
+    assert!(
+        report.left[0].why.contains("moved or deleted"),
+        "{}",
+        report.left[0].why
+    );
+    assert_eq!(files_in(&log_folder(&linker)), logs);
+    assert_eq!(links_of(&read(&linker)), ["a.kame"]);
+}
+
 fn place_in(path: &Path) -> Option<String> {
     Db::open_read_only(path).unwrap().load_sync_place()
 }

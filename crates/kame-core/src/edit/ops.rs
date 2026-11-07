@@ -570,6 +570,27 @@ pub fn apply_inverse(doc: &mut Document, op: &Op) {
     }
 }
 
+/// Whether two documents hold the same words: the same blocks, by id, with the same text, in the
+/// same order, and the same notes, by id, with the same bodies, in any order.
+fn same_words(one: &Document, other: &Document) -> bool {
+    let blocks = |doc: &Document| -> Vec<(BlockId, String)> {
+        doc.blocks
+            .iter()
+            .map(|block| (block.id, block.text.clone()))
+            .collect()
+    };
+    let notes = |doc: &Document| -> Vec<(AnnotationId, String)> {
+        let mut notes: Vec<_> = doc
+            .annotations
+            .iter()
+            .map(|note| (note.id, note.body.clone()))
+            .collect();
+        notes.sort();
+        notes
+    };
+    blocks(one) == blocks(other) && notes(one) == notes(other)
+}
+
 /// Runs `change` on a copy of `doc`, which takes the result only if it got through.
 fn staged(doc: &mut Document, change: impl FnOnce(&mut Document)) -> bool {
     let mut copy = doc.clone();
@@ -767,7 +788,14 @@ pub fn apply(doc: &mut Document, op: &Op) {
             );
             annotation.body = new_body.clone();
         }
-        Op::ReplaceDocument { new, .. } => {
+        // The words are what's checked, as they're what would be lost: the blocks' ids and text in
+        // order, and the notes' ids and bodies, which have no order, as a note put back by undo
+        // comes back at the end.
+        Op::ReplaceDocument { old, new } => {
+            assert!(
+                same_words(doc, old),
+                "ReplaceDocument payload old does not match the document"
+            );
             *doc = (**new).clone();
         }
         Op::SetTitle { old, new } => {

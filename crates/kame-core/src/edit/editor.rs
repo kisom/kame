@@ -314,9 +314,10 @@ impl Editor {
         };
         let joined = Op::ReplaceDocument {
             old: old.clone(),
-            new: Box::new(new),
+            new: Box::new(new.clone()),
         };
-        apply(self.doc.get_mut(), &joined);
+        // The document is the last step's `new`, not the joined step's `old`.
+        *self.doc.get_mut() = new;
         *self.undo.last_mut().expect("it was just read") = joined.clone();
         self.coalesced = true;
         Some(joined)

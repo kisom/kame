@@ -265,7 +265,7 @@ Metadata isn't part of history. Changing it writes the `metadata` row directly, 
 
 Each row in `ops` is one JSON object with a single key naming the operation. **All text changes must go through an operation**, so that history can always put the document back.
 
-Removals carry what they remove, so that undoing one needs nothing else. `apply` checks `DeleteText.text`, `DeleteText.removed`, `DeleteBlock.annotations` and the id of `DeleteBlock.block`. `RemoveAnnotation` isn't checked, a missing id does nothing, and undo restores what the op carries, so a wrong payload there changes the document silently.
+Removals carry what they remove, so that undoing one needs nothing else. `apply` checks `DeleteText.text`, `DeleteText.removed`, `DeleteBlock.annotations`, the id of `DeleteBlock.block` and the words of `ReplaceDocument.old`. `RemoveAnnotation` isn't checked, a missing id does nothing, and undo restores what the op carries, so a wrong payload there changes the document silently.
 
 A mismatch is a bug: **stop, and persist nothing**. Never drop a mismatched payload, because that would lose notes. An implementation should validate before changing anything. For a new edit, kame panics, so its disk stays as it was, but its memory doesn't, because `DeleteText` checks `removed` after changing the text. Undo and redo run on a copy and refuse the step instead.
 
@@ -327,7 +327,7 @@ A writer must set `clipped` to every range anchor that step 3 changes, in terms 
 
 **`SetAnnotationBody`.** The annotation must exist and `old_body` must match.
 
-**`SetTitle`.** `old` must match. **`ReplaceDocument`.** Replaces the whole document, without checking `old`.
+**`SetTitle`.** `old` must match. **`ReplaceDocument`.** `old` must hold the document's words: the same blocks, by id, with the same text, in the same order, and the same annotations, by id, with the same bodies, in any order, since undo puts a note back at the end. The rest of `old`, kinds, spans, anchors and the title, isn't checked. Then it replaces the whole document with `new`. Undoing it puts `old` back the same way, checking `new`, so a head whose words have changed since, as by another program, keeps them, and the step is refused.
 
 **`Batch`.** Members apply in order, each to the result of the last, on a copy that replaces the document only when all have applied. Each member's payload must be built from the document as it'll be when that member applies. Undo and redo stage the whole step the same way.
 
@@ -388,7 +388,7 @@ Each of these is one transaction, because head, log and cursor must never disagr
 - Successive changes to the same annotation's body, unless the current body ends in whitespace and the next doesn't continue it with more whitespace. Any other change joins, whatever its size.
 - Successive `ReplaceDocument` arrivals from another machine with no edit between them.
 
-Only a single character can join onto an insert or delete, but the earlier op can be any length. The joined `InsertText` keeps the first `offset`. The joined `DeleteText` extends `start`, `end` and `text`, keeps the first `old_spans` and `clipped`, and has `removed` empty. The joined `SetAnnotationBody` keeps the first `old_body`.
+Only a single character can join onto an insert or delete, but the earlier op can be any length. The joined `InsertText` keeps the first `offset`. The joined `DeleteText` extends `start`, `end` and `text`, keeps the first `old_spans` and `clipped`, and has `removed` empty. The joined `SetAnnotationBody` keeps the first `old_body`. The joined `ReplaceDocument` keeps the first `old` and takes the last `new`.
 
 **Compacting** applies the first three joins to an existing log, leaving the redo tail alone. kame first replays the undo part of the old and new logs and changes nothing unless they agree. It compares only block ids, kinds and text, and the set of note ids, so spans, anchors, note bodies and the title aren't compared.
 

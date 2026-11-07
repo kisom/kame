@@ -17,7 +17,7 @@ or use the flake devshell (`nix develop`, or `direnv allow` with the bundled `.e
 
 Both `cargo build` and `cargo test` must pass (`make all` and `make test`). The test suite is headless (no display/GPU); fonts resolve via `env!("CARGO_MANIFEST_DIR")/fonts/`.
 
-The fuzzing tests (`fuzz_*.rs` in `kame-core`, `kame-typeset` and `kame-sync`) damage the releases' samples and what the tests build: `.kame` files through SQL, revision log lines, documents to merge, and Markdown to import. `cargo test` runs 150 to 400 seeds of each. Each also has a long run, ignored by default, which takes how many seeds from `KAME_FUZZ_ITERATIONS` (10,000 if unset) and the first from `KAME_FUZZ_SEED` (the clock if unset). It's quiet about the panics caught on purpose, as when undo refuses a step, and a failure prints its seed, what its panic said and where, and how to run it alone:
+The fuzzing tests (`fuzz_*.rs` in `kame-core`, `kame-typeset` and `kame-sync`) damage the releases' samples and what the tests build: `.kame` files through SQL, revision log lines, documents to merge, and Markdown to import. `cargo test` runs 150 to 400 seeds of each. Each also has a long run, ignored by default, which takes how many seeds from `KAME_FUZZ_ITERATIONS` (10,000 if unset) and the first from `KAME_FUZZ_SEED` (the clock if unset). It's quiet about the panics it catches, as when undo refuses a step, and ends by counting them, a line for each place they were. A failure prints every panic its seed had, with where it was, then its seed, what failed and where, and how to run it alone, and so does one that aborts:
 
 ```sh
 KAME_FUZZ_ITERATIONS=100000 cargo test --release fuzz_ -- --ignored --nocapture

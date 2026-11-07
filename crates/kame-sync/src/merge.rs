@@ -333,9 +333,11 @@ fn merged_order(
     order
 }
 
-/// An anchor moved into the merged text, or `None` if its block is gone.
+/// An anchor moved into the merged text, or `None` if its block is gone. `side` is the document
+/// the anchor is from.
 fn moved_anchor(
     anchor: &Anchor,
+    side: &Document,
     side_is_ours: bool,
     blocks: &HashMap<BlockId, &Block>,
     maps: &HashMap<BlockId, Merged3>,
@@ -349,7 +351,10 @@ fn moved_anchor(
         } => {
             let block = blocks.get(block_id)?;
             let Some(text) = maps.get(block_id) else {
-                return Some(anchor.clone());
+                // Only one side has the block, and its text is that side's. A note can name a
+                // block its own side doesn't have, and its offsets are into no text there is.
+                let own = side.blocks.iter().any(|block| block.id == *block_id);
+                return own.then(|| anchor.clone());
             };
             let map = if side_is_ours {
                 &text.ours_map
@@ -421,8 +426,8 @@ fn merged_annotations(
                 _ if note.body == their_note.body => note.body.clone(),
                 _ => format!("{}\n\nOn {}: {}", note.body, theirs.label, their_note.body),
             };
-            let anchor = moved_anchor(&note.anchor, true, &placed, maps)
-                .or_else(|| moved_anchor(&their_note.anchor, false, &placed, maps))
+            let anchor = moved_anchor(&note.anchor, ours.doc, true, &placed, maps)
+                .or_else(|| moved_anchor(&their_note.anchor, theirs.doc, false, &placed, maps))
                 .unwrap_or_else(|| rehome(&note.anchor, ours.doc));
             merged.push(Annotation {
                 id: *id,
@@ -431,7 +436,7 @@ fn merged_annotations(
                 body,
             });
         } else if base_note.is_none_or(|old| old.body != note.body) {
-            let anchor = moved_anchor(&note.anchor, true, &placed, maps)
+            let anchor = moved_anchor(&note.anchor, ours.doc, true, &placed, maps)
                 .unwrap_or_else(|| rehome(&note.anchor, ours.doc));
             merged.push(Annotation {
                 id: *id,
@@ -446,7 +451,7 @@ fn merged_annotations(
             continue;
         }
         if was.get(id).is_none_or(|old| old.body != note.body) {
-            let anchor = moved_anchor(&note.anchor, false, &placed, maps)
+            let anchor = moved_anchor(&note.anchor, theirs.doc, false, &placed, maps)
                 .unwrap_or_else(|| rehome(&note.anchor, theirs.doc));
             merged.push(Annotation {
                 id: *id,

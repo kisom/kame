@@ -396,6 +396,44 @@ fn notes_follow_their_words_through_the_other_sides_edits() {
     assert_eq!(&result.doc.blocks[0].text[start..end], "Marked");
 }
 
+/// Fuzzing found this (`fuzz_logs.rs`, damaged merges, seed 0). A note can name a block its own
+/// side no longer has, as an older file's can, and when the other side kept that block by editing
+/// it, the note's offsets were into text that isn't there, past its end.
+#[test]
+fn a_note_on_a_block_only_the_other_side_kept_takes_that_sides_place() {
+    let note = |start: usize, end: usize| kame_core::model::Annotation {
+        id: Uuid::from_u128(50),
+        kind: AnnotationKind::Footnote,
+        anchor: Anchor::range(Uuid::from_u128(2), start, end),
+        body: "A footnote.".to_string(),
+    };
+    let mut base = document(vec![
+        block(1, "Kept."),
+        block(2, "A long sentence that goes on."),
+    ]);
+    base.annotations = vec![note(20, 29)];
+    // The later side cut the block and kept its note, as a file from an older kame can.
+    let mut cut = base.clone();
+    cut.blocks.remove(1);
+    // The earlier side shortened it, so the note moved with its words.
+    let mut shortened = base.clone();
+    shortened.blocks[1].text = "Short now.".to_string();
+    shortened.annotations = vec![note(6, 9)];
+
+    let result = merged(&base, &cut, &shortened);
+
+    assert_eq!(result.doc.blocks[1].text, "Short now.");
+    let found = &result
+        .doc
+        .annotations
+        .iter()
+        .find(|found| found.id == Uuid::from_u128(50));
+    assert_eq!(
+        found.unwrap().anchor,
+        Anchor::range(Uuid::from_u128(2), 6, 9)
+    );
+}
+
 #[test]
 fn formatting_follows_and_removal_sticks() {
     let mut base = document(vec![block(1, "One bold word. Second one plain.")]);

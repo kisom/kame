@@ -128,7 +128,7 @@ Matched by id.
 
 | Situation | Result |
 |---|---|
-| Both have it | Keep it, with ours' kind. Merge the body as below. Anchor by ours if its block survives, else theirs, else rehomed |
+| Both have it | Keep it, with ours' kind. Merge the body as below. Anchor by ours if it can be moved, else theirs, else rehomed |
 | One has it, and it's new or its body differs from the base | Keep it. Anchor by that side, or rehomed |
 | One has it, with the body unchanged from the base | The other removed it, so it's gone |
 
@@ -139,7 +139,7 @@ Matched by id.
 3. If they're the same, take either.
 4. Otherwise keep both: `{ours}\n\nOn {theirs label}: {theirs}`.
 
-**Moving an anchor.** A whole-block anchor stays if the block survives. A range in a block both sides had goes through that side's map, with `start` through `start()`, and `end` through `end()` but never before the new start. A zero-width anchor stays zero-width, so a footnote's marker doesn't widen. A range in a block only one side had stays as it is.
+**Moving an anchor.** A whole-block anchor stays if the block survives. A range in a block both sides had goes through that side's map, with `start` through `start()`, and `end` through `end()` but never before the new start. A zero-width anchor stays zero-width, so a footnote's marker doesn't widen. A range in a block only one side had stays as it is, if it's from that side. One from the side without the block, which a note naming a block its side has cut can be, is into no text there is, so it can't be moved, and counts as one whose block is gone.
 
 **Rehoming.** When a note's block is gone, it becomes a whole-block anchor on the nearest earlier block that survives, in the order of the side that had it (ours, if both did), or on the first merged block if there's none.
 

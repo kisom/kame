@@ -4073,27 +4073,33 @@ impl KameApp {
         egui::Panel::top("kame-status").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 let file_menu = ui.menu_button("File", |ui| {
-                    ui.set_min_width(interface::room(ui.ctx(), 260.0));
-                    commands::command_rows(ui, in_menu(BarMenu::File), &mut action);
-                    ui.separator();
-                    let plural = |n: usize| if n == 1 { "" } else { "s" };
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{blocks} block{} · {annotations} annotation{} · undo {undo} · redo {redo}",
-                            plural(blocks),
-                            plural(annotations),
-                        ))
-                        .small()
-                        .weak(),
-                    );
+                    commands::menu_rows(ui, |ui| {
+                        ui.set_min_width(interface::room(ui.ctx(), 260.0));
+                        commands::command_rows(ui, in_menu(BarMenu::File), &mut action);
+                        ui.separator();
+                        let plural = |n: usize| if n == 1 { "" } else { "s" };
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{blocks} block{} · {annotations} annotation{} · undo {undo} · redo {redo}",
+                                plural(blocks),
+                                plural(annotations),
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
                 });
                 let edit_menu = ui.menu_button("Edit", |ui| {
-                    ui.set_min_width(interface::room(ui.ctx(), 200.0));
-                    commands::command_rows(ui, in_menu(BarMenu::Edit), &mut action);
+                    commands::menu_rows(ui, |ui| {
+                        ui.set_min_width(interface::room(ui.ctx(), 200.0));
+                        commands::command_rows(ui, in_menu(BarMenu::Edit), &mut action);
+                    });
                 });
                 let annotate_menu = ui.menu_button("Annotate", |ui| {
-                    ui.set_min_width(interface::room(ui.ctx(), 200.0));
-                    commands::command_rows(ui, in_menu(BarMenu::Annotate), &mut action);
+                    commands::menu_rows(ui, |ui| {
+                        ui.set_min_width(interface::room(ui.ctx(), 200.0));
+                        commands::command_rows(ui, in_menu(BarMenu::Annotate), &mut action);
+                    });
                 });
                 let is_size = |command: &&commands::MenuCommand| {
                     matches!(
@@ -4102,51 +4108,57 @@ impl KameApp {
                     )
                 };
                 let view_menu = ui.menu_button("View", |ui| {
-                    ui.set_min_width(interface::room(ui.ctx(), 240.0));
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Type size {:.0}", self.body_size));
-                        // These stay open, so the size can be walked to taste.
-                        for command in in_menu(BarMenu::View).filter(is_size) {
-                            let MenuAction::TypeSize(step) = command.action else {
-                                continue;
-                            };
-                            let sign = if step < 0.0 { "−" } else { "+" };
-                            if ui.small_button(sign).on_hover_text(command.label).clicked() {
-                                action = Some(command.action);
+                    commands::menu_rows(ui, |ui| {
+                        ui.set_min_width(interface::room(ui.ctx(), 240.0));
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Type size {:.0}", self.body_size));
+                            // These stay open, so the size can be walked to taste.
+                            for command in in_menu(BarMenu::View).filter(is_size) {
+                                let MenuAction::TypeSize(step) = command.action else {
+                                    continue;
+                                };
+                                let sign = if step < 0.0 { "−" } else { "+" };
+                                if ui.small_button(sign).on_hover_text(command.label).clicked() {
+                                    action = Some(command.action);
+                                }
                             }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        let percent = (self.interface_scale * 100.0).round();
-                        ui.label(format!("Interface text {percent:.0}%"));
-                        for command in in_menu(BarMenu::View).filter(is_size) {
-                            let MenuAction::InterfaceText(change) = command.action else {
-                                continue;
-                            };
-                            let text = match change {
-                                interface::Change::Smaller => "−",
-                                interface::Change::Larger => "+",
-                                interface::Change::Reset => "Reset",
-                            };
-                            if ui.small_button(text).on_hover_text(command.label).clicked() {
-                                action = Some(command.action);
+                        });
+                        ui.horizontal(|ui| {
+                            let percent = (self.interface_scale * 100.0).round();
+                            ui.label(format!("Interface text {percent:.0}%"));
+                            for command in in_menu(BarMenu::View).filter(is_size) {
+                                let MenuAction::InterfaceText(change) = command.action else {
+                                    continue;
+                                };
+                                let text = match change {
+                                    interface::Change::Smaller => "−",
+                                    interface::Change::Larger => "+",
+                                    interface::Change::Reset => "Reset",
+                                };
+                                if ui.small_button(text).on_hover_text(command.label).clicked() {
+                                    action = Some(command.action);
+                                }
                             }
-                        }
+                        });
+                        let rest = in_menu(BarMenu::View).filter(|command| !is_size(command));
+                        commands::command_rows(ui, rest, &mut action);
                     });
-                    let rest = in_menu(BarMenu::View).filter(|command| !is_size(command));
-                    commands::command_rows(ui, rest, &mut action);
                 });
                 let mut site_menu = None;
                 if in_menu(BarMenu::Site).next().is_some() {
                     let menu = ui.menu_button("Site", |ui| {
-                        ui.set_min_width(interface::room(ui.ctx(), 160.0));
-                        commands::command_rows(ui, in_menu(BarMenu::Site), &mut action);
+                        commands::menu_rows(ui, |ui| {
+                            ui.set_min_width(interface::room(ui.ctx(), 160.0));
+                            commands::command_rows(ui, in_menu(BarMenu::Site), &mut action);
+                        });
                     });
                     site_menu = Some(menu.response);
                 }
                 let help_menu = ui.menu_button("Help", |ui| {
-                    ui.set_min_width(interface::room(ui.ctx(), 160.0));
-                    commands::command_rows(ui, in_menu(BarMenu::Help), &mut action);
+                    commands::menu_rows(ui, |ui| {
+                        ui.set_min_width(interface::room(ui.ctx(), 160.0));
+                        commands::command_rows(ui, in_menu(BarMenu::Help), &mut action);
+                    });
                 });
                 for (menu, response) in [
                     (BarMenu::File, &file_menu.response),

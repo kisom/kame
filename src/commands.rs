@@ -6,7 +6,7 @@ use eframe::egui;
 use kame_core::model::BlockKind;
 use kame_notebook::list::rank;
 
-use super::interface::Change;
+use super::interface::{room, Change};
 use super::notebook::{focus_field, list_keys, list_row, list_rows, list_window};
 use super::{
     menu_entry, shortcut_label, AnnotationKind, BarMenu, Command, FileCommand, KameApp, MenuAction,
@@ -130,6 +130,25 @@ pub(crate) fn narrow_commands(query: &str, commands: &[MenuCommand]) -> Vec<usiz
     }
     found.into_iter().map(|(_, at)| at).collect()
 }
+
+/// A menu's contents, scrolling once they're taller than the room below the menu bar, so that
+/// its last rows can still be reached with large interface text or in a small window.
+pub(crate) fn menu_rows(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let below = ui.ctx().content_rect().bottom() - ui.max_rect().top();
+    let edge = ui.spacing().menu_margin.sum().y + MENU_EDGE;
+    let height = (below - edge).max(room(ui.ctx(), MENU_LEAST));
+    // A menu's room is the size it had last frame, which a scroll area would otherwise keep
+    // to, so it's given all there is below the bar, and shrinks to the rows that fit in it.
+    ui.set_max_height(height);
+    egui::ScrollArea::vertical()
+        .max_height(height)
+        .show(ui, add);
+}
+
+/// The room a menu leaves below it at the window's edge.
+const MENU_EDGE: f32 = 8.0;
+/// The least a menu shows before it scrolls, however little room there is.
+const MENU_LEAST: f32 = 60.0;
 
 /// Draws `commands` as rows of their menu, setting `action` to the one clicked.
 pub(crate) fn command_rows<'a>(
@@ -1329,6 +1348,45 @@ mod tests {
                 "at {scale} the palette starts at {} over the status row ending at {status}",
                 list.top()
             );
+        }
+    }
+
+    /// A menu longer than the window has room for scrolls, so its last row can still be reached
+    /// and chosen.
+    #[test]
+    fn a_menu_taller_than_the_window_scrolls_to_its_last_row() {
+        for (scale, height, menu, first, last) in [
+            (2.0, 600.0, BarMenu::Edit, "Undo", "Outdent Item"),
+            (1.0, 360.0, BarMenu::File, "New", "Document Properties…"),
+        ] {
+            // In a list, so that every Edit row can be chosen.
+            let (mut page, _, _) = list_page();
+            page.height = height;
+            page.app.set_interface_scale(&page.ctx, scale);
+            page.frame(Vec::new());
+            let first = row(&page, menu, first);
+            let last = row(&page, menu, last);
+            open_menu(&mut page, menu);
+            let at = middle_of(&page, &first).expect("the first row");
+            bar_frame(&mut page, vec![egui::Event::PointerMoved(at)]);
+            for _ in 0..20 {
+                bar_frame(
+                    &mut page,
+                    vec![egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Line,
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
+                        delta: egui::Vec2::new(0.0, -5.0),
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+            let (top, bottom) = page.drawn_at(&last).expect("the last row");
+            assert!(
+                top >= 0.0 && bottom <= height,
+                "{menu:?} at {scale} in {height}: {last} is at {top}..{bottom}"
+            );
+            assert!(page.can_press(&last));
         }
     }
 

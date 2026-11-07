@@ -29,8 +29,6 @@ written by one version has to be safe in another.
 
 ### Reliability
 
-- [ ] **Fuzz the reader and the merge.** Damaged and random heads, ops, snapshots and log lines, read and merged, must never
-  panic or lose what was readable. Offsets are fitted on reading now; fuzzing finds what that didn't think of.
 - [ ] **A stretch of daily writing with no lost words,** on two machines at different versions, with sync on. How long is
   still to agree.
 - [ ] **A corrupt log line stays for good.** Logs are only added to, so a line that doesn't parse, and isn't torn, stays until it's

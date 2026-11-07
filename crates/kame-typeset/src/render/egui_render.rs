@@ -1129,9 +1129,10 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         // Ctrl-Shift-1/2/3 make a heading; Ctrl-Shift-0 returns a block to
         // body text. `command` is Ctrl (Cmd) on every platform, so the chords
         // travel. The shifted symbols are the same chords as egui-winit
-        // delivers them (see `command_for_event`).
+        // delivers them (see `command_for_event`). Not with Alt as well, which makes
+        // Ctrl-Alt-0 the interface text's, so a stray Shift on it changes nothing.
         Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Exclamationmark
-            if command && modifiers.shift =>
+            if command && modifiers.shift && !modifiers.alt =>
         {
             block_kind_for_key(key).map(Command::SetBlockKind)
         }
@@ -2465,6 +2466,36 @@ visual form, and thus with an independent existence.";
         };
         assert_eq!(command_for_key(Key::Num1, none), None);
         assert_eq!(command_for_key(Key::Num1, ctrl), None);
+    }
+
+    /// Ctrl-Alt-0 puts the interface text back, so a stray Shift on it mustn't change the
+    /// caret's block instead. With Alt, the digits aren't a block kind's chord.
+    #[test]
+    fn the_block_kind_chords_leave_alt_alone() {
+        let ctrl_alt_shift = Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        for key in [
+            Key::Num0,
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Exclamationmark,
+        ] {
+            assert_eq!(command_for_key(key, ctrl_alt_shift), None, "{key:?}");
+            let event = Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers: ctrl_alt_shift,
+            };
+            assert_eq!(command_for_event(&event), None, "{key:?} as an event");
+        }
     }
 
     /// A Ctrl-Shift-<digit> key event exactly as egui-winit builds it: the

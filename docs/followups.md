@@ -27,12 +27,6 @@ written by one version has to be safe in another.
   whether logs keep growing (nothing compacts them, and every merge stores both whole documents in the undo log), or 1.0 needs
   a way to compact them.
 
-- [ ] **A field written at its default opens as a newer version's.** A field this build knows and leaves out at its
-  default, such as `centered`, `align`, `link`, `language`, `removed` or `clipped`, written by another program at that
-  default, is gone when the JSON is read and written again, so the document opens read-only as one from a newer version,
-  as an unknown field would. Nothing is lost, but it says to update kame for no reason. Only a list item's `depth` is
-  taken as this build's own. The bounds in `model/document.rs` could list every such field.
-
 ### Reliability
 
 - [ ] **A stretch of daily writing with no lost words,** on two machines at different versions, with sync on. How long is

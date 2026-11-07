@@ -99,38 +99,50 @@ fn is_zero(depth: &u8) -> bool {
     *depth == 0
 }
 
-/// A byte from any whole number, the nearest one to it, so that one out of a byte's range, as a
-/// damaged or hand-made file can hold, is fitted rather than making its whole document unreadable.
-/// Anything but a whole number is still an error.
+/// The nearest `u8` to any whole number, so that one out of a byte's range, as a damaged or
+/// hand-made file can hold, is fitted rather than making its whole document unreadable. Anything
+/// but a whole number is still an error.
 fn byte_from_any<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
-    struct Whole;
-    impl serde::de::Visitor<'_> for Whole {
-        type Value = u8;
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a whole number")
-        }
-        fn visit_i64<E>(self, value: i64) -> Result<u8, E> {
-            Ok(value.clamp(0, 255) as u8)
-        }
-        fn visit_u64<E>(self, value: u64) -> Result<u8, E> {
-            Ok(value.min(255) as u8)
-        }
-        fn visit_i128<E>(self, value: i128) -> Result<u8, E> {
-            Ok(value.clamp(0, 255) as u8)
-        }
-        fn visit_u128<E>(self, value: u128) -> Result<u8, E> {
-            Ok(value.min(255) as u8)
-        }
-        /// JSON has one kind of number, and one past what a `u64` holds is read as a float.
-        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<u8, E> {
-            if value.is_finite() && value.fract() == 0.0 {
-                Ok(value.clamp(0.0, 255.0) as u8)
-            } else {
-                Err(E::invalid_type(serde::de::Unexpected::Float(value), &self))
-            }
+    let whole = deserializer.deserialize_any(Whole)?;
+    Ok(whole.clamp(0, i128::from(u8::MAX)) as u8)
+}
+
+/// The nearest `usize` to any whole number, as [`byte_from_any`] has it, for an offset: one below
+/// zero becomes 0, and one past any text is fitted to its text as any other offset past it is.
+fn offset_from_any<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    let whole = deserializer.deserialize_any(Whole)?;
+    Ok(usize::try_from(whole.max(0)).unwrap_or(usize::MAX))
+}
+
+/// Reads any whole number, as near as an `i128` holds it.
+struct Whole;
+
+impl serde::de::Visitor<'_> for Whole {
+    type Value = i128;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a whole number")
+    }
+    fn visit_i64<E>(self, value: i64) -> Result<i128, E> {
+        Ok(i128::from(value))
+    }
+    fn visit_u64<E>(self, value: u64) -> Result<i128, E> {
+        Ok(i128::from(value))
+    }
+    fn visit_i128<E>(self, value: i128) -> Result<i128, E> {
+        Ok(value)
+    }
+    fn visit_u128<E>(self, value: u128) -> Result<i128, E> {
+        Ok(i128::try_from(value).unwrap_or(i128::MAX))
+    }
+    /// JSON has one kind of number, and one past what a `u64` holds is read as a float.
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<i128, E> {
+        if value.is_finite() && value.fract() == 0.0 {
+            // Saturates, as a float cast to an integer does.
+            Ok(value as i128)
+        } else {
+            Err(E::invalid_type(serde::de::Unexpected::Float(value), &self))
         }
     }
-    deserializer.deserialize_any(Whole)
 }
 
 /// How deeply lists can nest.
@@ -319,7 +331,10 @@ pub fn is_script_url(url: &str) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Span {
+    /// Read from any whole number, and fitted to the text ([`Block::fit_spans`]).
+    #[serde(deserialize_with = "offset_from_any")]
     pub start: usize,
+    #[serde(deserialize_with = "offset_from_any")]
     pub end: usize,
     pub style: SpanStyle,
 }
@@ -351,7 +366,10 @@ pub enum Anchor {
     /// passage) and footnotes (a numbered marker at a position).
     Range {
         block_id: BlockId,
+        /// Read from any whole number, and fitted to the text ([`Document::fit`]).
+        #[serde(deserialize_with = "offset_from_any")]
         start: usize,
+        #[serde(deserialize_with = "offset_from_any")]
         end: usize,
     },
 }

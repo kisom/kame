@@ -454,6 +454,53 @@ mod tests {
         }
     }
 
+    /// A document whose one block, "Café au lait", has `spans`, and a note anchored at `anchor`,
+    /// as JSON, read and fitted.
+    fn read_and_fitted(spans: &str, anchor: &str) -> Document {
+        let json = format!(
+            r#"{{"id":"00000000-0000-0000-0000-000000000001","title":"t","blocks":[{{"id":"00000000-0000-0000-0000-000000000010","kind":"Paragraph","text":"Café au lait","spans":[{spans}]}}],"annotations":[{{"id":"00000000-0000-0000-0000-000000000020","kind":"Note","anchor":{anchor},"body":""}}]}}"#
+        );
+        let mut doc: Document =
+            serde_json::from_str(&json).unwrap_or_else(|err| panic!("{spans} {anchor}: {err}"));
+        doc.fit();
+        doc
+    }
+
+    #[test]
+    fn an_offset_below_zero_or_past_any_number_is_fitted_as_one_past_the_end_is() {
+        let range = |start: &str, end: &str| {
+            format!(
+                r#"{{"block_id":"00000000-0000-0000-0000-000000000010","start":{start},"end":{end}}}"#
+            )
+        };
+        // Both below zero is read as 0..0, empty and in the text, which reading leaves as it is.
+        for (start, end, fitted) in [
+            ("-1", "4", (0, 3)),
+            ("-9223372036854775808", "-1", (0, 0)),
+            ("5", "18446744073709551615", (5, 13)),
+            ("5", "1e30", (5, 13)),
+        ] {
+            let span = format!(r#"{{"start":{start},"end":{end},"style":"Bold"}}"#);
+            let doc = read_and_fitted(&span, &range(start, end));
+            let spans: Vec<(usize, usize)> = doc.blocks[0]
+                .spans
+                .iter()
+                .map(|span| (span.start, span.end))
+                .collect();
+            assert_eq!(spans, [fitted], "{span}");
+            let anchor = doc.annotations[0].anchor.byte_range().unwrap();
+            assert_eq!(anchor, fitted, "{start}..{end}");
+        }
+    }
+
+    #[test]
+    fn an_offset_that_isnt_a_whole_number_is_still_damage() {
+        for start in ["0.5", "\"3\"", "null"] {
+            let span = format!(r#"{{"start":{start},"end":4,"style":"Bold"}}"#);
+            assert!(serde_json::from_str::<Span>(&span).is_err(), "{span}");
+        }
+    }
+
     /// A level or depth of the wrong type is damage, as any other value of the wrong type is.
     #[test]
     fn a_level_or_depth_that_isnt_a_whole_number_is_still_damage() {

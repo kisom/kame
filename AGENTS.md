@@ -17,7 +17,7 @@ or use the flake devshell (`nix develop`, or `direnv allow` with the bundled `.e
 
 Both `cargo build` and `cargo test` must pass (`make all` and `make test`). The test suite is headless (no display/GPU); fonts resolve via `env!("CARGO_MANIFEST_DIR")/fonts/`.
 
-Every release keeps samples of what it writes, which every later build's tests read: a document and a folder of revision logs, with what reading them gave, in `crates/kame-core/tests/samples/VERSION/`. At the release commit, once every version says the new one and before tagging, run `cargo run -p kame-sync --example write_samples` and commit the folder it writes. It's never run in tests. Nothing in a folder already there is ever changed, not even to make a test pass, and the release workflow refuses a tag whose version has none, or whose tests fail.
+Every release keeps samples of what it writes, which every later build's tests read: a document and a folder of revision logs, with what reading them gave, in `crates/kame-core/tests/samples/VERSION/`. At the release commit, once every version says the new one and before tagging, run `cargo run -p kame-sync --example write_samples` and commit the folder it writes, with the release's section in `CHANGELOG.md`, which becomes its notes on GitHub. It's never run in tests. Nothing in a folder already there is ever changed, not even to make a test pass, and the release workflow refuses a tag whose version has none, or whose tests fail.
 
 To run the app with no display on NixOS, use Xvfb and the software Vulkan driver:
 
@@ -87,7 +87,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.
 
-`.github/workflows/release.yml` and `packaging/aur/` — releasing: a `v*` tag, refused without its version's samples or with a failing `cargo test` (run on macOS, where the app builds with nothing to install), builds the macOS app, creates the GitHub release, bumps the Homebrew tap (`kisom/homebrew-tap`: the `kame` cask for the app, the `kame-site` formula) and installs both from it on a clean Mac to check them; the PKGBUILD and `.SRCINFO` are the AUR package, whose version, like the tag's, must match every `Cargo.toml` and `packaging/macos/Info.plist`.
+`.github/workflows/release.yml` and `packaging/aur/` — releasing: a `v*` tag, refused without its version's samples, its section in `CHANGELOG.md` (its release notes) or with a failing `cargo test` (run on macOS, where the app builds with nothing to install), builds the macOS app, creates the GitHub release, bumps the Homebrew tap (`kisom/homebrew-tap`: the `kame` cask for the app, the `kame-site` formula) and installs both from it on a clean Mac to check them; the PKGBUILD and `.SRCINFO` are the AUR package, whose version, like the tag's, must match every `Cargo.toml` and `packaging/macos/Info.plist`.
 
 `src/main.rs` — the app: egui shell (`KameApp`, keybindings, distraction-free modes).
 

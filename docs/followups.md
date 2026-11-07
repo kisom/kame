@@ -50,10 +50,6 @@ written by one version has to be safe in another.
 
 ### Polish
 
-- [ ] **A changelog,** and the release notes on GitHub drawn from it.
-- [ ] **An Intel or universal build of the app,** if Intel Macs should have it: a second target in the release workflow.
-  The app stays ad-hoc signed and not notarized (an Apple Developer ID isn't worth its yearly fee here), and the Homebrew
-  cask takes it out of quarantine as it installs.
 - [ ] **Rough edges daily writing finds,** added here as they're found.
 
 Performance, worth doing if daily writing feels it. Measured with `src/perf.rs` and `sample` on an M3 Max, on a 2,500-word document and a copy ten times over. Typing takes 2–4 ms a
@@ -77,6 +73,9 @@ i3-1315U, Intel graphics) with a 3,571-word document and spelling off, kame hold
 
 ## Roadmap (after 1.0)
 
+- [ ] **An Intel or universal build of the app.** Not feasible for now. It would be a second target in the release
+  workflow. The app stays ad-hoc signed and not notarized (an Apple Developer ID isn't worth its yearly fee here), and
+  the Homebrew cask takes it out of quarantine as it installs.
 - [ ] **Tables.** The model has no equivalent. Tables are wanted but too complex for now;
   the stopgap is automatic, as a Markdown table imports as a `markdown` code block holding the table's exact
   Markdown, ready to be copied into a table block once there is one.

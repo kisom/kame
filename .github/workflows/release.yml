@@ -34,6 +34,17 @@ jobs:
           fi
           [ "$ok" = 1 ] || exit 1
           echo "tag $TAG matches Cargo.toml and Info.plist"
+      # The release's notes are its section of the changelog, so it has to have one.
+      - name: The changelog has this release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! grep -q "^## \[${TAG#v}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${TAG#v}]' section; write this release's notes there and tag that"
+            exit 1
+          fi
+          echo "CHANGELOG.md has ${TAG#v}"
       # What this release writes, every later build's tests read, so it has to be there before the tag.
       - name: The release has samples for later builds to read
         env:
@@ -76,9 +87,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: kame.app.zip
+      - name: Take this release's notes from the changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          awk -v head="## [${TAG#v}]" 'index($0, head) == 1 { found = 1; next } found && /^## \[/ { exit } found' \
+            CHANGELOG.md > release-notes.md
+          [ -s release-notes.md ] || { echo "::error::CHANGELOG.md's ${TAG#v} section is empty"; exit 1; }
       - name: Create the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -92,7 +112,7 @@ jobs:
           gh release create "$TAG" kame.app.zip \
             --repo "$REPO" \
             --title "$TAG" \
-            --generate-notes \
+            --notes-file release-notes.md \
             "${flags[@]}"
 
   tap:

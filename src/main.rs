@@ -16,6 +16,7 @@ mod notebook;
 mod perf;
 mod publish;
 mod references;
+mod touchpad;
 
 use kame_core::links::{
     image_file, is_web_address, resolve_open_path, split_document_target, stored_image_path,
@@ -2704,6 +2705,8 @@ struct KameApp {
     ime_preedit: String,
     /// Where the page drew its caret last, on the screen.
     page_caret_rect: Option<Rect>,
+    /// A touchpad's swipes on Linux, sped up and coasting as on macOS.
+    touchpad: touchpad::Touchpad,
     /// Distraction-free view toggles (never persisted).
     modes: Modes,
     /// The body font size, in px. Every other size (leading, headings, margin
@@ -2874,6 +2877,7 @@ impl KameApp {
             open_note_fresh: false,
             ime_preedit: String::new(),
             page_caret_rect: None,
+            touchpad: touchpad::Touchpad::default(),
             modes: Modes::default(),
             body_size,
             interface_scale,
@@ -7528,8 +7532,16 @@ impl eframe::App for KameApp {
     /// window is minimized or occluded, and a close nothing cancels there exits.
     /// egui moves the keyboard focus on Tab before any of kame's code sees the frame,
     /// so a block that takes tabs has to claim the key here.
+    ///
+    /// On Linux a touchpad's swipes are sped up and coast here, as macOS does for every app.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.claim_tabs(ctx, &mut raw_input.events);
+        if cfg!(target_os = "linux") {
+            self.touchpad.adjust(raw_input);
+            if self.touchpad.coasting() {
+                ctx.request_repaint();
+            }
+        }
     }
 
     fn on_exit(&mut self) {

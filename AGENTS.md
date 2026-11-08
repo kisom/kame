@@ -91,6 +91,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/commands.rs` — the menu bar's commands, in the one list the menus and the command palette (Ctrl-P) both draw from, the Edit menu's, which run what their keys do, and the palette.
 
+`src/touchpad.rs` — a touchpad on Linux, sped up for a fast swipe and coasting once the fingers lift, as macOS does, before egui sees the frame's input.
+
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.
 
 `.github/workflows/release.yml` and `packaging/aur/` — releasing: a `v*` tag, refused without its version's samples, its section in `CHANGELOG.md` (its release notes) or with a failing `cargo test` (run on macOS, where the app builds with nothing to install), builds the macOS app, creates the GitHub release, bumps the Homebrew tap (`kisom/homebrew-tap`: the `kame` cask for the app, the `kame-site` formula) and installs both from it on a clean Mac to check them; the PKGBUILD and `.SRCINFO` are the AUR package, whose version, like the tag's, must match every `Cargo.toml` and `packaging/macos/Info.plist`.

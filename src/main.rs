@@ -1265,6 +1265,18 @@ fn dim_veil(
     (enabled && index != caret_index).then_some(veil)
 }
 
+/// How many lines of body text a notch of the wheel scrolls on Linux.
+const WHEEL_LINES: f32 = 3.0;
+
+/// Makes a notch of the wheel scroll [`WHEEL_LINES`] lines of body text. egui's 40 points a
+/// notch is under two of them, and on Linux a notch is one line where macOS gives several.
+fn set_wheel_speed(ctx: &egui::Context, body_line_height: f32) {
+    let speed = WHEEL_LINES * body_line_height;
+    if ctx.options(|options| options.input_options.line_scroll_speed) != speed {
+        ctx.options_mut(|options| options.input_options.line_scroll_speed = speed);
+    }
+}
+
 /// How tall the page is: what's on it, then in typewriter mode half a window more, so that a
 /// caret on the last line can be centred too, and never less than the window.
 fn page_height(content_end: f32, viewport_height: f32, typewriter: bool) -> f32 {
@@ -7577,6 +7589,9 @@ impl eframe::App for KameApp {
             hyphenate: self.hyphenate,
             ..base
         };
+        if cfg!(target_os = "linux") {
+            set_wheel_speed(ui.ctx(), config.body_line_height);
+        }
         if self.renderer.set_config(config) {
             // Everything cached was shaped and rasterized at the old measure.
             self.layouts.clear();
@@ -11971,6 +11986,29 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         page.frame(Vec::new());
         assert_eq!(page.app.session.caret, caret);
         assert!(page.app.session.selection.is_none());
+    }
+
+    #[test]
+    fn a_wheel_notch_scrolls_three_lines_of_body_text() {
+        let mut page = page_of_items(80, 0);
+        let line = page.app.renderer.config().body_line_height;
+        set_wheel_speed(&page.ctx, line);
+        page.frame(vec![egui::Event::PointerMoved(Pos2::new(400.0, 400.0))]);
+        page.frame(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            delta: Vec2::new(0.0, -1.0),
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for _ in 0..60 {
+            page.frame(Vec::new());
+        }
+        assert!(
+            (page.app.page_scroll - WHEEL_LINES * line).abs() < 1.0,
+            "a notch scrolled {} with lines {line} tall",
+            page.app.page_scroll
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ macOS (`Modifiers::command`).
 | Page Up, Page Down | move the caret and the page a window at a time, or to the very start or end from the first or last line; with Shift, extend the selection |
 | Ctrl-Left / Ctrl-Right | move the caret a whole word at a time |
 | Shift-wheel or a sideways swipe | scroll a code block whose lines run past the column; the caret also brings its block along, and a solid edge marks each side with more to see |
-| wheel or trackpad | scroll the page, bringing the caret along when it would leave the page, unless text is selected or typewriter mode is on |
+| wheel or trackpad | scroll the page, bringing the caret along when it would leave the page, unless text is selected or typewriter mode is on; on Linux a notch of the wheel is three lines of body text |
 | Ctrl-Shift-Left / Ctrl-Shift-Right | extend the selection a whole word at a time |
 | Ctrl-A | select the caret's whole block (again for the whole document) |
 | Ctrl-Shift-Up / Ctrl-Shift-Down | move the caret's list item, or the selected items, a place up / down in its list, with the items nested under it |

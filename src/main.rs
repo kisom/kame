@@ -1265,6 +1265,23 @@ fn dim_veil(
     (enabled && index != caret_index).then_some(veil)
 }
 
+/// How tall the page is: what's on it, then in typewriter mode half a window more, so that a
+/// caret on the last line can be centred too, and never less than the window.
+fn page_height(content_end: f32, viewport_height: f32, typewriter: bool) -> f32 {
+    let room = if typewriter {
+        viewport_height * 0.5
+    } else {
+        0.0
+    };
+    (content_end + room).max(viewport_height)
+}
+
+/// Whether `y` on the page is in the room typewriter mode leaves after the end, where the
+/// page would otherwise have ended. A click there does nothing.
+fn past_the_end(y: f32, content_end: f32, viewport_height: f32) -> bool {
+    y > content_end.max(viewport_height)
+}
+
 /// Scroll offset that puts `caret_top` (page-local) at the vertical centre of a
 /// viewport, clamped so the page never scrolls past its own edges.
 fn typewriter_scroll_offset(caret_top: f32, viewport_height: f32, content_height: f32) -> f32 {
@@ -4608,8 +4625,9 @@ impl KameApp {
 
         let backlinks_height =
             notebook::backlinks_height(self.nb.backlinks.len(), config.margin_size);
-        let content_height =
-            (footnote_bottom + backlinks_height + PAGE_PADDING).max(ui.available_height());
+        let content_end = footnote_bottom + backlinks_height + PAGE_PADDING;
+        let window_height = ui.available_height();
+        let content_height = page_height(content_end, window_height, typewriter);
 
         let (response, painter) = ui.allocate_painter(
             Vec2::new(ui.available_width(), content_height),
@@ -5314,6 +5332,12 @@ impl KameApp {
         let mut word_selection = None;
         let mut marker_click: Option<(AnnotationId, Rect)> = None;
         let pointer = response.interact_pointer_pos();
+        // The room typewriter mode leaves after the end is only there to scroll into.
+        let after_end =
+            |pos: Pos2| past_the_end(pos.y - response.rect.top(), content_end, window_height);
+        let from_after_end = ui
+            .input(|input| input.pointer.press_origin())
+            .is_some_and(after_end);
         if response.clicked() {
             if let Some(pos) = pointer {
                 self.last_click = Some((std::time::Instant::now(), pos));
@@ -5325,7 +5349,7 @@ impl KameApp {
             let second_press = origin
                 .is_some_and(|at| is_second_press(self.last_click, std::time::Instant::now(), at));
             self.word_drag_start = None;
-            if let Some(pos) = origin {
+            if let Some(pos) = origin.filter(|_| !from_after_end) {
                 if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
                 {
@@ -5351,6 +5375,7 @@ impl KameApp {
                     .map(|(id, _)| *id);
                 if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
+                        .filter(|_| !after_end(pos))
                 {
                     self.link_menu = self.session.link_under(cursor).map(|link| LinkMenu {
                         url: link.url.clone(),
@@ -5468,7 +5493,7 @@ impl KameApp {
             }
         }
         if response.dragged() {
-            if let Some(pos) = pointer {
+            if let Some(pos) = pointer.filter(|_| !from_after_end) {
                 if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
                 {
@@ -5505,6 +5530,7 @@ impl KameApp {
                     marker_click = Some(hit);
                 } else if let Some(cursor) =
                     hit_test(blocks, &layouts, &tops, &heights, &sideways, body_left, pos)
+                        .filter(|_| !after_end(pos))
                 {
                     // A double click selects a word, even in a link: its first click has
                     // already opened the link. A click on a link opens it instead of moving
@@ -11875,6 +11901,76 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         press_chord(&mut page, egui::Key::ArrowDown);
         assert_eq!(item_texts(&page), ["0", "2", "1"], "it's the last");
         assert_eq!(page.app.session.caret, caret);
+    }
+
+    /// A long typewriter page with its caret at the start of the last item, centred.
+    fn typewriter_page_at_the_end() -> Headless {
+        let mut page = page_of_items(80, 79);
+        page.app.modes.typewriter = true;
+        for _ in 0..4 {
+            page.frame(Vec::new());
+        }
+        page
+    }
+
+    #[test]
+    fn typewriter_centres_the_caret_on_the_last_line() {
+        let page = typewriter_page_at_the_end();
+        let caret = page.app.page_caret_rect.expect("the page's caret");
+        assert!(
+            (caret.top() - Headless::HEIGHT / 2.0).abs() < 1.0,
+            "the caret is at {} in a window {} tall",
+            caret.top(),
+            Headless::HEIGHT
+        );
+    }
+
+    #[test]
+    fn a_click_after_the_end_of_a_typewriter_page_does_nothing() {
+        let mut page = typewriter_page_at_the_end();
+        let caret = page.app.session.caret;
+        let at = Pos2::new(page.body_left() + 400.0, Headless::HEIGHT - 60.0);
+        page.frame(vec![egui::Event::PointerMoved(at)]);
+        for pressed in [true, false] {
+            page.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.caret, caret);
+        assert!(page.app.session.selection.is_none());
+    }
+
+    #[test]
+    fn a_drag_from_after_the_end_of_a_typewriter_page_does_nothing() {
+        let mut page = typewriter_page_at_the_end();
+        let caret = page.app.session.caret;
+        let from = Pos2::new(page.body_left() + 400.0, Headless::HEIGHT - 60.0);
+        let to = Pos2::new(page.body_left() + 10.0, Headless::HEIGHT / 2.0 - 100.0);
+        page.frame(vec![egui::Event::PointerMoved(from)]);
+        page.frame(vec![egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for step in 1..=5 {
+            page.frame(vec![egui::Event::PointerMoved(
+                from.lerp(to, step as f32 / 5.0),
+            )]);
+        }
+        page.frame(vec![egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.caret, caret);
+        assert!(page.app.session.selection.is_none());
     }
 
     #[test]

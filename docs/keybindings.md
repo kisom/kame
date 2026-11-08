@@ -154,7 +154,7 @@ typewriter. Hovering one names it.
 | Ctrl-Shift-H | hide chrome | hides the menu bar and the status row |
 | Ctrl-Shift-G | hide margin | collapses the margin gutter; marginal notes and note markers are not drawn (their anchored ranges stay marked, footnotes stay at the foot) |
 | Ctrl-Shift-P | paragraph focus | dims every block but the one holding the caret |
-| Ctrl-Shift-T | typewriter | keeps the caret's line at the vertical centre of the window; the page re-centres when the caret moves and can still be scrolled while idle |
+| Ctrl-Shift-T | typewriter | keeps the caret's line at the vertical centre of the window, the last line too, with half a window of empty page after the end, where a click does nothing; the page re-centres when the caret moves and can still be scrolled while idle |
 
 Held keys do not auto-repeat a toggle: one press is one flip.
 

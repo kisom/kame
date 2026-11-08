@@ -7,6 +7,7 @@
 CARGO ?= cargo
 BIN := kame
 SITE_BIN := kame-site
+SYNC_BIN := kame-sync
 PREFIX ?= $(HOME)/.local/bin
 XDG_DATA_HOME ?= $(HOME)/.local/share
 
@@ -30,8 +31,8 @@ clean: ## Remove build artifacts
 # at runtime, so a bare cargo build can't find them outside `nix develop`.
 # `nix build .#` wraps the binary with the right LD_LIBRARY_PATH; install that.
 # Elsewhere the libs are in standard paths and a plain release build suffices.
-# kame-site opens no window, so it needs none of that.
-install: ## Install kame, kame-site, the desktop shortcut and .kame file type
+# kame-site and kame-sync open no window, so they need none of that.
+install: ## Install kame, kame-site, kame-sync, the desktop shortcut and .kame file type
 	@if command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then \
 		nix build .#; \
 		mkdir -p $(PREFIX); \
@@ -41,15 +42,16 @@ install: ## Install kame, kame-site, the desktop shortcut and .kame file type
 		mkdir -p $(PREFIX); \
 		install -m 755 target/release/$(BIN) $(PREFIX)/$(BIN); \
 	fi
-	$(CARGO) build --release -p $(SITE_BIN)
+	$(CARGO) build --release -p $(SITE_BIN) -p $(SYNC_BIN)
 	@install -m 755 target/release/$(SITE_BIN) $(PREFIX)/$(SITE_BIN)
+	@install -m 755 target/release/$(SYNC_BIN) $(PREFIX)/$(SYNC_BIN)
 	@mkdir -p $(XDG_DATA_HOME)/applications $(XDG_DATA_HOME)/icons/hicolor/256x256/apps $(XDG_DATA_HOME)/mime/packages
 	@sed 's|@PREFIX@|$(PREFIX)|g' packaging/kame.desktop > $(XDG_DATA_HOME)/applications/kame.desktop
 	@install -m 644 packaging/kame.png $(XDG_DATA_HOME)/icons/hicolor/256x256/apps/kame.png
 	@install -m 644 packaging/kame.xml $(XDG_DATA_HOME)/mime/packages/kame.xml
 	@command -v update-mime-database >/dev/null 2>&1 && update-mime-database $(XDG_DATA_HOME)/mime >/dev/null 2>&1 || true
 	@command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database $(XDG_DATA_HOME)/applications >/dev/null 2>&1 || true
-	@printf 'installed $(PREFIX)/$(BIN), $(PREFIX)/$(SITE_BIN), desktop shortcut, icon, and .kame file type\n'
+	@printf 'installed $(PREFIX)/$(BIN), $(PREFIX)/$(SITE_BIN), $(PREFIX)/$(SYNC_BIN), desktop shortcut, icon, and .kame file type\n'
 
 mac-app: ## Build a macOS .app bundle (run on a Mac)
 	./packaging/macos/build-app.sh

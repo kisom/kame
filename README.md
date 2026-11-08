@@ -71,7 +71,7 @@ them natively.
 ```sh
 make          # debug build
 make test     # run the test suite
-make install  # release build, install kame, kame-site + a desktop shortcut
+make install  # release build, install kame, kame-site, kame-sync + a desktop shortcut
 make clean    # remove build artifacts
 ```
 

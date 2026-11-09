@@ -91,6 +91,23 @@ pub enum SpanStyle {
     },
 }
 
+/// Bold or italic: what Ctrl-B and Ctrl-I put on words and take off them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Emphasis {
+    Bold,
+    Italic,
+}
+
+impl Emphasis {
+    /// The span style it is.
+    pub fn style(self) -> SpanStyle {
+        match self {
+            Emphasis::Bold => SpanStyle::Bold,
+            Emphasis::Italic => SpanStyle::Italic,
+        }
+    }
+}
+
 fn is_false(flag: &bool) -> bool {
     !*flag
 }

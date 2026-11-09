@@ -293,6 +293,48 @@ impl Op {
     }
 }
 
+/// `previous` and `next` as one edit, if both are typing with a style put on or taken off, an
+/// insert and then the block's spans, as [`crate::edit::Editor::type_styled`] makes them, and
+/// `next` carries on the same word as [`coalesce`] has it for plain typing. The spans before the
+/// joined edit are those before both: `previous`'s, with `next`'s insert made on them as well.
+pub fn coalesce_styled(previous: &Op, next: &Op) -> Option<Op> {
+    let (Op::Batch { ops: before }, Op::Batch { ops: after }) = (previous, next) else {
+        return None;
+    };
+    let [insert @ Op::InsertText { block_id, .. }, Op::SetSpans {
+        block_id: restyled,
+        old_spans,
+        ..
+    }] = before.as_slice()
+    else {
+        return None;
+    };
+    let [next_insert @ Op::InsertText { offset, text, .. }, Op::SetSpans {
+        block_id: next_restyled,
+        spans,
+        ..
+    }] = after.as_slice()
+    else {
+        return None;
+    };
+    if restyled != block_id || next_restyled != block_id {
+        return None;
+    }
+    let joined = coalesce(insert, next_insert)?;
+    let mut old_spans = old_spans.clone();
+    spans_for_insert(&mut old_spans, *offset, text.len());
+    Some(Op::Batch {
+        ops: vec![
+            joined,
+            Op::SetSpans {
+                block_id: *block_id,
+                old_spans,
+                spans: spans.clone(),
+            },
+        ],
+    })
+}
+
 /// `previous` and `next` as one edit, if `next` carries on the same word.
 ///
 /// Nearly all of a document's history would otherwise be single keystrokes, at about 1 KB per
@@ -667,18 +709,7 @@ pub fn apply(doc: &mut Document, op: &Op) {
             );
             // Spans (bold/italic/link) move and widen exactly like anchors, so
             // a link stays on the text it points at as surrounding text shifts.
-            {
-                let block = block_mut(doc, *block_id);
-                for span in block.spans.iter_mut() {
-                    if span.start < *offset && *offset < span.end {
-                        span.end = span
-                            .end
-                            .checked_add(delta)
-                            .expect("span end overflowed usize");
-                    }
-                }
-                shift_spans(block, *offset, delta as isize);
-            }
+            spans_for_insert(&mut block_mut(doc, *block_id).spans, *offset, delta);
         }
         Op::DeleteText {
             block_id,
@@ -1209,6 +1240,28 @@ fn rebase_annotations(
         -((end - start) as isize),
     );
     dropped
+}
+
+/// What an insert of `len` bytes at `offset` does to a block's spans: one it's strictly inside
+/// widens, and one starting at or after it moves along.
+fn spans_for_insert(spans: &mut [Span], offset: usize, len: usize) {
+    for span in spans.iter_mut() {
+        if span.start < offset && offset < span.end {
+            span.end = span
+                .end
+                .checked_add(len)
+                .expect("span end overflowed usize");
+        } else if span.start >= offset {
+            span.start = span
+                .start
+                .checked_add(len)
+                .expect("span start overflowed usize");
+            span.end = span
+                .end
+                .checked_add(len)
+                .expect("span end overflowed usize");
+        }
+    }
 }
 
 /// Shifts every span whose `start` is at or after `edit_start` by `delta` bytes

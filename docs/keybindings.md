@@ -16,6 +16,7 @@ macOS (`Modifiers::command`).
 | Ctrl-Shift-N / Ctrl-Shift-F | add a note (a highlight) / a footnote at the selection or the word under the caret. A footnote's selection grows to whole words |
 | Ctrl-Shift-M | add a marginal on the caret's block, or on the first block of a selection, showing the margin if it's hidden |
 | Ctrl-Shift-C | cite a reference, in a notebook. In or just after a `[key]` with no reference it opens a new one with that key, in or just after a known one it opens that reference for editing, and elsewhere it searches the references and inserts `[key]` |
+| Ctrl-B / Ctrl-I | bold / italic on the selection, or off it if all of it is already, as one undo step. With nothing selected, bold or italic for what you type next, or not, until the same key again or the caret leaves the block, and the status row shows **B** or *I*, struck through for off. Code stays as it is |
 | Ctrl-K | add or edit a hyperlink on the selection, or the link under the caret: its words and its URL (empty words show the URL, and an empty URL removes the link) |
 | Arrows, Home, End | move the caret (up/down cross into the adjacent block at the edge) |
 | Page Up, Page Down | move the caret and the page a window at a time, or to the very start or end from the first or last line; with Shift, extend the selection |
@@ -77,7 +78,9 @@ word — each one is a single undo step:
 - `| ` at the start of a line → a prose block
 - ` ``` ` or ` ```rust ` then Enter → a code block
 - `---` then Enter → a horizontal rule
-- `*x*` / `**x**` around a word → italic / bold
+- `*x*` / `**x**` around words → italic / bold, whichever end is typed last. With `few words*`
+  typed, a `*` before `few` italicizes them: it pairs with the nearest `*` after it that ends a
+  word, in the same paragraph and not across inline code. `_` and `**` work the same way
 - `[text](url)` → a hyperlink on `text`
 
 A code or prose block keeps its text exactly: line breaks and spacing stand, Tab types
@@ -363,7 +366,7 @@ click runs the command as its menu would. Like those lists, it waits while anoth
 note's box has the keyboard, or the close prompt is asking, and it takes the place of another list.
 
 The status row below it shows the document's title (hover for its path), `not
-saved yet` if it has no file, any mode badges, and the word count.
+saved yet` if it has no file, any mode badges, bold or italic turned on or off for typing, and the word count.
 
 A notice shows in the row, cut to fit with the full text on hover, until the next edit or undo. An error stays until
 it is resolved.

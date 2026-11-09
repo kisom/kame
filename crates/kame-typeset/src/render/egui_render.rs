@@ -17,7 +17,7 @@ use egui::{
 pub use kame_core::text::{next_boundary, next_word, prev_boundary, prev_word, word_at};
 
 use crate::layout::{layout_block_marked, layout_block_with_align, BlockLayout, LayoutConfig};
-use crate::model::{AnnotationId, AnnotationKind, Block, BlockId, BlockKind};
+use crate::model::{AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Emphasis};
 use crate::render::{GlyphAtlas, Painting, Patch};
 
 /// Every face the layout can ask for, compiled into the binary.
@@ -976,6 +976,9 @@ pub enum Command {
     MoveListItem {
         up: bool,
     },
+    /// Ctrl-B or Ctrl-I: bold or italic on the selection or off it, or with nothing selected,
+    /// for what's typed next.
+    ToggleEmphasis(Emphasis),
 }
 
 /// How long after Escape the next key still counts as following it.
@@ -1176,6 +1179,13 @@ pub fn command_for_key(key: Key, modifiers: Modifiers) -> Option<Command> {
         Key::End if modifiers.shift && !command => Some(Command::SelectLineEnd),
         Key::End if !command => Some(Command::MoveLineEnd),
         Key::A if command => Some(Command::SelectAll),
+        // Ctrl-Shift-B is the HTML export's.
+        Key::B if command && !modifiers.shift && !modifiers.alt => {
+            Some(Command::ToggleEmphasis(Emphasis::Bold))
+        }
+        Key::I if command && !modifiers.shift && !modifiers.alt => {
+            Some(Command::ToggleEmphasis(Emphasis::Italic))
+        }
         _ => None,
     }
 }
@@ -2270,6 +2280,28 @@ visual form, and thus with an independent existence.";
             [255, 255, 255],
         );
         assert_ne!(cache.get(id).unwrap().texture.size(), size);
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_i_toggle_bold_and_italic() {
+        assert_eq!(
+            command_for_key(Key::B, Modifiers::COMMAND),
+            Some(Command::ToggleEmphasis(Emphasis::Bold))
+        );
+        assert_eq!(
+            command_for_key(Key::I, Modifiers::COMMAND),
+            Some(Command::ToggleEmphasis(Emphasis::Italic))
+        );
+        // Ctrl-Shift-B exports HTML, and plain letters are typing.
+        assert_eq!(
+            command_for_key(Key::B, Modifiers::COMMAND | Modifiers::SHIFT),
+            None
+        );
+        assert_eq!(command_for_key(Key::B, Modifiers::NONE), None);
+        assert_eq!(
+            command_for_key(Key::I, Modifiers::ALT | Modifiers::COMMAND),
+            None
+        );
     }
 
     #[test]

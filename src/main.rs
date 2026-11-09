@@ -45,8 +45,8 @@ use crate::layout::{
 };
 use crate::model::{
     bare_link_ranges, is_script_url, list_labels, list_positions, AcceptedMark, Anchor, Annotation,
-    AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, ImageAlign, Metadata,
-    SpanStyle,
+    AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document, Emphasis, ImageAlign,
+    Metadata, SpanStyle,
 };
 use crate::render::egui_render::{
     adjacent_line, caret_line, caret_x, command_for_event, install_fonts, offset_at, range_rects,
@@ -595,7 +595,14 @@ const HELP_ROWS: &[(&str, &str)] = &[
         "code block: three backticks and a language if wanted, then Enter",
     ),
     ("---", "horizontal rule, typed on its own line, then Enter"),
-    ("*x*  **x**", "italic / bold emphasis, typed around a word"),
+    (
+        "*x*  **x**",
+        "italic / bold emphasis, typed around words, the end first or the start",
+    ),
+    (
+        "Ctrl-B  Ctrl-I",
+        "bold / italic on the selection, or for what you type next",
+    ),
     ("[text](url)", "a hyperlink, typed around the anchor text"),
     ("[[target]]", "a link to another document, typed"),
     ("Ctrl-K", "add or edit a link on the selection"),
@@ -1636,6 +1643,20 @@ fn mode_badges(modes: &Modes) -> Vec<(&'static str, &'static str)> {
     .filter(|(mode, _, _)| modes.is_on(*mode))
     .map(|(_, short, name)| (short, name))
     .collect()
+}
+
+/// The status row's badge for bold or italic turned on or off for what's typed next, as
+/// `(letter, what it means, on)`. One turned off is struck through.
+fn typing_badges(typing: &[(Emphasis, bool)]) -> Vec<(&'static str, &'static str, bool)> {
+    typing
+        .iter()
+        .map(|(emphasis, on)| match (emphasis, on) {
+            (Emphasis::Bold, true) => ("B", "bold for what you type next", true),
+            (Emphasis::Bold, false) => ("B", "not bold for what you type next", false),
+            (Emphasis::Italic, true) => ("I", "italic for what you type next", true),
+            (Emphasis::Italic, false) => ("I", "not italic for what you type next", false),
+        })
+        .collect()
 }
 
 /// The status row's word count, with thousands separated.
@@ -3614,6 +3635,9 @@ impl KameApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        // Bold or italic turned on for typing holds only in the block it was turned on in, and a
+        // click last frame may have left it.
+        self.session.settle_typing_style();
         // Read first, so the chord's text is gone before anything can type it.
         if !self.dialog_open() && !self.modes.hide_chrome {
             self.pending_menu = ctx
@@ -3938,6 +3962,9 @@ impl KameApp {
             Command::MoveListItem { up } => {
                 self.session.move_list_item(up);
             }
+            Command::ToggleEmphasis(emphasis) => {
+                self.session.toggle_emphasis(emphasis);
+            }
         }
     }
 
@@ -4219,6 +4246,17 @@ impl KameApp {
                     for (short, name) in mode_badges(&self.modes).into_iter().rev() {
                         ui.label(egui::RichText::new(short).small().strong())
                             .on_hover_text(name);
+                    }
+                    for (letter, name, on) in
+                        typing_badges(&self.session.typing_emphasis()).into_iter().rev()
+                    {
+                        let badge = egui::RichText::new(letter).small().strong();
+                        let badge = match (letter, on) {
+                            (_, false) => badge.strikethrough(),
+                            ("I", true) => badge.italics(),
+                            _ => badge,
+                        };
+                        ui.label(badge).on_hover_text(name);
                     }
                     if not_saved {
                         ui.label(egui::RichText::new("not saved yet").small().weak());
@@ -12616,6 +12654,8 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             "Escape",
             "[[target]]",
             "Alt-F",
+            "Ctrl-B",
+            "Ctrl-I",
         ] {
             assert!(
                 HELP_ROWS.iter().any(|(row, _)| row.contains(keys)),
@@ -12994,6 +13034,63 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
         assert!(coloured(&page.app.layout_of(&block)));
         assert_ne!(painting(&page), as_text);
         assert_eq!(page.app.session.document().blocks[0], block, "only drawn");
+    }
+
+    #[test]
+    fn ctrl_b_bolds_what_is_typed_next_and_says_so() {
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.frame(vec![egui::Event::Text("plain ".to_string())]);
+        chord(&mut page, egui::Key::B, egui::Modifiers::COMMAND);
+        assert_eq!(page.app.session.typing_emphasis(), [(Emphasis::Bold, true)]);
+        page.frame(vec![egui::Event::Text("strong".to_string())]);
+        let block = &page.app.session.document().blocks[0];
+        assert_eq!(block.text, "plain strong");
+        assert_eq!(
+            block.spans,
+            [crate::model::Span {
+                start: 6,
+                end: 12,
+                style: SpanStyle::Bold
+            }]
+        );
+        chord(&mut page, egui::Key::B, egui::Modifiers::COMMAND);
+        assert!(page.app.session.typing_emphasis().is_empty());
+    }
+
+    #[test]
+    fn ctrl_i_italicizes_the_selection() {
+        let mut page = Headless::new(Session::anonymous().unwrap());
+        page.frame(vec![egui::Event::Text("one two".to_string())]);
+        let id = page.app.session.document().blocks[0].id;
+        page.app.session.set_caret(Cursor {
+            block_id: id,
+            offset: 4,
+        });
+        page.app.session.select_to(Cursor {
+            block_id: id,
+            offset: 7,
+        });
+        chord(&mut page, egui::Key::I, egui::Modifiers::COMMAND);
+        assert_eq!(
+            page.app.session.document().blocks[0].spans,
+            [crate::model::Span {
+                start: 4,
+                end: 7,
+                style: SpanStyle::Italic
+            }]
+        );
+    }
+
+    #[test]
+    fn the_status_row_marks_a_style_turned_on_or_off_for_typing() {
+        assert!(typing_badges(&[]).is_empty());
+        assert_eq!(
+            typing_badges(&[(Emphasis::Bold, true), (Emphasis::Italic, false)]),
+            [
+                ("B", "bold for what you type next", true),
+                ("I", "not italic for what you type next", false),
+            ]
+        );
     }
 
     /// A key pressed and let go with `modifiers`, in two frames.

@@ -6,14 +6,14 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use crate::edit::ops::anchor_wholly_inside;
-use crate::edit::{Cursor, EditError, Editor, Op, Selection};
+use crate::edit::{restyled, styled_throughout, Cursor, EditError, Editor, Op, Selection};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::links::{
     image_file, names_something, own_target_after_save_as, retargeted, stored_image_path,
 };
 use crate::model::{
     bare_link_ranges, Anchor, AnnotationId, AnnotationKind, Block, BlockId, BlockKind, Document,
-    ImageAlign, Metadata, Span, SpanStyle,
+    Emphasis, ImageAlign, Metadata, Span, SpanStyle,
 };
 use crate::references::{
     block_citation_ranges, citation_ranges, key_of, rewrite_citation, valid_key, References,
@@ -22,6 +22,41 @@ use crate::storage::{self, Db, DbError, SnapshotMeta};
 use crate::text::{
     next_boundary, next_word, prev_boundary, prev_word, widen_to_words, word_at, word_for_note,
 };
+
+/// Bold and italic as they're to be for what's typed next, where Ctrl-B or Ctrl-I with nothing
+/// selected changed them: `Some(true)` puts one on, `Some(false)` takes it off, and `None` leaves
+/// typing as the words around it make it. It holds while the caret stays in `block_id`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TypingStyle {
+    block_id: BlockId,
+    bold: Option<bool>,
+    italic: Option<bool>,
+}
+
+impl TypingStyle {
+    fn slot(&mut self, emphasis: Emphasis) -> &mut Option<bool> {
+        match emphasis {
+            Emphasis::Bold => &mut self.bold,
+            Emphasis::Italic => &mut self.italic,
+        }
+    }
+
+    fn styles(&self) -> Vec<(Emphasis, bool)> {
+        [(Emphasis::Bold, self.bold), (Emphasis::Italic, self.italic)]
+            .into_iter()
+            .filter_map(|(emphasis, on)| Some((emphasis, on?)))
+            .collect()
+    }
+}
+
+/// Whether a letter typed at `offset` in `block` comes out in `style` as it stands: inside a span
+/// of it, which widens, and not at either end, where it doesn't.
+fn typed_in(block: &Block, offset: usize, style: &SpanStyle) -> bool {
+    block
+        .spans
+        .iter()
+        .any(|span| span.style == *style && span.start < offset && offset < span.end)
+}
 
 /// The document, its durable history, and the caret — everything that exists
 /// without a window.
@@ -72,6 +107,9 @@ pub struct Session {
     /// Implies `newer`. Nothing at all is written from such a session, not even a snapshot or
     /// where the author is, since what it would write could stand for what it left out.
     pub lossy: bool,
+    /// Bold or italic turned on or off for what's typed next, by Ctrl-B or Ctrl-I with nothing
+    /// selected, in the block it was turned on in.
+    typing: Option<TypingStyle>,
 }
 
 /// Where SQLite keeps the log of writes to the database at `path`.
@@ -225,6 +263,7 @@ impl Session {
             db,
             caret,
             selection: None,
+            typing: None,
             last_error,
             save_failed,
             followed_at: None,
@@ -283,6 +322,7 @@ impl Session {
             db,
             caret,
             selection: None,
+            typing: None,
             last_error: Some(error),
             save_failed: false,
             followed_at: None,
@@ -323,6 +363,7 @@ impl Session {
             db,
             caret,
             selection: None,
+            typing: None,
             last_error: None,
             save_failed: false,
             followed_at: None,
@@ -407,6 +448,7 @@ impl Session {
             db,
             caret,
             selection: None,
+            typing: None,
             last_error: None,
             save_failed: false,
             followed_at: None,
@@ -1425,7 +1467,132 @@ impl Session {
     // --- editing commands --------------------------------------------------
 
     pub fn insert(&mut self, text: &str) -> bool {
-        self.insert_with(text, |editor, caret| editor.insert_text(caret, text))
+        self.settle_typing_style();
+        let Some(typing) = self.typing else {
+            return self.insert_with(text, |editor, caret| editor.insert_text(caret, text));
+        };
+        let styles: Vec<(SpanStyle, bool)> = typing
+            .styles()
+            .into_iter()
+            .map(|(emphasis, on)| (emphasis.style(), on))
+            .collect();
+        self.insert_with(text, |editor, caret| {
+            if caret.block_id == typing.block_id {
+                editor.type_styled(caret, text, &styles)
+            } else {
+                editor.insert_text(caret, text)
+            }
+        })
+    }
+
+    /// Ctrl-B or Ctrl-I: puts bold or italic on the selection, or takes it off if all of it has
+    /// it already, as one step. Code is left as it is. With nothing selected, it turns the style
+    /// on or off for what's typed next, in the caret's block, and again turns that back. Whether
+    /// anything changed.
+    pub fn toggle_emphasis(&mut self, emphasis: Emphasis) -> bool {
+        if self.save_failed || self.replaced || self.newer {
+            return false;
+        }
+        if let Some((start, end)) = self.ordered_selection().filter(|(start, end)| start != end) {
+            return self.emphasize(emphasis, start, end);
+        }
+        self.settle_typing_style();
+        let caret = self.valid_caret();
+        let Some(index) = self.block_index(caret.block_id) else {
+            return false;
+        };
+        let block = &self.document().blocks[index];
+        if matches!(
+            block.kind,
+            BlockKind::Code { .. } | BlockKind::Rule | BlockKind::Image { .. }
+        ) {
+            return false;
+        }
+        let natural = typed_in(block, caret.offset, &emphasis.style());
+        let typing = self.typing.get_or_insert(TypingStyle {
+            block_id: caret.block_id,
+            bold: None,
+            italic: None,
+        });
+        let slot = typing.slot(emphasis);
+        let now = !slot.unwrap_or(natural);
+        *slot = (now != natural).then_some(now);
+        if typing.styles().is_empty() {
+            self.typing = None;
+        }
+        true
+    }
+
+    /// Bold and italic as Ctrl-B and Ctrl-I have them turned on (`true`) or off for what's typed
+    /// next, for the status row to say so.
+    pub fn typing_emphasis(&self) -> Vec<(Emphasis, bool)> {
+        self.typing
+            .filter(|typing| typing.block_id == self.caret.block_id)
+            .map(|typing| typing.styles())
+            .unwrap_or_default()
+    }
+
+    /// Lets go of a style turned on for typing once the caret has left its block. The app asks on
+    /// every frame, so leaving and coming back doesn't bring it back.
+    pub fn settle_typing_style(&mut self) {
+        if self
+            .typing
+            .is_some_and(|typing| typing.block_id != self.caret.block_id)
+        {
+            self.typing = None;
+        }
+    }
+
+    /// Puts `emphasis` on `start..end`, or takes it off if every word of it in a block that takes
+    /// it has it, as one step.
+    fn emphasize(&mut self, emphasis: Emphasis, start: Cursor, end: Cursor) -> bool {
+        let style = emphasis.style();
+        let (Some(first), Some(last)) = (
+            self.block_index(start.block_id),
+            self.block_index(end.block_id),
+        ) else {
+            return false;
+        };
+        let ranges: Vec<(BlockId, usize, usize)> = self.document().blocks[first..=last]
+            .iter()
+            .filter(|block| !matches!(block.kind, BlockKind::Code { .. }))
+            .filter_map(|block| {
+                let from = if block.id == start.block_id {
+                    start.offset
+                } else {
+                    0
+                };
+                let to = if block.id == end.block_id {
+                    end.offset
+                } else {
+                    block.text.len()
+                };
+                (from < to).then_some((block.id, from, to))
+            })
+            .collect();
+        if ranges.is_empty() {
+            return false;
+        }
+        let on = !ranges.iter().all(|(id, from, to)| {
+            self.block_index(*id).is_some_and(|index| {
+                styled_throughout(&self.document().blocks[index].spans, *from, *to, &style)
+            })
+        });
+        self.as_one_step(|session| {
+            ranges.iter().all(|(id, from, to)| {
+                let Some(index) = session.block_index(*id) else {
+                    return false;
+                };
+                let spans = restyled(
+                    &session.document().blocks[index].spans,
+                    *from,
+                    *to,
+                    &style,
+                    on,
+                );
+                session.editor.set_spans_of(*id, spans).is_ok()
+            })
+        })
     }
 
     /// [`Session::insert`], as a step of its own in the history. Typing straight after it starts
@@ -7774,6 +7941,229 @@ mod tests {
         typed(&mut session, "```");
         session.split();
         session
+    }
+
+    fn styled(session: &Session, style: SpanStyle) -> Vec<(usize, usize)> {
+        let mut found: Vec<(usize, usize)> = session.document().blocks[0]
+            .spans
+            .iter()
+            .filter(|span| span.style == style)
+            .map(|span| (span.start, span.end))
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    fn at(session: &Session, offset: usize) -> Cursor {
+        Cursor {
+            block_id: session.document().blocks[0].id,
+            offset,
+        }
+    }
+
+    #[test]
+    fn an_opener_typed_after_its_closer_italicizes_the_words_between() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "the last few words* here");
+        session.set_caret(at(&session, 9));
+        type_marked(&mut session, "*");
+        assert_eq!(session.document().blocks[0].text, "the last few words here");
+        assert_eq!(styled(&session, SpanStyle::Italic), [(9, 18)]);
+        assert_eq!(session.caret, at(&session, 9));
+    }
+
+    #[test]
+    fn two_openers_typed_after_a_closing_pair_make_bold() {
+        let mut session = Session::anonymous().unwrap();
+        type_marked(&mut session, "a b c** d");
+        session.set_caret(at(&session, 2));
+        type_marked(&mut session, "*");
+        assert!(session.document().blocks[0].spans.is_empty());
+        type_marked(&mut session, "*");
+        assert_eq!(session.document().blocks[0].text, "a b c d");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(2, 5)]);
+    }
+
+    #[test]
+    fn bold_on_a_selection_and_again_takes_it_off() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one two three");
+        select(&mut session, (0, 4), (0, 7));
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        assert_eq!(styled(&session, SpanStyle::Bold), [(4, 7)]);
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        assert!(styled(&session, SpanStyle::Bold).is_empty());
+        // Partly bold, it all goes bold, and the selection stays.
+        select(&mut session, (0, 4), (0, 7));
+        session.toggle_emphasis(Emphasis::Bold);
+        select(&mut session, (0, 0), (0, 7));
+        session.toggle_emphasis(Emphasis::Bold);
+        assert_eq!(styled(&session, SpanStyle::Bold), [(0, 7)]);
+        assert_eq!(
+            session.ordered_selection(),
+            Some((at(&session, 0), at(&session, 7)))
+        );
+        // Each is one step.
+        session.undo();
+        assert_eq!(styled(&session, SpanStyle::Bold), [(4, 7)]);
+    }
+
+    #[test]
+    fn italic_off_part_of_an_italic_run_cuts_it() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one two three");
+        select(&mut session, (0, 0), (0, 13));
+        session.toggle_emphasis(Emphasis::Italic);
+        select(&mut session, (0, 4), (0, 7));
+        session.toggle_emphasis(Emphasis::Italic);
+        assert_eq!(styled(&session, SpanStyle::Italic), [(0, 4), (7, 13)]);
+    }
+
+    #[test]
+    fn a_selection_across_blocks_is_bolded_in_one_step() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one two");
+        session.split();
+        typed(&mut session, "three four");
+        let second = session.document().blocks[1].id;
+        session.set_caret(at(&session, 4));
+        session.select_to(Cursor {
+            block_id: second,
+            offset: 5,
+        });
+        let (undo, _) = session.history();
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        assert_eq!(styled(&session, SpanStyle::Bold), [(4, 7)]);
+        assert_eq!(
+            session.document().blocks[1].spans,
+            [Span {
+                start: 0,
+                end: 5,
+                style: SpanStyle::Bold
+            }]
+        );
+        assert_eq!(session.history().0, undo + 1);
+    }
+
+    #[test]
+    fn bold_turned_on_with_nothing_selected_bolds_what_is_typed_next() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "plain ");
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        assert_eq!(session.typing_emphasis(), [(Emphasis::Bold, true)]);
+        typed(&mut session, "strong words");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(6, 18)]);
+        session.toggle_emphasis(Emphasis::Bold);
+        assert!(session.typing_emphasis().is_empty());
+        typed(&mut session, " after");
+        assert_eq!(
+            session.document().blocks[0].text,
+            "plain strong words after"
+        );
+        assert_eq!(styled(&session, SpanStyle::Bold), [(6, 18)]);
+    }
+
+    #[test]
+    fn typing_with_a_style_on_undoes_a_word_at_a_time() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "plain ");
+        let (before, _) = session.history();
+        session.toggle_emphasis(Emphasis::Italic);
+        typed(&mut session, "two words");
+        assert_eq!(session.history().0, before + 2, "a step a word");
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "plain two ");
+        assert_eq!(styled(&session, SpanStyle::Italic), [(6, 10)]);
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "plain ");
+        assert!(session.document().blocks[0].spans.is_empty());
+    }
+
+    #[test]
+    fn bold_turned_off_inside_bold_words_types_plain_ones() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one two");
+        select(&mut session, (0, 0), (0, 7));
+        session.toggle_emphasis(Emphasis::Bold);
+        session.set_caret(at(&session, 3));
+        session.toggle_emphasis(Emphasis::Bold);
+        assert_eq!(session.typing_emphasis(), [(Emphasis::Bold, false)]);
+        typed(&mut session, "ab");
+        assert_eq!(session.document().blocks[0].text, "oneab two");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(0, 3), (5, 9)]);
+    }
+
+    #[test]
+    fn bold_and_italic_turned_on_together_both_go_on() {
+        let mut session = Session::anonymous().unwrap();
+        session.toggle_emphasis(Emphasis::Bold);
+        session.toggle_emphasis(Emphasis::Italic);
+        typed(&mut session, "both");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(0, 4)]);
+        assert_eq!(styled(&session, SpanStyle::Italic), [(0, 4)]);
+    }
+
+    #[test]
+    fn a_style_for_typing_ends_when_the_caret_leaves_its_block() {
+        let mut session = Session::anonymous().unwrap();
+        typed(&mut session, "one");
+        session.split();
+        typed(&mut session, "two");
+        session.toggle_emphasis(Emphasis::Bold);
+        let first = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 3,
+        });
+        session.settle_typing_style();
+        assert!(session.typing_emphasis().is_empty());
+        let second = session.document().blocks[1].id;
+        session.set_caret(Cursor {
+            block_id: second,
+            offset: 3,
+        });
+        typed(&mut session, "!");
+        assert!(session.document().blocks[1].spans.is_empty());
+        // Moving within the block keeps it.
+        session.toggle_emphasis(Emphasis::Bold);
+        session.set_caret(Cursor {
+            block_id: second,
+            offset: 0,
+        });
+        typed(&mut session, "x");
+        assert_eq!(
+            session.document().blocks[1].spans,
+            [Span {
+                start: 0,
+                end: 1,
+                style: SpanStyle::Bold
+            }]
+        );
+    }
+
+    #[test]
+    fn no_style_for_typing_in_code() {
+        let mut session = code_session();
+        assert!(!session.toggle_emphasis(Emphasis::Bold));
+        assert!(session.typing_emphasis().is_empty());
+    }
+
+    #[test]
+    fn typing_with_a_style_on_reads_back_the_same_after_a_reopen() {
+        let path = temp_db_path();
+        let mut session = open(&path);
+        typed(&mut session, "plain ");
+        session.toggle_emphasis(Emphasis::Bold);
+        typed(&mut session, "two words");
+        let written = session.document().clone();
+        drop(session);
+        let mut session = open(&path);
+        assert_eq!(*session.document(), written);
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "plain two ");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(6, 10)]);
+        session.undo();
+        assert_eq!(session.document().blocks[0].text, "plain ");
     }
 
     #[test]

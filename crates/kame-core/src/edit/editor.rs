@@ -16,8 +16,8 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::edit::ops::{
-    anchor_wholly_inside, apply, coalesce, invert, normalize, try_apply, try_apply_inverse,
-    with_clipped, Op,
+    anchor_wholly_inside, apply, coalesce, coalesce_styled, invert, normalize, try_apply,
+    try_apply_inverse, with_clipped, Op,
 };
 use crate::model::{
     link_style, Anchor, Annotation, AnnotationId, AnnotationKind, Block, BlockId, BlockKind,
@@ -154,6 +154,9 @@ pub struct Editor {
     gathering: Option<bool>,
     /// The redo stack as the step being gathered, or the one just ended, found it.
     redo_before_step: Vec<Op>,
+    /// Whether the last edit was typing with a style put on or taken off, which the next letter
+    /// typed so can join on to.
+    styled: bool,
 }
 
 impl Editor {
@@ -167,6 +170,7 @@ impl Editor {
             refused: false,
             gathering: None,
             redo_before_step: Vec::new(),
+            styled: false,
         }
     }
 
@@ -200,6 +204,7 @@ impl Editor {
             refused: false,
             gathering: None,
             redo_before_step: Vec::new(),
+            styled: false,
         }
     }
 
@@ -230,6 +235,7 @@ impl Editor {
     /// destroying the block's notes. A payload that is present but wrong is
     /// rejected by [`apply`], not silently overwritten.
     pub fn apply_edit(&mut self, op: Op) -> Op {
+        self.styled = false;
         let op = with_clipped(&self.doc, normalize(&self.doc, op));
         apply(self.doc.get_mut(), &op);
         match self.gathering {
@@ -352,6 +358,7 @@ impl Editor {
     /// A step that doesn't fit the document is refused, with nothing changed: `None`, and
     /// [`Editor::take_refused`] says so.
     pub fn undo(&mut self) -> Option<Op> {
+        self.styled = false;
         let op = self.undo.last()?.clone();
         if !try_apply_inverse(self.doc.get_mut(), &op) {
             self.refused = true;
@@ -441,6 +448,60 @@ impl Editor {
             text: text.to_string(),
         };
         Ok(self.apply_edit(op))
+    }
+
+    /// Types `text` at `cursor` with each of `styles` put on it (`true`) or taken off it, as
+    /// typing does after Ctrl-B or Ctrl-I with nothing selected. A letter typed straight after
+    /// another this way joins on to it as plain typing does, by word, so undo takes back a word at
+    /// a time and not a letter. It's an insert and then the block's spans, even when the spans come
+    /// out as they were, so that every letter joins the same way.
+    pub fn type_styled(
+        &mut self,
+        cursor: &Cursor,
+        text: &str,
+        styles: &[(SpanStyle, bool)],
+    ) -> Result<Op, EditError> {
+        self.check_cursor(*cursor)?;
+        let insert = Op::InsertText {
+            block_id: cursor.block_id,
+            offset: cursor.offset,
+            text: text.to_string(),
+        };
+        let mut after = self.doc.clone();
+        apply(&mut after, &insert);
+        let old_spans = after
+            .blocks
+            .iter()
+            .find(|block| block.id == cursor.block_id)
+            .map(|block| block.spans.clone())
+            .unwrap_or_default();
+        let (start, end) = (cursor.offset, cursor.offset + text.len());
+        let spans = styles.iter().fold(old_spans.clone(), |spans, (style, on)| {
+            restyled(&spans, start, end, style, *on)
+        });
+        let op = Op::Batch {
+            ops: vec![
+                insert,
+                Op::SetSpans {
+                    block_id: cursor.block_id,
+                    old_spans,
+                    spans,
+                },
+            ],
+        };
+        let joined = (self.styled && self.redo.is_empty() && self.gathering.is_none())
+            .then(|| self.undo.last().and_then(|last| coalesce_styled(last, &op)))
+            .flatten();
+        let Some(joined) = joined else {
+            let op = self.apply_edit(op);
+            self.styled = true;
+            return Ok(op);
+        };
+        apply(self.doc.get_mut(), &op);
+        *self.undo.last_mut().expect("it was just read") = joined;
+        self.coalesced = true;
+        self.styled = true;
+        Ok(op)
     }
 
     /// Inserts `text` at `cursor` as a step that typing can't join on to: only a plain insert
@@ -894,29 +955,39 @@ impl Editor {
         Some(self.apply_edit(Op::Batch { ops }))
     }
 
-    /// Applies inline markdown emphasis the caret just closed (see
-    /// [`inline_emphasis`]): strips the wrapping `*`/`_` markers and sets a
-    /// bold or italic span over the wrapped text in one atomic op. Returns the
-    /// applied op and the caret's new offset, or `None` when the caret has not
-    /// just closed an emphasis.
+    /// Applies inline markdown emphasis the caret just closed (see [`inline_emphasis`]), or just
+    /// opened before words already closed (see [`inline_emphasis_opened`]): strips the wrapping
+    /// `*`/`_` markers and sets a bold or italic span over the wrapped text in one atomic op.
+    /// Returns the applied op and the caret's new offset, after the words for a closer and before
+    /// them for an opener, or `None` when the marker completes no emphasis.
     pub fn apply_inline_markdown(&mut self, cursor: &Cursor) -> Option<(Op, usize)> {
         // What a code block holds is literal. Prose keeps its layout, not its asterisks.
         let block = self.block(cursor.block_id).ok()?;
         if matches!(block.kind, BlockKind::Code { .. }) || in_code(block, cursor.offset) {
             return None;
         }
-        let (style, opener_start, closer_start, marker_len) = {
-            let block = self.block(cursor.block_id).ok()?;
-            // A file name in a document link being typed isn't emphasis.
-            let head = &block.text[..cursor.offset];
-            if head
-                .rfind("[[")
-                .is_some_and(|open| !head[open..].contains("]]"))
-            {
-                return None;
-            }
-            inline_emphasis(&block.text, cursor.offset)?
-        };
+        // A file name in a document link being typed isn't emphasis.
+        let head = &block.text[..cursor.offset];
+        if head
+            .rfind("[[")
+            .is_some_and(|open| !head[open..].contains("]]"))
+        {
+            return None;
+        }
+        // The marker typed closes words before it, or failing that opens words after it, and the
+        // caret goes after the words or stays before them.
+        let (style, opener_start, closer_start, marker_len, closed) =
+            match inline_emphasis(&block.text, cursor.offset) {
+                Some((style, opener, closer, len)) => (style, opener, closer, len, true),
+                None => {
+                    let (style, opener, closer, len) =
+                        inline_emphasis_opened(&block.text, cursor.offset)?;
+                    if crosses_code(block, opener + len, closer) {
+                        return None;
+                    }
+                    (style, opener, closer, len, false)
+                }
+            };
         // Delete the closing marker, then the opening marker. The wrapped text
         // shifts left by `marker_len`, so the span covers
         // `opener_start..closer_start - marker_len` in the final text.
@@ -952,7 +1023,12 @@ impl Editor {
             ),
         ];
         let op = self.apply_edit(strip_markup(&self.doc, cursor.block_id, deletions, spans));
-        Some((op, closer_start - marker_len))
+        let caret = if closed {
+            closer_start - marker_len
+        } else {
+            opener_start
+        };
+        Some((op, caret))
     }
 
     /// Applies a markdown link the caret just closed (see [`markdown_link`]):
@@ -1702,6 +1778,151 @@ fn inline_emphasis(text: &str, caret: usize) -> Option<(SpanStyle, usize, usize,
         i = run_start;
     }
     None
+}
+
+/// The inline emphasis a just-typed opening marker completes, if any: the other way about from
+/// [`inline_emphasis`], for words closed first and opened after, as when the last few words
+/// typed turn out to want italics.
+///
+/// `caret` is just past the marker typed. The run of markers it's in opens when it has the line's
+/// start or whitespace before it and a word after it. Its closer is the nearest run of the same
+/// marker and length after it that ends a word: a non-space before it, and the line's end,
+/// whitespace or punctuation after it, so that the `_` in `snake_case` or the `*` in `2 * 3`
+/// isn't one. It stays within the block, and never reaches across inline code. Returns what
+/// [`inline_emphasis`] does.
+fn inline_emphasis_opened(text: &str, caret: usize) -> Option<(SpanStyle, usize, usize, usize)> {
+    let marker = text[..caret].chars().next_back()?;
+    if marker != '*' && marker != '_' {
+        return None;
+    }
+    let width = marker.len_utf8();
+    let mut opener_start = caret - width;
+    while text[..opener_start].ends_with(marker) {
+        opener_start -= width;
+    }
+    let mut content_start = caret;
+    while text[content_start..].starts_with(marker) {
+        content_start += width;
+    }
+    let marker_len = content_start - opener_start;
+    if marker_len != width && marker_len != width * 2 {
+        return None;
+    }
+    let left_ok = text[..opener_start]
+        .chars()
+        .next_back()
+        .is_none_or(char::is_whitespace);
+    let right_ok = text[content_start..]
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_whitespace());
+    if !left_ok || !right_ok {
+        return None;
+    }
+    let mut at = content_start;
+    while let Some(found) = text[at..].find(marker) {
+        let run_start = at + found;
+        let mut run_end = run_start;
+        while text[run_end..].starts_with(marker) {
+            run_end += width;
+        }
+        let ends_a_word = text[..run_start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace());
+        let word_after = text[run_end..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphanumeric);
+        if run_end - run_start == marker_len && ends_a_word && !word_after {
+            let style = if marker_len == width {
+                SpanStyle::Italic
+            } else {
+                SpanStyle::Bold
+            };
+            return Some((style, opener_start, run_start, marker_len));
+        }
+        at = run_end;
+    }
+    None
+}
+
+/// Whether inline code lies anywhere in `start..end` of `block`, which typed emphasis doesn't
+/// reach across.
+fn crosses_code(block: &Block, start: usize, end: usize) -> bool {
+    block.text[start..end].contains('`')
+        || block
+            .spans
+            .iter()
+            .any(|span| span.style == SpanStyle::Code && span.start < end && start < span.end)
+}
+
+/// `spans` with `style` put on `start..end`, or taken off it. Put on, it joins with the spans of
+/// that style it overlaps or touches, so words typed one letter at a time are one span. Taken off,
+/// a span of that style it's within is cut around it. Spans of other styles are left as they are.
+pub(crate) fn restyled(
+    spans: &[Span],
+    start: usize,
+    end: usize,
+    style: &SpanStyle,
+    on: bool,
+) -> Vec<Span> {
+    let (same, mut kept): (Vec<Span>, Vec<Span>) =
+        spans.iter().cloned().partition(|span| span.style == *style);
+    let span = |start, end| Span {
+        start,
+        end,
+        style: style.clone(),
+    };
+    if on {
+        let mut ranges: Vec<(usize, usize)> = same
+            .iter()
+            .map(|span| (span.start, span.end))
+            .chain(std::iter::once((start, end)))
+            .collect();
+        ranges.sort_unstable();
+        let mut joined: Vec<(usize, usize)> = Vec::new();
+        for (from, to) in ranges {
+            match joined.last_mut() {
+                Some(last) if from <= last.1 => last.1 = last.1.max(to),
+                _ => joined.push((from, to)),
+            }
+        }
+        kept.extend(joined.into_iter().map(|(from, to)| span(from, to)));
+    } else {
+        for other in same {
+            if other.end <= start || end <= other.start {
+                kept.push(other);
+                continue;
+            }
+            if other.start < start {
+                kept.push(span(other.start, start));
+            }
+            if end < other.end {
+                kept.push(span(end, other.end));
+            }
+        }
+    }
+    kept
+}
+
+/// Whether every byte of `start..end` is in a span of `style`.
+pub(crate) fn styled_throughout(
+    spans: &[Span],
+    start: usize,
+    end: usize,
+    style: &SpanStyle,
+) -> bool {
+    let mut covered = start;
+    let mut same: Vec<&Span> = spans.iter().filter(|span| span.style == *style).collect();
+    same.sort_unstable_by_key(|span| span.start);
+    for span in same {
+        if span.start > covered {
+            break;
+        }
+        covered = covered.max(span.end);
+    }
+    covered >= end
 }
 
 /// Rebases a span across a deletion of `[start, end)`: spans before the
@@ -2661,6 +2882,103 @@ mod tests {
         assert_eq!(inline_emphasis("word", 4), None);
         assert_eq!(inline_emphasis("* word*", 7), None);
         assert_eq!(inline_emphasis("**", 2), None);
+    }
+
+    #[test]
+    fn an_opener_typed_before_words_already_closed_finds_its_closer() {
+        // The caret is just past the opener, typed after the closer was.
+        assert_eq!(
+            inline_emphasis_opened("the last *few words* here", 10),
+            Some((SpanStyle::Italic, 9, 19, 1))
+        );
+        assert_eq!(
+            inline_emphasis_opened("a **b c** d", 4),
+            Some((SpanStyle::Bold, 2, 7, 2))
+        );
+        // The closer may end the block or come before punctuation.
+        assert_eq!(
+            inline_emphasis_opened("*few words*", 1),
+            Some((SpanStyle::Italic, 0, 10, 1))
+        );
+        assert_eq!(
+            inline_emphasis_opened("so _few words_, then", 4),
+            Some((SpanStyle::Italic, 3, 13, 1))
+        );
+    }
+
+    #[test]
+    fn an_opener_takes_the_nearest_closer_of_its_own_length() {
+        assert_eq!(
+            inline_emphasis_opened("*one two* three four*", 1),
+            Some((SpanStyle::Italic, 0, 8, 1))
+        );
+        // A run of two isn't a closer for one, nor one for two.
+        assert_eq!(inline_emphasis_opened("*one two** x", 1), None);
+        assert_eq!(inline_emphasis_opened("**one two* x", 2), None);
+        // The first of two openers typed is no match for a closing pair.
+        assert_eq!(inline_emphasis_opened("*one two**", 1), None);
+    }
+
+    #[test]
+    fn an_opener_doesnt_pair_with_a_marker_inside_a_word_or_a_sum() {
+        assert_eq!(inline_emphasis_opened("_foo snake_case", 1), None);
+        assert_eq!(inline_emphasis_opened("*a 2 * 3", 1), None);
+        assert_eq!(inline_emphasis_opened("*a b*c", 1), None);
+        // Nor is it an opener with a space after it, or a letter before it.
+        assert_eq!(inline_emphasis_opened("* few words*", 1), None);
+        assert_eq!(inline_emphasis_opened("x*few words*", 2), None);
+    }
+
+    #[test]
+    fn an_opener_typed_before_closed_words_italicizes_them_in_one_step() {
+        let doc = doc_with("the last few words* here");
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+        e.insert_text(
+            &Cursor {
+                block_id: id,
+                offset: 9,
+            },
+            "*",
+        )
+        .unwrap();
+        let (_, offset) = e
+            .apply_inline_markdown(&Cursor {
+                block_id: id,
+                offset: 10,
+            })
+            .expect("the opener finds the closer after it");
+        assert_eq!(offset, 9, "the caret stays where the opener was typed");
+        assert_eq!(e.document().blocks[0].text, "the last few words here");
+        assert_eq!(
+            e.document().blocks[0].spans,
+            vec![Span {
+                start: 9,
+                end: 18,
+                style: SpanStyle::Italic,
+            }]
+        );
+        e.undo().expect("the emphasis is one step");
+        assert_eq!(e.document().blocks[0].text, "the last *few words* here");
+    }
+
+    #[test]
+    fn an_opener_doesnt_reach_across_inline_code() {
+        let mut doc = doc_with("say *a `b` c* d");
+        doc.blocks[0].text = "say *a b c* d".to_string();
+        doc.blocks[0].spans = vec![Span {
+            start: 7,
+            end: 8,
+            style: SpanStyle::Code,
+        }];
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+        let caret = Cursor {
+            block_id: id,
+            offset: 5,
+        };
+        assert!(e.apply_inline_markdown(&caret).is_none());
+        assert_eq!(e.document().blocks[0].text, "say *a b c* d");
     }
 
     #[test]

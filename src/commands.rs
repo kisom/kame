@@ -3,7 +3,7 @@
 //! key, narrowed by typing as the jump list is, and Enter runs the one chosen as the menu would.
 
 use eframe::egui;
-use kame_core::model::BlockKind;
+use kame_core::model::{BlockKind, Emphasis};
 use kame_notebook::list::rank;
 
 use super::interface::{room, Change};
@@ -25,6 +25,8 @@ pub(crate) enum EditCommand {
     Find,
     /// Makes the caret's block a heading of this level, or with none, body text.
     Kind(Option<u8>),
+    /// Ctrl-B or Ctrl-I.
+    Emphasize(Emphasis),
     Link,
     MoveItem {
         up: bool,
@@ -455,11 +457,21 @@ impl KameApp {
             heading(3, "Heading 3", "Ctrl-Shift-3"),
             writes(item("Body Text", "Ctrl-Shift-0", Kind(None)), true, None),
             writes(
+                item("Bold", "Ctrl-B", EditCommand::Emphasize(Emphasis::Bold)),
+                true,
+                None,
+            )
+            .after_rule(),
+            writes(
+                item("Italic", "Ctrl-I", EditCommand::Emphasize(Emphasis::Italic)),
+                true,
+                None,
+            ),
+            writes(
                 item("Link…", "Ctrl-K", Link),
                 session.link_target().is_some(),
                 Some("Select words to link, or put the caret in a link."),
-            )
-            .after_rule(),
+            ),
             writes(
                 item("Move Item Up", "Ctrl-Shift-Up", MoveItem { up: true }),
                 in_list,
@@ -509,6 +521,9 @@ impl KameApp {
                     None => BlockKind::Paragraph,
                 };
                 self.run_command(ctx, Command::SetBlockKind(kind));
+            }
+            EditCommand::Emphasize(emphasis) => {
+                self.run_command(ctx, Command::ToggleEmphasis(emphasis))
             }
             EditCommand::Link => self.begin_link(),
             EditCommand::MoveItem { up } => self.run_command(ctx, Command::MoveListItem { up }),
@@ -935,7 +950,7 @@ mod tests {
             .unwrap_or_else(|| panic!("the Edit menu has no {label:?}"))
     }
 
-    const EDIT_ROWS: [&str; 16] = [
+    const EDIT_ROWS: [&str; 18] = [
         "Undo",
         "Redo",
         "Cut",
@@ -947,6 +962,8 @@ mod tests {
         "Heading 2",
         "Heading 3",
         "Body Text",
+        "Bold",
+        "Italic",
         "Link…",
         "Move Item Up",
         "Move Item Down",
@@ -978,7 +995,7 @@ mod tests {
             .filter(|command| command.rule)
             .map(|command| command.label)
             .collect();
-        assert_eq!(rules, ["Cut", "Find", "Heading 1", "Link…", "Move Item Up"]);
+        assert_eq!(rules, ["Cut", "Find", "Heading 1", "Bold", "Move Item Up"]);
         let keys: Vec<Option<&str>> = edit.iter().map(|command| command.key).collect();
         assert_eq!(
             keys,
@@ -994,6 +1011,8 @@ mod tests {
                 Some("Ctrl-Shift-2"),
                 Some("Ctrl-Shift-3"),
                 Some("Ctrl-Shift-0"),
+                Some("Ctrl-B"),
+                Some("Ctrl-I"),
                 Some("Ctrl-K"),
                 Some("Ctrl-Shift-Up"),
                 Some("Ctrl-Shift-Down"),
@@ -1211,7 +1230,7 @@ mod tests {
 
     /// The rows that change the document, those whose keys are refused while a dialog has the
     /// keyboard.
-    const EDIT_WRITES: [&str; 13] = [
+    const EDIT_WRITES: [&str; 15] = [
         "Undo",
         "Redo",
         "Cut",
@@ -1220,6 +1239,8 @@ mod tests {
         "Heading 2",
         "Heading 3",
         "Body Text",
+        "Bold",
+        "Italic",
         "Link…",
         "Move Item Up",
         "Move Item Down",

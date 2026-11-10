@@ -1045,12 +1045,15 @@ impl Editor {
             .spans
             .iter()
             .filter_map(rebase)
-            .chain(std::iter::once(Span {
-                start: opener_start,
-                end: closer_start - marker_len,
-                style,
-            }))
             .collect();
+        // Emphasis inside or against a run of its own style joins it rather than lying on it.
+        let spans = restyled(
+            &spans,
+            opener_start,
+            closer_start - marker_len,
+            &style,
+            true,
+        );
         let deletions = vec![
             Op::delete_text(
                 &self.doc,

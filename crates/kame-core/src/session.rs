@@ -8431,6 +8431,50 @@ mod tests {
     }
 
     #[test]
+    fn emphasis_typed_inside_its_own_style_is_one_span() {
+        let mut session = Session::anonymous().unwrap();
+        assert!(session.toggle_emphasis(Emphasis::Italic));
+        type_marked_then_undo(&mut session, "a *b*");
+        assert_eq!(session.document().blocks[0].text, "a b");
+        assert_eq!(styled(&session, SpanStyle::Italic), [(0, 3)]);
+
+        let mut session = Session::anonymous().unwrap();
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        type_marked_then_undo(&mut session, "a **b**");
+        assert_eq!(session.document().blocks[0].text, "a b");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(0, 3)]);
+    }
+
+    #[test]
+    fn emphasis_typed_against_its_own_style_joins_it() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("ab ");
+        session.set_caret(at(&session, 0));
+        session.select_to(at(&session, 3));
+        assert!(session.toggle_emphasis(Emphasis::Italic));
+        session.set_caret(at(&session, 3));
+        type_marked_then_undo(&mut session, "*c*");
+        assert_eq!(session.document().blocks[0].text, "ab c");
+        assert_eq!(styled(&session, SpanStyle::Italic), [(0, 4)]);
+    }
+
+    #[test]
+    fn a_link_typed_inside_a_link_to_another_page_lies_inside_it() {
+        let (outer, inner) = ("https://w.example/", "https://a.example/");
+        let mut session = linked("The Art of War", 0, 14, outer);
+        session.set_caret(at(&session, 4));
+        type_marked(&mut session, "[");
+        session.set_caret(at(&session, 8));
+        type_marked_then_undo(&mut session, &format!("]({inner})"));
+        assert_eq!(session.document().blocks[0].text, "The Art of War");
+        let link = |url: &str| SpanStyle::Link {
+            url: url.to_string(),
+        };
+        assert_eq!(styled(&session, link(outer)), [(0, 14)]);
+        assert_eq!(styled(&session, link(inner)), [(4, 7)]);
+    }
+
+    #[test]
     fn bold_on_a_selection_and_again_takes_it_off() {
         let mut session = Session::anonymous().unwrap();
         typed(&mut session, "one two three");

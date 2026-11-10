@@ -391,7 +391,9 @@ fn those_to_stamp(notebook: &Notebook) -> Vec<(PathBuf, LastSync)> {
 /// Whether a database can have its place written with nothing else happening to it. Opening it for
 /// writing folds in any `-wal` beside it, which may be another machine's, carried here by a sync tool,
 /// and it may be open in another process. So it waits until nothing is beside it. Opening one that
-/// can't be written also leaves side files beside it.
+/// can't be written also leaves side files beside it. This is asked early, to pass over one that
+/// can't take a place before anything is read for it. What it says can stop being so while that's
+/// read, so the write asks again, last of all.
 fn can_record_place(path: &Path) -> bool {
     std::fs::OpenOptions::new().write(true).open(path).is_ok()
         && sqlite_files(path).iter().all(|side| {
@@ -411,7 +413,8 @@ fn record_place(path: &Path) {
 }
 
 /// The place to write in a database, if it can take one. This is all the reading, which takes long
-/// enough for the database to be deleted or moved away meanwhile.
+/// enough for the database to be deleted or moved away meanwhile, or for a `-wal` to arrive beside
+/// it, so it all comes before the write.
 fn place_to_record(path: &Path) -> Option<String> {
     if !can_record_place(path) || Db::open_read_only(path).map_or(true, |db| db.holds_newer()) {
         return None;
@@ -419,10 +422,12 @@ fn place_to_record(path: &Path) -> Option<String> {
     place_of(path)
 }
 
-/// Writes it, in a database that's still there. One that has gone since it was looked at stays
-/// gone: `Db::open` would make a blank one there, and the notebook would list it as a document.
+/// Writes it, in a database that's still there with nothing beside it. One that has gone since it
+/// was looked at stays gone: `Db::open` would make a blank one there, and the notebook would list
+/// it as a document. One a `-wal` has reached since is left for a later pass. The open looks for
+/// both as late as it can, and what it can't rule out is in its own comment.
 fn write_place(path: &Path, place: &str) {
-    if let Ok(mut db) = Db::open_existing(path) {
+    if let Ok(mut db) = Db::open_with_nothing_beside(path) {
         let _ = db.save_sync_place(place);
     }
 }
@@ -897,6 +902,36 @@ mod tests {
         write_place(&a, &place);
         assert!(!a.exists(), "a blank document was made where it was");
         assert!(sqlite_files(&a).iter().all(|side| !side.exists()));
+    }
+
+    /// Another machine's `-wal`, with words this database hasn't, as a sync tool would carry it.
+    fn wal_from_elsewhere(path: &Path) -> Vec<u8> {
+        let there = kame_test_dir::folder("stranded-elsewhere").join("there.kame");
+        std::fs::copy(path, &there).unwrap();
+        let mut session = kame_core::session::Session::open(&there).unwrap();
+        session.insert(" From there.");
+        std::fs::read(&sqlite_files(&there)[0]).unwrap()
+    }
+
+    /// Carried here by a sync tool while the place was worked out. Opening the database for
+    /// writing now would fold it in, with nobody looking.
+    #[test]
+    fn a_place_is_not_written_once_a_wal_has_arrived_beside_the_database() {
+        let root = kame_test_dir::folder("stranded-record-wal-arrived");
+        std::fs::write(root.join(kame_sync::logs::MARKER), "").unwrap();
+        let a = root.join("a.kame");
+        synced_as(&a, "Words.", "titan-bbbb");
+        let carried = wal_from_elsewhere(&a);
+        let [wal, shm] = sqlite_files(&a);
+        let file = std::fs::read(&a).unwrap();
+
+        let place = place_to_record(&a).unwrap();
+        std::fs::write(&wal, &carried).unwrap();
+        write_place(&a, &place);
+
+        assert_eq!(std::fs::read(&a).unwrap(), file, "the file was written");
+        assert_eq!(std::fs::read(&wal).ok(), Some(carried), "the -wal was");
+        assert!(!shm.exists());
     }
 
     #[test]

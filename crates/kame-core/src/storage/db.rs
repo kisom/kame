@@ -307,6 +307,60 @@ impl Db {
         Self::init(Self::connect_existing(path)?)
     }
 
+    /// Opens for writing a database that's there, can be written, and has no `-wal` or `-shm`
+    /// beside it, for a write made with nobody looking. A `-wal` beside a closed document may be
+    /// another machine's, carried there by a sync tool, and any open for writing reads it as the
+    /// file's own and folds it in. Either side file may also mean another program has it open.
+    ///
+    /// What this promises: no file is made at `path`, as with [`Db::open_existing`]. A file that
+    /// can't be written is refused before anything is read, since SQLite would open it to read,
+    /// put side files beside it, and leave them. And the side files are looked for once the
+    /// file is open, as the last thing before the first statement, which is when SQLite first
+    /// looks for a `-wal` itself, both beside `path` and beside the file SQLite found there,
+    /// which is another when `path` is a symbolic link. Refusing changes nothing on disk.
+    ///
+    /// What it doesn't: this isn't a lock. A program that takes no notice of SQLite's locks, as
+    /// a sync tool doesn't, can still put a `-wal` there in the few system calls between that
+    /// look and SQLite's own, and it's then read as any open would read it. Nor is anything held
+    /// afterwards: another connection can open the file while this one has it, as with any `Db`,
+    /// and the two take turns to write.
+    pub fn open_with_nothing_beside(path: &Path) -> Result<Db, DbError> {
+        Self::init_with_nothing_beside(Self::connect_existing(path)?, path)
+    }
+
+    /// The checks of [`Db::open_with_nothing_beside`], on a connection that has run nothing yet,
+    /// and then what [`Db::open`] does.
+    fn init_with_nothing_beside(conn: Connection, path: &Path) -> Result<Db, DbError> {
+        let refused = |code, why: &str| {
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some(why.to_string()),
+            ))
+        };
+        if conn.is_readonly(rusqlite::MAIN_DB)? {
+            return Err(refused(
+                rusqlite::ffi::SQLITE_READONLY,
+                "the file can't be written",
+            ));
+        }
+        let found = conn.path().map(std::path::PathBuf::from);
+        for file in std::iter::once(path).chain(found.as_deref()) {
+            for suffix in ["-wal", "-shm"] {
+                let mut side = file.as_os_str().to_os_string();
+                side.push(suffix);
+                let is_absent = matches!(Path::new(&side).symlink_metadata(),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound);
+                if !is_absent {
+                    return Err(refused(
+                        rusqlite::ffi::SQLITE_BUSY,
+                        "a -wal or -shm is beside the file",
+                    ));
+                }
+            }
+        }
+        Self::init(conn)
+    }
+
     /// A connection to a file that's there, with nothing yet read or written, and nothing looked
     /// for beside it: SQLite opens only the file itself until the first statement.
     fn connect_existing(path: &Path) -> Result<Connection, DbError> {
@@ -2411,6 +2465,131 @@ mod tests {
         drop(db);
         assert!(!scratch.unwrap().exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn wal_of(path: &Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}-wal", path.display()))
+    }
+
+    /// Opening a connection reads the file and nothing else, so a `-wal` put there afterwards is
+    /// still read by the first statement. That's why whatever looks for one looks after opening.
+    #[test]
+    fn a_wal_is_first_looked_for_by_the_first_statement() {
+        let (dir, copy) = crashed_copy("walfirst");
+        let wal = std::fs::read(wal_of(&copy)).unwrap();
+        std::fs::remove_file(wal_of(&copy)).unwrap();
+        let conn = Db::connect_existing(&copy).unwrap();
+        assert!(sidecars(&copy).is_empty(), "{:?}", sidecars(&copy));
+        std::fs::write(wal_of(&copy), wal).unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(db.load_document().unwrap().title, "In the wal");
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_with_nothing_beside_it_opens_to_be_written() {
+        let path = saved_file("alone");
+        let mut db = Db::open_with_nothing_beside(&path).unwrap();
+        assert_eq!(db.load_document().unwrap().title, "Saved");
+        db.save_document(&Document::new("Changed")).unwrap();
+        drop(db);
+        let read = Db::open_read_only(&path).unwrap();
+        assert_eq!(read.load_document().unwrap().title, "Changed");
+    }
+
+    #[test]
+    fn opening_with_nothing_beside_makes_no_file() {
+        let path = crate::test_temp_dir().join(format!("kame-none-{}.kame", uuid::Uuid::new_v4()));
+        assert!(Db::open_with_nothing_beside(&path).is_err());
+        assert!(!path.exists());
+        assert!(sidecars(&path).is_empty(), "{:?}", sidecars(&path));
+    }
+
+    /// As a crash or a sync tool leaves one. It may not be this file's own, so it isn't read.
+    #[test]
+    fn a_file_with_a_wal_beside_it_is_refused_and_both_are_left_as_they_were() {
+        let (dir, copy) = crashed_copy("besidewal");
+        let (file, wal) = (
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(wal_of(&copy)).unwrap(),
+        );
+        assert!(Db::open_with_nothing_beside(&copy).is_err());
+        assert!(
+            std::fs::read(&copy).unwrap() == file,
+            "the file was written"
+        );
+        assert!(
+            std::fs::read(wal_of(&copy)).ok() == Some(wal),
+            "the -wal was"
+        );
+        assert_eq!(sidecars(&copy).len(), 1, "{:?}", sidecars(&copy));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Arriving once the file is open, which is as late as one can and still be seen.
+    #[test]
+    fn a_wal_arriving_as_the_file_opens_is_refused_too() {
+        let (dir, copy) = crashed_copy("arrivingwal");
+        let (file, wal) = (
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(wal_of(&copy)).unwrap(),
+        );
+        std::fs::remove_file(wal_of(&copy)).unwrap();
+        let conn = Db::connect_existing(&copy).unwrap();
+        std::fs::write(wal_of(&copy), &wal).unwrap();
+        assert!(Db::init_with_nothing_beside(conn, &copy).is_err());
+        assert!(
+            std::fs::read(&copy).unwrap() == file,
+            "the file was written"
+        );
+        assert!(
+            std::fs::read(wal_of(&copy)).ok() == Some(wal),
+            "the -wal was"
+        );
+        assert_eq!(sidecars(&copy).len(), 1, "{:?}", sidecars(&copy));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What a reader that was killed leaves. Something has it open, as far as can be told.
+    #[test]
+    fn a_file_with_only_a_shm_beside_it_is_refused() {
+        let path = saved_file("besideshm");
+        let shm = format!("{}-shm", path.display());
+        std::fs::write(&shm, b"left").unwrap();
+        assert!(Db::open_with_nothing_beside(&path).is_err());
+        assert_eq!(std::fs::read(&shm).unwrap(), b"left");
+        assert_eq!(sidecars(&path).len(), 1, "{:?}", sidecars(&path));
+    }
+
+    /// SQLite keeps a `-wal` beside the file a link leads to, and that's where it would read one.
+    #[test]
+    fn a_wal_beside_the_file_a_link_leads_to_is_seen() {
+        let (dir, copy) = crashed_copy("linkedwal");
+        let link = dir.join("link.kame");
+        std::os::unix::fs::symlink(&copy, &link).unwrap();
+        let file = std::fs::read(&copy).unwrap();
+        assert!(Db::open_with_nothing_beside(&link).is_err());
+        assert!(
+            std::fs::read(&copy).unwrap() == file,
+            "the file was written"
+        );
+        assert_eq!(sidecars(&copy).len(), 1, "{:?}", sidecars(&copy));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// SQLite opens such a file to read, and reading it puts side files there that are then
+    /// left, since only a writer clears them away.
+    #[test]
+    fn a_file_that_cannot_be_written_is_refused_with_nothing_put_beside_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = saved_file("readonly");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let opened = Db::open_with_nothing_beside(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(opened.is_err());
+        drop(opened);
+        assert!(sidecars(&path).is_empty(), "{:?}", sidecars(&path));
     }
 
     #[test]

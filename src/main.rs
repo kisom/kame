@@ -16,6 +16,7 @@ mod notebook;
 mod perf;
 mod publish;
 mod references;
+mod theme;
 mod touchpad;
 
 use kame_core::links::{
@@ -56,9 +57,9 @@ use crate::render::egui_render::{
 use crate::storage::{Db, SnapshotMeta};
 
 /// Theme colours. One palette is chosen at launch (or on the dark-mode
-/// toggle), and every surface reads from it — the rasterized text inks and the
-/// painted chrome must always agree.
-#[derive(Clone, Copy)]
+/// toggle, or when Omarchy's theme changes), and every surface reads from
+/// it — the rasterized text inks and the painted chrome must always agree.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Palette {
     background: Color32,
     body_ink: [u8; 3],
@@ -129,6 +130,62 @@ impl Palette {
             Palette::DARK
         } else {
             Palette::LIGHT
+        }
+    }
+
+    /// The palette for Omarchy's `theme`: the built-in one for its mode, with the theme's colours
+    /// in place of kame's. The words are the theme's foreground on its background, the pair every
+    /// theme is made around. A colour the theme leaves out stays kame's own. A colour that would
+    /// be hard to see on the paper is taken toward the foreground until it isn't, and a wash that
+    /// would make the words on it hard to read is made fainter.
+    fn from_theme(theme: &theme::Theme) -> Palette {
+        use theme::{legible, mix, MARK_CONTRAST, TEXT_CONTRAST};
+        let own = Palette::for_mode(theme.dark);
+        let (paper, ink) = (theme.background, theme.foreground);
+        // The interface's panels, where the status row's messages are.
+        let panel = theme.colour("dark_background").unwrap_or(paper);
+        let rgb = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
+        let mark = |name, kept| {
+            theme.colour(name).map_or(kept, |colour| {
+                rgb(legible(colour, ink, &[paper], MARK_CONTRAST))
+            })
+        };
+        let words = |name, kept, papers: &[[u8; 3]]| {
+            theme.colour(name).map_or(kept, |colour| {
+                rgb(legible(colour, ink, papers, TEXT_CONTRAST))
+            })
+        };
+        let wash = |[r, g, b]: [u8; 3], kept: Color32| {
+            (1..=kept.a())
+                .rev()
+                .map(|alpha| Color32::from_rgba_unmultiplied(r, g, b, alpha))
+                .find(|wash| theme::contrast(ink, overlay_on(rgb(paper), *wash)) >= TEXT_CONTRAST)
+                .unwrap_or(Color32::from_rgba_unmultiplied(r, g, b, kept.a()))
+        };
+        let washed = |name, kept| theme.colour(name).map_or(kept, |colour| wash(colour, kept));
+        Palette {
+            background: rgb(paper),
+            body_ink: ink,
+            apparatus_ink: mix(ink, paper, 0.28),
+            caret_ink: mark("accent", own.caret_ink),
+            selection_fill: washed("accent", own.selection_fill),
+            spelling_mark: mark("red", own.spelling_mark),
+            grammar_mark: mark("blue", own.grammar_mark),
+            note_highlight: washed("yellow", own.note_highlight),
+            footnote_highlight: washed("cyan", own.footnote_highlight),
+            footnote_mark: words("cyan", own.footnote_mark, &[paper]),
+            marginal_highlight: wash(ink, own.marginal_highlight),
+            rule_ink: rgb(mix(ink, paper, 0.55)),
+            note_mark: mark("yellow", own.note_mark),
+            list_marker_ink: rgb(ink),
+            dim_veil: Color32::from_rgba_unmultiplied(
+                paper[0],
+                paper[1],
+                paper[2],
+                own.dim_veil.a(),
+            ),
+            error_ink: words("red", own.error_ink, &[paper, panel]),
+            notice_ink: words("green", own.notice_ink, &[paper, panel]),
         }
     }
 }
@@ -1805,6 +1862,7 @@ enum MenuAction {
     TypeSize(f32),
     InterfaceText(interface::Change),
     ToggleDark,
+    ToggleOmarchy,
     ToggleHyphenate,
     ToggleCheck,
     Mode(ModeCommand),
@@ -1980,6 +2038,10 @@ struct KameConfig {
     interface_scale: f32,
     #[serde(default)]
     dark: bool,
+    /// Whether the page and the interface take Omarchy's theme, while there is one, in place of
+    /// kame's light or dark.
+    #[serde(default)]
+    follow_omarchy: bool,
     /// The document open when kame last ran, to reopen on a launch that names none.
     #[serde(default)]
     last_document: Option<PathBuf>,
@@ -2026,6 +2088,7 @@ impl Default for KameConfig {
             body_size: DEFAULT_BODY_SIZE,
             interface_scale: interface::DEFAULT_SCALE,
             dark: false,
+            follow_omarchy: false,
             last_document: None,
             author: String::new(),
             hyphenate: true,
@@ -2048,6 +2111,24 @@ fn config_dir() -> Option<PathBuf> {
     return Some(test_temp_dir().join("settings").join("kame"));
     #[cfg(not(test))]
     persons_config_dir()
+}
+
+/// Where Omarchy keeps what's current: `~/.local/state/omarchy/current`, which has the theme
+/// in `theme/` and the token it rewrites on every switch in `theme.generation`.
+fn omarchy_dir() -> Option<PathBuf> {
+    // A test never takes the colours of the person running it. Each has a folder of its own, by
+    // its name, where only it puts a theme.
+    #[cfg(test)]
+    {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed").replace("::", "-");
+        Some(test_temp_dir().join("omarchy").join(name).join("current"))
+    }
+    #[cfg(not(test))]
+    {
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+        Some(PathBuf::from(home).join(".local/state/omarchy/current"))
+    }
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -2127,6 +2208,7 @@ fn main() -> eframe::Result {
     let body_size = config.body_size;
     let interface_scale = config.interface_scale;
     let dark = config.dark;
+    let follow_omarchy = config.follow_omarchy;
     let config_hyphenate = config.hyphenate;
     let config_check = config.check_spelling;
     let config_words = config.words.clone();
@@ -2183,6 +2265,7 @@ fn main() -> eframe::Result {
                             body_size,
                             interface_scale,
                             dark,
+                            follow_omarchy,
                             last_document: None,
                             author: config_author.clone(),
                             hyphenate: config_hyphenate,
@@ -2225,6 +2308,7 @@ fn main() -> eframe::Result {
                 body_size,
                 interface_scale,
                 dark,
+                follow_omarchy,
                 last_document,
                 author: default_author,
                 hyphenate: config_hyphenate,
@@ -2740,8 +2824,13 @@ struct KameApp {
     interface_scale: f32,
     /// Dark mode, persisted as a kame setting.
     dark: bool,
-    /// The theme colours derived from `dark`.
+    /// The theme colours derived from `dark`, or from Omarchy's theme while it's in use.
     palette: Palette,
+    /// Whether to take Omarchy's theme, while there is one, in place of kame's light or dark. A
+    /// kame setting.
+    follow_omarchy: bool,
+    /// Omarchy's current theme, as far as kame has looked.
+    omarchy: theme::Omarchy,
     /// The caret position typewriter mode last centred. A new position scrolls
     /// the page so the caret returns to the middle; an unchanged one leaves the
     /// reader free to scroll away.
@@ -2831,6 +2920,7 @@ impl KameApp {
             body_size,
             interface_scale,
             dark,
+            follow_omarchy,
             last_document,
             author: default_author,
             hyphenate,
@@ -2856,7 +2946,7 @@ impl KameApp {
         external::set_waker(cc.egui_ctx.clone());
         let mut session = session;
         session.apply_default_author(&default_author);
-        KameApp {
+        let mut app = KameApp {
             session,
             document_lock: None,
             renderer: GlyphRenderer::new(LayoutConfig::default()),
@@ -2904,6 +2994,8 @@ impl KameApp {
             interface_scale,
             dark,
             palette: Palette::for_mode(dark),
+            follow_omarchy,
+            omarchy: theme::Omarchy::new(omarchy_dir()),
             typewriter_anchor: None,
             pending_scroll: None,
             follow_caret: false,
@@ -2939,7 +3031,9 @@ impl KameApp {
             find: None,
             reveal_caret: false,
             show_help: false,
-        }
+        };
+        app.keep_up_with_omarchy(&cc.egui_ctx);
+        app
     }
 
     /// Opens `id`'s popover (or closes it with `None`), seeding the editable
@@ -3024,8 +3118,12 @@ impl KameApp {
         }
     }
 
-    /// Flips dark mode and repaints the widgets to match.
+    /// Flips dark mode and repaints the widgets to match. While Omarchy's theme is in use, that
+    /// says whether the page is dark, and this does nothing.
     fn apply_dark_toggle(&mut self, ctx: &egui::Context) {
+        if self.theme_in_use().is_some() {
+            return;
+        }
         self.toggle_dark();
         ctx.set_visuals(if self.dark {
             egui::Visuals::dark()
@@ -3208,6 +3306,62 @@ impl KameApp {
         self.persist();
     }
 
+    /// Turns following Omarchy's theme on or off, colouring the page and the interface at once,
+    /// and keeps it as a kame setting.
+    fn toggle_omarchy(&mut self, ctx: &egui::Context) {
+        self.follow_omarchy = !self.follow_omarchy;
+        if self.follow_omarchy {
+            self.omarchy.look();
+        } else {
+            self.omarchy.look_for_folder();
+        }
+        self.apply_colours(ctx);
+        self.persist();
+    }
+
+    /// Looks at Omarchy's theme: only for its folder while kame isn't following it, and otherwise
+    /// for a new theme, which colours the page and the interface at once.
+    fn keep_up_with_omarchy(&mut self, ctx: &egui::Context) {
+        if !self.follow_omarchy {
+            self.omarchy.look_for_folder();
+        } else if self.omarchy.look() {
+            self.apply_colours(ctx);
+        }
+    }
+
+    /// The theme the page and the interface are in, if kame is following Omarchy's and has read
+    /// one.
+    fn theme_in_use(&self) -> Option<&theme::Theme> {
+        self.omarchy.theme.as_ref().filter(|_| self.follow_omarchy)
+    }
+
+    /// Colours the page and the interface: in Omarchy's theme while one is in use, and otherwise
+    /// in kame's own light or dark. What was inked in the old colours is dropped, to be inked
+    /// again in the new.
+    fn apply_colours(&mut self, ctx: &egui::Context) {
+        let visuals = match self.theme_in_use().cloned() {
+            Some(theme) => {
+                self.palette = Palette::from_theme(&theme);
+                theme::visuals(&theme, &self.palette)
+            }
+            None => {
+                self.palette = Palette::for_mode(self.dark);
+                if self.dark {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                }
+            }
+        };
+        // Both, so that the colours hold whichever egui takes the system's to be.
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            ctx.set_visuals_of(theme, visuals.clone());
+        }
+        self.layouts.clear();
+        self.textures.clear();
+        self.annotation_textures.clear();
+    }
+
     /// Writes the current preferences to the app config, best-effort.
     fn persist(&self) {
         save_config(&self.settings());
@@ -3219,6 +3373,7 @@ impl KameApp {
             body_size: self.body_size,
             interface_scale: self.interface_scale,
             dark: self.dark,
+            follow_omarchy: self.follow_omarchy,
             last_document: self.last_document.path.clone(),
             author: self.default_author.clone(),
             hyphenate: self.hyphenate,
@@ -3692,14 +3847,23 @@ impl KameApp {
         if back_chord && !self.dialog_open() && !self.close_flow.prompting {
             self.go_back();
         }
+        // The theme is most often switched with kame in the background, so getting the keyboard
+        // back looks at it at once.
+        let focused = ctx.input(|input| input.focused);
+        let came_back = focused && !self.omarchy.focused;
+        self.omarchy.focused = focused;
         // Every write checks too, so this is only for saying so promptly.
         if self.last_file_check.elapsed().as_secs_f32() >= FILE_CHECK_SECONDS {
             self.last_file_check = std::time::Instant::now();
             if self.session.check_file() {
                 self.replaced_prompt = true;
             }
+            self.keep_up_with_omarchy(ctx);
+        } else if came_back {
+            self.keep_up_with_omarchy(ctx);
         }
-        if !self.session.is_anonymous() {
+        // A theme being followed is looked at as often, whether or not the document has a file.
+        if !self.session.is_anonymous() || self.follow_omarchy {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(FILE_CHECK_SECONDS));
         }
         self.look_for_conflict_copies();
@@ -4340,6 +4504,7 @@ impl KameApp {
             MenuAction::TypeSize(step) => self.adjust_font_size(step),
             MenuAction::InterfaceText(change) => self.change_interface_text(ctx, change),
             MenuAction::ToggleDark => self.apply_dark_toggle(ctx),
+            MenuAction::ToggleOmarchy => self.toggle_omarchy(ctx),
             MenuAction::ToggleCheck => {
                 self.check_spelling = !self.check_spelling;
                 self.persist();
@@ -8477,6 +8642,7 @@ mod tests {
             body_size: 21.0,
             interface_scale: 1.0,
             dark: true,
+            follow_omarchy: true,
             last_document: Some(PathBuf::from("/notes/essay.kame")),
             author: "K. Isom".to_string(),
             hyphenate: false,
@@ -8491,6 +8657,7 @@ mod tests {
         let read = serde_json::from_str::<KameConfig>(&json).unwrap();
         assert_eq!(read.body_size, 21.0);
         assert!(read.dark);
+        assert!(read.follow_omarchy);
         assert_eq!(read.last_document, config.last_document);
         assert_eq!(read.author, "K. Isom");
         assert!(!read.hyphenate);
@@ -8503,6 +8670,7 @@ mod tests {
         let old = serde_json::from_str::<KameConfig>("{}").unwrap();
         assert_eq!(old.body_size, DEFAULT_BODY_SIZE);
         assert!(!old.dark);
+        assert!(!old.follow_omarchy, "an older config follows no theme");
         assert!(old.hyphenate);
         assert!(!old.check_spelling);
         assert!(old.words.is_empty());

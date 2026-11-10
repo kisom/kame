@@ -304,9 +304,27 @@ impl KameApp {
                 Some("Ctrl-Shift-D"),
                 MenuAction::ToggleDark,
             )
-            .checked(self.dark),
-            item(View, "Hyphenate", None, MenuAction::ToggleHyphenate).checked(self.hyphenate),
+            .checked(self.dark)
+            .enabled(
+                self.theme_in_use().is_none(),
+                Some("The Omarchy theme decides."),
+            ),
         ]);
+        // Only on Omarchy, where there's a theme to follow.
+        if self.omarchy.present {
+            commands.push(
+                item(
+                    View,
+                    "Follow Omarchy theme",
+                    None,
+                    MenuAction::ToggleOmarchy,
+                )
+                .checked(self.follow_omarchy),
+            );
+        }
+        commands.push(
+            item(View, "Hyphenate", None, MenuAction::ToggleHyphenate).checked(self.hyphenate),
+        );
         if in_notebook {
             commands.extend([
                 item(
@@ -741,6 +759,92 @@ mod tests {
             .position(|command| command.action == MenuAction::Commands)
             .expect("the Help menu has the palette");
         assert!(!narrow_commands("commands", &commands).contains(&palette));
+    }
+
+    fn follow_omarchy(page: &Headless) -> Option<MenuCommand> {
+        page.app
+            .commands()
+            .into_iter()
+            .find(|command| command.action == MenuAction::ToggleOmarchy)
+    }
+
+    #[test]
+    fn without_omarchy_following_its_theme_isnt_offered() {
+        let mut page = page();
+        assert!(follow_omarchy(&page).is_none());
+        open_menu(&mut page, BarMenu::View);
+        assert!(page.sees("Dark mode"));
+        assert!(!page.sees("Follow Omarchy theme"));
+
+        palette_chord(&mut page);
+        type_text(&mut page, "omarchy");
+        page.frame(Vec::new());
+        assert!(!page.sees("View: Follow Omarchy theme"));
+    }
+
+    #[test]
+    fn on_omarchy_following_its_theme_is_offered_and_dark_mode_waits_on_it() {
+        let current = crate::omarchy_dir().unwrap();
+        std::fs::create_dir_all(current.join("theme")).unwrap();
+        std::fs::write(
+            current.join("theme").join("colors.toml"),
+            "mode = \"dark\"\nbackground = \"#2e3440\"\nforeground = \"#d8dee9\"\n",
+        )
+        .unwrap();
+        let mut page = page();
+        let command = follow_omarchy(&page).expect("offered");
+        assert_eq!(command.menu, BarMenu::View);
+        assert!(command.enabled && !command.checked);
+        open_menu(&mut page, BarMenu::View);
+        assert!(page.sees("Follow Omarchy theme"));
+
+        palette_chord(&mut page);
+        type_text(&mut page, "omarchy");
+        page.frame(Vec::new());
+        assert!(page.can_press("View: Follow Omarchy theme"));
+        press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(page.app.follow_omarchy);
+        assert!(follow_omarchy(&page).unwrap().checked);
+
+        let dark_mode = |page: &Headless| {
+            page.app
+                .commands()
+                .into_iter()
+                .find(|command| command.action == MenuAction::ToggleDark)
+                .unwrap()
+        };
+        let greyed = dark_mode(&page);
+        assert!(!greyed.enabled);
+        assert_eq!(greyed.why_not, Some("The Omarchy theme decides."));
+        let commands = page.app.commands();
+        let at = commands
+            .iter()
+            .position(|command| command.action == MenuAction::ToggleDark)
+            .unwrap();
+        assert!(!narrow_commands("dark mode", &commands).contains(&at));
+        let dark = page.app.dark;
+        press(
+            &mut page,
+            egui::Key::D,
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        );
+        assert_eq!(page.app.dark, dark, "the key waits on the theme too");
+        assert!(page.app.palette.background == egui::Color32::from_rgb(0x2e, 0x34, 0x40));
+
+        // With no theme to read, kame's own light or dark is back in use, and so is the key.
+        std::fs::remove_file(current.join("theme").join("colors.toml")).unwrap();
+        page.app
+            .run_menu_action(&page.ctx.clone(), MenuAction::ToggleOmarchy);
+        page.app
+            .run_menu_action(&page.ctx.clone(), MenuAction::ToggleOmarchy);
+        assert!(page.app.follow_omarchy);
+        assert!(dark_mode(&page).enabled);
+        press(
+            &mut page,
+            egui::Key::D,
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        );
+        assert_eq!(page.app.dark, !dark);
     }
 
     #[test]

@@ -1189,6 +1189,41 @@ mod tests {
         }
     }
 
+    /// Without the `./` kame writes before it, `Draft: one.kame` would read as an address.
+    #[test]
+    fn a_link_to_a_name_with_a_colon_goes_to_its_page() {
+        let nb = made("nbcolon", "");
+        nb.words("Notebook.kame", false, "Contents.");
+        nb.words("Draft: one.kame", true, "The draft.");
+        nb.document(
+            "to-document.kame",
+            true,
+            &linking(
+                "The words.",
+                SpanStyle::DocumentLink {
+                    target: "./Draft: one.kame".to_string(),
+                },
+            ),
+        );
+        nb.document(
+            "to-path.kame",
+            true,
+            &linking(
+                "The words.",
+                SpanStyle::Link {
+                    url: "./Draft: one".to_string(),
+                },
+            ),
+        );
+        let (plan, problems) = nb.plan();
+        assert!(problems.warnings.is_empty(), "{:?}", problems.warnings);
+        assert!(page(&plan, "Draft%3A%20one/index.html").contains("The draft."));
+        for from in ["to-document", "to-path"] {
+            let text = page(&plan, &format!("{from}/index.html"));
+            assert!(text.contains("href=\"/Draft%3A%20one/\""), "{from}: {text}");
+        }
+    }
+
     #[test]
     fn markdown_publishes_when_its_front_matter_says_so() {
         let nb = made("nbmd", "");

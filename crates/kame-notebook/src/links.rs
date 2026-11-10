@@ -3,7 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use kame_core::links::{resolve_open_path, split_document_target};
+use kame_core::links::{has_scheme, resolve_open_path, split_document_target};
 use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::storage::Db;
 
@@ -38,24 +38,10 @@ pub fn is_web_link(link: &str) -> bool {
 }
 
 /// Whether a link is a path, rather than a web address or the like. A scheme is letters, digits
-/// and a little punctuation before the first colon, so a colon further along a path doesn't make
-/// one, and `//` leads to another host as it would in a browser.
+/// and a little punctuation before the first colon, as [`has_scheme`] has it, so a colon further
+/// along a path doesn't make one, and `//` leads to another host as it would in a browser.
 pub fn is_relative(link: &str) -> bool {
-    if link.is_empty() || link.starts_with('#') || link.starts_with("//") {
-        return false;
-    }
-    let Some(colon) = link.find(':') else {
-        return true;
-    };
-    let before = &link[..colon];
-    let is_scheme = before
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic())
-        && before
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-    !is_scheme
+    !(link.is_empty() || link.starts_with('#') || link.starts_with("//") || has_scheme(link))
 }
 
 /// Takes out `.` and `..` by what they say, since what's named may not exist yet.

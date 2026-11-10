@@ -93,6 +93,21 @@ fn the_refusal_for_a_taken_path_says_to_delete_it_first() {
     assert_eq!(err, "something is already at taken.kame; delete it first");
 }
 
+/// A link names a heading after a `#`, so a link to a name holding one would lead elsewhere.
+#[test]
+fn a_name_with_a_hash_in_it_is_refused() {
+    let (root, nb) = notebook("manage-hash");
+    let a = root.join("a.kame");
+    for typed in ["a#b", "#a", "a#", "x#1/a", "x/a#b.kame"] {
+        assert_eq!(
+            check_new_path(&nb, &a, typed).unwrap_err(),
+            "a name can't hold #, which is how a link names a heading",
+            "{typed}"
+        );
+    }
+    assert!(!root.join("x#1").exists());
+}
+
 #[test]
 fn a_new_name_differing_only_in_case_is_allowed_where_the_disk_sees_one_file() {
     let (root, nb) = notebook("manage-case");
@@ -1161,6 +1176,60 @@ fn a_name_with_spaces_and_accents_survives() {
         &block.kind,
         BlockKind::Image { path, .. } if path == "../maritain/é.png"
     )));
+}
+
+/// `Draft: one.kame` reads as an address with the scheme `Draft`, so a link to it starts `./`.
+#[test]
+fn a_name_with_a_colon_is_linked_to_as_a_path_and_back() {
+    let (root, nb) = plain_notebook("move-colon");
+    let one = root.join("one.kame");
+    document(&one, "One.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("one.kame"));
+    link(&linker, "two", document_link("one#Heading"));
+    let below = root.join("sub/below.kame");
+    document(&below, "");
+    link(&below, "up", document_link("../one.kame"));
+
+    let draft = check_new_path(&nb, &one, "Draft: one").unwrap();
+    assert_eq!(draft, root.join("Draft: one.kame"));
+    let report = make_move(&nb, &one, &draft);
+    assert!(report.left.is_empty());
+    let links = links_of(&read(&linker));
+    assert_eq!(links, ["./Draft: one.kame", "./Draft: one.kame#Heading"]);
+    for target in &links {
+        assert_follows(&nb, target, &linker, &draft);
+    }
+    assert_eq!(links_of(&read(&below)), ["../Draft: one.kame"]);
+    assert_follows(&nb, "../Draft: one.kame", &below, &draft);
+
+    let back = check_new_path(&nb, &draft, "one").unwrap();
+    let report = make_move(&nb, &draft, &back);
+    assert!(report.left.is_empty());
+    let links = links_of(&read(&linker));
+    assert_eq!(links, ["one.kame", "one.kame#Heading"]);
+    for target in &links {
+        assert_follows(&nb, target, &linker, &one);
+    }
+}
+
+#[test]
+fn a_link_from_here_to_a_name_with_a_colon_leads_there() {
+    let (root, nb) = plain_notebook("follow-colon");
+    let draft = root.join("Draft: one.kame");
+    document(&draft, "D.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    for target in [
+        "./Draft: one.kame",
+        "./Draft: one",
+        "./Draft: one.kame#Heading",
+    ] {
+        assert_follows(&nb, target, &linker, &draft);
+    }
+    // Without the `./`, it's an address.
+    assert_eq!(nb.follow("Draft: one.kame", &linker), Follow::Rotted);
 }
 
 #[test]

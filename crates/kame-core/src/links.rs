@@ -68,10 +68,31 @@ fn path_between(folder: &Path, file: &Path) -> String {
         .components()
         .skip(shared)
         .map(|part| part.as_os_str().to_string_lossy().into_owned());
-    std::iter::repeat_n("..".to_string(), climbs)
+    let way = std::iter::repeat_n("..".to_string(), climbs)
         .chain(down)
         .collect::<Vec<_>>()
-        .join("/")
+        .join("/");
+    // A first part like `Draft: one.kame` would read as a scheme, so the way starts from here.
+    if has_scheme(&way) {
+        format!("./{way}")
+    } else {
+        way
+    }
+}
+
+/// Whether a link starts with a scheme, as `https:` and `mailto:` do: a letter, then letters,
+/// digits, `+`, `-` or `.`, up to the first colon. A colon further along doesn't make one, so
+/// `./Draft: one.kame` is a path where `Draft: one.kame` isn't.
+pub fn has_scheme(link: &str) -> bool {
+    link.split_once(':').is_some_and(|(before, _)| {
+        before
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && before
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
 }
 
 /// Takes out `.` and `..` by what they say, since what's named may not exist.
@@ -112,16 +133,7 @@ pub fn is_web_address(link: &str) -> bool {
 /// be found, there's no way to say, and it stays as it is.
 pub fn retargeted(target: &str, from: &Path, to: &Path, document: bool) -> String {
     let (path, _) = split_document_target(target);
-    let has_scheme = path.split_once(':').is_some_and(|(before, _)| {
-        before
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic())
-            && before
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    });
-    if has_scheme
+    if has_scheme(path)
         || path.starts_with('/')
         || path.starts_with('~')
         || (!document && is_web_address(path))
@@ -291,6 +303,9 @@ fn names_document(path: &str, document: &Path, to_document: bool) -> bool {
         .is_some_and(|file| file == real_document)
 }
 
+/// Why a document can't be named with a `#`: a link to it would read as a path and a heading.
+pub const NO_HASH_IN_NAMES: &str = "a name can't hold #, which is how a link names a heading";
+
 /// A document link's target as its path and the heading it names, if any.
 pub fn split_document_target(target: &str) -> (&str, Option<&str>) {
     match target.split_once('#') {
@@ -441,6 +456,40 @@ mod tests {
         assert_eq!(moved_target("./", &new, &doc), "new.kame");
         assert_eq!(moved_target("../#Part", &new, &doc), "new.kame#Part");
         assert_eq!(moved_target("old", &new, &new), "new.kame");
+    }
+
+    /// `Draft: one.kame` would read as an address with the scheme `Draft`.
+    #[test]
+    fn a_way_that_would_read_as_an_address_starts_from_here() {
+        let root = kame_test_dir::folder("moved-target-colon")
+            .canonicalize()
+            .unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let (doc, below) = (root.join("doc.kame"), root.join("sub/doc.kame"));
+        let draft = root.join("Draft: one.kame");
+        assert_eq!(moved_target("one.kame", &draft, &doc), "./Draft: one.kame");
+        assert_eq!(
+            moved_target("one#Part", &draft, &doc),
+            "./Draft: one.kame#Part"
+        );
+        assert_eq!(moved_target("one", &draft, &below), "../Draft: one.kame");
+        assert_eq!(
+            moved_target("one", &root.join("sub/Draft: one.kame"), &doc),
+            "sub/Draft: one.kame"
+        );
+        assert_eq!(
+            retargeted("../Draft: one.kame#Part", &below, &doc, true),
+            "./Draft: one.kame#Part"
+        );
+        std::fs::write(&draft, "").unwrap();
+        assert_eq!(
+            way_within_notebook(&draft, &doc, &root).as_deref(),
+            Some("./Draft: one.kame")
+        );
+        // What a scheme can't start with or hold makes none.
+        for name in ["2026: notes.kame", "my draft: one.kame", "a_b: c.kame"] {
+            assert_eq!(moved_target("one", &root.join(name), &doc), name);
+        }
     }
 
     #[test]

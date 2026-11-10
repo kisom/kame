@@ -212,6 +212,7 @@ without making the document read-only.
 
 Open and Save As use the system's file browser. File > Open Path takes a typed path
 instead, with `~` expanded and relative paths resolved beside the current document.
+Neither makes a new file with `#` in its name, which a link to it would take for a heading.
 Save As carries the history, snapshots and properties to the new file and continues
 there, leaving the old file as it was. Images and relative links are said again from
 the new folder, so they lead where they did, all through the history: it isn't an undo
@@ -433,6 +434,8 @@ Rename and Move open one dialog holding the document's path from the notebook's 
 so you can type over either. A document at the root has no folders to select, so what you type goes in front of its name, and Move says to
 type a folder and `/` before the name. Enter confirms, and Escape cancels. Folders it names are created. If something is already at the new
 path, or it isn't a place a document can be, the dialog says why and stays open. Nothing is ever overwritten: delete the other file first.
+A name can't hold `#`, which is how a link names a heading. A colon is fine, but a link to `Draft: one.kame` from beside it is written
+`./Draft: one.kame`, as one typed by hand has to be, since without the `./` it reads as an address like `mailto:`.
 
 A rename or move rewrites the links to the document in every other document, including closed ones and any with links only in their
 revision logs, and fixes its own relative links and images if it changed folders. A title that was only the file's name follows the new

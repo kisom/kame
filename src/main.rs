@@ -21,7 +21,7 @@ mod touchpad;
 
 use kame_core::links::{
     image_file, is_web_address, resolve_open_path, split_document_target, stored_image_path,
-    way_within_notebook, web_address_start,
+    way_within_notebook, web_address_start, NO_HASH_IN_NAMES,
 };
 use kame_core::lock::{DocumentLock, LockError};
 use kame_core::references::{cited_key, with_citation_spans};
@@ -2430,6 +2430,12 @@ fn document_link_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
         }
         _ => None,
     })
+}
+
+/// Whether the file at `path` has a `#` in its name, which a link to it would take for a heading.
+fn named_with_a_hash(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().contains('#'))
 }
 
 /// The target for a link to the file at `path` from the document at `document`. Within the
@@ -6970,6 +6976,19 @@ impl KameApp {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let path = resolve_open_path(&typed, &base);
+        // Opening a path with nothing there makes a document, and none is made with a name a link
+        // couldn't lead to.
+        if !path.exists()
+            && !kame_sync::logs::log_folder(&path).is_dir()
+            && named_with_a_hash(&path)
+        {
+            self.notice = None;
+            self.session.last_error = Some(format!(
+                "could not create {} — {NO_HASH_IN_NAMES}",
+                path.display()
+            ));
+            return;
+        }
         // Before anything is written, there or here. Markdown is only read, into a document with
         // no file.
         let claimed = if is_markdown_path(&path) {
@@ -7082,6 +7101,13 @@ impl KameApp {
 
     /// Saves the document at `path`, and says its images and links again from there.
     fn save_to(&mut self, ctx: &egui::Context, path: &Path, close_after: bool) {
+        if named_with_a_hash(path) {
+            self.session.last_error = Some(format!(
+                "could not save {} — {NO_HASH_IN_NAMES}",
+                path.display()
+            ));
+            return;
+        }
         // Saving over a file another kame has open would pull it out from under that one.
         let claimed = match self.claim_document(path) {
             Ok(claimed) => claimed,
@@ -10855,6 +10881,49 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         page.app.follow_document_link(&target);
         assert_eq!(page.app.session.path(), Some(picked.as_path()));
         assert!(!root.join("three/two").exists());
+    }
+
+    /// A link names a heading after a `#`, so a link to such a name would lead elsewhere.
+    #[test]
+    fn no_new_document_is_named_with_a_hash() {
+        let dir = scratch_dir("hash-names");
+        let here = dir.join("here.kame");
+        let mut session = open(&here);
+        session.insert("Mine.");
+        let mut page = Headless::new(session);
+        let said = |page: &Headless| page.app.session.last_error.clone().unwrap_or_default();
+
+        page.app
+            .open_document(dir.join("a#b.kame").display().to_string());
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        assert!(
+            said(&page).contains(kame_core::links::NO_HASH_IN_NAMES),
+            "{}",
+            said(&page)
+        );
+        page.app.session.last_error = None;
+
+        let ctx = page.ctx.clone();
+        page.app.save_to(&ctx, &dir.join("c#d.kame"), false);
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        assert!(
+            said(&page).contains(kame_core::links::NO_HASH_IN_NAMES),
+            "{}",
+            said(&page)
+        );
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains('#'))
+            .collect();
+        names.sort();
+        assert!(names.is_empty(), "{names:?}");
+
+        // One already there, which kame didn't name, still opens.
+        let theirs = dir.join("e#f.kame");
+        open(&theirs).insert("Theirs.");
+        page.app.open_document(theirs.display().to_string());
+        assert_eq!(page.app.session.path(), Some(theirs.as_path()));
     }
 
     #[test]

@@ -276,6 +276,38 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Without the `./` kame writes before it, `Draft: one.kame` would read as an address.
+    #[test]
+    fn a_link_to_a_name_with_a_colon_goes_to_its_page() {
+        let dir = temp_dir("colon");
+        let a = make(&dir, "a", false, plain());
+        let path = dir.join("Draft: one.kame");
+        write_kame(&path, &plain(), Some(&metadata("draft", "2026-11-02", &[])));
+        let mut problems = Problems::default();
+        let draft = source::read(
+            &Entry {
+                slug: "draft".to_string(),
+                path,
+            },
+            false,
+            &mut problems,
+        )
+        .unwrap();
+        let index = SiteIndex::new(&[a.clone(), draft]);
+        for target in [
+            "./Draft: one.kame",
+            "./Draft: one",
+            "./Draft: one.kame#Intro",
+        ] {
+            assert_eq!(
+                index.link_url(target, &a).as_deref(),
+                Some("/k/draft/"),
+                "{target}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_heading_in_a_link_is_ignored() {
         let dir = temp_dir("heading");

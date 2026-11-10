@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use kame_core::links::{moved_target, own_target_after_move};
+use kame_core::links::{moved_target, own_target_after_move, NO_HASH_IN_NAMES};
 use kame_core::lock::Locks;
 use kame_core::model::{BlockKind, Document, SpanStyle};
 use kame_core::session::{is_markdown_path, Session};
@@ -29,6 +29,9 @@ pub fn check_new_path(
     let typed = typed.trim();
     if typed.is_empty() {
         return Err("type a path for it".to_string());
+    }
+    if typed.contains('#') {
+        return Err(NO_HASH_IN_NAMES.to_string());
     }
     if typed.starts_with('/') || typed.starts_with('~') {
         return Err("a path starts in the notebook, so it can't begin with / or ~".to_string());

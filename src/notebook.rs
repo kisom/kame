@@ -2889,6 +2889,83 @@ mod tests {
         DocumentLock::take(&folder, &to).unwrap();
     }
 
+    /// Every file under `root`, with what's in it.
+    fn every_file(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut found = Vec::new();
+        let mut folders = vec![root.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).unwrap();
+                    found.push((path, bytes));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn a_rename_to_a_name_with_a_hash_is_refused_and_changes_nothing() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-rename-hash")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let a = root.join("a.kame");
+        Session::open(&a).unwrap().insert("Words.");
+        let linker = root.join("linker.kame");
+        linking_to_a(&linker);
+        let mut page = crate::Headless::new(Session::open(&linker).unwrap());
+        page.frame(Vec::new());
+        page.app.nb.file_op = Some(FileOp::Path {
+            from: a.clone(),
+            field: "a#b".to_string(),
+            refusal: None,
+            rename: true,
+            focus: false,
+        });
+        page.frame(Vec::new());
+        let document = page.app.session.document().clone();
+        let before = every_file(&root);
+
+        press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
+        page.frame(Vec::new());
+
+        assert!(page.sees("a name can't hold #, which is how a link names a heading"));
+        assert_eq!(every_file(&root), before);
+        assert_eq!(page.app.session.document(), &document);
+        assert_eq!(page.app.session.path(), Some(linker.as_path()));
+    }
+
+    /// What the app follows a link with leads to a name with a colon from beside it, as kame writes
+    /// that link, and as one typed by hand is written.
+    #[test]
+    fn a_link_to_a_name_with_a_colon_leads_there() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-link-colon")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let draft = root.join("Draft: one.kame");
+        Session::open(&draft).unwrap().insert("The draft.");
+        let mut session = Session::open(&root.join("a.kame")).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+        assert!(crate::leads_within_kame("./Draft: one.kame", true));
+
+        page.app.follow_document_link("./Draft: one.kame");
+
+        assert_eq!(page.app.session.path(), Some(draft.as_path()));
+        assert_eq!(page.app.session.document().blocks[0].text, "The draft.");
+    }
+
     #[test]
     fn deleting_a_document_another_kame_has_open_is_refused() {
         use kame_core::lock::DocumentLock;

@@ -2443,10 +2443,28 @@ fn document_link_at(blocks: &[Block], cursor: &Cursor) -> Option<String> {
     })
 }
 
-/// Whether the file at `path` has a `#` in its name, which a link to it would take for a heading.
-fn named_with_a_hash(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|name| name.to_string_lossy().contains('#'))
+/// Whether a link to the file at `path` would hold a `#`, which it would take for a heading. In a
+/// notebook that's the way from its root, folders and all, and elsewhere only the file's name.
+fn linked_with_a_hash(path: &Path) -> bool {
+    let named = path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().contains('#'));
+    if named {
+        return true;
+    }
+    let Some(notebook) = kame_notebook::Notebook::find(path).ok().flatten() else {
+        return false;
+    };
+    // The root is a real path, and the folder may be reached through a symbolic link.
+    let real = path
+        .parent()
+        .and_then(|folder| folder.canonicalize().ok())
+        .zip(path.file_name())
+        .map(|(folder, name)| folder.join(name));
+    real.as_deref()
+        .unwrap_or(path)
+        .strip_prefix(&notebook.root)
+        .is_ok_and(|inside| inside.to_string_lossy().contains('#'))
 }
 
 /// The target for a link to the file at `path` from the document at `document`. Within the
@@ -7007,7 +7025,7 @@ impl KameApp {
         // couldn't lead to.
         if !path.exists()
             && !kame_sync::logs::log_folder(&path).is_dir()
-            && named_with_a_hash(&path)
+            && linked_with_a_hash(&path)
         {
             self.notice = None;
             self.session.last_error = Some(format!(
@@ -7128,7 +7146,7 @@ impl KameApp {
 
     /// Saves the document at `path`, and says its images and links again from there.
     fn save_to(&mut self, ctx: &egui::Context, path: &Path, close_after: bool) {
-        if named_with_a_hash(path) {
+        if linked_with_a_hash(path) {
             self.session.last_error = Some(format!(
                 "could not save {} — {NO_HASH_IN_NAMES}",
                 path.display()
@@ -10949,6 +10967,50 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
 
         // One already there, which kame didn't name, still opens.
         let theirs = dir.join("e#f.kame");
+        open(&theirs).insert("Theirs.");
+        page.app.open_document(theirs.display().to_string());
+        assert_eq!(page.app.session.path(), Some(theirs.as_path()));
+    }
+
+    /// Inside a notebook, a link to the file goes by the way from its root, folders and all.
+    #[test]
+    fn a_save_as_into_a_notebook_folder_named_with_a_hash_is_refused() {
+        let root = scratch_dir("hash-folder").canonicalize().unwrap();
+        let notebook = root.join("nb");
+        std::fs::create_dir_all(notebook.join("C#")).unwrap();
+        std::fs::write(notebook.join("notebook.yaml"), "").unwrap();
+        let outside = root.join("C#");
+        std::fs::create_dir_all(&outside).unwrap();
+        let here = notebook.join("here.kame");
+        let mut session = open(&here);
+        session.insert("Mine.");
+        let mut page = Headless::new(session);
+        let ctx = page.ctx.clone();
+
+        page.app
+            .save_to(&ctx, &notebook.join("C#/copy.kame"), false);
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        let said = page.app.session.last_error.clone().unwrap_or_default();
+        assert!(said.contains(kame_core::links::NO_HASH_IN_NAMES), "{said}");
+        assert!(!notebook.join("C#/copy.kame").exists());
+        page.app.session.last_error = None;
+        // Nor does Open Path make one there.
+        page.app
+            .open_document(notebook.join("C#/new.kame").display().to_string());
+        assert_eq!(page.app.session.path(), Some(here.as_path()));
+        let said = page.app.session.last_error.clone().unwrap_or_default();
+        assert!(said.contains(kame_core::links::NO_HASH_IN_NAMES), "{said}");
+        assert!(!notebook.join("C#/new.kame").exists());
+        page.app.session.last_error = None;
+
+        // Outside a notebook, only the file's name counts.
+        let elsewhere = outside.join("copy.kame");
+        page.app.save_to(&ctx, &elsewhere, false);
+        assert_eq!(page.app.session.last_error, None);
+        assert_eq!(page.app.session.path(), Some(elsewhere.as_path()));
+
+        // One already in such a folder still opens.
+        let theirs = notebook.join("C#/theirs.kame");
         open(&theirs).insert("Theirs.");
         page.app.open_document(theirs.display().to_string());
         assert_eq!(page.app.session.path(), Some(theirs.as_path()));

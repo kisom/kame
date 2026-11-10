@@ -212,7 +212,8 @@ without making the document read-only.
 
 Open and Save As use the system's file browser. File > Open Path takes a typed path
 instead, with `~` expanded and relative paths resolved beside the current document.
-Neither makes a new file with `#` in its name, which a link to it would take for a heading.
+Neither makes a new file with `#` in its name, which a link to it would take for a heading, nor,
+inside a notebook, one with `#` anywhere in its path from the notebook's folder.
 Save As carries the history, snapshots and properties to the new file and continues
 there, leaving the old file as it was. Images and relative links are said again from
 the new folder, so they lead where they did, all through the history: it isn't an undo

@@ -42,7 +42,7 @@ use crate::layout::reading_order;
 use crate::layout::{
     heading_size_for, place_footnotes, place_marginalia, BlockLayout, FootnotePlacement,
     LayoutConfig, MarginalPlacement, DEFAULT_BODY_SIZE, FOOTNOTE_GAP, FOOTNOTE_LINE_HEIGHT,
-    FOOTNOTE_MARK_EM,
+    FOOTNOTE_MARK_EM, LINK_INK,
 };
 use crate::model::{
     bare_link_ranges, is_script_url, list_labels, list_positions, AcceptedMark, Anchor, Annotation,
@@ -79,6 +79,8 @@ struct Palette {
     dim_veil: Color32,
     error_ink: Color32,
     notice_ink: Color32,
+    /// The words of a link, and a document link's underline.
+    link_ink: Color32,
 }
 
 impl Palette {
@@ -101,6 +103,7 @@ impl Palette {
         dim_veil: Color32::from_rgba_unmultiplied_const(247, 243, 235, 168),
         error_ink: Color32::from_rgb(168, 32, 32),
         notice_ink: Color32::from_rgb(46, 96, 60),
+        link_ink: KAME_LINK_INK,
     };
 
     /// Dark paper with warm light ink.
@@ -122,6 +125,7 @@ impl Palette {
         dim_veil: Color32::from_rgba_unmultiplied_const(30, 28, 25, 168),
         error_ink: Color32::from_rgb(226, 92, 92),
         notice_ink: Color32::from_rgb(120, 180, 130),
+        link_ink: KAME_LINK_INK,
     };
 
     /// The palette for a light or dark surface.
@@ -186,6 +190,13 @@ impl Palette {
             ),
             error_ink: words("red", own.error_ink, &[paper, panel]),
             notice_ink: words("green", own.notice_ink, &[paper, panel]),
+            // A theme with no accent has kame's blue, which is no more sure to read on its paper.
+            link_ink: rgb(legible(
+                theme.colour("accent").unwrap_or(LINK_INK),
+                ink,
+                &[paper],
+                TEXT_CONTRAST,
+            )),
         }
     }
 }
@@ -755,8 +766,8 @@ const LOG_RETURN_SECONDS: f32 = 10.0;
 /// How far up from the bottom of its line a document link's underline sits, as a share
 /// of the line's height.
 const DOCUMENT_LINK_UNDERLINE: f32 = 0.2;
-/// The colour of [`LINK_COLOR`] as egui takes it.
-const DOCUMENT_LINK_INK: Color32 = Color32::from_rgb(59, 130, 246);
+/// kame's own colour for a link, as egui takes it.
+const KAME_LINK_INK: Color32 = Color32::from_rgb(LINK_INK[0], LINK_INK[1], LINK_INK[2]);
 /// What an export or a copy from a view of a newer version's document says it left out.
 const NEWER_LEFT_OUT: &str = "parts written by a newer version of kame were left out";
 
@@ -3336,6 +3347,12 @@ impl KameApp {
         }
     }
 
+    /// The colour of a link's words on the page, as the layout takes it.
+    fn link_ink(&self) -> [u8; 3] {
+        let ink = self.palette.link_ink;
+        [ink.r(), ink.g(), ink.b()]
+    }
+
     /// The theme the page and the interface are in, if kame is following Omarchy's and has read
     /// one.
     fn theme_in_use(&self) -> Option<&theme::Theme> {
@@ -3367,6 +3384,13 @@ impl KameApp {
         // The panels this frame has begun keep the visuals it began with, and kame in the
         // background would otherwise not draw again until its next wake.
         ctx.request_repaint();
+        // A link's colour is shaped into its words, on the page and in the margin and the
+        // footnotes, so what was shaped goes with what was inked.
+        let config = self.renderer.config();
+        self.renderer.set_config(LayoutConfig {
+            link_ink: self.link_ink(),
+            ..config
+        });
         self.layouts.clear();
         self.textures.clear();
         self.annotation_textures.clear();
@@ -5026,7 +5050,7 @@ impl KameApp {
                     let y = rect.bottom() - rect.height() * DOCUMENT_LINK_UNDERLINE;
                     block_painter(index).line_segment(
                         [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                        egui::Stroke::new(1.0, DOCUMENT_LINK_INK),
+                        egui::Stroke::new(1.0, self.palette.link_ink),
                     );
                 }
             }
@@ -7856,6 +7880,7 @@ impl eframe::App for KameApp {
             body_width,
             margin_width,
             hyphenate: self.hyphenate,
+            link_ink: self.link_ink(),
             ..base
         };
         if cfg!(target_os = "linux") {

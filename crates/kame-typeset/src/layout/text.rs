@@ -21,10 +21,12 @@ const BODY_FAMILY: &str = "EB Garamond";
 const HEADING_FAMILY: &str = "Crimson Pro";
 /// Code face; loaded by the caller into the `FontSystem`.
 const CODE_FAMILY: &str = "IBM Plex Mono";
-/// The fixed colour a URL renders in. Chosen to read on both the light and the
-/// dark palette, so it can be baked into the layout without a palette swap
-/// invalidating the layout cache.
-pub const LINK_COLOR: Color = Color::rgb(59, 130, 246);
+/// kame's own colour for a link, on its light and its dark paper: [`LayoutConfig::link_ink`]
+/// unless a theme gives another.
+pub const LINK_INK: [u8; 3] = [59, 130, 246];
+/// [`LINK_INK`] as the layout marks a link's glyphs with it.
+#[cfg(test)]
+pub const LINK_COLOR: Color = Color::rgb(LINK_INK[0], LINK_INK[1], LINK_INK[2]);
 
 /// The widest a code line can be before it wraps after all, so that a block's image has an end.
 /// One past the largest texture a graphics card takes is drawn in several.
@@ -42,6 +44,11 @@ pub struct LayoutConfig {
     /// Whether justified paragraphs can break a word with a drawn hyphen.
     pub hyphenate: bool,
     pub list_indent: f32,
+    /// The colour a link's words are in, which is baked into the layout, so a change to it
+    /// drops what was shaped as [`GlyphRenderer::set_config`] says.
+    ///
+    /// [`GlyphRenderer::set_config`]: crate::render::egui_render::GlyphRenderer::set_config
+    pub link_ink: [u8; 3],
 }
 
 /// The body size every other font-derived size is a ratio of.
@@ -79,6 +86,7 @@ impl LayoutConfig {
             margin_size: body_size * MARGIN_RATIO,
             list_indent: body_size * LIST_INDENT_RATIO,
             hyphenate: true,
+            link_ink: LINK_INK,
         }
     }
 }
@@ -295,6 +303,7 @@ pub fn layout_block_marked_with_align(
         &attrs,
         marks,
         Metrics::new(size * CODE_RATIO, line_height),
+        config.link_ink,
     );
     // Justified text is shaped once on one long line, and kame chooses the lines itself. The engine
     // takes each line as it comes, which leaves wide gaps, and it can't close spaces up.
@@ -809,7 +818,7 @@ fn hang_line(
 
 /// Split the block text into `(text, attrs)` runs at span boundaries, layering
 /// `block.spans` (Bold → `Weight::BOLD`, Italic → `Style::Italic`) over `base`,
-/// and colouring any URL (see [`link_ranges`]) with [`LINK_COLOR`].
+/// and colouring any URL (see [`link_ranges`]) and stored link with `link_ink`.
 ///
 /// Runs are produced in text order and concatenate to exactly `block.text`, so
 /// cosmic-text's offsets stay aligned with the block's byte offsets. Span
@@ -820,7 +829,9 @@ fn styled_spans<'a>(
     base: &Attrs<'a>,
     marks: &[usize],
     code_metrics: Metrics,
+    link_ink: [u8; 3],
 ) -> Vec<(&'a str, Attrs<'a>)> {
+    let link_color = Color::rgb(link_ink[0], link_ink[1], link_ink[2]);
     let text = block.text.as_str();
     if text.is_empty() {
         return vec![(text, base.clone())];
@@ -905,7 +916,7 @@ fn styled_spans<'a>(
                     && span.end >= end
             });
             if is_stored_link || links.iter().any(|(ls, le)| *ls <= start && end <= *le) {
-                attrs = attrs.color(LINK_COLOR);
+                attrs = attrs.color(link_color);
             }
             if marked.contains(&start) {
                 attrs = attrs.letter_spacing(FOOTNOTE_MARK_EM);
@@ -1058,6 +1069,7 @@ dance, on a page, of pen, eye and hand.";
             margin_size: 12.0,
             list_indent: 28.0,
             hyphenate: false,
+            link_ink: crate::layout::LINK_INK,
         }
     }
 
@@ -2214,6 +2226,49 @@ twenty-four twenty-five twenty-six twenty-seven";
         );
         let run = layout.buffer.layout_runs().next().unwrap();
         assert!(run.glyphs.iter().all(|glyph| glyph.color_opt.is_none()));
+    }
+
+    #[test]
+    fn a_link_is_in_the_configs_ink_and_by_default_kames_blue() {
+        let mut fs = FontSystem::new();
+        load_fonts(&mut fs);
+        let mut block = kind_block(BlockKind::Paragraph, "See it at https://example.com now");
+        block.spans = vec![Span {
+            start: 4,
+            end: 6,
+            style: SpanStyle::DocumentLink {
+                target: "a.kame".to_string(),
+            },
+        }];
+        let url = block.text.find("https").unwrap()..block.text.find(" now").unwrap();
+        let mut colours = |config: &LayoutConfig| {
+            let layout = layout_block(&mut fs, &block, config);
+            let mut found = Vec::new();
+            for run in &layout.runs {
+                for glyph in &run.glyphs {
+                    let linked = (4..6).contains(&glyph.start) || url.contains(&glyph.start);
+                    found.push((linked, glyph.color_opt));
+                }
+            }
+            found
+        };
+        let ink = [0x12, 0x34, 0x56];
+        let config = LayoutConfig {
+            link_ink: ink,
+            ..LayoutConfig::with_body_size(16.0)
+        };
+        for (linked, colour) in colours(&config) {
+            let expected = linked.then(|| Color::rgb(0x12, 0x34, 0x56));
+            assert_eq!(colour, expected, "linked: {linked}");
+        }
+        assert_eq!(LayoutConfig::default().link_ink, LINK_INK);
+        assert_eq!(
+            Color::rgb(LINK_INK[0], LINK_INK[1], LINK_INK[2]),
+            LINK_COLOR
+        );
+        for (linked, colour) in colours(&LayoutConfig::default()) {
+            assert_eq!(colour, linked.then_some(LINK_COLOR));
+        }
     }
 
     #[test]

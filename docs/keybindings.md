@@ -179,8 +179,8 @@ Dark mode (`Ctrl-Shift-D`) is separate from these: a persisted preference
 (saved to the config and surviving a restart), not a transient view mode.
 
 On Omarchy, View > Follow Omarchy theme gives the page and everything around it the current
-theme's colours: the paper and the ink, the caret, the selection, the marks and the notes, and the
-menus, the status row and the windows. When the theme is switched, kame changes with it, within a
+theme's colours: the paper and the ink, the caret, the selection, the marks, the notes and the
+links, which take its accent, and the menus, the status row and the windows. When the theme is switched, kame changes with it, within a
 few seconds or as soon as it has the keyboard again. A colour that would be hard to see on the
 theme's paper is taken toward the theme's text colour until it isn't. While a theme is in use, it
 says whether the page is dark, so Dark mode is greyed out and `Ctrl-Shift-D` does nothing; kame

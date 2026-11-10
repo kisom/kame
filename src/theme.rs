@@ -565,6 +565,11 @@ mod tests {
         // the messages have it 35% toward the foreground.
         assert_eq!(palette.error_ink, opaque(0xc88d96));
         assert_eq!(palette.notice_ink, opaque(0xa3be8c));
+        assert_eq!(
+            palette.link_ink,
+            opaque(0x81a1c1),
+            "the accent, 4.64 on the paper"
+        );
     }
 
     #[test]
@@ -592,6 +597,9 @@ mod tests {
         // goes 10% toward the foreground and the green, 2.63 on them, 60%.
         assert_eq!(palette.error_ink, opaque(0xc5153e));
         assert_eq!(palette.notice_ink, opaque(0x476f50));
+        // Latte's accent is 4.34 on its paper, and a link's words take it 5% toward the
+        // foreground.
+        assert_eq!(palette.link_ink, opaque(0x2364e7));
     }
 
     #[test]
@@ -622,6 +630,8 @@ mod tests {
             assert_eq!(palette.footnote_mark, own.footnote_mark);
             assert_eq!(palette.error_ink, own.error_ink);
             assert_eq!(palette.notice_ink, own.notice_ink);
+            // kame's blue, 4.49 on this paper, made legible as a theme's accent would be.
+            assert_eq!(palette.link_ink, opaque(0x4488f6), "{mode}");
         }
     }
 
@@ -653,6 +663,7 @@ mod tests {
                 assert!(contrast(rgb_of(mark), paper) >= 3.0, "{mark:?}");
             }
             assert!(contrast(rgb_of(palette.footnote_mark), paper) >= 4.5);
+            assert!(contrast(rgb_of(palette.link_ink), paper) >= 4.5, "links");
             for ink in [palette.error_ink, palette.notice_ink] {
                 for under in [paper, panel] {
                     assert!(contrast(rgb_of(ink), under) >= 4.5, "{ink:?}");
@@ -982,6 +993,77 @@ mod tests {
         // The frame that draws the interface in kame's own colours, and then the next.
         assert_eq!(delay(&mut page), std::time::Duration::ZERO);
         assert!(delay(&mut page) > wake_in, "nothing to look at");
+    }
+
+    /// kame on a document with a link in it, as it launches with the setting `follow`.
+    fn launch_with_a_link(follow: bool) -> Headless {
+        let folder = test_temp_dir().join(format!("theme-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut session = Session::open(&folder.join("doc.kame")).unwrap();
+        session.insert("See https://example.com for more.");
+        launch_with(
+            session,
+            KameConfig {
+                follow_omarchy: follow,
+                ..KameConfig::default()
+            },
+        )
+    }
+
+    /// What colour the page's link was last laid out in, glyph by glyph.
+    fn link_inks(page: &Headless) -> Vec<Option<Rgb>> {
+        let block = &page.app.session.document().blocks[0];
+        let url = block.text.find("https").unwrap()..block.text.find(" for").unwrap();
+        let layout = page.app.layouts.get(block.id).expect("laid out");
+        let inks: Vec<_> = layout
+            .runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .filter(|glyph| url.contains(&glyph.start))
+            .map(|glyph| glyph.color_opt.map(|c| [c.r(), c.g(), c.b()]))
+            .collect();
+        assert!(!inks.is_empty());
+        inks
+    }
+
+    #[test]
+    fn a_themed_pages_links_are_in_its_accent_and_change_with_it() {
+        put_theme(Some(NORD), Some("1"));
+        let mut page = launch_with_a_link(true);
+        assert!(link_inks(&page)
+            .iter()
+            .all(|ink| *ink == Some(rgb(0x81a1c1))));
+        assert_eq!(
+            page.app.renderer.config().link_ink,
+            rgb(0x81a1c1),
+            "notes too"
+        );
+
+        put_theme(Some(LATTE), Some("2"));
+        wake(&mut page);
+        assert!(link_inks(&page)
+            .iter()
+            .all(|ink| *ink == Some(rgb(0x2364e7))));
+
+        let ctx = page.ctx.clone();
+        page.app.run_menu_action(&ctx, MenuAction::ToggleOmarchy);
+        page.frame(Vec::new());
+        let blue = Some(kame_typeset::layout::LINK_INK);
+        assert!(
+            link_inks(&page).iter().all(|ink| *ink == blue),
+            "kame's own"
+        );
+    }
+
+    #[test]
+    fn kames_own_palettes_keep_links_in_kames_blue() {
+        let blue = Color32::from_rgb(59, 130, 246);
+        assert_eq!(Palette::LIGHT.link_ink, blue);
+        assert_eq!(Palette::DARK.link_ink, blue);
+        put_theme(Some(NORD), Some("1"));
+        let page = launch_with_a_link(false);
+        let blue = Some(kame_typeset::layout::LINK_INK);
+        assert!(link_inks(&page).iter().all(|ink| *ink == blue));
     }
 
     #[test]

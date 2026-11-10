@@ -1344,6 +1344,7 @@ mod tests {
             margin_size: 12.0,
             list_indent: 28.0,
             hyphenate: false,
+            link_ink: crate::layout::LINK_INK,
         }
     }
 
@@ -1372,6 +1373,32 @@ mod tests {
         db.faces()
             .filter(|face| face.families.iter().any(|(name, _)| name == family))
             .collect()
+    }
+
+    #[test]
+    fn a_link_in_a_note_s_column_is_in_the_configs_ink() {
+        let mut renderer = GlyphRenderer::new(LayoutConfig {
+            link_ink: [0x12, 0x34, 0x56],
+            ..config()
+        });
+        let block = Block {
+            id: Uuid::new_v4(),
+            kind: BlockKind::Paragraph,
+            text: "see https://example.com".to_string(),
+            spans: Vec::new(),
+        };
+        let layout = renderer.layout_in_column(&block, 120.0, 12.0);
+        let linked: Vec<_> = layout
+            .runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .filter(|glyph| glyph.start >= "see ".len())
+            .map(|glyph| glyph.color_opt)
+            .collect();
+        assert!(!linked.is_empty());
+        assert!(linked
+            .iter()
+            .all(|colour| *colour == Some(cosmic_text::Color::rgb(0x12, 0x34, 0x56))));
     }
 
     #[test]

@@ -148,7 +148,22 @@ impl Session {
     /// non-fatal warning, and the durable state is reset to match that empty
     /// history.
     pub fn open(path: &Path) -> AppResult<Session> {
-        let mut db = Db::open(path).map_err(|err| open_error(path, err))?;
+        Self::resume(path, Db::open(path).map_err(|err| open_error(path, err))?)
+    }
+
+    /// Opens the document at `path` as [`Session::open`] does, but only one that's there, for
+    /// whatever writes into a document it found earlier: a file that has gone since is an error,
+    /// and none is made in its place, nor anything beside where it was. A file that's there and
+    /// holds no document yet still gets a fresh one.
+    pub fn open_existing(path: &Path) -> AppResult<Session> {
+        Self::resume(
+            path,
+            Db::open_existing(path).map_err(|err| gone_or_open_error(path, err))?,
+        )
+    }
+
+    /// The session for the database opened at `path`, which is all of opening one but the file.
+    fn resume(path: &Path, mut db: Db) -> AppResult<Session> {
         let mut warning = None;
         // Set when the degrade path could not reset the database, which leaves
         // it unable to write rather than merely historyless.
@@ -3889,6 +3904,18 @@ pub fn open_error(path: &Path, err: DbError) -> std::io::Error {
     )
 }
 
+/// What to say of a document that was there and didn't open. If it has gone, that's what went
+/// wrong, whatever SQLite made of it, which depends on when it went.
+fn gone_or_open_error(path: &Path, err: DbError) -> std::io::Error {
+    match path.metadata() {
+        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("cannot open {}: it's no longer there", path.display()),
+        ),
+        _ => open_error(path, err),
+    }
+}
+
 /// Today, as a metadata date.
 pub fn today() -> String {
     iso_date(std::time::SystemTime::now())
@@ -6443,6 +6470,100 @@ mod tests {
             !path.exists(),
             "a failed import must not leave a file behind"
         );
+    }
+
+    /// Everything beside a document that SQLite might have made.
+    fn beside(path: &Path) -> Vec<PathBuf> {
+        ["-wal", "-shm", "-journal"]
+            .iter()
+            .map(|suffix| {
+                let mut side = path.as_os_str().to_owned();
+                side.push(suffix);
+                PathBuf::from(side)
+            })
+            .filter(|side| side.symlink_metadata().is_ok())
+            .collect()
+    }
+
+    #[test]
+    fn opening_an_existing_document_makes_none_where_it_has_gone() {
+        let path = temp_db_path();
+        drop(open(&path));
+        std::fs::remove_file(&path).unwrap();
+        let Err(err) = Session::open_existing(&path) else {
+            panic!("a document was opened where there was none");
+        };
+        assert!(!path.exists(), "a blank document was made where it was");
+        assert_eq!(beside(&path), Vec::<PathBuf>::new());
+        assert_eq!(
+            err.to_string(),
+            format!("cannot open {}: it's no longer there", path.display())
+        );
+    }
+
+    #[test]
+    fn opening_an_existing_document_makes_none_where_there_never_was_one() {
+        let path = temp_db_path();
+        assert!(Session::open_existing(&path).is_err());
+        assert!(!path.exists());
+        assert_eq!(beside(&path), Vec::<PathBuf>::new());
+    }
+
+    /// One that goes once SQLite has the file open fails later and as something else.
+    #[test]
+    fn a_document_that_has_gone_is_said_to_be_gone_whatever_failed() {
+        let path = temp_db_path();
+        let said = |err| gone_or_open_error(&path, err).to_string();
+        let gone = format!("cannot open {}: it's no longer there", path.display());
+        assert_eq!(said(DbError::NoDocument), gone);
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(
+            said(DbError::NoDocument),
+            open_error(&path, DbError::NoDocument).to_string()
+        );
+    }
+
+    /// As `open` gives it: the words, the undo history, where the author was, and somewhere to
+    /// write.
+    #[test]
+    fn an_existing_document_opens_as_any_other() {
+        let path = temp_db_path();
+        {
+            let mut session = open(&path);
+            assert!(session.insert("First."));
+            session.split();
+            assert!(session.insert("Second."));
+            session.save_position(12.0);
+        }
+        let opened = open(&path);
+        let (document, caret, scroll) = (
+            opened.document().clone(),
+            opened.caret,
+            opened.restored_scroll,
+        );
+        let metadata = opened.metadata.clone();
+        drop(opened);
+        let mut session = Session::open_existing(&path).unwrap();
+        assert_eq!(session.document(), &document);
+        assert_eq!(session.caret, caret);
+        assert_eq!(session.restored_scroll, scroll);
+        assert_eq!(session.metadata, metadata);
+        assert!(!session.is_new && !session.save_failed && session.last_error.is_none());
+        assert!(session.undo(), "the history came with it");
+        assert!(session.insert(" More."));
+        let written = session.document().clone();
+        drop(session);
+        assert_eq!(open(&path).document(), &written);
+    }
+
+    /// A file with nothing in it is there, and becomes a document, as it does for `open`.
+    #[test]
+    fn an_existing_empty_file_becomes_a_document() {
+        let path = temp_db_path();
+        std::fs::write(&path, b"").unwrap();
+        let session = Session::open_existing(&path).unwrap();
+        assert!(session.is_new);
+        assert_eq!(session.document().title, "doc");
     }
 
     #[test]

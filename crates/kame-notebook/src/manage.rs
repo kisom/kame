@@ -414,10 +414,15 @@ pub(crate) fn versions_in_logs(path: &Path) -> InLogs {
 /// logs if it's logged. This says no before anything has changed if a change couldn't reach them.
 fn open_to_change(path: &Path, device: &str) -> Result<(Session, Option<Logged>), String> {
     build_from_logs(path).map_err(|err| format!("could not build it: {err}"))?;
-    if !path.exists() {
-        return Err("it's no longer there".to_string());
-    }
-    let session = Session::open(path).map_err(|err| err.to_string())?;
+    // An open that makes no document, since this one may have gone at any time up to now, and a
+    // blank one in its place would be what's changed. Why it failed is looked into afterwards.
+    let session = Session::open_existing(path).map_err(|err| {
+        if path.exists() {
+            err.to_string()
+        } else {
+            "it's no longer there".to_string()
+        }
+    })?;
     if session.newer {
         return Err(NEWER.to_string());
     }

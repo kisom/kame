@@ -559,6 +559,42 @@ fn changes_to_a_closed_logged_document_reach_its_logs() {
     assert_eq!(links_of(&head(&linker).0), ["b.kame"]);
 }
 
+/// Planned with the document there to rewrite, and carried out once it has gone.
+#[test]
+fn a_document_that_went_after_the_move_was_planned_is_left_and_not_made_again() {
+    let (root, nb) = plain_notebook("move-linker-gone");
+    let a = root.join("a.kame");
+    document(&a, "A.");
+    let linker = root.join("linker.kame");
+    document(&linker, "");
+    link(&linker, "one", document_link("a.kame"));
+    let plan = plan_move(
+        &nb,
+        &a,
+        &root.join("b.kame"),
+        None,
+        Locks::NONE,
+        DEVICE,
+        NOW,
+    );
+    std::fs::remove_file(&linker).unwrap();
+
+    let report = carry_out(&nb, plan, None, Locks::NONE, DEVICE, NOW).unwrap();
+    let left: Vec<_> = report
+        .left
+        .iter()
+        .map(|left| (left.relative.as_str(), left.why.as_str()))
+        .collect();
+    assert_eq!(left, [("linker.kame", "it's no longer there")]);
+    assert!(report.changed.is_empty(), "{:?}", report.changed);
+    let mut there: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    there.sort();
+    assert_eq!(there, ["b.kame", "notebook.yaml"]);
+}
+
 #[test]
 fn a_document_with_only_logs_is_changed_too() {
     let (root, nb) = logged_notebook("move-logs-only");

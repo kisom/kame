@@ -91,6 +91,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/commands.rs` — the menu bar's commands, in the one list the menus and the command palette (Ctrl-P) both draw from, the Edit menu's, which run what their keys do, and the palette.
 
+`src/theme.rs` — Omarchy's current theme, which View > Follow Omarchy theme puts on the page and the interface around it: its `colors.toml` read, the palette and egui's look made from it, and a switch taken up while kame runs, leaving exports as they are.
+
 `src/touchpad.rs` — a touchpad on Linux, sped up for a fast swipe and coasting once the fingers lift, as macOS does, before egui sees the frame's input.
 
 `src/external.rs` and `src/macos.rs` — requests from the OS to open a file or quit, and the macOS application events that bring them.

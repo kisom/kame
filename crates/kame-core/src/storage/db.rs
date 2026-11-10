@@ -307,10 +307,14 @@ impl Db {
     }
 
     /// Applies WAL journalling and the schema to an opened connection.
-    fn init(conn: Connection) -> Result<Db, DbError> {
+    fn init(mut conn: Connection) -> Result<Db, DbError> {
         // A second kame instance opening the same document contends for the
         // WAL write lock; retry briefly instead of failing the open outright.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Every transaction here writes, so it takes the write lock as it begins, which waits as
+        // above. Taken at its first write, after a read, SQLite refuses it at once if anything
+        // else has it, a checkpoint for instance, without waiting at all.
+        conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
 
         // `PRAGMA journal_mode` returns the resulting mode as a row, so it has
         // to be read rather than executed. An in-memory database reports
@@ -1995,6 +1999,45 @@ mod tests {
             .unwrap()
             .record_edit(&doc, &insert_op(0))
             .unwrap();
+    }
+
+    /// An edit takes the write lock before it reads, so that another connection holding it for a
+    /// moment is waited for, as the busy timeout says. Asked for only at the first write, after a
+    /// read, SQLite refuses it at once without asking the busy handler. These are the writes that
+    /// read first.
+    #[test]
+    fn an_edit_waits_for_another_connection_holding_the_write_lock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let path = temp_db_path();
+        let mut db = Db::open(&path).unwrap();
+        let doc = sample_document();
+        db.save_document(&doc).unwrap();
+        type Write = fn(&mut Db, &Document) -> Result<(), DbError>;
+        let writes: [(&str, Write); 2] = [
+            ("record_edit", |db, doc| {
+                db.record_edit(doc, &insert_op(0)).map(|_| ())
+            }),
+            ("forget_last_edit", |db, doc| db.forget_last_edit(doc, 0)),
+        ];
+        for (name, write) in writes {
+            let holder = Connection::open(&path).unwrap();
+            holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let asked = Arc::new(AtomicUsize::new(0));
+            {
+                let asked = asked.clone();
+                // What the busy timeout does, except that the wait ends with the holder letting go.
+                db.conn
+                    .busy_handler(Some(move |_| {
+                        asked.fetch_add(1, Ordering::SeqCst);
+                        holder.execute_batch("COMMIT").is_ok()
+                    }))
+                    .unwrap();
+            }
+            write(&mut db, &doc).unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert_eq!(asked.load(Ordering::SeqCst), 1, "{name}");
+        }
     }
 
     /// A history said again changes each snapshot named in place, keeping its label and time, and

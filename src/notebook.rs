@@ -1161,8 +1161,10 @@ impl KameApp {
             .into_iter()
             .filter(|at| self.nb.listing[*at].entry.kind == Kind::Document)
             .collect();
+        // A `#` would be taken for a heading, so what's typed with one can't be a new name, and
+        // making the name before it would be another than was asked for.
         let creatable = match (&self.nb.notebook, documents.is_empty(), jump.query.trim()) {
-            (Some(notebook), true, typed) if !typed.is_empty() => {
+            (Some(notebook), true, typed) if !typed.is_empty() && !typed.contains('#') => {
                 match notebook.follow(typed, &notebook.root.join(kame_notebook::INDEX)) {
                     Follow::Create(path) => Some(path),
                     _ => None,
@@ -3049,6 +3051,33 @@ mod tests {
         assert_eq!(page.app.session.path(), Some(theirs.as_path()));
         page.frame(Vec::new());
         assert_eq!(root_of(&page), Some(root.join("inner")));
+    }
+
+    /// A name can't hold `#`, and making `fresh.kame` for `fresh#part` would be a different name.
+    #[test]
+    fn the_jump_list_offers_to_create_no_name_with_a_hash() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-jump-hash")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let mut session = Session::open(&root.join("a.kame")).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+
+        page.app.toggle_jump();
+        type_text(&mut page, "fresh");
+        page.frame(Vec::new());
+        assert!(page.can_press("Create"), "a name with no # is offered");
+        type_text(&mut page, "#part");
+        page.frame(Vec::new());
+        assert!(!page.sees("Create"));
+        press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(!root.join("fresh.kame").exists());
+        assert!(!root.join("fresh#part.kame").exists());
+        assert_eq!(page.app.session.path(), Some(root.join("a.kame").as_path()));
     }
 
     /// A notebook in `name` with `a.kame` open, and `essay.kame` just made by following a link to

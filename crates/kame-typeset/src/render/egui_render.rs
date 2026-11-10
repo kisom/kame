@@ -12,7 +12,7 @@ use std::ops::Range;
 use cosmic_text::{fontdb, FontSystem};
 use egui::{
     ColorImage, Context, Event, FontData, FontFamily, Key, Modifiers, Pos2, Rect, TextureHandle,
-    TextureOptions, Vec2,
+    TextureOptions,
 };
 pub use kame_core::text::{next_boundary, next_word, prev_boundary, prev_word, word_at};
 
@@ -133,29 +133,164 @@ pub fn install_fonts(ctx: &Context) {
 /// cache grows for the lifetime of the process.
 const RASTERIZES_PER_CACHE_CLEAR: u32 = 512;
 
-/// A block's uploaded glyph texture plus the ink offset returned by
+/// A block's uploaded glyph image plus the ink offset returned by
 /// [`GlyphAtlas::rasterize_premultiplied`].
 ///
 /// The image is cropped to the glyph ink, so it must be drawn at
 /// `block_origin + (left, top)` — never at the block origin itself. The image
 /// and its offset are in physical pixels, rasterized at `scale` pixels per point.
+///
+/// It is one texture, unless the image is wider or taller than the largest texture the
+/// graphics card takes, when it is as many as it takes, each no larger than that, which
+/// tile the image.
 pub struct BlockTexture {
-    pub texture: TextureHandle,
+    tiles: Vec<Tile>,
+    size: [usize; 2],
+    /// The largest texture it was drawn for, on each side.
+    limit: usize,
     pub left: i32,
     pub top: i32,
     pub scale: f32,
+}
+
+/// One texture of a block's image, and the columns and rows of the image it holds.
+struct Tile {
+    texture: TextureHandle,
+    columns: Range<usize>,
+    rows: Range<usize>,
 }
 
 impl BlockTexture {
     /// Screen-space quad, in points, for a block whose layout origin (the
     /// top-left of its layout box, Y down) is `origin`.
     pub fn rect(&self, origin: Pos2) -> Rect {
-        pixel_aligned_quad(
-            origin,
-            (self.left, self.top),
-            self.texture.size(),
-            self.scale,
-        )
+        pixel_aligned_quad(origin, (self.left, self.top), self.size, self.scale)
+    }
+
+    /// The width and height of its image, in physical pixels.
+    pub fn size(&self) -> [usize; 2] {
+        self.size
+    }
+
+    /// Its textures, row by row, which are new whenever its image is uploaded whole.
+    pub fn texture_ids(&self) -> Vec<egui::TextureId> {
+        self.tiles.iter().map(|tile| tile.texture.id()).collect()
+    }
+
+    /// Each of its textures that falls within `visible`, and the quad, in points, that draws
+    /// it for a block whose layout origin is `origin`. The quads tile [`Self::rect`].
+    pub fn pieces(
+        &self,
+        origin: Pos2,
+        visible: Rect,
+    ) -> impl Iterator<Item = (egui::TextureId, Rect)> + '_ {
+        self.tiles
+            .iter()
+            .map(move |tile| {
+                let at = (
+                    self.left + tile.columns.start as i32,
+                    self.top + tile.rows.start as i32,
+                );
+                let size = [tile.columns.len(), tile.rows.len()];
+                (
+                    tile.texture.id(),
+                    pixel_aligned_quad(origin, at, size, self.scale),
+                )
+            })
+            .filter(move |(_, rect)| rect.intersects(visible))
+    }
+
+    /// Paints the block at `origin` with `painter`, leaving out what is outside its clip, and
+    /// returns [`Self::rect`].
+    pub fn paint(&self, painter: &egui::Painter, origin: Pos2) -> Rect {
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        for (texture, rect) in self.pieces(origin, painter.clip_rect()) {
+            painter.image(texture, rect, uv, egui::Color32::WHITE);
+        }
+        self.rect(origin)
+    }
+
+    /// Whether its textures are those an image of its size has where the largest texture is
+    /// `limit`.
+    fn tiled_for(&self, limit: usize) -> bool {
+        let fits = |limit: usize| self.size[0] <= limit && self.size[1] <= limit;
+        self.limit == limit || (fits(self.limit) && fits(limit))
+    }
+
+    /// Lays `patch`, a band of the image as wide as it, into the textures it falls in.
+    fn set_patch(&mut self, patch: Patch) {
+        if let [tile] = self.tiles.as_mut_slice() {
+            tile.texture
+                .set_partial([0, patch.top], patch.image, TextureOptions::NEAREST);
+            return;
+        }
+        let rows = patch.top..patch.top + patch.image.size[1];
+        for tile in &mut self.tiles {
+            let (top, bottom) = (rows.start.max(tile.rows.start), rows.end.min(tile.rows.end));
+            if top >= bottom {
+                continue;
+            }
+            let part = patch.image.region_by_pixels(
+                [tile.columns.start, top - patch.top],
+                [tile.columns.len(), bottom - top],
+            );
+            tile.texture
+                .set_partial([0, top - tile.rows.start], part, TextureOptions::NEAREST);
+        }
+    }
+}
+
+/// The largest texture `ctx` says the graphics card takes, on each side.
+fn largest_texture(ctx: &Context) -> usize {
+    ctx.input(|input| input.max_texture_side).max(1)
+}
+
+/// Draws `painting` and uploads it as `name`, in as many textures as the largest one `ctx`
+/// says the graphics card takes needs, each no larger than that. Most blocks are one.
+fn upload(
+    ctx: &Context,
+    renderer: &mut GlyphRenderer,
+    name: String,
+    painting: &Painting,
+) -> BlockTexture {
+    let limit = largest_texture(ctx);
+    let size = painting.size();
+    let ((left, top), tiles) = if size[0] <= limit && size[1] <= limit {
+        let (image, left, top) = renderer.draw(painting);
+        let tile = Tile {
+            columns: 0..image.size[0],
+            rows: 0..image.size[1],
+            texture: ctx.load_texture(name, image, TextureOptions::NEAREST),
+        };
+        ((left, top), vec![tile])
+    } else {
+        let mut tiles = Vec::new();
+        for top in (0..size[1]).step_by(limit) {
+            let rows = top..(top + limit).min(size[1]);
+            for columns in (0..size[0]).step_by(limit) {
+                let columns = columns..(columns + limit).min(size[0]);
+                let image = renderer.draw_part(painting, columns.clone(), rows.clone());
+                let texture = ctx.load_texture(
+                    format!("{name} at {},{}", columns.start, rows.start),
+                    image,
+                    TextureOptions::NEAREST,
+                );
+                tiles.push(Tile {
+                    texture,
+                    columns,
+                    rows: rows.clone(),
+                });
+            }
+        }
+        (painting.offset(), tiles)
+    };
+    BlockTexture {
+        tiles,
+        size,
+        limit,
+        left,
+        top,
+        scale: painting.scale(),
     }
 }
 
@@ -165,12 +300,17 @@ impl BlockTexture {
 ///
 /// The origin is snapped to a whole physical pixel. Scroll offsets and the
 /// centred page put it anywhere, and at a fractional position a nearest-sampled
-/// quad drops or doubles rows and columns even at the right size.
+/// quad drops or doubles rows and columns even at the right size. Its far edges
+/// are snapped the same way, so the quads of textures that tile an image meet
+/// exactly.
 fn pixel_aligned_quad(origin: Pos2, (left, top): (i32, i32), size: [usize; 2], scale: f32) -> Rect {
     let snap = |at: f32, offset: i32| ((at * scale).round() + offset as f32) / scale;
-    Rect::from_min_size(
+    Rect::from_min_max(
         Pos2::new(snap(origin.x, left), snap(origin.y, top)),
-        Vec2::new(size[0] as f32 / scale, size[1] as f32 / scale),
+        Pos2::new(
+            snap(origin.x, left + size[0] as i32),
+            snap(origin.y, top + size[1] as i32),
+        ),
     )
 }
 
@@ -253,6 +393,7 @@ impl TextureCache {
         wanted: &Wanted,
     ) {
         let scale = ctx.pixels_per_point();
+        let limit = largest_texture(ctx);
         let mut live = HashSet::with_capacity(wanted.keep.len());
         for (at, (block, layout)) in blocks.iter().zip(layouts.iter().copied()).enumerate() {
             let draw = wanted.draw.contains(&at);
@@ -265,7 +406,9 @@ impl TextureCache {
             let block_highlights = highlights.get(&block.id).map(Vec::as_slice).unwrap_or(&[]);
             let fingerprint = block_fingerprint(block, block_highlights);
             let up_to_date = self.entries.get(&block.id).is_some_and(|cached| {
-                cached.fingerprint == fingerprint && cached.block.scale == scale
+                cached.fingerprint == fingerprint
+                    && cached.block.scale == scale
+                    && cached.block.tiled_for(limit)
             });
             if up_to_date {
                 continue;
@@ -273,37 +416,27 @@ impl TextureCache {
 
             let painting = renderer.painting(layout, ink, background, block_highlights, scale);
             // An edit usually changes a few of a block's lines, and only those rows are drawn
-            // again and uploaded into the texture it has.
-            if let Some(cached) = self.entries.get_mut(&block.id) {
+            // again and uploaded into the textures it has.
+            if let Some(cached) = self
+                .entries
+                .get_mut(&block.id)
+                .filter(|cached| cached.block.tiled_for(limit))
+            {
                 if let Some(patches) = renderer.redraw(&cached.painting, &painting) {
                     for patch in patches {
-                        cached.block.texture.set_partial(
-                            [0, patch.top],
-                            patch.image,
-                            TextureOptions::NEAREST,
-                        );
+                        cached.block.set_patch(patch);
                     }
                     cached.fingerprint = fingerprint;
                     cached.painting = painting;
                     continue;
                 }
             }
-            let (image, left, top) = renderer.draw(&painting);
-            let texture = ctx.load_texture(
-                format!("kame-block-{}", block.id),
-                image,
-                TextureOptions::NEAREST,
-            );
+            let texture = upload(ctx, renderer, format!("kame-block-{}", block.id), &painting);
             self.entries.insert(
                 block.id,
                 CachedTexture {
                     fingerprint,
-                    block: BlockTexture {
-                        texture,
-                        left,
-                        top,
-                        scale,
-                    },
+                    block: texture,
                     painting,
                 },
             );
@@ -504,11 +637,11 @@ impl AnnotationTextureCache {
             return;
         }
         let scale = ctx.pixels_per_point();
+        let limit = largest_texture(ctx);
         let fingerprint = annotation_fingerprint(text, width, size, scale);
-        let up_to_date = self
-            .entries
-            .get(&annotation_id)
-            .is_some_and(|cached| cached.fingerprint == fingerprint);
+        let up_to_date = self.entries.get(&annotation_id).is_some_and(|cached| {
+            cached.fingerprint == fingerprint && cached.block.tiled_for(limit)
+        });
         if up_to_date {
             return;
         }
@@ -521,26 +654,18 @@ impl AnnotationTextureCache {
         };
         let layout = renderer.layout_in_column(&block, width, size);
         let body_height = layout.height;
-        let (image, left, top) = renderer.rasterize(&layout, color, background, &[], scale);
-        if image.size[0] == 0 || image.size[1] == 0 {
-            self.entries.remove(&annotation_id);
-            return;
-        }
-        let texture = ctx.load_texture(
+        let painting = renderer.painting(&layout, color, background, &[], scale);
+        let texture = upload(
+            ctx,
+            renderer,
             format!("kame-annotation-{annotation_id}"),
-            image,
-            TextureOptions::NEAREST,
+            &painting,
         );
         self.entries.insert(
             annotation_id,
             AnnotationEntry {
                 fingerprint,
-                block: BlockTexture {
-                    texture,
-                    left,
-                    top,
-                    scale,
-                },
+                block: texture,
                 height: body_height,
             },
         );
@@ -734,6 +859,18 @@ impl GlyphRenderer {
     pub fn draw(&mut self, painting: &Painting) -> (ColorImage, i32, i32) {
         self.atlas
             .draw_premultiplied(&mut self.font_system, painting)
+    }
+
+    /// The pixels of the image of `painting` in `columns` and `rows`. See
+    /// [`GlyphAtlas::draw_part_premultiplied`].
+    pub fn draw_part(
+        &mut self,
+        painting: &Painting,
+        columns: Range<usize>,
+        rows: Range<usize>,
+    ) -> ColorImage {
+        self.atlas
+            .draw_part_premultiplied(&mut self.font_system, painting, columns, rows)
     }
 
     /// The bands of `before`'s image that make it `after`'s, or `None` if it must be drawn
@@ -1474,7 +1611,7 @@ mod tests {
         assert_eq!(cache.len(), 2);
 
         let texture = cache.get(blocks[0].id).expect("first block texture");
-        let [width, height] = texture.texture.size();
+        let [width, height] = texture.size();
         assert!(width > 1 && height > 1, "texture has no ink");
         // The quad starts at the block origin plus the ink offset, so its
         // top-left is the placed ink rectangle, not the block box.
@@ -1546,26 +1683,26 @@ mod tests {
 
         sync(&mut cache, &mut renderer);
         let first = cache.get(blocks[0].id).expect("first frame texture");
-        let first_size = first.texture.size();
-        let first_id = first.texture.id();
+        let first_size = first.size();
+        let first_id = first.texture_ids()[0];
 
         set_scale(&ctx, 1.5);
         sync(&mut cache, &mut renderer);
         let scaled = cache.get(blocks[0].id).expect("scaled texture");
-        assert_ne!(scaled.texture.id(), first_id, "kept the 1x texture");
+        assert_ne!(scaled.texture_ids()[0], first_id, "kept the 1x texture");
         assert!(
-            scaled.texture.size()[0] > first_size[0],
+            scaled.size()[0] > first_size[0],
             "the physical texture should be larger than the 1x one"
         );
         assert_eq!(scaled.scale, 1.5);
         let origin = Pos2::new(100.0, 50.0);
         let quad = scaled.rect(origin);
-        assert!((quad.width() * 1.5 - scaled.texture.size()[0] as f32).abs() < 1e-3);
+        assert!((quad.width() * 1.5 - scaled.size()[0] as f32).abs() < 1e-3);
 
         // An unchanged scale is still a cache hit.
-        let stable_id = scaled.texture.id();
+        let stable_id = scaled.texture_ids()[0];
         sync(&mut cache, &mut renderer);
-        assert_eq!(cache.get(blocks[0].id).unwrap().texture.id(), stable_id);
+        assert_eq!(cache.get(blocks[0].id).unwrap().texture_ids()[0], stable_id);
     }
 
     #[test]
@@ -1588,14 +1725,14 @@ mod tests {
         };
 
         sync(&mut cache, &mut renderer);
-        let first_size = cache.get(id).expect("first texture").texture.size();
+        let first_size = cache.get(id).expect("first texture").size();
         let first_height = cache.body_height(id).expect("first height");
 
         set_scale(&ctx, 2.0);
         sync(&mut cache, &mut renderer);
         let scaled = cache.get(id).expect("scaled texture");
         assert!(
-            scaled.texture.size()[0] > first_size[0],
+            scaled.size()[0] > first_size[0],
             "the annotation kept its 1x texture"
         );
         assert_eq!(scaled.scale, 2.0);
@@ -1621,7 +1758,7 @@ mod tests {
             &HashMap::new(),
             &Wanted::all(blocks.len()),
         );
-        let first_size = cache.get(blocks[0].id).unwrap().texture.size();
+        let first_size = cache.get(blocks[0].id).unwrap().size();
 
         blocks[0].text = "Hello, much longer line".to_string();
         layouts = blocks.iter().map(|b| renderer.layout(b)).collect();
@@ -1637,7 +1774,7 @@ mod tests {
             &Wanted::all(blocks.len()),
         );
         assert_ne!(
-            cache.get(blocks[0].id).unwrap().texture.size(),
+            cache.get(blocks[0].id).unwrap().size(),
             first_size,
             "a changed block must be re-rasterized"
         );
@@ -1695,7 +1832,7 @@ mod tests {
             (layouts, uploads)
         };
         let (_, delta) = sync(&mut cache, &mut renderer, &blocks);
-        let id = cache.get(blocks[0].id).unwrap().texture.id();
+        let id = cache.get(blocks[0].id).unwrap().texture_ids()[0];
         let [whole] = delta[&id].as_slice() else {
             panic!("one upload of the new texture");
         };
@@ -1707,7 +1844,7 @@ mod tests {
         blocks[0].text.insert(at, 'x');
         let (layouts, delta) = sync(&mut cache, &mut renderer, &blocks);
         let texture = cache.get(blocks[0].id).unwrap();
-        assert_eq!(texture.texture.id(), id, "the texture is kept");
+        assert_eq!(texture.texture_ids()[0], id, "the texture is kept");
         let parts = &delta[&id];
         let mut rows = 0;
         for part in parts {
@@ -1728,6 +1865,422 @@ mod tests {
             drawn.pixels == image.pixels,
             "the bands make the whole image"
         );
+    }
+
+    /// A code block of `lines` lines.
+    fn code(lines: usize) -> Block {
+        let text: Vec<String> = (0..lines).map(|n| format!("let line_{n} = {n};")).collect();
+        Block {
+            kind: BlockKind::Code { language: None },
+            ..paragraph(&text.join("\n"))
+        }
+    }
+
+    /// `block` with the last digit of line `line`'s number changed, which changes the ink of
+    /// that line and no other, and leaves the image its size.
+    fn with_line_changed(block: &Block, line: usize) -> Block {
+        let mut lines: Vec<String> = block.text.split('\n').map(str::to_string).collect();
+        let at = lines[line].rfind(|c: char| c.is_ascii_digit()).unwrap();
+        let digit = lines[line].as_bytes()[at] - b'0';
+        lines[line].replace_range(at..at + 1, &((digit + 1) % 10).to_string());
+        Block {
+            text: lines.join("\n"),
+            ..block.clone()
+        }
+    }
+
+    /// A code block about `times` times as tall as the largest texture, at `scale`.
+    fn code_times_the_limit(renderer: &mut GlyphRenderer, ctx: &Context, times: f32) -> Block {
+        let ten = renderer.layout(&code(10));
+        let pitch = (ten.lines[1].y - ten.lines[0].y) * ctx.pixels_per_point();
+        code((times * limit(ctx) as f32 / pitch).ceil() as usize)
+    }
+
+    /// The largest texture egui says the graphics card takes, on each side.
+    fn limit(ctx: &Context) -> usize {
+        ctx.input(|input| input.max_texture_side)
+    }
+
+    /// Makes the largest texture the graphics card takes `limit`, as egui says it. No pass is
+    /// run, as egui's own text needs a larger one than some of these.
+    fn set_limit(ctx: &Context, limit: usize) {
+        ctx.input_mut(|input| input.max_texture_side = limit);
+    }
+
+    /// Every texture kame has given egui is within the largest the graphics card takes. egui's
+    /// own, for its text, was made for the limit it had when it was made.
+    fn assert_every_texture_fits(ctx: &Context) {
+        let limit = limit(ctx);
+        let textures = ctx.tex_manager();
+        let textures = textures.read();
+        let kame = textures
+            .allocated()
+            .filter(|(_, meta)| meta.name.starts_with("kame-"));
+        for (_, meta) in kame {
+            let [width, height] = meta.size;
+            assert!(
+                width <= limit && height <= limit,
+                "{} is {width}x{height}, over {limit}",
+                meta.name
+            );
+        }
+    }
+
+    /// What a graphics card would hold of each texture, from what it was given.
+    type Held = HashMap<egui::TextureId, ColorImage>;
+
+    /// What egui was asked to upload since it was last asked, laid over `held`: the textures
+    /// uploaded whole, and those uploaded in part. Each texture uploaded whole is within the
+    /// largest there can be, and each part within its texture.
+    fn upload_onto(
+        ctx: &Context,
+        held: &mut Held,
+    ) -> (HashSet<egui::TextureId>, HashSet<egui::TextureId>) {
+        let limit = limit(ctx);
+        let mut delta = ctx.tex_manager().write().take_delta();
+        let (mut whole, mut partly) = (HashSet::new(), HashSet::new());
+        for (id, deltas) in delta.set.drain() {
+            for upload in deltas.into_vec() {
+                let egui::ImageData::Color(image) = &upload.image;
+                let [width, height] = image.size;
+                let Some([x, y]) = upload.pos else {
+                    assert!(width <= limit && height <= limit, "{width}x{height}");
+                    held.insert(id, (**image).clone());
+                    whole.insert(id);
+                    continue;
+                };
+                let texture = held.get_mut(&id).expect("a part of a texture there is");
+                assert!(x + width <= texture.size[0] && y + height <= texture.size[1]);
+                for row in 0..height {
+                    let to = (y + row) * texture.size[0] + x;
+                    texture.pixels[to..to + width]
+                        .copy_from_slice(&image.pixels[row * width..(row + 1) * width]);
+                }
+                partly.insert(id);
+            }
+        }
+        delta.clear();
+        (whole, partly)
+    }
+
+    /// The image `texture`'s textures make, as `held` has them, laid where they're drawn. They
+    /// cover it once, with nothing left over.
+    fn stacked(texture: &BlockTexture, held: &Held) -> ColorImage {
+        let [width, height] = texture.size();
+        let mut image = ColorImage::filled([width, height], egui::Color32::from_rgb(255, 0, 255));
+        let mut covered = 0;
+        for tile in &texture.tiles {
+            let part = &held[&tile.texture.id()];
+            assert_eq!(part.size, [tile.columns.len(), tile.rows.len()]);
+            for (row, y) in tile.rows.clone().enumerate() {
+                let to = y * width + tile.columns.start;
+                let from = row * part.size[0];
+                image.pixels[to..to + part.size[0]]
+                    .copy_from_slice(&part.pixels[from..from + part.size[0]]);
+            }
+            covered += part.size[0] * part.size[1];
+        }
+        assert_eq!(covered, width * height, "the textures cover the image once");
+        image
+    }
+
+    /// Draws `blocks` into `cache` as the page does, and lays what was uploaded over `held`.
+    /// Returns their layouts and what [`upload_onto`] does.
+    fn sync_onto(
+        ctx: &Context,
+        renderer: &mut GlyphRenderer,
+        cache: &mut TextureCache,
+        blocks: &[Block],
+        held: &mut Held,
+    ) -> (
+        Vec<BlockLayout>,
+        HashSet<egui::TextureId>,
+        HashSet<egui::TextureId>,
+    ) {
+        let layouts: Vec<BlockLayout> = blocks.iter().map(|b| renderer.layout(b)).collect();
+        let refs: Vec<&BlockLayout> = layouts.iter().collect();
+        cache.sync(
+            ctx,
+            renderer,
+            blocks,
+            &refs,
+            [10, 10, 10],
+            [255, 255, 255],
+            &HashMap::new(),
+            &Wanted::all(blocks.len()),
+        );
+        assert_every_texture_fits(ctx);
+        let (whole, partly) = upload_onto(ctx, held);
+        (layouts, whole, partly)
+    }
+
+    /// The image of `block`'s texture, as the textures egui was given make it, is the one
+    /// drawing `layout` whole in one image gives, pixel for pixel, at the same place.
+    fn assert_drawn_as_whole(
+        ctx: &Context,
+        renderer: &mut GlyphRenderer,
+        texture: &BlockTexture,
+        layout: &BlockLayout,
+        held: &Held,
+    ) {
+        let scale = ctx.pixels_per_point();
+        let (whole, left, top) =
+            renderer.rasterize(layout, [10, 10, 10], [255, 255, 255], &[], scale);
+        assert_eq!((texture.left, texture.top), (left, top));
+        let image = stacked(texture, held);
+        assert_eq!(image.size, whole.size);
+        assert!(image.pixels == whole.pixels, "the textures make the image");
+    }
+
+    /// The row of `layout`'s image at `scale` that the middle of line `line` falls on.
+    fn row_of_line(layout: &BlockLayout, texture: &BlockTexture, line: usize, scale: f32) -> usize {
+        let line = layout.lines[line];
+        ((line.y + line.height * 0.5) * scale) as usize - texture.top as usize
+    }
+
+    /// The line of `layout` whose box the image's row `row` falls in.
+    fn line_at_row(layout: &BlockLayout, texture: &BlockTexture, row: usize, scale: f32) -> usize {
+        let y = (row as i32 + texture.top) as f32 / scale;
+        layout
+            .lines
+            .iter()
+            .position(|line| line.y <= y && y < line.y + line.height)
+            .expect("a line there")
+    }
+
+    /// A code block about two and a half times as tall as the largest texture, at 2x, is drawn
+    /// in three textures, each within it, which make the image one texture would have held.
+    #[test]
+    fn a_block_taller_than_the_largest_texture_is_drawn_in_bands() {
+        let ctx = Context::default();
+        set_scale(&ctx, 2.0);
+        let limit = limit(&ctx);
+        let mut renderer = GlyphRenderer::new(config());
+        let blocks = vec![code_times_the_limit(&mut renderer, &ctx, 2.5)];
+        let mut cache = TextureCache::new();
+        let mut held = Held::new();
+        let (layouts, whole, _) = sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        let [width, height] = texture.size();
+        assert!(height > 2 * limit && height <= 3 * limit, "{height} rows");
+        let ids = texture.texture_ids();
+        assert_eq!(ids.len(), 3, "three bands");
+        assert_eq!(whole, ids.iter().copied().collect());
+        let heights: Vec<usize> = texture.tiles.iter().map(|tile| tile.rows.len()).collect();
+        assert_eq!(heights[..2], [limit, limit]);
+        assert_eq!(heights.iter().sum::<usize>(), height);
+        assert!(texture.tiles.iter().all(|tile| tile.columns == (0..width)));
+        assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
+    }
+
+    /// The bands' quads meet with nothing between them and nothing doubled, wherever the block
+    /// is, and a band wholly off the screen isn't painted.
+    #[test]
+    fn the_bands_of_a_tall_block_meet_exactly_and_only_those_on_screen_are_painted() {
+        let ctx = Context::default();
+        let mut renderer = GlyphRenderer::new(config());
+        for scale in [1.0, 1.5, 2.0] {
+            set_scale(&ctx, scale);
+            let blocks = vec![code_times_the_limit(&mut renderer, &ctx, 2.5)];
+            let mut cache = TextureCache::new();
+            sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut Held::new());
+            let texture = cache.get(blocks[0].id).unwrap();
+            let origin = Pos2::new(100.3, 50.7);
+            let whole = texture.rect(origin);
+            let pieces: Vec<_> = texture.pieces(origin, Rect::EVERYTHING).collect();
+            assert_eq!(pieces.len(), 3);
+            assert_eq!(pieces[0].1.min, whole.min);
+            assert_eq!(pieces[2].1.max, whole.max);
+            for (piece, tile) in pieces.iter().zip(&texture.tiles) {
+                assert_eq!((piece.1.min.x, piece.1.max.x), (whole.min.x, whole.max.x));
+                assert!((piece.1.height() * scale - tile.rows.len() as f32).abs() < 1e-3);
+                let on_grid =
+                    |points: f32| (points * scale - (points * scale).round()).abs() < 1e-3;
+                assert!(on_grid(piece.1.min.y) && on_grid(piece.1.max.y));
+            }
+            for pair in pieces.windows(2) {
+                assert_eq!(
+                    pair[0].1.max.y, pair[1].1.min.y,
+                    "the bands meet at {scale}x"
+                );
+            }
+            let middle = pieces[1].1.shrink2(egui::Vec2::new(0.0, 1.0));
+            let ids = texture.texture_ids();
+            assert_eq!(
+                texture.pieces(origin, middle).collect::<Vec<_>>(),
+                vec![(ids[1], pieces[1].1)],
+                "only the band on the screen"
+            );
+        }
+    }
+
+    /// An edit to a line in the second band uploads only into that band, and only the rows
+    /// changed.
+    #[test]
+    fn an_edit_in_one_band_of_a_tall_block_uploads_only_into_that_band() {
+        let ctx = Context::default();
+        set_scale(&ctx, 2.0);
+        let limit = limit(&ctx);
+        let mut renderer = GlyphRenderer::new(config());
+        let mut blocks = vec![code_times_the_limit(&mut renderer, &ctx, 2.5)];
+        let mut cache = TextureCache::new();
+        let mut held = Held::new();
+        let (layouts, _, _) = sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let ids = cache.get(blocks[0].id).unwrap().texture_ids();
+        let texture = cache.get(blocks[0].id).unwrap();
+        let line = line_at_row(&layouts[0], texture, limit + limit / 2, 2.0);
+        assert!(row_of_line(&layouts[0], texture, line, 2.0) > limit);
+
+        blocks[0] = with_line_changed(&blocks[0], line);
+        let (layouts, whole, partly) =
+            sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        assert_eq!(texture.texture_ids(), ids, "the textures are kept");
+        assert!(whole.is_empty(), "nothing is uploaded whole");
+        assert_eq!(partly, HashSet::from([ids[1]]), "only the second band");
+        assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
+    }
+
+    /// An edit to a line whose ink crosses from one band into the next uploads into both.
+    #[test]
+    fn an_edit_across_two_bands_uploads_into_both() {
+        let ctx = Context::default();
+        set_scale(&ctx, 2.0);
+        let mut renderer = GlyphRenderer::new(config());
+        let mut blocks = vec![code(60)];
+        // A row partway down with ink on it and on the row above, to put a boundary between.
+        let layout = renderer.layout(&blocks[0]);
+        let (image, _, _) = renderer.rasterize(&layout, [10, 10, 10], [255, 255, 255], &[], 2.0);
+        let [width, height] = image.size;
+        let inked = |x: usize, y: usize| image.pixels[y * width + x].a() > 0;
+        let boundary = (height / 3..height / 2)
+            .find(|y| (0..width).any(|x| inked(x, y - 1) && inked(x, *y)))
+            .expect("a glyph a row runs through");
+        set_limit(&ctx, boundary);
+
+        let mut cache = TextureCache::new();
+        let mut held = Held::new();
+        let (layouts, _, _) = sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        let ids = texture.texture_ids();
+        assert_eq!(ids.len(), 3);
+        let line = line_at_row(&layouts[0], texture, boundary, 2.0);
+
+        blocks[0] = with_line_changed(&blocks[0], line);
+        let (layouts, whole, partly) =
+            sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        assert!(whole.is_empty());
+        assert_eq!(partly, HashSet::from([ids[0], ids[1]]));
+        assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
+    }
+
+    /// A block exactly as tall as the largest texture is one texture, and a pixel taller is
+    /// two, the second a row tall.
+    #[test]
+    fn a_block_at_the_largest_texture_is_one_and_a_pixel_over_is_two() {
+        let ctx = Context::default();
+        set_scale(&ctx, 2.0);
+        let mut renderer = GlyphRenderer::new(config());
+        let blocks = vec![code(20)];
+        let layout = renderer.layout(&blocks[0]);
+        let (image, _, _) = renderer.rasterize(&layout, [10, 10, 10], [255, 255, 255], &[], 2.0);
+        let height = image.size[1];
+        let mut cache = TextureCache::new();
+        let mut held = Held::new();
+
+        set_limit(&ctx, height);
+        let (layouts, ..) = sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        assert_eq!(texture.texture_ids().len(), 1);
+        assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
+        let one = texture.texture_ids();
+
+        // A larger limit it still fits in leaves it as it is.
+        set_limit(&ctx, height * 2);
+        let (_, whole, partly) = sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        assert!(whole.is_empty() && partly.is_empty());
+        assert_eq!(cache.get(blocks[0].id).unwrap().texture_ids(), one);
+
+        set_limit(&ctx, height - 1);
+        let (layouts, ..) = sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        let heights: Vec<usize> = texture.tiles.iter().map(|tile| tile.rows.len()).collect();
+        assert_eq!(heights, [height - 1, 1]);
+        assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
+    }
+
+    /// A line added that makes a block too tall for one texture makes it two, and taken away
+    /// again, one.
+    #[test]
+    fn a_block_that_grows_past_the_largest_texture_and_shrinks_back_is_drawn_again_whole() {
+        let ctx = Context::default();
+        set_scale(&ctx, 2.0);
+        let mut renderer = GlyphRenderer::new(config());
+        let one = code(20);
+        let layout = renderer.layout(&one);
+        let (image, _, _) = renderer.rasterize(&layout, [10, 10, 10], [255, 255, 255], &[], 2.0);
+        set_limit(&ctx, image.size[1] + 2);
+        let mut cache = TextureCache::new();
+        let mut held = Held::new();
+        let mut blocks = vec![one];
+        for (text, textures) in [(code(21).text, 2), (code(20).text, 1)] {
+            sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+            let before = cache.get(blocks[0].id).unwrap().texture_ids();
+            blocks[0].text = text;
+            let (layouts, whole, _) =
+                sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+            let texture = cache.get(blocks[0].id).unwrap();
+            let ids = texture.texture_ids();
+            assert_eq!(ids.len(), textures);
+            assert_eq!(whole, ids.iter().copied().collect(), "drawn again whole");
+            assert!(ids.iter().all(|id| !before.contains(id)));
+            assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
+        }
+    }
+
+    /// A block wider than the largest texture, as a long line of code can be, is drawn in
+    /// textures across it too, and an edit uploads into those of the rows it changes.
+    #[test]
+    fn a_block_wider_than_the_largest_texture_is_drawn_in_tiles_across_it() {
+        let ctx = Context::default();
+        set_scale(&ctx, 2.0);
+        let mut renderer = GlyphRenderer::new(config());
+        let long: Vec<String> = (0..30)
+            .map(|n| format!("let line_{n} = [{}];", "1, ".repeat(30)))
+            .collect();
+        let mut blocks = vec![Block {
+            text: long.join("\n"),
+            ..code(1)
+        }];
+        let layout = renderer.layout(&blocks[0]);
+        let (image, _, _) = renderer.rasterize(&layout, [10, 10, 10], [255, 255, 255], &[], 2.0);
+        let [width, height] = image.size;
+        set_limit(&ctx, (width * 2 / 5).min(height * 2 / 3));
+        let limit = limit(&ctx);
+        let mut cache = TextureCache::new();
+        let mut held = Held::new();
+        let (layouts, ..) = sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        let across = width.div_ceil(limit);
+        let down = height.div_ceil(limit);
+        assert!(across >= 3 && down >= 2);
+        assert_eq!(texture.texture_ids().len(), across * down);
+        assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
+
+        let ids = texture.texture_ids();
+        let line = line_at_row(&layouts[0], texture, limit / 2, 2.0);
+        blocks[0] = with_line_changed(&blocks[0], line);
+        let (layouts, whole, partly) =
+            sync_onto(&ctx, &mut renderer, &mut cache, &blocks, &mut held);
+        let texture = cache.get(blocks[0].id).unwrap();
+        assert!(whole.is_empty());
+        assert!(!partly.is_empty());
+        assert!(
+            partly.iter().all(|id| ids[..across].contains(id)),
+            "only the top row of textures"
+        );
+        assert_drawn_as_whole(&ctx, &mut renderer, texture, &layouts[0], &held);
     }
 
     #[test]
@@ -2253,7 +2806,7 @@ visual form, and thus with an independent existence.";
             [255, 255, 255],
         );
         assert_eq!(cache.len(), 1);
-        let size = cache.get(id).expect("annotation texture").texture.size();
+        let size = cache.get(id).expect("annotation texture").size();
 
         // Same text at a different column width must be re-shaped.
         cache.sync(
@@ -2279,7 +2832,44 @@ visual form, and thus with an independent existence.";
             [0, 0, 0],
             [255, 255, 255],
         );
-        assert_ne!(cache.get(id).unwrap().texture.size(), size);
+        assert_ne!(cache.get(id).unwrap().size(), size);
+    }
+
+    /// A note or a footnote too tall for one texture is drawn in bands, as a block is, each
+    /// within the largest texture, which make the image one texture would have held.
+    #[test]
+    fn an_annotation_taller_than_the_largest_texture_is_drawn_in_bands() {
+        let ctx = Context::default();
+        set_scale(&ctx, 2.0);
+        let mut renderer = GlyphRenderer::new(config());
+        let id = Uuid::new_v4();
+        let note = "Typography is the craft of endowing human language with a durable visual \
+                    form, and thus with an independent existence. "
+            .repeat(12);
+        let block = paragraph(&note);
+        let layout = renderer.layout_in_column(&block, 120.0, 12.0);
+        let (image, _, _) = renderer.rasterize(&layout, [0, 0, 0], [255, 255, 255], &[], 2.0);
+        set_limit(&ctx, image.size[1] * 2 / 5);
+        let mut cache = AnnotationTextureCache::new();
+        cache.sync(
+            &ctx,
+            &mut renderer,
+            id,
+            &note,
+            120.0,
+            12.0,
+            [0, 0, 0],
+            [255, 255, 255],
+        );
+        assert_every_texture_fits(&ctx);
+        let mut held = Held::new();
+        upload_onto(&ctx, &mut held);
+        let texture = cache.get(id).unwrap();
+        assert_eq!(texture.texture_ids().len(), 3);
+        let (whole, left, top) = renderer.rasterize(&layout, [0, 0, 0], [255, 255, 255], &[], 2.0);
+        assert_eq!((texture.left, texture.top), (left, top));
+        assert!(stacked(texture, &held).pixels == whole.pixels);
+        assert_eq!(cache.body_height(id), Some(layout.height));
     }
 
     #[test]

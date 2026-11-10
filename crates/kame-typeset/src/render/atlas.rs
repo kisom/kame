@@ -1,6 +1,7 @@
 //! Glyph rasterization: cosmic-text runs painted with swash into egui's premultiplied image.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use crate::layout::BlockLayout;
 use cosmic_text::{
@@ -144,6 +145,32 @@ impl GlyphAtlas {
             Some((canvas, left, top)) => (canvas.image, left, top),
             None => (ColorImage::filled([1, 1], Color32::TRANSPARENT), 0, 0),
         }
+    }
+
+    /// The pixels of the image of `painting` in `columns` and `rows`, as drawing it whole paints
+    /// them, for an image too large for one texture.
+    ///
+    /// Each pixel is what the masks over it make, painted in order, so the masks that reach the
+    /// part, painted in the same order, make the same pixels.
+    pub fn draw_part_premultiplied(
+        &mut self,
+        fs: &mut FontSystem,
+        painting: &Painting,
+        columns: Range<usize>,
+        rows: Range<usize>,
+    ) -> ColorImage {
+        let Some((min_x, min_y, _, _)) = painting.bounds else {
+            return ColorImage::filled([1, 1], Color32::TRANSPARENT);
+        };
+        let (left, top) = (min_x + columns.start as i32, min_y + rows.start as i32);
+        let (right, bottom) = (min_x + columns.end as i32, min_y + rows.end as i32);
+        let mut canvas = Premultiplied::new(columns.len() as u32, rows.len() as u32);
+        let reaching = painting.lines.iter().flatten().filter(|mark| {
+            let (mark_right, mark_bottom) = mark.right_bottom();
+            mark.left < right && mark_right > left && mark.top < bottom && mark_bottom > top
+        });
+        self.paint(fs, reaching, &mut canvas, (left, top), painting.scale);
+        canvas.image
     }
 
     /// Paints `painting` into a canvas `make` makes at the size of its ink, or `None` if it has
@@ -337,6 +364,31 @@ pub struct Painting {
     /// `(min_x, min_y, max_x, max_y)` with the maxima exclusive, or `None` if nothing is drawn.
     bounds: Option<(i32, i32, i32, i32)>,
     scale: f32,
+}
+
+impl Painting {
+    /// The width and height of its image, as [`GlyphAtlas::draw_premultiplied`] draws it.
+    pub fn size(&self) -> [usize; 2] {
+        match self.bounds {
+            Some((min_x, min_y, max_x, max_y)) => [
+                (max_x - min_x).max(1) as usize,
+                (max_y - min_y).max(1) as usize,
+            ],
+            None => [1, 1],
+        }
+    }
+
+    /// Where its image starts from the block's origin, as [`GlyphAtlas::draw_premultiplied`]
+    /// gives it.
+    pub fn offset(&self) -> (i32, i32) {
+        self.bounds
+            .map_or((0, 0), |(min_x, min_y, _, _)| (min_x, min_y))
+    }
+
+    /// The display's physical pixels per point it was painted for.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
 }
 
 /// A band of a block's image, as wide as the image, whose first row is `top`.

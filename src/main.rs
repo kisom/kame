@@ -4914,9 +4914,8 @@ impl KameApp {
             }
             if let Some(texture) = self.textures.get(block.id) {
                 let origin = Pos2::new(body_left + indent - sideways[index], tops[index]);
-                let rect = texture.rect(origin);
                 let clipped = block_painter(index);
-                clipped.image(texture.texture.id(), rect, uv, Color32::WHITE);
+                let rect = texture.paint(&clipped, origin);
                 if let Some(veil) = dim_veil(self.palette.dim_veil, focus, index, caret_index) {
                     clipped.rect_filled(rect, 0.0, veil);
                 }
@@ -5212,8 +5211,7 @@ impl KameApp {
                         self.palette.rule_ink,
                     );
                     if let Some(texture) = self.annotation_textures.get(annotation.id) {
-                        let rect = texture.rect(origin);
-                        painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
+                        let rect = texture.paint(&painter, origin);
                         // The body is the hit target, so a marginal can be
                         // reopened and revised once its popover has closed.
                         markers.push((annotation.id, rect));
@@ -5267,8 +5265,7 @@ impl KameApp {
         for placement in &footnotes {
             if let Some(texture) = self.annotation_textures.get(placement.annotation_id) {
                 let origin = footnote_origin(response.rect.top(), body_left, placement);
-                let rect = texture.rect(origin);
-                painter.image(texture.texture.id(), rect, uv, Color32::WHITE);
+                let rect = texture.paint(&painter, origin);
                 // The foot entry is the hit target for reopening its popover.
                 markers.push((placement.annotation_id, rect));
                 let annotation = by_id.get(&placement.annotation_id);
@@ -12510,6 +12507,38 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
             "far behind, and let go"
         );
         assert!(page.app.textures.len() < 60);
+    }
+
+    /// A code block of 300 lines on a 2x screen is far taller than the largest texture, and the
+    /// document opens and is drawn with every texture within it.
+    #[test]
+    fn a_code_block_taller_than_the_largest_texture_opens() {
+        let mut session = Session::anonymous().unwrap();
+        let mut document = Document::new("tall");
+        let text: Vec<String> = (0..300).map(|n| format!("let line_{n} = {n};")).collect();
+        document.blocks = vec![Block {
+            id: uuid::Uuid::new_v4(),
+            kind: BlockKind::Code { language: None },
+            text: text.join("\n"),
+            spans: Vec::new(),
+        }];
+        assert!(session.replace_document(document));
+        let mut page = Headless::new(session);
+        page.scale = Some(2.0);
+        for _ in 0..3 {
+            page.frame(Vec::new());
+        }
+        let block = page.app.session.document().blocks[0].id;
+        assert!(page.app.textures.get(block).is_some(), "the block is drawn");
+        let limit = page.ctx.input(|input| input.max_texture_side);
+        for (_, meta) in page.ctx.tex_manager().read().allocated() {
+            let [width, height] = meta.size;
+            assert!(
+                width <= limit && height <= limit,
+                "{} is {width}x{height}, over {limit}",
+                meta.name
+            );
+        }
     }
 
     #[test]

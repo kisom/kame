@@ -3364,6 +3364,9 @@ impl KameApp {
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
             ctx.set_visuals_of(theme, visuals.clone());
         }
+        // The panels this frame has begun keep the visuals it began with, and kame in the
+        // background would otherwise not draw again until its next wake.
+        ctx.request_repaint();
         self.layouts.clear();
         self.textures.clear();
         self.annotation_textures.clear();

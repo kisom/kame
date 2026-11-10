@@ -805,6 +805,54 @@ mod tests {
         assert!(current.join("theme.generation").exists());
     }
 
+    /// One frame as `ui` runs it, as far as the theme goes: what the panels drawn this frame are
+    /// coloured with, which egui fixes as the frame begins, then the frame's input, and how soon
+    /// it asks for the next.
+    fn panels_and_next_frame(page: &mut Headless) -> (Color32, std::time::Duration) {
+        page.time += 0.02;
+        let input = egui::RawInput {
+            time: Some(page.time),
+            ..Default::default()
+        };
+        let app = &mut page.app;
+        let mut panels = Color32::TRANSPARENT;
+        let output = page.ctx.run_ui(input, |ui| {
+            panels = ui.visuals().panel_fill;
+            app.handle_input(ui.ctx());
+        });
+        let next = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        output.drop_without_applying_deltas();
+        (panels, next)
+    }
+
+    #[test]
+    fn a_switch_in_the_background_reaches_the_interface_on_the_very_next_frame() {
+        put_theme(Some(NORD), Some("1"));
+        let mut page = launch(true);
+        // Frames with nothing to look at, so that nothing else is asking for another. egui asks
+        // for one after the first frame drawn this way, telling the window its theme.
+        panels_and_next_frame(&mut page);
+        let (_, idle) = panels_and_next_frame(&mut page);
+        let wake_in = std::time::Duration::from_secs_f32(FILE_CHECK_SECONDS);
+        assert_eq!(idle, wake_in);
+        put_theme(Some(LATTE), Some("2"));
+
+        let due = std::time::Duration::from_secs_f32(FILE_CHECK_SECONDS + 1.0);
+        page.app.last_file_check = std::time::Instant::now().checked_sub(due).unwrap();
+        let (panels, next) = panels_and_next_frame(&mut page);
+        // The page takes the theme in this frame, and the panels, already begun, can't.
+        assert_eq!(page.app.palette, themed(LATTE));
+        assert_eq!(panels, opaque(0x222730), "nord's, fixed as the frame began");
+        assert_eq!(
+            next,
+            std::time::Duration::ZERO,
+            "the next frame is asked for at once"
+        );
+
+        let (panels, _) = panels_and_next_frame(&mut page);
+        assert_eq!(panels, opaque(0xe3e4e8), "latte's");
+    }
+
     #[test]
     fn with_the_same_token_nothing_is_read_or_dropped() {
         put_theme(Some(NORD), Some("3622320-1793907493360538"));
@@ -931,6 +979,8 @@ mod tests {
 
         page.app
             .run_menu_action(&page.ctx.clone(), MenuAction::ToggleOmarchy);
+        // The frame that draws the interface in kame's own colours, and then the next.
+        assert_eq!(delay(&mut page), std::time::Duration::ZERO);
         assert!(delay(&mut page) > wake_in, "nothing to look at");
     }
 

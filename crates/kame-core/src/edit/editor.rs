@@ -894,7 +894,9 @@ impl Editor {
 
     /// Merges the block after `cursor`'s block into it, returning the op that
     /// was applied: the next block's text is appended and its notes, styles and
-    /// links move with it.
+    /// links move with it. When `cursor`'s block is a rule or an image and the
+    /// next block has text, the rule or image is deleted instead and the next
+    /// block is left as it was.
     ///
     /// The last block has nothing to merge into and is
     /// [`EditError::NoNextBlock`].
@@ -906,6 +908,12 @@ impl Editor {
         let Some(next) = self.doc.blocks.get(index + 1).cloned() else {
             return Err(EditError::NoNextBlock);
         };
+        // A rule or an image holds no text, so words joined into one would be lost to the page:
+        // the rule or image goes instead, with its notes, and the words stay as they were.
+        if matches!(block.kind, BlockKind::Rule | BlockKind::Image { .. }) && !next.text.is_empty()
+        {
+            return Ok(self.apply_edit(Op::delete_block(&self.doc, index)));
+        }
 
         let next_notes: Vec<Annotation> = self
             .doc
@@ -3545,6 +3553,50 @@ mod tests {
             Err(EditError::NoNextBlock)
         );
         assert_eq!(e.history(), (0, 0));
+    }
+
+    #[test]
+    fn joining_words_into_a_rule_or_an_image_takes_the_rule_or_image_away() {
+        for kind in [
+            BlockKind::Rule,
+            BlockKind::Image {
+                path: "/img/a.png".into(),
+                link: None,
+                align: Default::default(),
+            },
+        ] {
+            let mut doc = doc_with("");
+            doc.blocks[0].kind = kind.clone();
+            let above = doc.blocks[0].id;
+            let below = paragraph(Uuid::new_v4(), "words");
+            doc.blocks.push(below.clone());
+            // Undo puts a deleted block's notes back at the end of the list, so the rule's is
+            // last here for the document to compare equal.
+            doc.annotations.push(note(below.id, 0, 5));
+            doc.annotations.push(Annotation {
+                id: Uuid::new_v4(),
+                kind: AnnotationKind::Marginal,
+                anchor: Anchor::block(above),
+                body: "on the rule".to_string(),
+            });
+            let before = doc.clone();
+
+            let mut e = Editor::new(doc);
+            e.merge_with_next(&Cursor {
+                block_id: above,
+                offset: 0,
+            })
+            .expect("join below a rule or image");
+            assert_eq!(e.document().blocks, vec![below.clone()], "{kind:?}");
+            assert_eq!(
+                e.document().annotations,
+                vec![before.annotations[0].clone()],
+                "the words keep their note, and the rule's goes with it"
+            );
+            assert_eq!(e.history(), (1, 0), "one undo step");
+            e.undo().expect("to be undoable");
+            assert_eq!(e.document(), &before, "undo puts the {kind:?} back");
+        }
     }
 
     #[test]

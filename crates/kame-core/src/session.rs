@@ -2118,7 +2118,15 @@ impl Session {
         };
         let result = self.editor.merge_with_next(&at_end);
         if self.commit(result) {
-            self.caret = at_end;
+            // Below a rule or an image, the join takes the rule or image away and the caret stays.
+            self.caret = if self.block_index(previous_id).is_some() {
+                at_end
+            } else {
+                Cursor {
+                    block_id: caret.block_id,
+                    offset: 0,
+                }
+            };
             true
         } else {
             false
@@ -2152,8 +2160,20 @@ impl Session {
             return false;
         }
         // At the end of a block: pull the next block's text up.
+        let next = self.editor.document().blocks[index + 1].id;
         let result = self.editor.merge_with_next(&caret);
-        self.commit(result)
+        if !self.commit(result) {
+            return false;
+        }
+        // On a rule or an image, the join takes the rule or image away, and the caret goes to
+        // what was below it.
+        if self.block_index(caret.block_id).is_none() {
+            self.caret = Cursor {
+                block_id: next,
+                offset: 0,
+            };
+        }
+        true
     }
 
     /// Shift-Enter: a line in a verbatim block, however blank the one before it. In
@@ -6725,6 +6745,114 @@ mod tests {
             assert_eq!(session.document(), &before);
             assert!(session.redo());
             assert_eq!(session.document(), &after);
+        }
+    }
+
+    /// A session whose last two blocks are a rule, or an image, and below it a paragraph reading
+    /// `below`, with the caret at the paragraph's start.
+    fn below_a_rule_or_image(image: bool, below: &str) -> Session {
+        let mut session = Session::anonymous().unwrap();
+        if image {
+            session.insert("x");
+            assert!(session.insert_image("/img/a.png".to_string()));
+        } else {
+            typed(&mut session, "---");
+        }
+        assert!(session.split());
+        session.insert(below);
+        let last = session.document().blocks.last().unwrap().id;
+        session.set_caret(Cursor {
+            block_id: last,
+            offset: 0,
+        });
+        session
+    }
+
+    #[test]
+    fn backspace_below_a_rule_or_an_image_takes_it_away_and_keeps_the_words() {
+        for image in [false, true] {
+            for by_delete in [false, true] {
+                let mut session = below_a_rule_or_image(image, "words");
+                let before = session.document().clone();
+                let steps = session.history().0;
+                let count = before.blocks.len();
+                let (above, below) = (&before.blocks[count - 2], &before.blocks[count - 1]);
+                assert_ne!(above.kind, BlockKind::Paragraph);
+                if by_delete {
+                    session.set_caret(Cursor {
+                        block_id: above.id,
+                        offset: 0,
+                    });
+                    assert!(session.delete_forward());
+                } else {
+                    assert!(session.backspace());
+                }
+                let mut expected = before.blocks.clone();
+                expected.remove(count - 2);
+                assert_eq!(
+                    session.document().blocks,
+                    expected,
+                    "image: {image}, by delete: {by_delete}"
+                );
+                assert_eq!(
+                    session.caret,
+                    Cursor {
+                        block_id: below.id,
+                        offset: 0
+                    },
+                    "image: {image}, by delete: {by_delete}"
+                );
+                assert_eq!(session.history().0, steps + 1, "one undo step");
+                assert!(session.undo());
+                assert_eq!(session.document(), &before);
+            }
+        }
+    }
+
+    #[test]
+    fn backspace_in_an_empty_block_below_a_rule_or_an_image_moves_onto_it() {
+        for image in [false, true] {
+            let mut session = below_a_rule_or_image(image, "");
+            let mut expected = session.document().blocks.clone();
+            expected.pop();
+            let above = expected.last().unwrap().id;
+            assert!(session.backspace());
+            assert_eq!(session.document().blocks, expected, "image: {image}");
+            assert_eq!(
+                session.caret,
+                Cursor {
+                    block_id: above,
+                    offset: 0
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn delete_at_the_end_of_words_above_a_rule_or_an_image_takes_it_away() {
+        for image in [false, true] {
+            let mut session = Session::anonymous().unwrap();
+            session.insert("words");
+            if image {
+                assert!(session.insert_image("/img/a.png".to_string()));
+            } else {
+                assert!(session.split());
+                typed(&mut session, "---");
+                // Enter after the dashes leaves an empty paragraph below the rule.
+                assert!(session.split());
+                assert!(session.backspace());
+            }
+            let words = session.document().blocks[0].clone();
+            assert_eq!(session.document().blocks.len(), 2, "image: {image}");
+            assert_ne!(session.document().blocks[1].kind, BlockKind::Paragraph);
+            let end = Cursor {
+                block_id: words.id,
+                offset: 5,
+            };
+            session.set_caret(end);
+            assert!(session.delete_forward());
+            assert_eq!(session.document().blocks, vec![words]);
+            assert_eq!(session.caret, end);
         }
     }
 

@@ -137,6 +137,17 @@ pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     })
 }
 
+/// What an open is of, which whoever asks for it knows and the file system can't say: a path with
+/// nothing at it is as much a name for a new document as it is a document that has gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opening {
+    /// A name for a document, which is made if there's none there: one typed, or given at launch.
+    MayCreate,
+    /// A document found earlier, in a list or by a link or from the last time, which may have gone
+    /// since and is never made again.
+    MustExist,
+}
+
 impl Session {
     /// Opens the database at `path`, creating a fresh document when it holds
     /// none yet, and resumes the editor at the persisted undo cursor.
@@ -409,6 +420,24 @@ impl Session {
             Ok((session, Some(note)))
         } else {
             Ok((Session::open(path)?, None))
+        }
+    }
+
+    /// Opens whatever `path` names as `opening` says. A name a document may be made at opens as
+    /// [`Session::open_any`] opens it. A document found earlier opens the same way if it's still
+    /// there, and is `None` if it has gone, whatever the open made of that, with nothing made
+    /// where it was or beside it. Markdown is only ever read, so nothing is made for it either way.
+    pub fn open_as(path: &Path, opening: Opening) -> AppResult<Option<(Session, Option<String>)>> {
+        let found = match opening {
+            Opening::MayCreate => return Self::open_any(path).map(Some),
+            Opening::MustExist if is_markdown_path(path) => {
+                Session::import(path).map(|(session, note)| (session, Some(note)))
+            }
+            Opening::MustExist => Session::open_existing(path).map(|session| (session, None)),
+        };
+        match found {
+            Err(_) if has_gone(path) => Ok(None),
+            found => found.map(Some),
         }
     }
 
@@ -3907,13 +3936,19 @@ pub fn open_error(path: &Path, err: DbError) -> std::io::Error {
 /// What to say of a document that was there and didn't open. If it has gone, that's what went
 /// wrong, whatever SQLite made of it, which depends on when it went.
 fn gone_or_open_error(path: &Path, err: DbError) -> std::io::Error {
-    match path.metadata() {
-        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => std::io::Error::new(
+    if has_gone(path) {
+        std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("cannot open {}: it's no longer there", path.display()),
-        ),
-        _ => open_error(path, err),
+        )
+    } else {
+        open_error(path, err)
     }
+}
+
+/// Whether there's nothing at `path`, which a file that can't be looked at isn't taken for.
+fn has_gone(path: &Path) -> bool {
+    matches!(path.metadata(), Err(missing) if missing.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Today, as a metadata date.
@@ -6564,6 +6599,108 @@ mod tests {
         let session = Session::open_existing(&path).unwrap();
         assert!(session.is_new);
         assert_eq!(session.document().title, "doc");
+    }
+
+    #[test]
+    fn a_document_found_earlier_that_has_gone_is_not_made_again() {
+        let path = temp_db_path();
+        drop(open(&path));
+        std::fs::remove_file(&path).unwrap();
+        let opened = Session::open_as(&path, Opening::MustExist).unwrap();
+        assert!(
+            opened.is_none(),
+            "a document was opened where there was none"
+        );
+        assert!(!path.exists(), "a blank document was made where it was");
+        assert_eq!(beside(&path), Vec::<PathBuf>::new());
+    }
+
+    /// Markdown is only read, so nothing would be made, but it has gone all the same, and that's
+    /// what's said of it rather than what reading it failed with.
+    #[test]
+    fn markdown_found_earlier_that_has_gone_is_gone_too() {
+        let path = temp_db_path().with_extension("md");
+        std::fs::write(&path, "# Notes\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let opened = Session::open_as(&path, Opening::MustExist).unwrap();
+        assert!(opened.is_none());
+        assert!(!path.exists());
+    }
+
+    /// Only one that has gone is gone. One that's there and won't open says why, as ever.
+    #[test]
+    fn a_document_found_earlier_that_will_not_open_says_why() {
+        let path = temp_db_path();
+        std::fs::write(&path, b"not a database, whatever its name").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let Err(err) = Session::open_as(&path, Opening::MustExist) else {
+            panic!("it opened, or was taken for gone");
+        };
+        assert_eq!(
+            err.to_string(),
+            Session::open_any(&path)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// What's still there opens as `open_any` opens it: a document with its file, and Markdown
+    /// as an import with a line to say so.
+    #[test]
+    fn a_document_found_earlier_opens_as_any_other() {
+        let path = temp_db_path();
+        {
+            let mut session = open(&path);
+            assert!(session.insert("Found."));
+        }
+        let (session, note) = Session::open_as(&path, Opening::MustExist)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.path(), Some(path.as_path()));
+        assert_eq!(session.document().blocks[0].text, "Found.");
+        assert_eq!(note, None);
+        drop(session);
+
+        let markdown = path.with_extension("md");
+        std::fs::write(&markdown, "Found too.\n").unwrap();
+        let (any, any_note) = Session::open_any(&markdown).unwrap();
+        let (session, note) = Session::open_as(&markdown, Opening::MustExist)
+            .unwrap()
+            .unwrap();
+        assert!(session.is_anonymous());
+        assert_eq!(session.document().blocks[0].text, "Found too.");
+        assert_eq!(session.document().blocks.len(), any.document().blocks.len());
+        assert_eq!(note, any_note);
+        assert!(note.is_some());
+    }
+
+    /// A name for a new document makes one, as `open_any` does, and a Markdown file that isn't
+    /// there fails as it does.
+    #[test]
+    fn a_name_for_a_document_still_makes_one() {
+        let path = temp_db_path();
+        let (session, note) = Session::open_as(&path, Opening::MayCreate)
+            .unwrap()
+            .unwrap();
+        assert!(session.is_new);
+        assert_eq!(session.path(), Some(path.as_path()));
+        assert_eq!(note, None);
+        assert!(path.exists(), "opening a name makes the document");
+
+        let markdown = path.with_extension("md");
+        let Err(err) = Session::open_as(&markdown, Opening::MayCreate) else {
+            panic!("Markdown that isn't there was opened");
+        };
+        assert_eq!(
+            err.to_string(),
+            Session::open_any(&markdown)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string()
+        );
+        assert!(!markdown.exists());
     }
 
     #[test]

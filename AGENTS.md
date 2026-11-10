@@ -61,7 +61,7 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 - `lock.rs` — `DocumentLock`, which holds a document for the kame that has it open, in a folder of the caller's, so that no other kame writes it, and `Locks`, which whatever writes into documents it doesn't have open takes them through
 - `references/` — a notebook's sources: the `Reference` type, key rules, finding `[key]` citations, IEEE formatting and the text of the References section, which exports take as input, and `form`, what the windows for a new reference and for editing one hold
 - `import/` — `from_markdown` (Markdown to a new `Document`, with a report of what it simplified)
-- `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk; `Session::open` makes a document where there's none, and `open_existing` is for one found earlier, which may have gone since
+- `session.rs` — `Session`: an open document, its file, caret and selection, and how every edit reaches the disk; `Session::open` makes a document where there's none, and `open_existing` is for one found earlier, which may have gone since; `open_as` takes which of the two an open is, an `Opening`, from whoever asks for it
 - `text.rs` — moving through text by character and word
 - `tests/samples/` — what each release wrote, with what reading it gave, which `tests/written_by_releases.rs` and `kame-sync`'s `tests/logs_from_releases.rs` read
 

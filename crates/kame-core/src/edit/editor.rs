@@ -944,14 +944,25 @@ impl Editor {
             };
             ops.push(Op::AddAnnotation { annotation: moved });
         }
-        // The appended text takes the styles and links it had, after the ones already there.
+        // The appended text takes the styles and links it had, after the ones already there. One
+        // that starts at the join carries on a span of the same style (and link) ending there,
+        // as `restyled` joins spans that touch.
         if !next.spans.is_empty() {
             let mut spans = block.spans.clone();
-            spans.extend(next.spans.iter().map(|span| Span {
-                start: span.start + join,
-                end: span.end + join,
-                style: span.style.clone(),
-            }));
+            for span in &next.spans {
+                let (start, end) = (span.start + join, span.end + join);
+                let meeting = spans
+                    .iter_mut()
+                    .find(|kept| start == join && kept.end == join && kept.style == span.style);
+                match meeting {
+                    Some(kept) => kept.end = end,
+                    None => spans.push(Span {
+                        start,
+                        end,
+                        style: span.style.clone(),
+                    }),
+                }
+            }
             ops.push(Op::SetSpans {
                 block_id: cursor.block_id,
                 old_spans: block.spans.clone(),
@@ -2938,53 +2949,106 @@ mod tests {
     }
 
     #[test]
-    fn a_split_then_a_join_at_the_same_place_gives_back_the_text_and_styles() {
+    fn a_split_then_a_join_at_the_same_place_gives_back_the_document() {
         let url = "https://p.example/";
-        // Nothing crosses the split: the block comes back exactly.
+        for (text, spans, offset) in [
+            // Nothing crosses the split.
+            (
+                "one twothree four",
+                vec![span(4, 7, SpanStyle::Italic), span(7, 12, link(url))],
+                7,
+            ),
+            // A bold run and a link across it.
+            (
+                "See the paper now.",
+                vec![span(4, 13, SpanStyle::Bold), span(8, 13, link(url))],
+                10,
+            ),
+            // A link alone across it.
+            ("See the paper now.", vec![span(8, 13, link(url))], 10),
+        ] {
+            let doc = styled(BlockKind::Paragraph, text, spans);
+            let before = doc.clone();
+            let at = Cursor {
+                block_id: doc.blocks[0].id,
+                offset,
+            };
+            let mut e = Editor::new(doc);
+            e.split_paragraph(&at).unwrap();
+            e.merge_with_next(&at).unwrap();
+            assert_eq!(e.document(), &before, "{text:?} split at {offset}");
+        }
+    }
+
+    #[test]
+    fn a_join_joins_a_style_that_meets_at_it_and_only_that() {
+        let (one, two) = ("https://one.example/", "https://two.example/");
+        // Bold meets bold at the join, a link meets a link to another page, and italic starts
+        // where nothing italic ends.
         let doc = styled(
             BlockKind::Paragraph,
-            "one twothree four",
-            vec![span(4, 7, SpanStyle::Italic), span(7, 12, link(url))],
+            "ab",
+            vec![span(0, 2, SpanStyle::Bold), span(1, 2, link(one))],
+        );
+        let doc = with_next(
+            doc,
+            BlockKind::Paragraph,
+            "cd",
+            vec![
+                span(0, 2, SpanStyle::Bold),
+                span(0, 1, link(two)),
+                span(1, 2, SpanStyle::Italic),
+            ],
         );
         let before = doc.clone();
         let id = doc.blocks[0].id;
-        let at = Cursor {
-            block_id: id,
-            offset: 7,
-        };
         let mut e = Editor::new(doc);
-        e.split_paragraph(&at).unwrap();
-        e.merge_with_next(&at).unwrap();
-        assert_eq!(e.document(), &before);
-
-        // A bold run and a link across it come back as the same characters with the same
-        // styles, each in two pieces that touch, as an export reads them.
-        let doc = styled(
-            BlockKind::Paragraph,
-            "See the paper now.",
-            vec![span(4, 13, SpanStyle::Bold), span(8, 13, link(url))],
-        );
-        let markdown = crate::export::to_markdown(&doc);
-        let id = doc.blocks[0].id;
-        let at = Cursor {
+        e.merge_with_next(&Cursor {
             block_id: id,
-            offset: 10,
-        };
-        let mut e = Editor::new(doc);
-        e.split_paragraph(&at).unwrap();
-        e.merge_with_next(&at).unwrap();
-        let block = &e.document().blocks[0];
-        assert_eq!(block.text, "See the paper now.");
+            offset: 2,
+        })
+        .expect("join with the next block");
+        let after = e.document().clone();
+        assert_eq!(after.blocks[0].text, "abcd");
         assert_eq!(
-            block.spans,
+            after.blocks[0].spans,
             vec![
-                span(4, 10, SpanStyle::Bold),
-                span(8, 10, link(url)),
-                span(10, 13, SpanStyle::Bold),
-                span(10, 13, link(url)),
+                span(0, 4, SpanStyle::Bold),
+                span(1, 2, link(one)),
+                span(2, 3, link(two)),
+                span(3, 4, SpanStyle::Italic),
             ]
         );
-        assert_eq!(crate::export::to_markdown(e.document()), markdown);
+        assert_eq!(e.history(), (1, 0), "a join is one undo step");
+        e.undo().expect("join to be undoable");
+        assert_eq!(e.document(), &before);
+        e.redo().expect("join to be redoable");
+        assert_eq!(e.document(), &after);
+    }
+
+    #[test]
+    fn a_join_onto_words_ending_in_bold_leaves_the_plain_words_plain() {
+        let doc = styled(
+            BlockKind::Paragraph,
+            "one two",
+            vec![span(4, 7, SpanStyle::Bold)],
+        );
+        let doc = with_next(doc, BlockKind::Paragraph, " three", Vec::new());
+        let before = doc.clone();
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+        e.merge_with_next(&Cursor {
+            block_id: id,
+            offset: 7,
+        })
+        .expect("join with the next block");
+        let after = e.document().clone();
+        assert_eq!(after.blocks[0].text, "one two three");
+        assert_eq!(after.blocks[0].spans, vec![span(4, 7, SpanStyle::Bold)]);
+        e.undo().expect("join to be undoable");
+        assert_eq!(e.document(), &before);
+        e.redo().expect("join to be redoable");
+        assert_eq!(e.document(), &after);
     }
 
     #[test]

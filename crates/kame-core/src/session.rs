@@ -6760,6 +6760,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn enter_inside_a_link_then_backspace_gives_back_the_document() {
+        let mut session = linked("See the paper now.", 8, 13, "https://p.example/");
+        let before = session.document().clone();
+        let block_id = before.blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 10,
+        });
+        assert!(session.split());
+        assert!(session.backspace());
+        assert_eq!(session.document(), &before);
+        assert_eq!(
+            session.caret,
+            Cursor {
+                block_id,
+                offset: 10
+            }
+        );
+    }
+
     /// A session whose last two blocks are a rule, or an image, and below it a paragraph reading
     /// `below`, with the caret at the paragraph's start.
     fn below_a_rule_or_image(image: bool, below: &str) -> Session {

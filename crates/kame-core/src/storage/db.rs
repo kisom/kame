@@ -215,11 +215,6 @@ impl Drop for ScratchCopy {
 }
 
 impl Db {
-    /// Opens (creating if absent) the database at `path`, enables WAL
-    /// journalling, and applies the schema for schema version 1.
-    ///
-    /// Fails if the database was created by a newer schema version, rather
-    /// than silently stamping it back down to [`SCHEMA_VERSION`].
     /// Opens an existing file for reading only, for publishing what is written without
     /// any chance of changing it: no migration runs and nothing can be saved. An older
     /// file that needs migrating fails on whichever read needs what it lacks.
@@ -294,6 +289,11 @@ impl Db {
         })
     }
 
+    /// Opens (creating if absent) the database at `path`, enables WAL
+    /// journalling, and applies the schema for schema version 1.
+    ///
+    /// Fails if the database was created by a newer schema version, rather
+    /// than silently stamping it back down to [`SCHEMA_VERSION`].
     pub fn open(path: &Path) -> Result<Db, DbError> {
         let conn = Connection::open(path)?;
         Self::init(conn)

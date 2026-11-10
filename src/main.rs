@@ -2813,6 +2813,9 @@ struct KameApp {
     menu_block: Option<BlockId>,
     /// The marginal the page's menu was opened on.
     marginal_menu: Option<AnnotationId>,
+    /// Set when another document is adopted, for the page to close its menu, which egui keeps up
+    /// until something closes it, the next time it's drawn.
+    page_menu_closing: bool,
     /// Where each marginal was drawn on the last frame.
     marginals_drawn: Vec<(AnnotationId, Rect)>,
     /// Whether justified paragraphs can hyphenate words.
@@ -3009,6 +3012,7 @@ impl KameApp {
             clipped: None,
             menu_block: None,
             marginal_menu: None,
+            page_menu_closing: false,
             marginals_drawn: Vec::new(),
             page: references::Page::default(),
             layouts: LayoutCache::new(),
@@ -3644,6 +3648,7 @@ impl KameApp {
         self.link_menu = None;
         self.menu_block = None;
         self.marginal_menu = None;
+        self.page_menu_closing = true;
         self.typewriter_anchor = None;
         // The scroll area remembers its offset, which belonged to the old document.
         self.pending_scroll = Some(0.0);
@@ -5886,6 +5891,9 @@ impl KameApp {
         let link_menu = self.link_menu.clone();
         let mut open_link = false;
         let mut edit_link = false;
+        if std::mem::take(&mut self.page_menu_closing) {
+            egui::Popup::close_id(ui.ctx(), egui::Popup::default_response_id(&response));
+        }
         response.context_menu(|ui| {
             ui.set_min_width(interface::room(ui.ctx(), 180.0));
             let caret = self.session.valid_caret();
@@ -11735,6 +11743,22 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(page.app.menu_block.is_none());
         assert!(page.app.mark_menu.is_none());
         assert!(page.app.marginal_menu.is_none());
+    }
+
+    /// The menu itself, which would otherwise stay up over the other document with its rows.
+    #[test]
+    fn the_page_menu_closes_when_another_document_opens() {
+        let (mut page, b) = a_open_beside_b("page-menu-closes");
+        page.right_click_at(Pos2::new(page.body_left() + 10.0, PAGE_PADDING + 10.0));
+        assert!(egui::Popup::is_any_open(&page.ctx));
+        assert!(page.sees("Link to document…"));
+
+        page.app.open_document(b.display().to_string());
+        page.frame(Vec::new());
+
+        assert_eq!(page.app.session.path(), Some(b.as_path()));
+        assert!(!egui::Popup::is_any_open(&page.ctx));
+        assert!(!page.sees("Link to document…"));
     }
 
     fn annotation(kind: AnnotationKind, body: &str) -> Annotation {

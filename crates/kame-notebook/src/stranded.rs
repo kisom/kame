@@ -390,8 +390,8 @@ fn those_to_stamp(notebook: &Notebook) -> Vec<(PathBuf, LastSync)> {
 
 /// Whether a database can have its place written with nothing else happening to it. Opening it for
 /// writing folds in any `-wal` beside it, which may be another machine's, carried here by a sync tool,
-/// and it may be open in another process. So it waits until nothing is beside it. `Db::open` also
-/// makes a file that's gone, and leaves side files beside one it can't write.
+/// and it may be open in another process. So it waits until nothing is beside it. Opening one that
+/// can't be written also leaves side files beside it.
 fn can_record_place(path: &Path) -> bool {
     std::fs::OpenOptions::new().write(true).open(path).is_ok()
         && sqlite_files(path).iter().all(|side| {
@@ -405,11 +405,25 @@ fn can_record_place(path: &Path) -> bool {
 /// somewhere else or nothing, and is merely not stranded. One holding something from a newer version
 /// of kame is left as it is, since nothing this build does writes to that.
 fn record_place(path: &Path) {
-    if !can_record_place(path) || Db::open_read_only(path).map_or(true, |db| db.holds_newer()) {
-        return;
+    if let Some(place) = place_to_record(path) {
+        write_place(path, &place);
     }
-    if let (Some(place), Ok(mut db)) = (place_of(path), Db::open(path)) {
-        let _ = db.save_sync_place(&place);
+}
+
+/// The place to write in a database, if it can take one. This is all the reading, which takes long
+/// enough for the database to be deleted or moved away meanwhile.
+fn place_to_record(path: &Path) -> Option<String> {
+    if !can_record_place(path) || Db::open_read_only(path).map_or(true, |db| db.holds_newer()) {
+        return None;
+    }
+    place_of(path)
+}
+
+/// Writes it, in a database that's still there. One that has gone since it was looked at stays
+/// gone: `Db::open` would make a blank one there, and the notebook would list it as a document.
+fn write_place(path: &Path, place: &str) {
+    if let Ok(mut db) = Db::open_existing(path) {
+        let _ = db.save_sync_place(place);
     }
 }
 
@@ -861,7 +875,7 @@ fn rename_all(moves: Vec<(PathBuf, PathBuf)>) -> bool {
 mod tests {
     use super::*;
 
-    /// `Db::open` would make a blank one, if a delete from another process landed just before it.
+    /// Gone before it's looked at.
     #[test]
     fn a_place_is_not_recorded_where_the_file_has_gone() {
         let root = kame_test_dir::folder("stranded-record-gone");
@@ -869,6 +883,20 @@ mod tests {
         let gone = root.join("gone.kame");
         record_place(&gone);
         assert!(!gone.exists());
+    }
+
+    /// A delete from another process, or a sync tool's, landing while the place was worked out.
+    #[test]
+    fn a_place_is_not_written_where_the_file_went_while_it_was_worked_out() {
+        let root = kame_test_dir::folder("stranded-record-went");
+        std::fs::write(root.join(kame_sync::logs::MARKER), "").unwrap();
+        let a = root.join("a.kame");
+        synced_as(&a, "Words.", "titan-bbbb");
+        let place = place_to_record(&a).unwrap();
+        std::fs::remove_file(&a).unwrap();
+        write_place(&a, &place);
+        assert!(!a.exists(), "a blank document was made where it was");
+        assert!(sqlite_files(&a).iter().all(|side| !side.exists()));
     }
 
     #[test]

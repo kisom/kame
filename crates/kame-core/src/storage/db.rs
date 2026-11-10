@@ -299,6 +299,22 @@ impl Db {
         Self::init(conn)
     }
 
+    /// Opens the database at `path` as [`Db::open`] does, but only one that's there, for whatever
+    /// writes into a document it found earlier: a file that has gone since is an error, and none
+    /// is made in its place, nor anything beside where it was. That holds for one that goes as
+    /// late as between the file being opened and the first thing read from it.
+    pub fn open_existing(path: &Path) -> Result<Db, DbError> {
+        Self::init(Self::connect_existing(path)?)
+    }
+
+    /// A connection to a file that's there, with nothing yet read or written, and nothing looked
+    /// for beside it: SQLite opens only the file itself until the first statement.
+    fn connect_existing(path: &Path) -> Result<Connection, DbError> {
+        // What `Connection::open` asks for, without making the file.
+        let flags = OpenFlags::default().difference(OpenFlags::SQLITE_OPEN_CREATE);
+        Ok(Connection::open_with_flags(path, flags)?)
+    }
+
     /// Opens a fresh, private in-memory database for a session that must not
     /// touch the disk — e.g. a failed open that still wants to show the author
     /// an editable document and its error, without clobbering the bad file.
@@ -2260,6 +2276,37 @@ mod tests {
             .map(|suffix| format!("{}{suffix}", path.display()))
             .filter(|sidecar| Path::new(sidecar).exists())
             .collect()
+    }
+
+    #[test]
+    fn opening_an_existing_file_makes_none_where_there_is_none() {
+        let path = crate::test_temp_dir().join(format!("kame-none-{}.kame", uuid::Uuid::new_v4()));
+        assert!(Db::open_existing(&path).is_err());
+        assert!(!path.exists());
+        assert!(sidecars(&path).is_empty(), "{:?}", sidecars(&path));
+    }
+
+    #[test]
+    fn an_existing_file_opens_to_be_written_as_any_other() {
+        let path = saved_file("existing");
+        let mut db = Db::open_existing(&path).unwrap();
+        assert_eq!(db.load_document().unwrap().title, "Saved");
+        db.save_document(&Document::new("Changed")).unwrap();
+        drop(db);
+        let read = Db::open_read_only(&path).unwrap();
+        assert_eq!(read.load_document().unwrap().title, "Changed");
+    }
+
+    /// Gone between the open and the first statement, which is as late as it can go and still
+    /// be noticed. SQLite then refuses to make a `-wal` for a database it can't find.
+    #[test]
+    fn an_existing_file_that_goes_as_it_is_opened_is_not_made_again() {
+        let path = saved_file("went");
+        let conn = Db::connect_existing(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(Db::init(conn).is_err());
+        assert!(!path.exists());
+        assert!(sidecars(&path).is_empty(), "{:?}", sidecars(&path));
     }
 
     /// Reading must leave nothing behind: documents live in synced folders, and files

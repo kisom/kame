@@ -296,6 +296,14 @@ pub fn merge_copy_into(session: &mut Session, copy: &Path) -> Result<MergedIn> {
 /// what's on the screen leaves out or fits what this build doesn't know, which the merge would then
 /// write into the file. Nothing can have been typed into it, so refusing loses nothing.
 pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
+    let (path, merged, changed) = merged_with_replacement(old)?;
+    write_replaced(old, &path, merged, changed)
+}
+
+/// The merge of what an open session holds with the file that replaced its own, where that file
+/// is, and whether the merge differs from it. This is all the reading, which takes long enough
+/// for the file to be deleted or moved away meanwhile, so it all comes before the write.
+fn merged_with_replacement(old: &Session) -> Result<(PathBuf, Merged, bool)> {
     if old.newer {
         return Err(
             "this document was written by a newer version of kame; update kame to merge \
@@ -304,7 +312,7 @@ pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
         );
     }
     let path = old.path().ok_or("this document has no file")?.to_path_buf();
-    // Opening a missing path would create a document there.
+    // Said plainly here. One that goes after this is refused by the open that writes.
     if !path.is_file() {
         return Err("that file is no longer there".into());
     }
@@ -321,7 +329,18 @@ pub fn merge_replaced(old: &Session) -> Result<(Session, MergedIn)> {
     let ours = version_of(old);
     let merged = merge_into_screen(&ours, &arrived, "the other machine");
     let changed = merged.doc != arrived.doc;
-    let mut session = Session::open(&path).map_err(|err| err.to_string())?;
+    Ok((path, merged, changed))
+}
+
+/// Writes that merge into the file it was worked out against, if it's still there. An open that
+/// made a document where there was none would return that in place of the words in `old`.
+fn write_replaced(
+    old: &Session,
+    path: &Path,
+    merged: Merged,
+    changed: bool,
+) -> Result<(Session, MergedIn)> {
+    let mut session = Session::open_existing(path).map_err(|err| err.to_string())?;
     if changed {
         if session
             .snapshot(Some("before merging with the copy on this machine"))
@@ -365,6 +384,43 @@ mod tests {
             }],
             annotations: Vec::new(),
         }
+    }
+
+    /// The file that replaced an open document's goes in turn, once the merge with it has been
+    /// worked out and before it's written.
+    #[test]
+    fn a_merge_is_not_written_where_the_file_went_while_it_was_worked_out() {
+        let dir = kame_test_dir::folder("files-replaced-gone");
+        let (path, other) = (dir.join("doc.kame"), dir.join("other.kame"));
+        Session::open(&path).unwrap().insert("Shared words.");
+        std::fs::copy(&path, &other).unwrap();
+        Session::open(&other).unwrap().insert("Theirs. ");
+        let mut old = Session::open(&path).unwrap();
+        old.insert("Mine. ");
+        std::fs::rename(&other, &path).unwrap();
+        assert!(old.check_file());
+        let (on_screen, error) = (old.document().clone(), old.last_error.clone());
+
+        let (at, merged, changed) = merged_with_replacement(&old).unwrap();
+        assert_eq!(at, path);
+        assert!(changed);
+        std::fs::remove_file(&path).unwrap();
+        let Err(err) = write_replaced(&old, &at, merged, changed) else {
+            panic!("a merge was written where there was no file");
+        };
+
+        assert_eq!(
+            err.to_string(),
+            format!("cannot open {}: it's no longer there", path.display())
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "something was made there: {left:?}");
+        assert_eq!(old.document(), &on_screen);
+        assert_eq!(old.last_error, error);
+        assert!(old.replaced && old.path() == Some(path.as_path()));
     }
 
     /// With no way back to what they share, nothing counts as shared but what they agree on. A

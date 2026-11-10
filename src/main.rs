@@ -25,7 +25,7 @@ use kame_core::links::{
 };
 use kame_core::lock::{DocumentLock, LockError};
 use kame_core::references::{cited_key, with_citation_spans};
-use kame_core::session::{is_markdown_path, Clipped, LinkUnder, Session};
+use kame_core::session::{is_markdown_path, Clipped, LinkUnder, Opening, Session};
 use kame_core::{edit, model, storage};
 use kame_typeset::{layout, render};
 use std::collections::{HashMap, HashSet};
@@ -293,8 +293,18 @@ fn launch_path(argument: Option<std::ffi::OsString>) -> Option<PathBuf> {
     Some(std::path::absolute(&path).unwrap_or(path))
 }
 
-fn document_to_open(argument: Option<PathBuf>, last: Option<PathBuf>) -> Option<PathBuf> {
-    argument.or_else(|| last.filter(|path| path.is_file()))
+/// What a launch opens, and as what: a file named on the command line, which is made if it isn't
+/// there, or else the last document, which is only gone back to.
+fn document_to_open(
+    argument: Option<PathBuf>,
+    last: Option<PathBuf>,
+) -> Option<(PathBuf, Opening)> {
+    let named = argument.map(|path| (path, Opening::MayCreate));
+    // One that isn't a file isn't gone back to. One that goes after this is found gone by the open.
+    named.or_else(|| {
+        last.filter(|path| path.is_file())
+            .map(|path| (path, Opening::MustExist))
+    })
 }
 
 /// Takes the lock that marks this as the first running kame, holding it until the
@@ -342,8 +352,9 @@ fn held_elsewhere(path: &Path) -> String {
 type Launched = (Session, Option<String>, Option<DocumentLock>);
 
 /// Opens the document a launch names, with its lock. One another kame has is refused before
-/// anything is written to it, as building it from its logs would.
-fn launch_open(path: &Path) -> Result<Launched, String> {
+/// anything is written to it, as building it from its logs would. `None` is a document found
+/// earlier that has gone since, and nothing is made where it was.
+fn launch_open(path: &Path, opening: Opening) -> Result<Option<Launched>, String> {
     // Markdown is only read, into a document with no file.
     let claimed = if is_markdown_path(path) {
         None
@@ -354,15 +365,18 @@ fn launch_open(path: &Path) -> Result<Launched, String> {
     // document at a name its logs have.
     kame_sync::logs::build_from_logs(path)
         .map_err(|err| format!("could not open {} — {err}", path.display()))?;
-    let (session, note) = Session::open_any(path)
-        .map_err(|err| format!("could not open {} — {err}", path.display()))?;
+    let Some((session, note)) = Session::open_as(path, opening)
+        .map_err(|err| format!("could not open {} — {err}", path.display()))?
+    else {
+        return Ok(None);
+    };
     // A file the open has just made had nothing to lock before. Another kame making it at the
     // same moment may have it now, and then this one leaves it.
     let claimed = match (claimed, session.path()) {
         (None, Some(made)) => claim(made)?,
         (claimed, _) => claimed,
     };
-    Ok((session, note, claimed))
+    Ok(Some((session, note, claimed)))
 }
 
 /// Turns the Tab key into a typed tab. Shift-Tab has nothing to do in a block that takes
@@ -1094,6 +1108,9 @@ struct OpenPrompt {
     /// discarding unsaved changes (a failed save), so the prompt offers
     /// "open anyway" instead of opening straight away.
     confirming: bool,
+    /// Whether the path is a name a document may be made at, as one typed here is, or a document
+    /// found earlier, as whatever asked for an open that's waiting on the confirmation said.
+    opening: Opening,
 }
 
 /// A native file dialog starting in `directory`, if there is one.
@@ -2247,28 +2264,22 @@ fn main() -> eframe::Result {
         .as_deref()
         .filter(|path| path.is_dir())
         .and_then(|folder| kame_notebook::Notebook::open(folder).ok());
-    let (argument, last) = match &folder_notebook {
-        Some(notebook) => (notebook.index(), None),
-        None => (argument, last),
+    let to_open = match &folder_notebook {
+        // Its contents page is one found there, and not a name for one.
+        Some(notebook) => notebook.index().map(|index| (index, Opening::MustExist)),
+        None => document_to_open(argument, last),
     };
-    let (session, notice, claimed) = match document_to_open(argument, last) {
-        None => (
-            Session::anonymous().unwrap_or_else(|err| {
-                eprintln!("kame: {err}");
-                std::process::exit(1);
-            }),
-            None,
-            None,
-        ),
-        Some(path) => {
+    let launched = match to_open {
+        None => None,
+        Some((path, opening)) => {
             // Open the document before the window exists, so a failure is
             // reported as "your file is the problem" rather than an opaque
             // app-creation error that reads as "kame is broken". A failed open
             // still shows the author an editable (in-memory) document and the
             // reason in the status panel, since a desktop launch has no
             // terminal to print to.
-            match launch_open(&path) {
-                Ok(opened) => {
+            match launch_open(&path, opening) {
+                Ok(Some(opened)) => {
                     // An import has no file yet, so it is like a new document.
                     if opened.0.is_anonymous() {
                         last_document = None;
@@ -2288,18 +2299,28 @@ fn main() -> eframe::Result {
                             browser_folders: config_browser_folders.clone(),
                         });
                     }
-                    opened
+                    Some(opened)
                 }
+                // It went after it was found, so this starts as it does when there's nothing to
+                // go back to, and nothing is made where it was.
+                Ok(None) => None,
                 Err(message) => {
                     let session = Session::blank(&path, message).unwrap_or_else(|err| {
                         eprintln!("kame: {err}");
                         std::process::exit(1);
                     });
-                    (session, None, None)
+                    Some((session, None, None))
                 }
             }
         }
     };
+    let (session, notice, claimed) = launched.unwrap_or_else(|| {
+        let session = Session::anonymous().unwrap_or_else(|err| {
+            eprintln!("kame: {err}");
+            std::process::exit(1);
+        });
+        (session, None, None)
+    });
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -6439,6 +6460,7 @@ impl KameApp {
         let mut buffer = prompt.path.clone();
         let focus = prompt.focus;
         let confirming = prompt.confirming;
+        let opening = prompt.opening;
         let unsaved = self.session.would_lose_work();
         // A chord and an Enter arriving in the same frame would otherwise open
         // a path nobody has finished typing.
@@ -6502,7 +6524,7 @@ impl KameApp {
                 .map(|prompt| prompt.path.trim().to_string())
                 .unwrap_or_default();
             self.open_prompt = None;
-            self.open_document(path);
+            self.open_document(path, opening);
             return;
         }
         if !submit {
@@ -6521,7 +6543,7 @@ impl KameApp {
             .map(|prompt| prompt.path.trim().to_string())
             .unwrap_or_default();
         self.open_prompt = None;
-        self.open_document(path);
+        self.open_document(path, opening);
     }
 
     /// Shapes `block` as the page does, footnote room included, so caret movement
@@ -6718,6 +6740,7 @@ impl KameApp {
             path: String::new(),
             focus: true,
             confirming: false,
+            opening: Opening::MayCreate,
         });
     }
 
@@ -6828,11 +6851,11 @@ impl KameApp {
             self.go_to_heading(heading);
             return;
         }
-        let found = match self.follow_in_notebook(path, heading) {
+        let (found, opening) = match self.follow_in_notebook(path, heading) {
             Some(Some(found)) => found,
             Some(None) => return,
             None => match kame_sync::logs::find_or_build(path, &self.session.link_base()) {
-                Ok(Some(found)) => found,
+                Ok(Some(found)) => (found, Opening::MustExist),
                 Ok(None) => {
                     self.notice = Some(format!("no document at {path}"));
                     return;
@@ -6865,7 +6888,7 @@ impl KameApp {
             self.back.push(here);
         }
         self.pending_heading = heading.map(str::to_string);
-        self.open_or_confirm(found);
+        self.open_or_confirm(found, opening);
     }
 
     /// Returns to where the last followed link was followed from. Another document reopens
@@ -6893,13 +6916,14 @@ impl KameApp {
         let Some(path) = stop.path else {
             return;
         };
-        // Opening a missing path would create it.
+        // Said here, without leaving what's open, if it has gone already. It may yet go before the
+        // open, which is of a document found earlier and makes none.
         if !path.is_file() {
             self.notice = Some(format!("{} is no longer there", path.display()));
             return;
         }
         self.pending_heading = None;
-        self.open_or_confirm(path);
+        self.open_or_confirm(path, Opening::MustExist);
     }
 
     /// Moves to the heading a document link named, and says so if it isn't there.
@@ -6922,11 +6946,12 @@ impl KameApp {
         self.reveal_caret = true;
     }
 
-    /// Opens a file chosen in a dialog, holding at the Open prompt's confirmation
-    /// if work would be lost.
+    /// Opens a file chosen in a dialog or handed over by the OS, holding at the Open prompt's
+    /// confirmation if work would be lost. Either was there to be chosen, so none is made if it
+    /// has gone since.
     fn open_picked(&mut self, path: PathBuf) {
         self.pending_heading = None;
-        self.open_or_confirm(path);
+        self.open_or_confirm(path, Opening::MustExist);
     }
 
     /// What the OS asked to open, which arrives only once, so a dialog that's up holds it rather
@@ -6936,6 +6961,7 @@ impl KameApp {
     fn request_open(&mut self, path: PathBuf) {
         if let Some(prompt) = self.open_prompt.as_mut().filter(|prompt| prompt.confirming) {
             prompt.path = path.display().to_string();
+            prompt.opening = Opening::MustExist;
             self.pending_heading = None;
             self.held_open = None;
             return;
@@ -6971,7 +6997,7 @@ impl KameApp {
     }
 
     /// Opens what the OS asked for, if it was waiting and the dialog that held it has closed. It
-    /// may have gone meanwhile, and opening a missing path would create it.
+    /// may have gone meanwhile, which is said here, and none is made if it goes before the open.
     fn open_held(&mut self) {
         if self.holds_what_the_os_asks() {
             return;
@@ -6989,8 +7015,9 @@ impl KameApp {
     }
 
     /// Opens a document, unless a form or the Cite search is up, which would go with this one.
-    /// A heading waiting for the open goes with the refusal.
-    fn open_or_confirm(&mut self, path: PathBuf) {
+    /// A heading waiting for the open goes with the refusal. `opening` is whether the caller has a
+    /// name for a document or one it found, and waits with the path if this has to ask first.
+    fn open_or_confirm(&mut self, path: PathBuf, opening: Opening) {
         if self.say_if_reference_form_up() {
             self.pending_heading = None;
             return;
@@ -7001,9 +7028,10 @@ impl KameApp {
                 path,
                 focus: false,
                 confirming: true,
+                opening,
             });
         } else {
-            self.open_document(path);
+            self.open_document(path, opening);
         }
     }
 
@@ -7011,7 +7039,11 @@ impl KameApp {
     /// view state that pointed into the old document (open note, find bar,
     /// typewriter anchor, caches). A failed open keeps the current document and
     /// surfaces the reason through `Session::last_error`.
-    fn open_document(&mut self, typed: String) {
+    ///
+    /// `opening` is the caller's to say, and never worked out from what's on the disk: a name
+    /// typed makes a document if there's none, and a document found earlier, in a list or by a
+    /// link, is only opened. If that one has gone, this document stays and the status row says so.
+    fn open_document(&mut self, typed: String, opening: Opening) {
         // What's opening now is the latest thing asked for.
         self.held_open = None;
         let heading = self.pending_heading.take();
@@ -7065,8 +7097,9 @@ impl KameApp {
             self.session.last_error = Some(format!("could not open {} — {err}", path.display()));
             return;
         }
-        match Session::open_any(&path) {
-            Ok((session, note)) => {
+        match Session::open_as(&path, opening) {
+            Ok(None) => self.say_gone(&path),
+            Ok(Some((session, note))) => {
                 // A file the open has just made had nothing to lock before. Another kame making it
                 // at the same moment may have it now, and then this one leaves it.
                 let claimed = match (claimed, session.path()) {
@@ -7097,6 +7130,14 @@ impl KameApp {
                     Some(format!("could not open {} — {err}", path.display()));
             }
         }
+    }
+
+    /// Says that a document found earlier has gone, with what's on the screen left as it is. A
+    /// place in it that a search asked for goes with it, and isn't left for the next document.
+    fn say_gone(&mut self, path: &Path) {
+        self.forget_pending_place();
+        self.notice_tracker.announced();
+        self.notice = Some(format!("{} is no longer there", path.display()));
     }
 
     /// Returns the decoded GPU texture for the image at `path`, loading and
@@ -7487,7 +7528,12 @@ impl KameApp {
             return;
         }
         self.replaced_prompt = false;
-        self.open_document(path.display().to_string());
+        self.open_document(path.display().to_string(), Opening::MustExist);
+        // It went as it was asked for. These words are still the only ones, with nowhere to be
+        // saved, so the prompt stays, now with what's left to offer.
+        if self.session.replaced && !path.is_file() {
+            self.replaced_prompt = true;
+        }
     }
 
     /// What to do about a file replaced on disk: merge the two, keep these words under a new
@@ -10046,9 +10092,12 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let named = PathBuf::from("/named.kame");
         assert_eq!(
             document_to_open(Some(named.clone()), Some(last.clone())),
-            Some(named)
+            Some((named, Opening::MayCreate))
         );
-        assert_eq!(document_to_open(None, Some(last.clone())), Some(last));
+        assert_eq!(
+            document_to_open(None, Some(last.clone())),
+            Some((last, Opening::MustExist))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -10194,7 +10243,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let _other = held_elsewhere_lock(&held);
         let before = on_disk(&held);
         let mut page = page_holding(&mine);
-        page.app.open_document(held.display().to_string());
+        page.app
+            .open_document(held.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.session.path(), Some(mine.as_path()));
         assert_eq!(
             page.app.session.last_error.as_deref(),
@@ -10211,7 +10261,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let symlink = path.with_file_name("link.kame");
         std::os::unix::fs::symlink(&path, &symlink).unwrap();
         for spelling in [&path, &symlink] {
-            page.app.open_document(spelling.display().to_string());
+            page.app
+                .open_document(spelling.display().to_string(), Opening::MayCreate);
             assert_eq!(page.app.session.last_error, None);
             assert_eq!(page.app.session.path(), Some(spelling.as_path()));
             assert!(is_held(&path));
@@ -10224,7 +10275,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let second = written_document("second.kame");
         let mut page = page_holding(&first);
         assert!(is_held(&first));
-        page.app.open_document(second.display().to_string());
+        page.app
+            .open_document(second.display().to_string(), Opening::MayCreate);
         assert!(!is_held(&first));
         assert!(is_held(&second));
         page.app.request_new();
@@ -10236,9 +10288,187 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     fn a_document_an_open_makes_is_held() {
         let path = scratch_dir("held").join("new.kame");
         let mut page = Headless::new(Session::anonymous().unwrap());
-        page.app.open_document(path.display().to_string());
+        page.app
+            .open_document(path.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.session.path(), Some(path.as_path()));
         assert!(is_held(&path));
+    }
+
+    /// Takes the document at `path` away, as a sync or another program does between its being
+    /// found and its being opened, with what SQLite keeps beside it.
+    fn take_away(path: &Path) {
+        std::fs::remove_file(path).unwrap();
+        for beside in ["-wal", "-shm", "-journal"] {
+            let mut name = path.as_os_str().to_owned();
+            name.push(beside);
+            let _ = std::fs::remove_file(PathBuf::from(name));
+        }
+    }
+
+    /// Whether nothing was made at `path` or beside it, in a folder that held only it.
+    fn nothing_made_at(path: &Path) -> bool {
+        std::fs::read_dir(path.parent().unwrap()).unwrap().count() == 0
+    }
+
+    /// What the status row says of a document found earlier that has gone.
+    fn says_gone(page: &Headless, path: &Path) -> bool {
+        page.app.notice == Some(format!("{} is no longer there", path.display()))
+            && page.app.session.last_error.is_none()
+    }
+
+    /// The first paragraph on the screen.
+    fn first_words(page: &Headless) -> &str {
+        &page.app.session.document().blocks[0].text
+    }
+
+    /// A page of unsaved words, which an open asks about before leaving, and a document found
+    /// for it to open.
+    fn page_asking_before_it_opens() -> (Headless, PathBuf) {
+        (page_with_a_word(), written_document("found.kame"))
+    }
+
+    /// Answers the prompt asking whether to leave unsaved words, once `found` has gone, and
+    /// checks that nothing was made where it was and the words are still on the screen.
+    fn open_anyway_once_it_has_gone(page: &mut Headless, found: &Path) {
+        let asking = page.app.open_prompt.as_ref().expect("it asks first");
+        assert!(asking.confirming);
+        assert_eq!(asking.opening, Opening::MustExist);
+        take_away(found);
+        page.press("Open anyway");
+        page.frame(Vec::new());
+        assert!(page.app.open_prompt.is_none());
+        assert!(
+            nothing_made_at(found),
+            "a document was made where one had gone"
+        );
+        assert!(page.app.session.is_anonymous());
+        assert_eq!(first_words(page), "word");
+        assert!(says_gone(page, found), "{:?}", page.app.notice);
+    }
+
+    #[test]
+    fn a_document_found_earlier_that_has_gone_is_not_made_by_opening_it() {
+        let mine = written_document("mine.kame");
+        let found = written_document("found.kame");
+        let mut page = page_holding(&mine);
+        take_away(&found);
+        page.app
+            .open_document(found.display().to_string(), Opening::MustExist);
+        assert!(
+            nothing_made_at(&found),
+            "a document was made where one had gone"
+        );
+        assert_eq!(page.app.session.path(), Some(mine.as_path()));
+        assert_eq!(first_words(&page), "words");
+        assert!(says_gone(&page, &found), "{:?}", page.app.notice);
+        assert!(is_held(&mine));
+    }
+
+    #[test]
+    fn a_picked_document_that_goes_while_the_prompt_asks_is_not_made() {
+        let (mut page, found) = page_asking_before_it_opens();
+        page.app.open_picked(found.clone());
+        open_anyway_once_it_has_gone(&mut page, &found);
+    }
+
+    #[test]
+    fn an_earlier_document_that_goes_while_the_prompt_asks_is_not_made_by_going_back() {
+        let (mut page, found) = page_asking_before_it_opens();
+        page.app.back.push(BackStop {
+            path: Some(found.clone()),
+            caret: page.app.session.caret,
+            scroll: 0.0,
+        });
+        page.app.go_back();
+        open_anyway_once_it_has_gone(&mut page, &found);
+    }
+
+    /// The prompt was asking about a name typed, which would have been made, and now asks about
+    /// a document the OS found.
+    #[test]
+    fn a_document_the_os_asked_for_that_goes_while_the_prompt_asks_is_not_made() {
+        let (mut page, found) = page_asking_before_it_opens();
+        let typed = scratch_dir("typed").join("typed.kame");
+        page.app.open_or_confirm(typed.clone(), Opening::MayCreate);
+        page.app.request_open(found.clone());
+        open_anyway_once_it_has_gone(&mut page, &found);
+        assert!(!typed.exists());
+    }
+
+    #[test]
+    fn a_document_the_os_asked_for_that_goes_while_a_dialog_holds_it_is_not_made() {
+        let (mut page, found) = page_asking_before_it_opens();
+        page.app.begin_properties();
+        page.app.request_open(found.clone());
+        page.app.metadata_prompt = None;
+        page.frame(Vec::new());
+        open_anyway_once_it_has_gone(&mut page, &found);
+    }
+
+    #[test]
+    fn a_name_typed_is_still_made_once_the_prompt_is_answered() {
+        let mut page = page_with_a_word();
+        let typed = scratch_dir("typed").join("typed.kame");
+        page.app.open_or_confirm(typed.clone(), Opening::MayCreate);
+        assert!(!typed.exists());
+        page.press("Open anyway");
+        page.frame(Vec::new());
+        assert!(typed.is_file());
+        assert_eq!(page.app.session.path(), Some(typed.as_path()));
+    }
+
+    /// The file that replaced this one was there when the prompt offered it, and went before it
+    /// was opened. These words are then the only ones left, and the prompt stays to say so.
+    #[test]
+    fn the_one_on_disk_that_has_gone_is_not_made_and_these_words_stay() {
+        let path = written_document("doc.kame");
+        let mut page = page_holding(&path);
+        let was = replace_with_copy(&path);
+        assert!(page.app.session.check_file());
+        page.app.replaced_prompt = true;
+        take_away(&path);
+        page.app.open_replacement(&path);
+        assert!(!path.exists(), "a document was made where one had gone");
+        assert_eq!(on_disk(&path).len(), 1, "only the file this was: {was:?}");
+        assert_eq!(page.app.session.path(), Some(path.as_path()));
+        assert_eq!(first_words(&page), "words");
+        assert_eq!(
+            page.app.notice,
+            Some(format!("{} is no longer there", path.display()))
+        );
+        for _ in 0..2 {
+            page.frame(Vec::new());
+        }
+        assert!(page.sees("doc.kame is no longer there."));
+        assert!(page.can_press("Save mine as…"));
+        assert!(!page.can_press("Open the one on disk"));
+    }
+
+    #[test]
+    fn a_launch_onto_the_last_document_that_has_gone_makes_nothing() {
+        let last = written_document("last.kame");
+        let found = document_to_open(None, Some(last.clone()));
+        assert_eq!(found, Some((last.clone(), Opening::MustExist)));
+        take_away(&last);
+        let (path, opening) = found.unwrap();
+        let launched = launch_open(&path, opening).unwrap();
+        assert!(
+            launched.is_none(),
+            "it opened a document where one had gone"
+        );
+        assert!(nothing_made_at(&last));
+    }
+
+    #[test]
+    fn a_launch_onto_a_name_still_makes_a_document() {
+        let named = scratch_dir("named").join("new.kame");
+        let found = document_to_open(Some(named.clone()), None);
+        assert_eq!(found, Some((named.clone(), Opening::MayCreate)));
+        let (path, opening) = found.unwrap();
+        let (session, _, claimed) = launch_open(&path, opening).unwrap().unwrap();
+        assert!(named.is_file());
+        assert_eq!(session.path(), Some(named.as_path()));
+        assert!(claimed.is_some_and(|lock| lock.is_for(&named)));
     }
 
     #[test]
@@ -10281,7 +10511,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         std::fs::write(&held, b"").unwrap();
         let other = held_elsewhere_lock(&held);
         let before = on_disk(&held);
-        let refused = launch_open(&held).map(|_| ());
+        let refused = launch_open(&held, Opening::MayCreate).map(|_| ());
         assert_eq!(
             refused,
             Err("held.kame is open in another kame window".to_string())
@@ -10291,7 +10521,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(blank.path(), None);
         assert_eq!(on_disk(&held), before);
         drop(other);
-        assert!(launch_open(&held).is_ok());
+        assert!(launch_open(&held, Opening::MayCreate).is_ok());
         assert_ne!(on_disk(&held), before, "an open does write it");
     }
 
@@ -10310,7 +10540,9 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             assert!(said.contains("until kame is updated"), "{said}");
         };
 
-        let refused = launch_open(&path).map(|_| ()).unwrap_err();
+        let refused = launch_open(&path, Opening::MayCreate)
+            .map(|_| ())
+            .unwrap_err();
         says_to_update(&refused);
         assert!(!path.exists(), "a launch made nothing");
 
@@ -10318,7 +10550,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let mut session = open(&here);
         session.insert("Here.");
         let mut page = Headless::new(session);
-        page.app.open_document(path.display().to_string());
+        page.app
+            .open_document(path.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.session.path(), Some(here.as_path()));
         says_to_update(page.app.session.last_error.as_deref().unwrap_or_default());
         assert!(!path.exists(), "an Open made nothing");
@@ -10334,7 +10567,7 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     #[test]
     fn a_launch_holds_what_it_opens() {
         let path = written_document("doc.kame");
-        let (session, _, claimed) = launch_open(&path).unwrap();
+        let (session, _, claimed) = launch_open(&path, Opening::MayCreate).unwrap().unwrap();
         assert!(claimed.is_some_and(|lock| lock.is_for(&path)));
         drop(session);
         assert!(!is_held(&path));
@@ -10947,8 +11180,10 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let mut page = Headless::new(session);
         let said = |page: &Headless| page.app.session.last_error.clone().unwrap_or_default();
 
-        page.app
-            .open_document(dir.join("a#b.kame").display().to_string());
+        page.app.open_document(
+            dir.join("a#b.kame").display().to_string(),
+            Opening::MayCreate,
+        );
         assert_eq!(page.app.session.path(), Some(here.as_path()));
         assert!(
             said(&page).contains(kame_core::links::NO_HASH_IN_NAMES),
@@ -10976,7 +11211,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         // One already there, which kame didn't name, still opens.
         let theirs = dir.join("e#f.kame");
         open(&theirs).insert("Theirs.");
-        page.app.open_document(theirs.display().to_string());
+        page.app
+            .open_document(theirs.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.session.path(), Some(theirs.as_path()));
     }
 
@@ -11003,8 +11239,10 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(!notebook.join("C#/copy.kame").exists());
         page.app.session.last_error = None;
         // Nor does Open Path make one there.
-        page.app
-            .open_document(notebook.join("C#/new.kame").display().to_string());
+        page.app.open_document(
+            notebook.join("C#/new.kame").display().to_string(),
+            Opening::MayCreate,
+        );
         assert_eq!(page.app.session.path(), Some(here.as_path()));
         let said = page.app.session.last_error.clone().unwrap_or_default();
         assert!(said.contains(kame_core::links::NO_HASH_IN_NAMES), "{said}");
@@ -11020,7 +11258,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         // One already in such a folder still opens.
         let theirs = notebook.join("C#/theirs.kame");
         open(&theirs).insert("Theirs.");
-        page.app.open_document(theirs.display().to_string());
+        page.app
+            .open_document(theirs.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.session.path(), Some(theirs.as_path()));
     }
 
@@ -11611,7 +11850,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
     /// and that the file holds what it held.
     fn open_unchanged(page: &mut Headless, b: &Path) {
         let before = kept_in(b);
-        page.app.open_document(b.display().to_string());
+        page.app
+            .open_document(b.display().to_string(), Opening::MayCreate);
         page.frame(Vec::new());
         page.frame(Vec::new());
         assert_eq!(page.app.session.path(), Some(b));
@@ -11633,7 +11873,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         let prompt = page.app.metadata_prompt.as_mut().unwrap();
         prompt.title = "Typed for A".to_string();
 
-        page.app.open_document(b.display().to_string());
+        page.app
+            .open_document(b.display().to_string(), Opening::MayCreate);
         page.frame(Vec::new());
 
         assert!(page.app.metadata_prompt.is_none());
@@ -11753,7 +11994,8 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert!(egui::Popup::is_any_open(&page.ctx));
         assert!(page.sees("Link to document…"));
 
-        page.app.open_document(b.display().to_string());
+        page.app
+            .open_document(b.display().to_string(), Opening::MayCreate);
         page.frame(Vec::new());
 
         assert_eq!(page.app.session.path(), Some(b.as_path()));
@@ -12411,7 +12653,8 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
     fn opening_another_document_takes_away_an_unwritten_marginal() {
         let (mut page, path, before) = page_on_file_with_unwritten_marginal();
         let other = temp_db_path();
-        page.app.open_document(other.display().to_string());
+        page.app
+            .open_document(other.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.open_note, None);
         assert_ne!(page.app.session.path(), Some(path.as_path()));
         assert_eq!(open(&path).document(), &before);
@@ -12430,7 +12673,8 @@ remarkably counterintuitive properties, whatever anybody happens to believe abou
     fn reopening_the_file_takes_away_an_unwritten_marginal() {
         let (mut page, path, before) = page_on_file_with_unwritten_marginal();
         let history = (1, 0);
-        page.app.open_document(path.display().to_string());
+        page.app
+            .open_document(path.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.open_note, None);
         assert_eq!(page.app.session.document(), &before);
         assert_eq!(page.app.session.history(), history);

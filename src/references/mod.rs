@@ -341,7 +341,7 @@ mod tests {
     use super::*;
     use crate::references::test_support::*;
     use crate::{test_temp_dir, Headless};
-    use kame_core::session::Session;
+    use kame_core::session::{Opening, Session};
     use std::path::Path;
 
     /// Refreshes, and waits for the files to have been read.
@@ -537,7 +537,7 @@ mod tests {
         page.app.open_picked(other.clone());
         assert_form_kept(&page, &opened);
         page.app.pending_heading = Some("Part".to_string());
-        page.app.open_or_confirm(other);
+        page.app.open_or_confirm(other, Opening::MustExist);
         assert_form_kept(&page, &opened);
         assert_eq!(page.app.pending_heading, None);
     }
@@ -751,7 +751,8 @@ mod tests {
         page.app.begin_properties();
         page.app.request_open(held);
 
-        page.app.open_document(picked.display().to_string());
+        page.app
+            .open_document(picked.display().to_string(), Opening::MayCreate);
         page.app.metadata_prompt = None;
         page.frame(Vec::new());
         page.frame(Vec::new());
@@ -775,7 +776,8 @@ mod tests {
     #[test]
     fn a_document_the_os_asks_for_takes_over_the_prompt_about_losing_work() {
         let (mut page, other) = page_that_would_lose_work();
-        page.app.open_or_confirm(PathBuf::from("first.kame"));
+        page.app
+            .open_or_confirm(PathBuf::from("first.kame"), Opening::MayCreate);
         assert!(page.app.open_prompt.is_some());
 
         page.app.request_open(other.clone());

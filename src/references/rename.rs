@@ -200,7 +200,7 @@ mod tests {
     use super::*;
     use crate::references::test_support::*;
     use crate::{test_temp_dir, Headless};
-    use kame_core::session::Session;
+    use kame_core::session::{Opening, Session};
 
     #[test]
     fn a_renames_outcome_says_what_it_did_and_what_it_left() {
@@ -570,7 +570,8 @@ mod tests {
         });
         let open = page.app.session.path().unwrap().to_path_buf();
 
-        page.app.open_document(other.display().to_string());
+        page.app
+            .open_document(other.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.session.path(), Some(open.as_path()));
         assert!(page
             .app
@@ -587,7 +588,8 @@ mod tests {
 
         send.send(Err("refused".to_string())).unwrap();
         run_until(&mut page, |app| app.refs.renaming.is_none());
-        page.app.open_document(other.display().to_string());
+        page.app
+            .open_document(other.display().to_string(), Opening::MayCreate);
         assert_eq!(page.app.session.path(), Some(other.as_path()));
         assert!(
             page.app.refs.window.is_none(),
@@ -778,7 +780,7 @@ mod tests {
         let other = other_document(&page, "other.kame", "elsewhere");
         let _send = rename_held_open(&mut page);
 
-        page.app.open_from_notebook(other, None);
+        page.app.open_from_notebook(other, None, Opening::MustExist);
 
         assert!(page.app.back.stops.is_empty());
     }

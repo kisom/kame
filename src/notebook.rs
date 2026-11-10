@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use kame_core::lock::Locks;
 use kame_core::model::{BlockId, Metadata};
-use kame_core::session::Session;
+use kame_core::session::{Opening, Session};
 use kame_notebook::links::{create_document, linking_to, remove_untouched, Follow, LinkFrom, Made};
 use kame_notebook::list::{
     listed, listed_if_changed, narrow, narrow_headings, rows, Entry, Kind, Listed, RowKind,
@@ -831,7 +831,8 @@ impl KameApp {
         match kame_notebook::init(&folder) {
             Ok(notebook) => {
                 if let Some(index) = notebook.index() {
-                    self.open_or_confirm(index);
+                    // Making the notebook makes its contents page.
+                    self.open_or_confirm(index, Opening::MayCreate);
                 }
             }
             Err(err) => self.session.last_error = Some(err),
@@ -841,7 +842,7 @@ impl KameApp {
     /// Goes to the contents page, with Ctrl-[ coming back.
     pub(crate) fn go_home(&mut self) {
         match self.nb.notebook.as_ref().and_then(Notebook::index) {
-            Some(index) => self.open_from_notebook(index, None),
+            Some(index) => self.open_from_notebook(index, None, Opening::MustExist),
             None => self.notice = Some(format!("this notebook has no {}", kame_notebook::INDEX)),
         }
     }
@@ -894,7 +895,14 @@ impl KameApp {
     }
 
     /// Opens a document from a list, at a place in it if there is one, with Ctrl-[ coming back.
-    pub(crate) fn open_from_notebook(&mut self, path: PathBuf, place: Option<(BlockId, usize)>) {
+    /// One a list found is only opened, as the list may be older than the folder, and one the
+    /// jump list has just been asked to create may be made.
+    pub(crate) fn open_from_notebook(
+        &mut self,
+        path: PathBuf,
+        place: Option<(BlockId, usize)>,
+        opening: Opening,
+    ) {
         let elsewhere = !same_document(self.session.path(), Some(&path));
         // Refused before a stop is left that leads back from nowhere.
         if elsewhere && self.say_if_reference_form_up() {
@@ -922,7 +930,7 @@ impl KameApp {
         }
         self.pending_heading = None;
         self.nb.pending_place = place;
-        self.open_or_confirm(path);
+        self.open_or_confirm(path, opening);
     }
 
     /// Goes to the place a search asked for, once its document is open.
@@ -935,14 +943,20 @@ impl KameApp {
         }
     }
 
+    /// Lets go of the place a search asked for, in a document that turned out to have gone.
+    pub(crate) fn forget_pending_place(&mut self) {
+        self.nb.pending_place = None;
+    }
+
     /// Where a link leads in a notebook, doing what it takes to get there. `None` means it has been
-    /// dealt with here, and otherwise it's a document for the usual path to open. A link this
-    /// notebook won't follow falls back on opening anything that's already there.
+    /// dealt with here, and otherwise it's a document for the usual path to open, as one found or
+    /// as one this has just been asked to create. A link this notebook won't follow falls back on
+    /// opening anything that's already there.
     pub(crate) fn follow_in_notebook(
         &mut self,
         target: &str,
         heading: Option<&str>,
-    ) -> Option<Option<PathBuf>> {
+    ) -> Option<Option<(PathBuf, Opening)>> {
         let notebook = self.nb.notebook.clone()?;
         match notebook.follow(target, &self.session.link_base()) {
             Follow::Open(found) => {
@@ -951,7 +965,7 @@ impl KameApp {
                         Some(format!("could not open {} — {err}", found.display()));
                     return Some(None);
                 }
-                Some(Some(found))
+                Some(Some((found, Opening::MustExist)))
             }
             Follow::Create(found) => match create_document(&found, heading) {
                 Ok(made) => {
@@ -961,7 +975,7 @@ impl KameApp {
                         metadata: Metadata::default(),
                         kept: false,
                     });
-                    Some(Some(found))
+                    Some(Some((found, Opening::MayCreate)))
                 }
                 Err(err) => {
                     self.session.last_error =
@@ -1133,7 +1147,9 @@ impl KameApp {
             self.browser_reference(chosen);
         }
         match choose {
-            Some((path, Kind::Document)) => self.open_from_notebook(path, None),
+            Some((path, Kind::Document)) => {
+                self.open_from_notebook(path, None, Opening::MustExist);
+            }
             Some((path, Kind::File)) => {
                 if let Err(err) = open_in_system_viewer(&path) {
                     self.session.last_error =
@@ -1214,10 +1230,10 @@ impl KameApp {
         if let Some(row) = chosen.filter(|row| *row < rows_count) {
             if let Some(at) = documents.get(row) {
                 let path = self.nb.listing[*at].entry.path.clone();
-                self.open_from_notebook(path, None);
+                self.open_from_notebook(path, None, Opening::MustExist);
             } else if let Some(path) = creatable {
                 match create_document(&path, None) {
-                    Ok(_) => self.open_from_notebook(path, None),
+                    Ok(_) => self.open_from_notebook(path, None, Opening::MayCreate),
                     Err(err) => {
                         self.session.last_error =
                             Some(format!("could not create {} — {err}", path.display()));
@@ -1356,7 +1372,7 @@ impl KameApp {
             if let Some(running) = search_list.running.take() {
                 running.cancel.store(true, Ordering::Relaxed);
             }
-            self.open_from_notebook(path, Some((block, offset)));
+            self.open_from_notebook(path, Some((block, offset)), Opening::MustExist);
             return;
         }
         if close {
@@ -1546,7 +1562,7 @@ impl KameApp {
     /// Opens the document clicked on in what links here, once the page has been drawn.
     pub(crate) fn open_pending_backlink(&mut self) {
         if let Some(path) = self.nb.pending_open.take() {
-            self.open_from_notebook(path, None);
+            self.open_from_notebook(path, None, Opening::MustExist);
         }
     }
 
@@ -1796,13 +1812,14 @@ impl KameApp {
             self.document_lock = held.flatten();
             if there_to_open(back_to) {
                 self.pending_heading = None;
-                self.open_document(back_to.display().to_string());
-                if same_document(self.session.path(), Some(back_to)) {
-                    self.session.set_caret(caret);
-                    self.session.restored_scroll = None;
-                    self.pending_scroll = Some(scroll);
-                }
-            } else {
+                self.open_document(back_to.display().to_string(), Opening::MustExist);
+            }
+            if same_document(self.session.path(), Some(back_to)) {
+                self.session.set_caret(caret);
+                self.session.restored_scroll = None;
+                self.pending_scroll = Some(scroll);
+            } else if !back_to.exists() {
+                // Whether it wasn't there to open or went as it was opened, which makes none.
                 self.session.last_error = Some(format!("{} is no longer there", back_to.display()));
             }
             // Its lock goes if it did not open again.
@@ -1919,7 +1936,7 @@ impl KameApp {
         let mut why_not_index = None;
         if let Some(index) = index {
             self.pending_heading = None;
-            self.open_document(index.display().to_string());
+            self.open_document(index.display().to_string(), Opening::MustExist);
             if same_document(self.session.path(), Some(path)) {
                 why_not_index = self.session.last_error.clone();
             }
@@ -3078,6 +3095,78 @@ mod tests {
         assert!(!root.join("fresh.kame").exists());
         assert!(!root.join("fresh#part.kame").exists());
         assert_eq!(page.app.session.path(), Some(root.join("a.kame").as_path()));
+    }
+
+    #[test]
+    fn the_jump_list_s_create_row_still_makes_a_document() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-jump-create")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let mut session = Session::open(&root.join("a.kame")).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+
+        page.app.toggle_jump();
+        // The field takes the keyboard on its first frame.
+        page.frame(Vec::new());
+        type_text(&mut page, "fresh");
+        page.frame(Vec::new());
+        page.press("Create");
+        page.frame(Vec::new());
+        let fresh = root.join("fresh.kame");
+        assert!(fresh.is_file());
+        assert_eq!(page.app.session.path(), Some(fresh.as_path()));
+    }
+
+    /// The browser, the jump list, a search and what links here each show what was there when they
+    /// last looked, and a row is opened as the document it was found as.
+    #[test]
+    fn a_listed_document_that_has_gone_is_not_made_by_opening_it() {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder("app-listed-gone")
+            .canonicalize()
+            .unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        std::fs::create_dir_all(root.join("essays")).unwrap();
+        let listed = root.join("essays/listed.kame");
+        let mut theirs = Session::open(&listed).unwrap();
+        theirs.insert("Theirs.");
+        let place = (theirs.document().blocks[0].id, 3);
+        drop(theirs);
+        let mine = root.join("a.kame");
+        let mut session = Session::open(&mine).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+        let caret = page.app.session.caret;
+
+        for entry in std::fs::read_dir(root.join("essays")).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        page.app
+            .open_from_notebook(listed.clone(), Some(place), Opening::MustExist);
+        assert_eq!(
+            std::fs::read_dir(root.join("essays")).unwrap().count(),
+            0,
+            "a document was made where one had gone"
+        );
+        assert_eq!(page.app.session.path(), Some(mine.as_path()));
+        assert_eq!(page.app.session.document().blocks[0].text, "Mine.");
+        assert_eq!(page.app.session.caret, caret);
+        assert_eq!(
+            page.app.notice,
+            Some(format!("{} is no longer there", listed.display()))
+        );
+        assert_eq!(page.app.session.last_error, None);
+        assert!(
+            page.app.nb.pending_place.is_none(),
+            "the place in it is left for no other document"
+        );
     }
 
     /// A notebook in `name` with `a.kame` open, and `essay.kame` just made by following a link to

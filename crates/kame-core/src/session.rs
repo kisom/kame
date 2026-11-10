@@ -590,7 +590,8 @@ impl Session {
     }
 
     /// What the first save suggests calling the file: the source's name for an
-    /// import, whatever title its front matter gave the document.
+    /// import, whatever title its front matter gave the document. A `#` is left out, as a link
+    /// would take it for a heading, and a name of nothing else is Untitled.
     pub fn suggested_file_name(&self) -> String {
         let stem = self
             .path
@@ -598,7 +599,9 @@ impl Session {
             .or(self.source_path.as_deref())
             .and_then(Path::file_stem)
             .and_then(|stem| stem.to_str())
-            .unwrap_or("Untitled");
+            .map(|stem| stem.replace('#', "").trim().to_string())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or_else(|| "Untitled".to_string());
         format!("{stem}.kame")
     }
 
@@ -4678,6 +4681,26 @@ mod tests {
         std::fs::write(&path, "Title: Something Else\n\nWords.\n").unwrap();
         let (session, _) = Session::open_any(&path).unwrap();
         assert_eq!(session.suggested_file_name(), "notes.kame");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A link names a heading after a `#`, so Save As refuses a name holding one.
+    #[test]
+    fn the_name_suggested_for_an_import_leaves_out_hash() {
+        let dir = crate::test_temp_dir().join(format!("kame-name-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (source, suggested) in [
+            ("C#.md", "C.kame"),
+            ("#1 notes#.md", "1 notes.kame"),
+            ("#.md", "Untitled.kame"),
+        ] {
+            let path = dir.join(source);
+            std::fs::write(&path, "Words.\n").unwrap();
+            let (session, _) = Session::open_any(&path).unwrap();
+            let title = Path::new(source).file_stem().unwrap().to_str().unwrap();
+            assert_eq!(session.document().title, title, "{source}");
+            assert_eq!(session.suggested_file_name(), suggested, "{source}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

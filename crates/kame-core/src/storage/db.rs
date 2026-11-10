@@ -996,6 +996,13 @@ impl Drop for Db {
         // .kame file. A crash or kill leaves -wal/-shm behind — that is normal
         // and harmless: SQLite replays the WAL on the next open. Here we shrink
         // the WAL, and the connection's own close removes both sidecars.
+        //
+        // Only a connection that writes does this. One opened to read has nothing of its own in
+        // the log, and a checkpoint takes the lock the writer needs, holding it while it waits for
+        // other readers, so an edit made meanwhile would be refused.
+        if self.conn.is_readonly(rusqlite::MAIN_DB).unwrap_or(true) {
+            return;
+        }
         let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 }
@@ -1934,6 +1941,60 @@ mod tests {
             .unwrap();
         assert!(db.close().is_err());
         other.execute_batch("COMMIT").unwrap();
+    }
+
+    /// Something only reading a document, as a notebook's threads do, never takes the lock its
+    /// writer needs. A checkpoint does take it, and one that restarts the log holds it while it
+    /// waits for other readers, so an edit made then is refused.
+    #[test]
+    fn closing_a_reader_leaves_the_writer_its_lock() {
+        use std::sync::{Arc, Mutex};
+
+        let path = temp_db_path();
+        let mut writer = Db::open(&path).unwrap();
+        let doc = sample_document();
+        writer.save_document(&doc).unwrap();
+        // Another reader, part way through, which a checkpoint restarting the log has to wait for.
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN").unwrap();
+        let _: i64 = other
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .unwrap();
+        // All of the log is in the file, so a checkpoint has nothing to copy, only that to wait for.
+        writer
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(PASSIVE)")
+            .unwrap();
+        let mut reader = Db::open_read_only(&path).unwrap();
+        assert_eq!(reader.load_document().unwrap(), doc);
+        let writer = Arc::new(Mutex::new(writer));
+        let edited_meanwhile: Arc<Mutex<Option<String>>> = Arc::default();
+        {
+            let (writer, edited_meanwhile, doc) =
+                (writer.clone(), edited_meanwhile.clone(), doc.clone());
+            reader
+                .conn
+                .busy_handler(Some(move |_| {
+                    let edit = writer.lock().unwrap().record_edit(&doc, &insert_op(0));
+                    *edited_meanwhile.lock().unwrap() = Some(format!("{edit:?}"));
+                    false
+                }))
+                .unwrap();
+        }
+
+        drop(reader);
+
+        assert_eq!(
+            *edited_meanwhile.lock().unwrap(),
+            None,
+            "closing the reader waited, holding the writer's lock"
+        );
+        other.execute_batch("COMMIT").unwrap();
+        writer
+            .lock()
+            .unwrap()
+            .record_edit(&doc, &insert_op(0))
+            .unwrap();
     }
 
     /// A history said again changes each snapshot named in place, keeping its label and time, and

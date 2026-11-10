@@ -8344,6 +8344,71 @@ mod tests {
         assert_eq!(styled(&session, SpanStyle::Bold), [(2, 5)]);
     }
 
+    /// Types `text` as [`type_marked`] does, and checks that what its last character converts is
+    /// one step, which undo takes back to the document from just before it and redo brings back.
+    fn type_marked_then_undo(session: &mut Session, text: &str) {
+        let (head, last) = text.split_at(text.len() - 1);
+        type_marked(session, head);
+        assert!(session.insert(last));
+        let before = session.document().clone();
+        let steps = session.history().0;
+        session.apply_inline_markdown();
+        session.apply_markdown_link();
+        assert_eq!(session.history().0, steps + 1, "one step");
+        let after = session.document().clone();
+        assert_ne!(after, before, "{text:?} converts");
+        assert!(session.undo());
+        assert_eq!(session.document(), &before);
+        assert!(session.redo());
+        assert_eq!(session.document(), &after);
+    }
+
+    #[test]
+    fn emphasis_typed_inside_a_link_keeps_the_link() {
+        let url = "https://w.example/";
+        let mut session = linked("The Art of War", 0, 14, url);
+        session.set_caret(at(&session, 11));
+        type_marked(&mut session, "*");
+        session.set_caret(at(&session, 15));
+        type_marked_then_undo(&mut session, "*");
+        assert_eq!(session.document().blocks[0].text, "The Art of War");
+        let link = SpanStyle::Link {
+            url: url.to_string(),
+        };
+        assert_eq!(styled(&session, link), [(0, 14)]);
+        assert_eq!(styled(&session, SpanStyle::Italic), [(11, 14)]);
+    }
+
+    #[test]
+    fn bold_typed_inside_italic_keeps_the_italic() {
+        let mut session = Session::anonymous().unwrap();
+        assert!(session.toggle_emphasis(Emphasis::Italic));
+        type_marked_then_undo(&mut session, "a **b**");
+        assert_eq!(session.document().blocks[0].text, "a b");
+        assert_eq!(styled(&session, SpanStyle::Italic), [(0, 3)]);
+        assert_eq!(styled(&session, SpanStyle::Bold), [(2, 3)]);
+    }
+
+    #[test]
+    fn code_and_a_link_typed_inside_bold_keep_the_bold() {
+        let mut session = Session::anonymous().unwrap();
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        type_marked_then_undo(&mut session, "a `x`");
+        assert_eq!(session.document().blocks[0].text, "a x");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(0, 3)]);
+        assert_eq!(styled(&session, SpanStyle::Code), [(2, 3)]);
+
+        let mut session = Session::anonymous().unwrap();
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        type_marked_then_undo(&mut session, "a [w](https://x.example/)");
+        assert_eq!(session.document().blocks[0].text, "a w");
+        assert_eq!(styled(&session, SpanStyle::Bold), [(0, 3)]);
+        let link = SpanStyle::Link {
+            url: "https://x.example/".to_string(),
+        };
+        assert_eq!(styled(&session, link), [(2, 3)]);
+    }
+
     #[test]
     fn bold_on_a_selection_and_again_takes_it_off() {
         let mut session = Session::anonymous().unwrap();

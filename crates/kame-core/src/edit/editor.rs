@@ -1957,21 +1957,25 @@ pub(crate) fn styled_throughout(
     covered >= end
 }
 
-/// Rebases a span across a deletion of `[start, end)`: spans before the
-/// deletion are unchanged, spans after it shift left, and a span that straddles
-/// a deletion boundary is dropped (its text is partly gone).
+/// Rebases a span across a deletion of `[start, end)`, as a delete does to the spans it touches:
+/// spans before the deletion are unchanged, spans after it shift left, and a span the deletion
+/// reaches into shrinks by what it took. A span left with nothing in it is dropped.
 fn shift_span_on_delete(span: &Span, start: usize, end: usize) -> Option<Span> {
-    if span.end <= start {
-        Some(span.clone())
-    } else if span.start >= end {
-        Some(Span {
-            start: span.start - (end - start),
-            end: span.end - (end - start),
-            style: span.style.clone(),
-        })
-    } else {
-        None
-    }
+    let rebased = |offset: usize| {
+        if offset <= start {
+            offset
+        } else if offset >= end {
+            offset - (end - start)
+        } else {
+            start
+        }
+    };
+    let (from, to) = (rebased(span.start), rebased(span.end));
+    (from < to).then(|| Span {
+        start: from,
+        end: to,
+        style: span.style.clone(),
+    })
 }
 
 /// The markdown link a just-typed closing `)` completes, if any.

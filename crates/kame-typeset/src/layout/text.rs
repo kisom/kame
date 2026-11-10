@@ -26,8 +26,8 @@ const CODE_FAMILY: &str = "IBM Plex Mono";
 /// invalidating the layout cache.
 pub const LINK_COLOR: Color = Color::rgb(59, 130, 246);
 
-/// The widest a code line can be before it wraps after all. A block is drawn as one image, and
-/// this at 3x stays within what graphics cards allow.
+/// The widest a code line can be before it wraps after all, so that a block's image has an end.
+/// One past the largest texture a graphics card takes is drawn in several.
 const CODE_WIDEST: f32 = 2400.0;
 
 /// Metrics and column widths for headless layout.

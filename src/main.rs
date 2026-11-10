@@ -3582,6 +3582,17 @@ impl KameApp {
         self.open_note_pos = None;
         self.find = None;
         self.refs.close_windows();
+        // What these hold was read from the old document, and would otherwise be written into
+        // this one, or name its blocks or snapshots by the old one's ids.
+        self.metadata_prompt = None;
+        self.link_prompt = None;
+        self.snapshot_prompt = None;
+        self.restore_picker = None;
+        self.replaced_prompt = false;
+        self.mark_menu = None;
+        self.link_menu = None;
+        self.menu_block = None;
+        self.marginal_menu = None;
         self.typewriter_anchor = None;
         // The scroll area remembers its offset, which belonged to the old document.
         self.pending_scroll = Some(0.0);
@@ -11392,6 +11403,179 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
         assert_eq!(words, vec!["alpha", "beta", "kame", "mantrap", "Udacity"]);
         add_words(&mut words, "   ");
         assert_eq!(words.len(), 5);
+    }
+
+    /// `a.kame` on the screen, and `b.kame` beside it, returned. Each has words, a title, a word
+    /// for the spell checker and a snapshot of its own.
+    fn a_open_beside_b(name: &str) -> (Headless, PathBuf) {
+        let dir = scratch_dir(name);
+        let write = |path: &Path, which: &str| {
+            let mut session = open(path);
+            session.insert(&format!("Words of {which}."));
+            let mut metadata = session.metadata.clone();
+            metadata.title = format!("Title of {which}");
+            metadata.words = vec![format!("word{which}")];
+            session.set_metadata(metadata);
+            session.snapshot(Some(which)).unwrap();
+            session
+        };
+        let b = dir.join("b.kame");
+        drop(write(&b, "B"));
+        let mut page = Headless::new(write(&dir.join("a.kame"), "A"));
+        page.frame(Vec::new());
+        (page, b)
+    }
+
+    /// What the file at `path` holds: its words, its properties and its snapshots' labels.
+    fn kept_in(path: &Path) -> (Document, model::Metadata, Vec<Option<String>>) {
+        let db = storage::Db::open_read_only(path).unwrap();
+        let snapshots = db.list_snapshots().unwrap();
+        (
+            db.load_document().unwrap(),
+            db.load_metadata().unwrap().unwrap(),
+            snapshots
+                .into_iter()
+                .map(|snapshot| snapshot.label)
+                .collect(),
+        )
+    }
+
+    /// Goes to `b` with the app's Open, and checks that it's on the screen as it is in its file,
+    /// and that the file holds what it held.
+    fn open_unchanged(page: &mut Headless, b: &Path) {
+        let before = kept_in(b);
+        page.app.open_document(b.display().to_string());
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path(), Some(b));
+        assert_eq!(page.app.session.document(), &before.0);
+        assert_eq!(page.app.session.metadata, before.1);
+        assert_eq!(page.app.session.metadata.title, "Title of B");
+        drop(std::mem::replace(
+            &mut page.app.session,
+            Session::anonymous().unwrap(),
+        ));
+        assert_eq!(kept_in(b), before);
+    }
+
+    #[test]
+    fn properties_close_when_another_document_opens() {
+        let (mut page, b) = a_open_beside_b("properties-move");
+        page.app.begin_properties();
+        page.frame(Vec::new());
+        let prompt = page.app.metadata_prompt.as_mut().unwrap();
+        prompt.title = "Typed for A".to_string();
+
+        page.app.open_document(b.display().to_string());
+        page.frame(Vec::new());
+
+        assert!(page.app.metadata_prompt.is_none());
+        assert!(!page.can_press("Save"));
+        assert_eq!(page.app.session.metadata.title, "Title of B");
+        assert_eq!(page.app.session.metadata.words, ["wordB"]);
+        let (mut page, b) = a_open_beside_b("properties-move-unchanged");
+        page.app.begin_properties();
+        page.frame(Vec::new());
+        open_unchanged(&mut page, &b);
+    }
+
+    /// Following a link and going back change the document as Open does.
+    #[test]
+    fn properties_close_when_a_link_is_followed_and_on_going_back() {
+        let (mut page, b) = a_open_beside_b("properties-link");
+        let a = page.app.session.path().unwrap().to_path_buf();
+        page.app.begin_properties();
+        page.frame(Vec::new());
+        page.app.follow_document_link("b.kame");
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path(), Some(b.as_path()));
+        assert!(page.app.metadata_prompt.is_none());
+        assert_eq!(page.app.session.metadata.title, "Title of B");
+
+        page.app.begin_properties();
+        page.frame(Vec::new());
+        page.app.go_back();
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.path(), Some(a.as_path()));
+        assert!(page.app.metadata_prompt.is_none());
+        assert_eq!(page.app.session.metadata.title, "Title of A");
+    }
+
+    #[test]
+    fn the_link_prompt_closes_when_another_document_opens() {
+        let (mut page, b) = a_open_beside_b("link-prompt-move");
+        let block_id = page.app.session.document().blocks[0].id;
+        page.app.open_link_prompt(block_id, 0, 5, None);
+        page.frame(Vec::new());
+        assert!(page.app.link_prompt.is_some());
+
+        open_unchanged(&mut page, &b);
+
+        assert!(page.app.link_prompt.is_none());
+    }
+
+    #[test]
+    fn the_snapshot_prompt_closes_when_another_document_opens() {
+        let (mut page, b) = a_open_beside_b("snapshot-prompt-move");
+        page.app.run_file_command(FileCommand::SnapshotNow);
+        page.frame(Vec::new());
+        page.app.snapshot_prompt.as_mut().unwrap().label = "Of A".to_string();
+
+        open_unchanged(&mut page, &b);
+
+        assert!(page.app.snapshot_prompt.is_none());
+    }
+
+    /// Its snapshots are A's, by row, and B's rows have the same numbers.
+    #[test]
+    fn the_restore_picker_closes_when_another_document_opens() {
+        let (mut page, b) = a_open_beside_b("restore-picker-move");
+        page.app.run_file_command(FileCommand::RestoreSnapshot);
+        page.frame(Vec::new());
+        assert!(page.app.restore_picker.is_some());
+
+        open_unchanged(&mut page, &b);
+
+        assert!(page.app.restore_picker.is_none());
+    }
+
+    /// It asks about a file that was replaced, which is the one left.
+    #[test]
+    fn the_replaced_file_prompt_closes_when_another_document_opens() {
+        let (mut page, b) = a_open_beside_b("replaced-prompt-move");
+        page.app.replaced_prompt = true;
+        for _ in 0..2 {
+            page.frame(Vec::new());
+        }
+        assert!(page.can_press("Save mine as…"));
+
+        open_unchanged(&mut page, &b);
+
+        assert!(!page.app.replaced_prompt);
+    }
+
+    /// The page's menu remembers the link, the block, the mark and the marginal it was opened on.
+    #[test]
+    fn the_page_menu_forgets_the_document_it_was_opened_on() {
+        let (mut page, b) = a_open_beside_b("page-menu-move");
+        let block_id = page.app.session.document().blocks[0].id;
+        assert!(page
+            .app
+            .session
+            .set_link(block_id, 0, 5, "https://example.com/".to_string()));
+        page.frame(Vec::new());
+        page.right_click_at(Pos2::new(page.body_left() + 10.0, PAGE_PADDING + 10.0));
+        assert!(page.app.link_menu.is_some());
+        assert_eq!(page.app.menu_block, Some(block_id));
+        page.app.mark_menu = Some((block_id, finding_at(0, 5)));
+        page.app.marginal_menu = Some(uuid::Uuid::new_v4());
+
+        open_unchanged(&mut page, &b);
+
+        assert!(page.app.link_menu.is_none());
+        assert!(page.app.menu_block.is_none());
+        assert!(page.app.mark_menu.is_none());
+        assert!(page.app.marginal_menu.is_none());
     }
 
     fn annotation(kind: AnnotationKind, body: &str) -> Annotation {

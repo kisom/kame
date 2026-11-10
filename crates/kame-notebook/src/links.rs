@@ -237,15 +237,17 @@ impl Notebook {
 }
 
 /// What creating a document made, so that all of it can go again if it's left untouched.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Made {
     folders: Vec<PathBuf>,
+    /// The document as it was written, for telling whether it's still only that.
+    document: Document,
 }
 
 /// Creates a document at `path` with any folders it needs. A heading named in the link becomes its
 /// first heading, so that the link then leads somewhere. None of this is an edit.
 pub fn create_document(path: &Path, heading: Option<&str>) -> std::io::Result<Made> {
-    let mut made = Made::default();
+    let mut folders = Vec::new();
     let mut missing: Vec<&Path> = path
         .ancestors()
         .skip(1)
@@ -254,7 +256,7 @@ pub fn create_document(path: &Path, heading: Option<&str>) -> std::io::Result<Ma
     missing.reverse();
     for folder in missing {
         std::fs::create_dir(folder)?;
-        made.folders.push(folder.to_path_buf());
+        folders.push(folder.to_path_buf());
     }
     let title = path
         .file_stem()
@@ -270,13 +272,21 @@ pub fn create_document(path: &Path, heading: Option<&str>) -> std::io::Result<Ma
     }
     let mut db = Db::open(path).map_err(std::io::Error::other)?;
     db.save_document(&doc).map_err(std::io::Error::other)?;
-    Ok(made)
+    Ok(Made {
+        folders,
+        document: doc,
+    })
 }
 
 /// Removes a document made by [`create_document`] and left unwritten, with what SQLite keeps beside
 /// it, and the folders made for it if nothing else has gone in them. The caller vouches that it
-/// was created this session and never edited, so that nothing the person wrote is lost.
-pub fn remove_untouched(path: &Path, made: &Made) {
+/// was created this session and never edited, and the file must still hold only the document as
+/// it was made, with no snapshot, or it stays, so that nothing the person wrote is lost. Returns
+/// whether it was removed.
+pub fn remove_untouched(path: &Path, made: &Made) -> bool {
+    if !holds_only(path, &made.document) {
+        return false;
+    }
     let _ = std::fs::remove_file(path);
     for suffix in ["-wal", "-shm"] {
         let mut side = path.as_os_str().to_os_string();
@@ -287,6 +297,19 @@ pub fn remove_untouched(path: &Path, made: &Made) {
         // Only succeeds on an empty folder, which is the point.
         let _ = std::fs::remove_dir(folder);
     }
+    true
+}
+
+/// Whether the file at `path` holds `document` and nothing kept beside it: no snapshot. Anything
+/// that can't be read counts as holding more.
+fn holds_only(path: &Path, document: &Document) -> bool {
+    let Ok(db) = Db::open_read_only(path) else {
+        return false;
+    };
+    db.load_document().is_ok_and(|found| found == *document)
+        && db
+            .list_snapshots()
+            .is_ok_and(|snapshots| snapshots.is_empty())
 }
 
 /// A document linking to another.

@@ -417,7 +417,8 @@ is fine. These do something only in a notebook, and are also in the View menu:
 Both lists take the arrows, Enter and Escape. The browser and the jump list notice what arrives from another machine within about 10 seconds of Syncthing delivering it. Ctrl-[ comes back from anywhere they lead.
 
 Following a link to a document that isn't there creates it, inside the notebook only, as a `.kame` with any folders it needs. A heading in
-the link becomes its first heading, and a link to a folder makes that folder's `Notebook.kame`. Leave it unwritten and it's removed again.
+the link becomes its first heading, and a link to a folder makes that folder's `Notebook.kame`. Leave it unwritten and it's removed again,
+but once anything is kept in it, words, properties or a snapshot, it stays, even if the words are then undone or a snapshot restored.
 A document comes before a folder of the same name: `b` leads to `b.kame` if there is one, beside a folder `b/` or not, and `b/` to the folder.
 A link to any other kind of file opens it in the system's viewer, and a missing one says so.
 

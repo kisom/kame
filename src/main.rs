@@ -3269,6 +3269,7 @@ impl KameApp {
             self.notice = None;
             return;
         }
+        self.note_fresh_kept(true);
         self.notice = Some(format!("restored snapshot #{id}"));
         // The popover's note and the typewriter's centring both pointed into
         // the text that was just replaced, so that view state goes with it.
@@ -4476,17 +4477,23 @@ impl KameApp {
             MenuAction::JumpToHeading => self.toggle_headings(),
             MenuAction::SearchNotebook => self.toggle_search(),
             MenuAction::Back => self.go_back(),
-            MenuAction::CompactHistory => match self.session.compact_history() {
-                Ok((before, after)) if before == after => {
-                    self.notice = Some("the history is already compact".to_string());
+            MenuAction::CompactHistory => {
+                let compacted = self.session.compact_history();
+                if compacted.is_ok() {
+                    self.note_fresh_kept(true);
                 }
-                Ok((before, after)) => {
-                    self.notice = Some(format!(
-                        "compacted the history from {before} entries to {after}"
-                    ));
+                match compacted {
+                    Ok((before, after)) if before == after => {
+                        self.notice = Some("the history is already compact".to_string());
+                    }
+                    Ok((before, after)) => {
+                        self.notice = Some(format!(
+                            "compacted the history from {before} entries to {after}"
+                        ));
+                    }
+                    Err(err) => self.session.last_error = Some(err),
                 }
-                Err(err) => self.session.last_error = Some(err),
-            },
+            }
             MenuAction::LinkDocument => self.link_document_with_dialog(),
             MenuAction::New => self.request_new(),
             MenuAction::NewNotebook => self.new_notebook(),
@@ -6347,6 +6354,9 @@ impl KameApp {
                 format!("snapshot #{id} \"{label}\" taken")
             }
         });
+        if self.notice.is_some() {
+            self.note_fresh_kept(true);
+        }
     }
 
     /// The "Open" path prompt (Ctrl-O): type a `.kame` path, then open it in

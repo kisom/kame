@@ -570,6 +570,28 @@ mod linking {
         assert!(root.join("kept/other.txt").exists());
     }
 
+    /// Whatever the caller vouched for, what's in the file now is what decides.
+    #[test]
+    fn a_document_written_in_or_holding_a_snapshot_is_never_removed() {
+        let (root, _) = with_notebook("removewritten");
+        let written = root.join("made/written.kame");
+        let made = create_document(&written, None).unwrap();
+        Session::open(&written).unwrap().insert("Words.");
+        assert!(!remove_untouched(&written, &made));
+        assert!(written.is_file());
+        assert_eq!(
+            Session::open(&written).unwrap().document().blocks[0].text,
+            "Words."
+        );
+
+        let held = root.join("held.kame");
+        let made = create_document(&held, None).unwrap();
+        Session::open(&held).unwrap().snapshot(None).unwrap();
+        assert!(!remove_untouched(&held, &made));
+        assert!(held.is_file());
+        assert_eq!(Session::open(&held).unwrap().snapshots().unwrap().len(), 1);
+    }
+
     #[test]
     fn a_folder_someone_has_since_used_stays() {
         let (root, _) = with_notebook("removekeep");

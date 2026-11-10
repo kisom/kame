@@ -88,6 +88,9 @@ struct Fresh {
     path: PathBuf,
     made: Made,
     metadata: Metadata,
+    /// Set once anything has been kept in it, after which it's never untouched again, even if its
+    /// history goes back to nothing, as restoring a snapshot makes it.
+    kept: bool,
 }
 
 /// A document's row was right-clicked, and this is the dialog that opened.
@@ -609,6 +612,7 @@ pub(crate) fn is_relative_link(url: &str) -> bool {
 impl KameApp {
     /// What runs every frame: keeps up with which notebook this is, and with the background threads.
     pub(crate) fn notebook_tick(&mut self, ctx: &egui::Context) {
+        self.note_fresh_kept(false);
         if let Some(path) = self.session.path().map(Path::to_path_buf) {
             if self.nb.looked_from.as_deref() != Some(&path) {
                 self.nb.notebook = match Notebook::find(&path) {
@@ -955,6 +959,7 @@ impl KameApp {
                         path: found.clone(),
                         made,
                         metadata: Metadata::default(),
+                        kept: false,
                     });
                     Some(Some(found))
                 }
@@ -979,9 +984,26 @@ impl KameApp {
     pub(crate) fn on_untouched_fresh(&self) -> bool {
         self.nb.fresh.as_ref().is_some_and(|fresh| {
             same_document(self.session.path(), Some(&fresh.path))
+                && !fresh.kept
                 && self.session.history() == (0, 0)
                 && self.session.metadata == fresh.metadata
         })
+    }
+
+    /// Notes that something is kept in the fresh document on screen, if it is: an edit or its
+    /// properties, seen here every frame, or `also`, for a snapshot taken or restored or a history
+    /// compacted, which may leave no trace in the history.
+    pub(crate) fn note_fresh_kept(&mut self, also: bool) {
+        let edited = self.session.history() != (0, 0);
+        let metadata = &self.session.metadata;
+        let path = self.session.path();
+        if let Some(fresh) = &mut self.nb.fresh {
+            if same_document(path, Some(&fresh.path))
+                && (also || edited || *metadata != fresh.metadata)
+            {
+                fresh.kept = true;
+            }
+        }
     }
 
     /// Notes what a fresh document's properties are once it's open, since opening one can add
@@ -1005,8 +1027,7 @@ impl KameApp {
             return;
         }
         let fresh = self.nb.fresh.take().expect("it was just read");
-        if untouched {
-            remove_untouched(&fresh.path, &fresh.made);
+        if untouched && remove_untouched(&fresh.path, &fresh.made) {
             self.back.forget(&fresh.path);
             self.nb.recent.retain(|recent| *recent != fresh.path);
             self.nb.refresh_listing();
@@ -2951,6 +2972,175 @@ mod tests {
         assert_eq!(page.app.session.path(), Some(theirs.as_path()));
         page.frame(Vec::new());
         assert_eq!(root_of(&page), Some(root.join("inner")));
+    }
+
+    /// A notebook in `name` with `a.kame` open, and `essay.kame` just made by following a link to
+    /// it, which is now on the screen.
+    fn followed_into_a_new_essay(name: &str) -> (PathBuf, crate::Headless) {
+        use kame_core::session::Session;
+
+        let root = kame_test_dir::folder(name).canonicalize().unwrap();
+        std::fs::write(root.join("notebook.yaml"), "").unwrap();
+        let mut session = Session::open(&root.join("a.kame")).unwrap();
+        session.insert("Mine.");
+        let mut page = crate::Headless::new(session);
+        page.frame(Vec::new());
+        page.app.follow_document_link("essay");
+        page.frame(Vec::new());
+        // Waits for what reads the notebook on threads, since one reading the new file just as
+        // it's first written in can have that write refused.
+        let start = std::time::Instant::now();
+        while page.app.nb.listing_coming.is_some()
+            || page.app.nb.backlinks_coming.is_some()
+            || page.app.nb.stranded_coming.is_some()
+        {
+            assert!(start.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            page.frame(Vec::new());
+        }
+        let essay = root.join("essay.kame");
+        assert_eq!(page.app.session.path(), Some(essay.as_path()));
+        assert!(page.app.on_untouched_fresh());
+        (essay, page)
+    }
+
+    /// The text of the document at `path` and how many snapshots it holds, read from the file.
+    fn on_disk_with_snapshots(path: &Path) -> (Vec<String>, usize) {
+        let db = kame_core::storage::Db::open_read_only(path).unwrap();
+        let text = db
+            .load_document()
+            .unwrap()
+            .blocks
+            .iter()
+            .map(|block| block.text.clone())
+            .collect();
+        (text, db.list_snapshots().unwrap().len())
+    }
+
+    /// Restoring a snapshot starts the history again, which isn't the document going back to
+    /// nothing.
+    #[test]
+    fn a_new_document_with_a_snapshot_restored_is_kept_on_leaving() {
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-restored");
+        page.app.session.insert("A first draft of the essay.");
+        let id = page.app.session.snapshot(Some("draft")).unwrap();
+        page.app.session.insert(" More words after it.");
+        page.frame(Vec::new());
+        page.app.restore_snapshot(id);
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.history(), (0, 0));
+
+        page.app.follow_document_link("a");
+        page.frame(Vec::new());
+
+        assert!(essay.is_file(), "it was deleted");
+        assert_eq!(
+            on_disk_with_snapshots(&essay),
+            (vec!["A first draft of the essay.".to_string()], 1)
+        );
+    }
+
+    #[test]
+    fn a_new_document_with_a_snapshot_restored_is_kept_on_quitting() {
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-restored-quit");
+        page.app.session.insert("A first draft of the essay.");
+        let id = page.app.session.snapshot(Some("draft")).unwrap();
+        page.app.session.insert(" More words after it.");
+        page.frame(Vec::new());
+        page.app.restore_snapshot(id);
+        page.frame(Vec::new());
+
+        eframe::App::on_exit(&mut page.app);
+        drop(page);
+
+        assert!(essay.is_file(), "it was deleted");
+        assert_eq!(
+            on_disk_with_snapshots(&essay),
+            (vec!["A first draft of the essay.".to_string()], 1)
+        );
+    }
+
+    #[test]
+    fn a_new_document_with_a_snapshot_taken_is_kept_on_leaving() {
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-snapshot");
+        page.app.snapshot_prompt = Some(crate::SnapshotPrompt {
+            label: "empty".to_string(),
+            focus: false,
+        });
+        page.frame(Vec::new());
+        page.press("Take snapshot");
+        page.frame(Vec::new());
+        assert!(page.app.snapshot_prompt.is_none());
+
+        page.app.follow_document_link("a");
+        page.frame(Vec::new());
+
+        assert!(essay.is_file(), "it was deleted");
+        assert_eq!(on_disk_with_snapshots(&essay), (vec![String::new()], 1));
+    }
+
+    /// Whatever the window noticed, a file holding a snapshot isn't taken away.
+    #[test]
+    fn a_new_document_holding_a_snapshot_is_kept_on_leaving() {
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-snapshot-held");
+        page.app.session.snapshot(None).unwrap();
+
+        page.app.follow_document_link("a");
+        page.frame(Vec::new());
+
+        assert!(essay.is_file(), "it was deleted");
+        assert_eq!(on_disk_with_snapshots(&essay), (vec![String::new()], 1));
+    }
+
+    #[test]
+    fn a_new_document_whose_history_was_compacted_is_kept_on_leaving() {
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-compacted");
+        for word in ["A ", "first ", "draft."] {
+            page.app.session.insert(word);
+            page.frame(Vec::new());
+        }
+        let ctx = page.ctx.clone();
+        page.app
+            .run_menu_action(&ctx, crate::MenuAction::CompactHistory);
+        page.frame(Vec::new());
+
+        page.app.follow_document_link("a");
+        page.frame(Vec::new());
+
+        assert!(essay.is_file(), "it was deleted");
+        assert_eq!(
+            on_disk_with_snapshots(&essay),
+            (vec!["A first draft.".to_string()], 0)
+        );
+    }
+
+    /// Undoing it all leaves what redo can bring back.
+    #[test]
+    fn a_new_document_written_in_and_undone_is_kept_on_leaving() {
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-undone");
+        page.app.session.insert("A first draft.");
+        page.frame(Vec::new());
+        while page.app.session.undo() {}
+        page.frame(Vec::new());
+        assert_eq!(page.app.session.history().0, 0);
+
+        page.app.follow_document_link("a");
+        page.frame(Vec::new());
+
+        assert!(essay.is_file(), "it was deleted");
+    }
+
+    #[test]
+    fn a_new_document_left_as_it_was_made_goes_on_leaving_and_on_quitting() {
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-left");
+        page.app.follow_document_link("a");
+        page.frame(Vec::new());
+        assert!(!essay.exists());
+
+        let (essay, mut page) = followed_into_a_new_essay("app-fresh-quit");
+        eframe::App::on_exit(&mut page.app);
+        drop(page);
+        assert!(!essay.exists());
     }
 
     #[test]

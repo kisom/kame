@@ -3064,17 +3064,6 @@ mod tests {
         page.frame(Vec::new());
         page.app.follow_document_link("essay");
         page.frame(Vec::new());
-        // Waits for what reads the notebook on threads, since one reading the new file just as
-        // it's first written in can have that write refused.
-        let start = std::time::Instant::now();
-        while page.app.nb.listing_coming.is_some()
-            || page.app.nb.backlinks_coming.is_some()
-            || page.app.nb.stranded_coming.is_some()
-        {
-            assert!(start.elapsed() < std::time::Duration::from_secs(10));
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            page.frame(Vec::new());
-        }
         let essay = root.join("essay.kame");
         assert_eq!(page.app.session.path(), Some(essay.as_path()));
         assert!(page.app.on_untouched_fresh());

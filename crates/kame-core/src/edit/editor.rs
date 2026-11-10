@@ -692,12 +692,8 @@ impl Editor {
     ///
     /// Splitting at the end of a block appends an empty block.
     ///
-    /// # Limitation: inline spans
-    ///
-    /// The op set does not rebase [`Span`](crate::model::Span) ranges on text
-    /// edits yet, so the moved text loses its bold/italic ranges. Layout
-    /// clamps stale spans, so nothing breaks; a later styling task has to
-    /// rebase spans for both this command and [`Editor::delete_selection`].
+    /// Styles and links keep covering the same characters: one after the split
+    /// moves with the text, and one across it is cut in two, a half in each block.
     pub fn split_paragraph(&mut self, cursor: &Cursor) -> Result<Op, EditError> {
         let index = self.block_index(cursor.block_id)?;
         let block = self.block(cursor.block_id)?;
@@ -807,11 +803,25 @@ impl Editor {
             Vec::new()
         };
 
+        // The tail delete below trims a span across the split to end there; the new block takes
+        // the rest of it, and every span after the split, over the same characters.
+        let tail_spans: Vec<Span> = block
+            .spans
+            .iter()
+            .filter(|span| span.end > cursor.offset)
+            .map(|span| Span {
+                start: span.start.max(cursor.offset) - cursor.offset,
+                end: span.end - cursor.offset,
+                style: span.style.clone(),
+            })
+            .filter(|span| span.start < span.end)
+            .collect();
+
         let new_block = Block {
             id: Uuid::new_v4(),
             kind,
             text: text[cursor.offset..].to_string(),
-            spans: Vec::new(),
+            spans: tail_spans,
         };
 
         let mut ops = Vec::new();
@@ -883,8 +893,8 @@ impl Editor {
     }
 
     /// Merges the block after `cursor`'s block into it, returning the op that
-    /// was applied: the next block's text is appended and its notes move with
-    /// it.
+    /// was applied: the next block's text is appended and its notes, styles and
+    /// links move with it.
     ///
     /// The last block has nothing to merge into and is
     /// [`EditError::NoNextBlock`].
@@ -925,6 +935,20 @@ impl Editor {
                 }
             };
             ops.push(Op::AddAnnotation { annotation: moved });
+        }
+        // The appended text takes the styles and links it had, after the ones already there.
+        if !next.spans.is_empty() {
+            let mut spans = block.spans.clone();
+            spans.extend(next.spans.iter().map(|span| Span {
+                start: span.start + join,
+                end: span.end + join,
+                style: span.style.clone(),
+            }));
+            ops.push(Op::SetSpans {
+                block_id: cursor.block_id,
+                old_spans: block.spans.clone(),
+                spans,
+            });
         }
         Ok(self.apply_edit(Op::Batch { ops }))
     }
@@ -2727,6 +2751,228 @@ mod tests {
         assert_eq!(e.document().blocks.len(), 2);
         assert_eq!(e.document().blocks[0].text, "end");
         assert_eq!(e.document().blocks[1].text, "");
+    }
+
+    fn span(start: usize, end: usize, style: SpanStyle) -> Span {
+        Span { start, end, style }
+    }
+
+    fn link(url: &str) -> SpanStyle {
+        SpanStyle::Link {
+            url: url.to_string(),
+        }
+    }
+
+    /// A one-block document of `kind` reading `text` with `spans`.
+    fn styled(kind: BlockKind, text: &str, spans: Vec<Span>) -> Document {
+        let mut d = doc_with(text);
+        d.blocks[0].kind = kind;
+        d.blocks[0].spans = spans;
+        d
+    }
+
+    /// Splits `doc`'s first block at `offset`, checks undo gives back `doc` exactly and redo
+    /// the split exactly, and returns the two blocks' spans.
+    fn split_spans(doc: Document, offset: usize) -> (Vec<Span>, Vec<Span>) {
+        let before = doc.clone();
+        let id = doc.blocks[0].id;
+        let mut e = Editor::new(doc);
+        e.split_paragraph(&Cursor {
+            block_id: id,
+            offset,
+        })
+        .expect("split at the caret");
+        let after = e.document().clone();
+        assert_eq!(after.blocks.len(), 2);
+        assert_eq!(e.history(), (1, 0), "a split is one undo step");
+        e.undo().expect("split to be undoable");
+        assert_eq!(e.document(), &before, "undo gives back the document");
+        e.redo().expect("split to be redoable");
+        assert_eq!(e.document(), &after, "redo gives back the split");
+        (after.blocks[0].spans.clone(), after.blocks[1].spans.clone())
+    }
+
+    #[test]
+    fn a_split_inside_a_bold_run_cuts_it_in_two() {
+        // "a bold| run": bold over "bold run".
+        let doc = styled(
+            BlockKind::Paragraph,
+            "a bold run",
+            vec![span(2, 10, SpanStyle::Bold)],
+        );
+        let (first, second) = split_spans(doc, 6);
+        assert_eq!(first, vec![span(2, 6, SpanStyle::Bold)]);
+        assert_eq!(second, vec![span(0, 4, SpanStyle::Bold)]);
+    }
+
+    #[test]
+    fn a_split_inside_a_link_leaves_both_halves_linked() {
+        let url = "https://p.example/";
+        let doc = styled(
+            BlockKind::Paragraph,
+            "See the paper now.",
+            vec![span(8, 13, link(url))],
+        );
+        let (first, second) = split_spans(doc, 10);
+        assert_eq!(first, vec![span(8, 10, link(url))]);
+        assert_eq!(second, vec![span(0, 3, link(url))]);
+    }
+
+    #[test]
+    fn a_split_between_styled_runs_keeps_each_on_its_side() {
+        // "one *two*|**three** four": italic ends and bold starts at the split.
+        let doc = styled(
+            BlockKind::Paragraph,
+            "one twothree four",
+            vec![
+                span(0, 3, SpanStyle::Code),
+                span(4, 7, SpanStyle::Italic),
+                span(7, 12, SpanStyle::Bold),
+                span(13, 17, link("https://f.example/")),
+            ],
+        );
+        let (first, second) = split_spans(doc, 7);
+        assert_eq!(
+            first,
+            vec![span(0, 3, SpanStyle::Code), span(4, 7, SpanStyle::Italic)]
+        );
+        assert_eq!(
+            second,
+            vec![
+                span(0, 5, SpanStyle::Bold),
+                span(6, 10, link("https://f.example/"))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_split_keeps_styles_in_headings_list_items_and_quotes() {
+        for kind in [
+            BlockKind::Heading {
+                level: 2,
+                centered: false,
+            },
+            BlockKind::ListItem {
+                ordered: true,
+                depth: 1,
+            },
+            BlockKind::BlockQuote,
+        ] {
+            let doc = styled(kind, "a bold run", vec![span(2, 10, SpanStyle::Bold)]);
+            let (first, second) = split_spans(doc, 6);
+            assert_eq!(first, vec![span(2, 6, SpanStyle::Bold)]);
+            assert_eq!(second, vec![span(0, 4, SpanStyle::Bold)]);
+        }
+    }
+
+    /// `doc` with a second block of `kind` reading `text` with `spans`.
+    fn with_next(mut doc: Document, kind: BlockKind, text: &str, spans: Vec<Span>) -> Document {
+        doc.blocks.push(Block {
+            id: Uuid::new_v4(),
+            kind,
+            text: text.to_string(),
+            spans,
+        });
+        doc
+    }
+
+    #[test]
+    fn a_join_brings_the_styles_and_links_of_the_block_that_goes() {
+        let url = "https://t.example/";
+        for kind in [
+            BlockKind::Paragraph,
+            BlockKind::Heading {
+                level: 1,
+                centered: false,
+            },
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+            },
+            BlockKind::BlockQuote,
+        ] {
+            let doc = styled(kind.clone(), "one two", vec![span(4, 7, SpanStyle::Bold)]);
+            let doc = with_next(
+                doc,
+                kind,
+                "three four",
+                vec![span(0, 5, SpanStyle::Italic), span(6, 10, link(url))],
+            );
+            let before = doc.clone();
+            let id = doc.blocks[0].id;
+            let mut e = Editor::new(doc);
+            e.merge_with_next(&Cursor {
+                block_id: id,
+                offset: 7,
+            })
+            .expect("join with the next block");
+            let after = e.document().clone();
+            assert_eq!(after.blocks.len(), 1);
+            assert_eq!(after.blocks[0].text, "one twothree four");
+            assert_eq!(
+                after.blocks[0].spans,
+                vec![
+                    span(4, 7, SpanStyle::Bold),
+                    span(7, 12, SpanStyle::Italic),
+                    span(13, 17, link(url)),
+                ]
+            );
+            assert_eq!(e.history(), (1, 0), "a join is one undo step");
+            e.undo().expect("join to be undoable");
+            assert_eq!(e.document(), &before, "undo gives back both blocks");
+            e.redo().expect("join to be redoable");
+            assert_eq!(e.document(), &after, "redo gives back the join");
+        }
+    }
+
+    #[test]
+    fn a_split_then_a_join_at_the_same_place_gives_back_the_text_and_styles() {
+        let url = "https://p.example/";
+        // Nothing crosses the split: the block comes back exactly.
+        let doc = styled(
+            BlockKind::Paragraph,
+            "one twothree four",
+            vec![span(4, 7, SpanStyle::Italic), span(7, 12, link(url))],
+        );
+        let before = doc.clone();
+        let id = doc.blocks[0].id;
+        let at = Cursor {
+            block_id: id,
+            offset: 7,
+        };
+        let mut e = Editor::new(doc);
+        e.split_paragraph(&at).unwrap();
+        e.merge_with_next(&at).unwrap();
+        assert_eq!(e.document(), &before);
+
+        // A bold run and a link across it come back as the same characters with the same
+        // styles, each in two pieces that touch, as an export reads them.
+        let doc = styled(
+            BlockKind::Paragraph,
+            "See the paper now.",
+            vec![span(4, 13, SpanStyle::Bold), span(8, 13, link(url))],
+        );
+        let markdown = crate::export::to_markdown(&doc);
+        let id = doc.blocks[0].id;
+        let at = Cursor {
+            block_id: id,
+            offset: 10,
+        };
+        let mut e = Editor::new(doc);
+        e.split_paragraph(&at).unwrap();
+        e.merge_with_next(&at).unwrap();
+        let block = &e.document().blocks[0];
+        assert_eq!(block.text, "See the paper now.");
+        assert_eq!(
+            block.spans,
+            vec![
+                span(4, 10, SpanStyle::Bold),
+                span(8, 10, link(url)),
+                span(10, 13, SpanStyle::Bold),
+                span(10, 13, link(url)),
+            ]
+        );
+        assert_eq!(crate::export::to_markdown(e.document()), markdown);
     }
 
     #[test]

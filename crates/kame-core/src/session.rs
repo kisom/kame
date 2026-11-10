@@ -6590,6 +6590,144 @@ mod tests {
         assert_eq!(session.caret.offset, 3);
     }
 
+    /// A span as `(start, end, style)`.
+    type Styled = (usize, usize, SpanStyle);
+
+    /// The blocks' text and spans.
+    fn styled_blocks(session: &Session) -> Vec<(String, Vec<Styled>)> {
+        session
+            .document()
+            .blocks
+            .iter()
+            .map(|block| {
+                let spans = block
+                    .spans
+                    .iter()
+                    .map(|span| (span.start, span.end, span.style.clone()))
+                    .collect();
+                (block.text.clone(), spans)
+            })
+            .collect()
+    }
+
+    /// A session of two blocks of `kind`, "one two" with "two" bold and "three four" with
+    /// "four" a link, the caret at the end.
+    fn two_styled_blocks(kind: BlockKind) -> Session {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("one two");
+        session.split();
+        session.insert("three four");
+        let (first, second) = (
+            session.document().blocks[0].id,
+            session.document().blocks[1].id,
+        );
+        session.set_caret(Cursor {
+            block_id: first,
+            offset: 4,
+        });
+        session.select_to(Cursor {
+            block_id: first,
+            offset: 7,
+        });
+        assert!(session.toggle_emphasis(Emphasis::Bold));
+        assert!(session.set_link(second, 6, 10, "https://f.example/".to_string()));
+        assert!(session.set_block_kind(first, kind.clone()));
+        assert!(session.set_block_kind(second, kind));
+        session
+    }
+
+    fn bold() -> SpanStyle {
+        SpanStyle::Bold
+    }
+
+    fn four() -> SpanStyle {
+        SpanStyle::Link {
+            url: "https://f.example/".to_string(),
+        }
+    }
+
+    const JOINABLE: [BlockKind; 4] = [
+        BlockKind::Paragraph,
+        BlockKind::Heading {
+            level: 2,
+            centered: false,
+        },
+        BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+        },
+        BlockKind::BlockQuote,
+    ];
+
+    #[test]
+    fn backspace_and_delete_between_blocks_bring_the_styles_along() {
+        for kind in JOINABLE {
+            for by_delete in [false, true] {
+                let mut session = two_styled_blocks(kind.clone());
+                let before = session.document().clone();
+                let (first, second) = (
+                    session.document().blocks[0].id,
+                    session.document().blocks[1].id,
+                );
+                if by_delete {
+                    session.set_caret(Cursor {
+                        block_id: first,
+                        offset: 7,
+                    });
+                    assert!(session.delete_forward());
+                } else {
+                    session.set_caret(Cursor {
+                        block_id: second,
+                        offset: 0,
+                    });
+                    assert!(session.backspace());
+                }
+                let after = session.document().clone();
+                assert_eq!(
+                    styled_blocks(&session),
+                    vec![(
+                        "one twothree four".to_string(),
+                        vec![(4, 7, bold()), (13, 17, four())]
+                    )],
+                    "{kind:?}, by delete: {by_delete}"
+                );
+                assert!(session.undo());
+                assert_eq!(session.document(), &before);
+                assert!(session.redo());
+                assert_eq!(session.document(), &after);
+            }
+        }
+    }
+
+    #[test]
+    fn enter_inside_a_styled_run_keeps_both_halves_styled() {
+        for kind in JOINABLE {
+            let mut session = two_styled_blocks(kind.clone());
+            let before = session.document().clone();
+            let first = session.document().blocks[0].id;
+            // "one t|wo": inside the bold.
+            session.set_caret(Cursor {
+                block_id: first,
+                offset: 5,
+            });
+            assert!(session.split());
+            let after = session.document().clone();
+            assert_eq!(
+                styled_blocks(&session),
+                vec![
+                    ("one t".to_string(), vec![(4, 5, bold())]),
+                    ("wo".to_string(), vec![(0, 2, bold())]),
+                    ("three four".to_string(), vec![(6, 10, four())]),
+                ],
+                "{kind:?}"
+            );
+            assert!(session.undo());
+            assert_eq!(session.document(), &before);
+            assert!(session.redo());
+            assert_eq!(session.document(), &after);
+        }
+    }
+
     #[test]
     fn backspace_deletes_a_whole_utf8_character() {
         let path = temp_db_path();

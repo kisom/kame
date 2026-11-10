@@ -1689,7 +1689,7 @@ fn split_kind(kind: &BlockKind) -> BlockKind {
 /// `# `, `## ` and `### ` become headings; `- `/`* ` start a bullet, `1. ` an
 /// ordered item and `> ` a block quote. A block that already has a kind is left
 /// alone.
-fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
+pub(crate) fn markdown_prefix(text: &str, kind: &BlockKind) -> Option<(BlockKind, usize)> {
     if !matches!(kind, BlockKind::Paragraph) {
         return None;
     }

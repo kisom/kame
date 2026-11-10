@@ -6,7 +6,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use crate::edit::ops::anchor_wholly_inside;
-use crate::edit::{restyled, styled_throughout, Cursor, EditError, Editor, Op, Selection};
+use crate::edit::{
+    markdown_prefix, restyled, styled_throughout, Cursor, EditError, Editor, Op, Selection,
+};
 use crate::import::markdown::{from_markdown, Imported};
 use crate::links::{
     image_file, names_something, own_target_after_save_as, retargeted, stored_image_path,
@@ -1656,8 +1658,18 @@ impl Session {
     /// Applies a markdown-style prefix at the start of the caret's block (typed
     /// `# `, `## `, `### `, `- `, `* `, `1. `): the prefix is stripped, the
     /// block kind changes, and the caret returns to the start of the block.
+    /// Only a prefix the caret is straight after converts, which is where it is
+    /// when the prefix's last character has just been typed: typing anywhere
+    /// else in a paragraph that starts with one is ordinary typing.
     pub fn apply_markdown_shortcut(&mut self) {
         let caret = self.valid_caret();
+        let just_typed = self.block_index(caret.block_id).is_some_and(|index| {
+            let block = &self.document().blocks[index];
+            markdown_prefix(&block.text, &block.kind).is_some_and(|(_, len)| len == caret.offset)
+        });
+        if !just_typed {
+            return;
+        }
         if let Some(op) = self.editor.apply_markdown_prefix(caret.block_id) {
             self.record(&op);
             self.caret = Cursor {
@@ -7920,6 +7932,88 @@ mod tests {
     fn only_text(session: &Session, index: usize) -> (BlockKind, String) {
         let block = &session.document().blocks[index];
         (block.kind.clone(), block.text.clone())
+    }
+
+    #[test]
+    fn typing_after_a_pasted_prefix_is_ordinary_typing() {
+        let mut session = Session::anonymous().unwrap();
+        assert!(session.paste("- milk"));
+        typed(&mut session, "sh");
+        assert_eq!(
+            only_text(&session, 0),
+            (BlockKind::Paragraph, "- milksh".to_string())
+        );
+        assert_eq!(session.caret.offset, "- milksh".len());
+    }
+
+    #[test]
+    fn typing_inside_words_after_a_prefix_leaves_the_caret_where_it_is() {
+        for prefix in ["# ", "## ", "### ", "- ", "* ", "1. ", "> ", "| "] {
+            let mut session = Session::anonymous().unwrap();
+            assert!(session.paste(&format!("{prefix}milk")));
+            let block_id = session.document().blocks[0].id;
+            let at = prefix.len() + 2;
+            session.set_caret(Cursor {
+                block_id,
+                offset: at,
+            });
+            typed(&mut session, "x");
+            assert_eq!(
+                only_text(&session, 0),
+                (BlockKind::Paragraph, format!("{prefix}mixlk")),
+                "{prefix:?}"
+            );
+            assert_eq!(session.caret.offset, at + 1, "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn each_prefix_converts_when_typed() {
+        let heading = |level| BlockKind::Heading {
+            level,
+            centered: false,
+        };
+        let item = |ordered| BlockKind::ListItem { ordered, depth: 0 };
+        for (prefix, kind) in [
+            ("# ", heading(1)),
+            ("## ", heading(2)),
+            ("### ", heading(3)),
+            ("- ", item(false)),
+            ("* ", item(false)),
+            ("1. ", item(true)),
+            ("> ", BlockKind::BlockQuote),
+            ("| ", BlockKind::Prose),
+        ] {
+            let mut session = Session::anonymous().unwrap();
+            typed(&mut session, prefix);
+            assert_eq!(only_text(&session, 0), (kind.clone(), String::new()));
+            typed(&mut session, "milk");
+            assert_eq!(only_text(&session, 0), (kind, "milk".to_string()));
+            assert_eq!(session.caret.offset, 4, "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_typed_before_words_already_there_converts_and_keeps_them() {
+        let mut session = Session::anonymous().unwrap();
+        session.insert("Title words");
+        let block_id = session.document().blocks[0].id;
+        session.set_caret(Cursor {
+            block_id,
+            offset: 0,
+        });
+        typed(&mut session, "# ");
+        assert_eq!(
+            only_text(&session, 0),
+            (
+                BlockKind::Heading {
+                    level: 1,
+                    centered: false
+                },
+                "Title words".to_string()
+            )
+        );
+        assert_eq!(session.caret.offset, 0);
     }
 
     #[test]

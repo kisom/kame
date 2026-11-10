@@ -83,6 +83,9 @@ word — each one is a single undo step:
   word, in the same paragraph and not across inline code. `_` and `**` work the same way
 - `[text](url)` → a hyperlink on `text`
 
+A prefix at the start of a line converts as its space is typed, before words already there
+too. One that was pasted stays as it is while typing goes on elsewhere in the line.
+
 A code or prose block keeps its text exactly: line breaks and spacing stand, Tab types
 a tab, and pasted lines stay in the block. Enter adds a line, and Enter on a blank last
 line returns to body text. Shift-Enter adds a line without ever leaving, for blank lines

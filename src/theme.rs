@@ -280,13 +280,19 @@ impl Omarchy {
 
     /// Looks at the theme, reading its colours only if the token says they have changed, and
     /// returns whether the theme in use has. Colours that can't be read leave the theme as it
-    /// was, to be read again next time: a switch can be caught half done. Without a theme folder
-    /// there's no theme.
+    /// was, to be read again next time: a switch can be caught half done. So can a missing theme
+    /// folder, which Omarchy removes before it moves the next one in, so a theme already read is
+    /// kept, and the setting with it. If Omarchy really has gone, that theme stays until kame is
+    /// started again or the setting is turned off. With none read, there's no Omarchy.
+    ///
+    /// Omarchy writes the token after the colours are in place, so the token has to be read
+    /// first: one read after the colours could be a later switch's, whose colours would then
+    /// never be read.
     pub(crate) fn look(&mut self) -> bool {
         let Some(folder) = self.theme_folder().filter(|folder| folder.is_dir()) else {
-            self.present = false;
             self.seen = None;
-            return self.theme.take().is_some();
+            self.present = self.theme.is_some();
+            return false;
         };
         self.present = true;
         let colours = folder.join("colors.toml");
@@ -862,15 +868,30 @@ mod tests {
         put_theme(Some(NORD), Some("2"));
         wake(&mut page);
         assert_eq!(page.app.palette, themed(NORD));
+    }
 
-        std::fs::remove_dir_all(omarchy_dir().unwrap()).unwrap();
-        wake(&mut page);
-        assert_eq!(
-            page.app.palette,
-            Palette::LIGHT,
-            "the theme went with its folder"
-        );
-        assert!(!page.app.omarchy.present);
+    #[test]
+    fn a_theme_folder_gone_mid_switch_keeps_the_theme_until_the_next_is_in() {
+        let current = put_theme(Some(NORD), Some("3622320-1793907493360538"));
+        let mut omarchy = Omarchy::new(Some(current.clone()));
+        assert!(omarchy.look());
+        assert_eq!(omarchy.theme, parse(NORD));
+
+        // Omarchy removes the theme folder before it moves the next one in.
+        std::fs::remove_dir_all(current.join("theme")).unwrap();
+        assert!(!omarchy.look());
+        assert_eq!(omarchy.theme, parse(NORD), "kept");
+        assert!(omarchy.present, "the setting is still there to turn off");
+
+        put_theme(Some(LATTE), Some("3622321-1793907500000000"));
+        assert!(omarchy.look());
+        assert_eq!(omarchy.theme, parse(LATTE));
+
+        // With no theme read yet, a missing folder is no Omarchy.
+        let mut none = Omarchy::new(Some(test_temp_dir().join("no-omarchy").join("current")));
+        assert!(!none.look());
+        assert!(!none.present);
+        assert_eq!(none.theme, None);
     }
 
     #[test]

@@ -6844,13 +6844,20 @@ impl KameApp {
     /// Returns the decoded GPU texture for the image at `path`, loading and
     /// caching it on first use. A path that cannot be decoded returns `None`,
     /// and the block simply draws nothing (its height is still reserved).
+    ///
+    /// A picture wider or taller than the largest texture the graphics card takes
+    /// is scaled down to fit it, in its own proportions. Its size on the page
+    /// comes from the file, in `image_size`, and doesn't change.
     fn image_texture_handle(&mut self, ctx: &egui::Context, path: &str) -> Option<TextureHandle> {
         if let Some(texture) = self.image_textures.get(path) {
             return Some(texture.clone());
         }
-        let decoded = image::open(image_file(path, self.session.path()))
-            .ok()?
-            .to_rgba8();
+        let mut decoded = image::open(image_file(path, self.session.path())).ok()?;
+        let limit = u32::try_from(ctx.input(|input| input.max_texture_side)).unwrap_or(u32::MAX);
+        if decoded.width() > limit || decoded.height() > limit {
+            decoded = decoded.resize(limit, limit, image::imageops::FilterType::Triangle);
+        }
+        let decoded = decoded.to_rgba8();
         let size = [decoded.width() as usize, decoded.height() as usize];
         let color = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
         let texture = ctx.load_texture(path, color, egui::TextureOptions::LINEAR);
@@ -10685,6 +10692,37 @@ visual form, and thus with an independent existence. Its heartwood is calligraph
             Some(root.join("three/a.kame").as_path())
         );
         assert!(page.app.image_textures.is_empty());
+    }
+
+    /// A picture wider or taller than the largest texture is drawn from a copy scaled down to
+    /// fit it, in its own proportions, and keeps its size on the page.
+    #[test]
+    fn a_picture_larger_than_the_largest_texture_is_scaled_down_to_fit() {
+        let root = kame_test_dir::folder("app-images-too-large")
+            .canonicalize()
+            .unwrap();
+        image::RgbaImage::new(3000, 40)
+            .save(root.join("wide.png"))
+            .unwrap();
+        image::RgbaImage::new(40, 3000)
+            .save(root.join("tall.png"))
+            .unwrap();
+        let mut page = Headless::new(open(&root.join("a.kame")));
+        let ctx = page.ctx.clone();
+        let limit = ctx.input(|input| input.max_texture_side);
+        let short = (40.0 * limit as f32 / 3000.0).round() as usize;
+        for (path, size) in [("wide.png", [limit, short]), ("tall.png", [short, limit])] {
+            let texture = page
+                .app
+                .image_texture_handle(&ctx, path)
+                .expect("the picture is drawn");
+            assert_eq!(texture.size(), size, "{path}");
+        }
+        // Its size on the page comes from the file, scaled to the measure.
+        assert_eq!(
+            image_size(&root.join("wide.png"), 600.0),
+            Vec2::new(600.0, 8.0)
+        );
     }
 
     #[test]

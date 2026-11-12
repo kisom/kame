@@ -610,12 +610,18 @@ mod tests {
 
     #[test]
     fn asking_to_import_or_start_a_notebook_doesnt_take_away_a_form() {
-        // Each would put up the system's file browser, which a test isn't allowed to.
         let (mut page, opened) = page_with_form();
+        let stand_in = crate::browse::StandIn::default();
+        stand_in.install(&mut page.app.browser);
         page.app.import_markdown();
         assert_form_kept(&page, &opened);
         page.app.new_notebook();
         assert_form_kept(&page, &opened);
+        assert_eq!(
+            stand_in.asked(),
+            Vec::new(),
+            "neither asked for the file browser"
+        );
     }
 
     #[test]

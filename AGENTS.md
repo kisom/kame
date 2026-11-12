@@ -89,6 +89,8 @@ A workspace, so that documents can be used without a window. `cargo build` and `
 
 `src/publish.rs` — the app's Site menu, on `kame-site`.
 
+`src/browse.rs` — the system's file browser, asked for without stopping the frame: what each command asks it (`Ask`), what its answer is for (`Then`), `native`, the only code that calls `rfd`, and what's held from kame while it's up. A browser that blocks inside winit's event handler aborts kame on macOS when something is dragged over it, so `KameApp` takes the answer once a frame, and tests put a stand-in in its place.
+
 `src/commands.rs` — the menu bar's commands, in the one list the menus and the command palette (Ctrl-P) both draw from, the Edit menu's, which run what their keys do, and the palette.
 
 `src/theme.rs` — Omarchy's current theme, which View > Follow Omarchy theme puts on the page and the interface around it: its `colors.toml` read, the palette and egui's look made from it, and a switch taken up while kame runs, leaving exports as they are.

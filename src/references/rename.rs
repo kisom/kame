@@ -602,10 +602,12 @@ mod tests {
         let mut page = page_in_notebook("[knuth1981]");
         open_list(&mut page);
         let _send = rename_held_open(&mut page);
-        let ctx = page.ctx.clone();
+        let stand_in = crate::browse::StandIn::default();
+        stand_in.install(&mut page.app.browser);
 
-        // A test panics if this asks where to save.
-        page.app.save_with_dialog(&ctx, false);
+        page.app.save_with_dialog(false);
+
+        assert_eq!(stand_in.asked(), Vec::new(), "it didn't ask where to save");
 
         assert!(page
             .app

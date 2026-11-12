@@ -819,16 +819,21 @@ impl KameApp {
         }
     }
 
-    /// File > New Notebook: makes a chosen folder a notebook, and opens its contents page.
+    /// File > New Notebook: asks for the folder to make a notebook.
     pub(crate) fn new_notebook(&mut self) {
         if self.say_if_reference_form_up() {
             return;
         }
-        let Some(folder) = super::pick_notebook_folder(self.session.dialog_directory().as_deref())
-        else {
-            return;
-        };
-        match kame_notebook::init(&folder) {
+        let directory = self.session.dialog_directory();
+        self.browse(
+            crate::browse::Ask::notebook_folder(directory.as_deref()),
+            crate::browse::Then::NewNotebook,
+        );
+    }
+
+    /// Makes `folder` a notebook, and opens its contents page.
+    pub(crate) fn make_notebook(&mut self, folder: &Path) {
+        match kame_notebook::init(folder) {
             Ok(notebook) => {
                 if let Some(index) = notebook.index() {
                     // Making the notebook makes its contents page.

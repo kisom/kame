@@ -6,6 +6,7 @@
 //! commands; every command is persisted through the durable op log so history
 //! survives a restart.
 
+mod browse;
 mod commands;
 mod external;
 mod interface;
@@ -37,6 +38,7 @@ use egui::{Align2, Color32, FontId, Id, Order, Pos2, Rect, Sense, TextureHandle,
 
 use kame_check::{Background, Exceptions, Finding, FindingKind};
 
+use crate::browse::Then;
 use crate::edit::Cursor;
 use crate::layout::reading_order;
 use crate::layout::{
@@ -1111,100 +1113,6 @@ struct OpenPrompt {
     /// Whether the path is a name a document may be made at, as one typed here is, or a document
     /// found earlier, as whatever asked for an open that's waiting on the confirmation said.
     opening: Opening,
-}
-
-/// A native file dialog starting in `directory`, if there is one.
-fn file_dialog(title: &str, directory: Option<&Path>) -> rfd::FileDialog {
-    if cfg!(test) {
-        panic!("a test asked for the file browser: {title}");
-    }
-    let dialog = rfd::FileDialog::new().set_title(title);
-    match directory {
-        Some(directory) => dialog.set_directory(directory),
-        None => dialog,
-    }
-}
-
-/// The native file browser for a Markdown file to import, or `None` when the
-/// author cancels it. Blocks the frame like [`pick_save_path`], which is correct
-/// for a modal dialog.
-fn pick_markdown_path(directory: Option<&Path>) -> Option<PathBuf> {
-    file_dialog("Import Markdown", directory)
-        .add_filter("Markdown", &["md", "markdown"])
-        .pick_file()
-}
-
-/// The native file browser for a document to open, or `None` when the author
-/// cancels it.
-fn pick_open_path(directory: Option<&Path>) -> Option<PathBuf> {
-    file_dialog("Open", directory)
-        .add_filter("kame or Markdown", &["kame", "md", "markdown"])
-        .add_filter("kame document", &["kame"])
-        .add_filter("Markdown", &["md", "markdown"])
-        .pick_file()
-}
-
-/// The native file browser for the folder of a new notebook, or `None` if it is cancelled.
-fn pick_notebook_folder(directory: Option<&Path>) -> Option<PathBuf> {
-    file_dialog("New Notebook", directory).pick_folder()
-}
-
-/// The native file browser for a document to link to, or `None` if it is cancelled.
-fn pick_document_link_path(directory: Option<&Path>) -> Option<PathBuf> {
-    file_dialog("Link to Document", directory)
-        .add_filter("kame or Markdown", &["kame", "md", "markdown"])
-        .add_filter("kame document", &["kame"])
-        .add_filter("Markdown", &["md", "markdown"])
-        .pick_file()
-}
-
-/// The native file browser for an image to insert, or `None` if it is cancelled.
-fn pick_image_path(directory: Option<&Path>) -> Option<PathBuf> {
-    file_dialog("Insert Image", directory)
-        .add_filter(
-            "Image",
-            &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"],
-        )
-        .pick_file()
-}
-
-/// The native "save as" browser for an export, starting at `suggestion`, or `None`
-/// when the author cancels it.
-fn pick_export_path(
-    title: &str,
-    kind: &str,
-    extension: &str,
-    suggestion: &Path,
-) -> Option<PathBuf> {
-    let directory = suggestion
-        .parent()
-        .filter(|directory| !directory.as_os_str().is_empty());
-    let mut dialog = file_dialog(title, directory).add_filter(kind, &[extension]);
-    if let Some(name) = suggestion.file_name().and_then(|name| name.to_str()) {
-        dialog = dialog.set_file_name(name);
-    }
-    dialog.save_file()
-}
-
-/// The native "save as" file browser, or `None` when the author cancels it.
-///
-/// `rfd` is built with the XDG desktop portal backend (not GTK), so it asks the
-/// compositor's file chooser — the GTK one on this desktop — over D-Bus. That
-/// is a full file browser: directories, navigation and a file-name field, the
-/// same dialog a GTK application shows. The synchronous API blocks the frame
-/// thread while the (modal) dialog is up, which is correct for a save prompt.
-#[cfg(not(test))]
-fn pick_save_path(suggested_name: &str, directory: Option<&Path>) -> Option<PathBuf> {
-    file_dialog("Save kame document", directory)
-        .add_filter("kame document", &["kame"])
-        .set_file_name(suggested_name)
-        .save_file()
-}
-
-/// A test has no one to answer a native dialog, so asking for one is a failure.
-#[cfg(test)]
-fn pick_save_path(_suggested_name: &str, _directory: Option<&Path>) -> Option<PathBuf> {
-    panic!("a test asked for the save dialog");
 }
 
 /// The link a right-click landed on.
@@ -2852,6 +2760,10 @@ struct KameApp {
     image_textures: HashMap<String, egui::TextureHandle>,
     /// A document the OS asked for while a dialog was up, to open once it closes.
     held_open: Option<PathBuf>,
+    /// The system's file browser, and what its answer is for while it's up.
+    browser: browse::FileBrowser,
+    /// Whether the OS asked kame to quit while the file browser was up, which waits for it.
+    held_quit: bool,
     /// The note whose popover is open, and where its marker was painted.
     open_note: Option<AnnotationId>,
     open_note_pos: Option<Pos2>,
@@ -3041,6 +2953,8 @@ impl KameApp {
             annotation_textures: AnnotationTextureCache::new(),
             image_textures: HashMap::new(),
             held_open: None,
+            browser: browse::FileBrowser::new(cc.egui_ctx.clone()),
+            held_quit: false,
             open_note: None,
             open_note_pos: None,
             open_note_body: String::new(),
@@ -3209,12 +3123,17 @@ impl KameApp {
             || self.nb.file_op.is_some()
             || self.nb.move_report.is_some()
             || self.publishing.report.is_some()
+            || self.browser.is_open()
     }
 
     /// Closes whichever file dialog is open, leaving a window for references that it was over.
-    /// Returns whether one was closed, so Escape can fall through to the note popover only when
-    /// it was not.
+    /// Returns whether one was up, so Escape can fall through to the note popover only when
+    /// none was. The system's file browser is left, as only it closes it, and so is everything
+    /// under it, which its answer is for.
     fn dismiss_dialog(&mut self) -> bool {
+        if self.browser.is_open() {
+            return true;
+        }
         let open = self.dialog_open();
         if !self.other_dialog_open() {
             self.refs.dismiss();
@@ -3282,19 +3201,14 @@ impl KameApp {
         match command {
             FileCommand::ExportMarkdown => {
                 let suggestion = self.session.export_suggestion("md");
-                let Some(path) = pick_export_path("Export Markdown", "Markdown", "md", &suggestion)
-                else {
-                    return;
-                };
-                self.export_markdown_to(&path);
+                self.browse(
+                    browse::Ask::export_markdown(&suggestion),
+                    Then::ExportMarkdown,
+                );
             }
             FileCommand::ExportHtml => {
                 let suggestion = self.session.export_suggestion("html");
-                let Some(path) = pick_export_path("Export HTML", "HTML", "html", &suggestion)
-                else {
-                    return;
-                };
-                self.export_html_to(&path);
+                self.browse(browse::Ask::export_html(&suggestion), Then::ExportHtml);
             }
             FileCommand::SnapshotNow => {
                 self.restore_picker = None;
@@ -3598,6 +3512,11 @@ impl KameApp {
     /// What the window being asked to close does, before it closes or the prompt comes up.
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         let close_requested = ctx.input(|input| input.viewport().close_requested());
+        // The file browser's answer is for this window as it is, so the window waits for it.
+        if close_requested && self.browser.is_open() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            return;
+        }
         if close_requested {
             self.set_open_note(None);
             self.save_position_now();
@@ -4015,7 +3934,7 @@ impl KameApp {
             })
         });
         if save_chord {
-            self.save_action(ctx, false);
+            self.save_action(false);
         }
         // F1 toggles the help dialog (the usage and keybinding reference).
         if ctx.input(|input| input.key_pressed(egui::Key::F1)) {
@@ -4379,8 +4298,8 @@ impl KameApp {
             .unwrap_or_else(|| "not saved to a file yet".to_string());
         let not_saved = self.session.is_anonymous() && self.session.has_content();
         let message = self.status_message();
-        // Applied after the panel closes: some of these block on a native dialog
-        // or replace the session the panel is reading.
+        // Applied after the panel closes: some of these replace the session the
+        // panel is reading.
         let mut action: Option<MenuAction> = None;
         let pending_menu = self.pending_menu.take();
 
@@ -4549,6 +4468,9 @@ impl KameApp {
     /// then a notice, and then what's wrong with the notebook's references, which is said for as
     /// long as it's so.
     fn status_message(&self) -> Option<(String, bool)> {
+        if self.browser.is_open() {
+            return Some((browse::OPEN_LINE.to_string(), false));
+        }
         let error = self.session.last_error.clone().map(|error| (error, true));
         let notice = || self.notice.clone().map(|notice| (notice, false));
         let references = || self.refs.problem_line().map(|problem| (problem, true));
@@ -4587,8 +4509,8 @@ impl KameApp {
             MenuAction::NewNotebook => self.new_notebook(),
             MenuAction::Open => self.open_with_dialog(),
             MenuAction::OpenPath => self.begin_open(),
-            MenuAction::Save => self.save_action(ctx, false),
-            MenuAction::SaveAs => self.save_with_dialog(ctx, false),
+            MenuAction::Save => self.save_action(false),
+            MenuAction::SaveAs => self.save_with_dialog(false),
             MenuAction::ImportMarkdown => self.import_markdown(),
             MenuAction::Properties => self.begin_properties(),
             MenuAction::File(command) => self.run_file_command(command),
@@ -6750,9 +6672,10 @@ impl KameApp {
             return;
         }
         let directory = self.session.dialog_directory();
-        if let Some(path) = pick_markdown_path(directory.as_deref()) {
-            self.open_picked(path);
-        }
+        self.browse(
+            browse::Ask::markdown(directory.as_deref()),
+            Then::ImportMarkdown,
+        );
     }
 
     /// File > Open: asks for a document in the system's file browser and opens it.
@@ -6764,23 +6687,25 @@ impl KameApp {
         self.restore_picker = None;
         self.open_prompt = None;
         let directory = self.session.dialog_directory();
-        if let Some(path) = pick_open_path(directory.as_deref()) {
-            self.open_picked(path);
-        }
+        self.browse(browse::Ask::open(directory.as_deref()), Then::Open);
     }
 
-    /// Asks for an image, starting in the notebook's `images/` if there is one, and inserts it
-    /// as a block after the caret's. One from outside the notebook is copied into it first.
+    /// Asks for an image, starting in the notebook's `images/` if there is one, to insert.
     fn insert_image_with_dialog(&mut self) {
-        let notebook = self.nb.notebook.clone();
-        let directory = notebook
+        let directory = self
+            .nb
+            .notebook
             .as_ref()
             .map(|notebook| notebook.root.join(kame_notebook::images::IMAGES))
             .filter(|folder| folder.is_dir())
             .or_else(|| self.session.dialog_directory());
-        let Some(file) = pick_image_path(directory.as_deref()) else {
-            return;
-        };
+        self.browse(browse::Ask::image(directory.as_deref()), Then::InsertImage);
+    }
+
+    /// Inserts the image at `file` as a block after the caret's. One from outside the notebook is
+    /// copied into it first.
+    fn insert_picked_image(&mut self, file: PathBuf) {
+        let notebook = self.nb.notebook.clone();
         let document = self.session.path().map(Path::to_path_buf);
         let stored = match (&document, &notebook) {
             (Some(document), Some(notebook)) => {
@@ -6810,10 +6735,10 @@ impl KameApp {
             return;
         }
         let directory = self.session.dialog_directory();
-        let Some(path) = pick_document_link_path(directory.as_deref()) else {
-            return;
-        };
-        self.link_to_picked_document(&path);
+        self.browse(
+            browse::Ask::document_link(directory.as_deref()),
+            Then::LinkDocument,
+        );
     }
 
     /// Links the selection or the word at the caret to the document at `path`, by the way from
@@ -6982,11 +6907,16 @@ impl KameApp {
         self.dialog_open() || self.close_flow.prompting
     }
 
-    /// Does what the OS has asked for since the last frame, and opens what was waiting for a dialog
-    /// that has now closed. The OS asking to quit goes through the same close request as the
-    /// window's own button, and so through the unsaved-document prompt.
+    /// Does what the file browser was asked for, if its answer has come, then what the OS has
+    /// asked for since the last frame, and opens what was waiting for a dialog that has now
+    /// closed. The OS asking to quit goes through the same close request as the window's own
+    /// button, and so through the unsaved-document prompt, once the file browser has gone.
     fn handle_os_requests(&mut self, ctx: &egui::Context, requests: external::Requests) {
-        if requests.quit {
+        self.take_browser_answer(ctx);
+        // A close is refused while the file browser is up, so a quit waits for it to go.
+        self.held_quit |= requests.quit;
+        if self.held_quit && !self.browser.is_open() {
+            self.held_quit = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         // kame shows one document, so of several files opened at once the first wins.
@@ -6994,6 +6924,40 @@ impl KameApp {
             self.request_open(path);
         }
         self.open_held();
+    }
+
+    /// Puts up the system's file browser for `ask`, with `then` to do with the path it gives. The
+    /// frame goes on meanwhile, and kame takes no input until it answers. One already up is kept,
+    /// and this is refused.
+    fn browse(&mut self, ask: browse::Ask, then: Then) {
+        self.browser.ask(&ask, then);
+    }
+
+    /// Does what the file browser was asked for, once it has answered. A cancelled browser only
+    /// stops waiting, as nothing was to happen without a path. Nothing is taken from before it
+    /// was asked but what `Then` says: the rest is read now, which is as it was then, since
+    /// nothing reached kame meanwhile.
+    fn take_browser_answer(&mut self, ctx: &egui::Context) {
+        let Some((then, Some(path))) = self.browser.take_answer() else {
+            return;
+        };
+        match then {
+            Then::ExportMarkdown => self.export_markdown_to(&path),
+            Then::ExportHtml => self.export_html_to(&path),
+            Then::ImportMarkdown | Then::Open => self.open_picked(path),
+            Then::InsertImage => self.insert_picked_image(path),
+            Then::LinkDocument => self.link_to_picked_document(&path),
+            Then::Save { close_after } => self.save_to(ctx, &path, close_after),
+            Then::NewNotebook => self.make_notebook(&path),
+        }
+    }
+
+    /// While the file browser is up, takes out of a frame's input what would act on kame, so that
+    /// the browser's answer meets the state it was asked from.
+    fn hold_input_for_browser(&self, input: &mut egui::RawInput) {
+        if self.browser.is_open() {
+            browse::hold(input);
+        }
     }
 
     /// Opens what the OS asked for, if it was waiting and the dialog that held it has closed. It
@@ -7169,28 +7133,27 @@ impl KameApp {
     /// already on disk is saved continuously, so it is a no-op; an anonymous
     /// document opens the native save-as browser and, on success, is persisted
     /// to the chosen file. `close_after` closes the window once the save lands.
-    fn save_action(&mut self, ctx: &egui::Context, close_after: bool) {
+    fn save_action(&mut self, close_after: bool) {
         if !self.session.is_anonymous() {
             self.notice = Some("saved".to_string());
             return;
         }
-        self.save_with_dialog(ctx, close_after);
+        self.save_with_dialog(close_after);
     }
 
-    /// Asks where to save the document, then saves it there. Cancelling changes
-    /// nothing, and leaves the close prompt up if it was what asked.
-    fn save_with_dialog(&mut self, ctx: &egui::Context, close_after: bool) {
+    /// Asks where to save the document, to save it there. Cancelling changes
+    /// nothing, and leaves the close prompt up if it was what asked, so that
+    /// the author can still discard or cancel explicitly.
+    fn save_with_dialog(&mut self, close_after: bool) {
         if self.held_by_rename() {
             return;
         }
         let directory = self.session.dialog_directory();
         let name = self.session.suggested_file_name();
-        let Some(path) = pick_save_path(&name, directory.as_deref()) else {
-            // The author cancelled the save; the close prompt stays open so
-            // they can still discard or cancel explicitly.
-            return;
-        };
-        self.save_to(ctx, &path, close_after);
+        self.browse(
+            browse::Ask::save(&name, directory.as_deref()),
+            Then::Save { close_after },
+        );
     }
 
     /// Saves the document at `path`, and says its images and links again from there.
@@ -7595,7 +7558,7 @@ impl KameApp {
         if merge {
             self.merge_with_replacement();
         } else if save {
-            self.save_with_dialog(ctx, false);
+            self.save_with_dialog(false);
             self.replaced_prompt = self.session.replaced;
         } else if open {
             self.open_replacement(&path);
@@ -7643,7 +7606,7 @@ impl KameApp {
             return;
         }
         if save {
-            self.save_action(ctx, true);
+            self.save_action(true);
         }
     }
 
@@ -7887,7 +7850,10 @@ impl eframe::App for KameApp {
     /// so a block that takes tabs has to claim the key here.
     ///
     /// On Linux a touchpad's swipes are sped up and coast here, as macOS does for every app.
+    ///
+    /// While the file browser is up, what would act on kame is taken out here first.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.hold_input_for_browser(raw_input);
         self.claim_tabs(ctx, &mut raw_input.events);
         if cfg!(target_os = "linux") {
             self.touchpad.adjust(raw_input);
@@ -7932,7 +7898,9 @@ impl eframe::App for KameApp {
         // never land cannot make the window unclosable. (egui delivers one
         // close request per X click, so `cancel_close` counts clicks, not
         // frames.)
-        let close_requested = ui.ctx().input(|input| input.viewport().close_requested());
+        // One refused for the file browser, in `logic`, isn't counted.
+        let close_requested =
+            ui.ctx().input(|input| input.viewport().close_requested()) && !self.browser.is_open();
         if self.close.cancel_close(
             self.session.save_failed && !self.session.newer,
             close_requested,
@@ -8113,6 +8081,10 @@ pub(crate) struct Headless {
     asked: Vec<egui::Event>,
     /// Whether a frame draws the find bar, the menu bar and the status row, as the window does.
     pub(crate) chrome: bool,
+    /// What the OS asks for before the next frame.
+    pub(crate) requests: external::Requests,
+    /// Whether a frame has asked the window to close.
+    pub(crate) closing: bool,
 }
 
 #[cfg(test)]
@@ -8137,6 +8109,8 @@ impl Headless {
             clipboard: String::new(),
             asked: Vec::new(),
             chrome: false,
+            requests: external::Requests::default(),
+            closing: false,
         }
     }
 
@@ -8160,6 +8134,7 @@ impl Headless {
                 egui::ViewportCommand::RequestPaste if !self.clipboard.is_empty() => {
                     self.asked.push(egui::Event::Paste(self.clipboard.clone()));
                 }
+                egui::ViewportCommand::Close => self.closing = true,
                 _ => {}
             }
         }
@@ -8188,7 +8163,8 @@ impl Headless {
                 .native_pixels_per_point = Some(scale);
         }
         let app = &mut self.app;
-        app.handle_os_requests(&self.ctx, external::Requests::default());
+        app.hold_input_for_browser(&mut input);
+        app.handle_os_requests(&self.ctx, std::mem::take(&mut self.requests));
         app.notebook_tick(&self.ctx);
         let chrome = self.chrome;
         let mut output = self.ctx.run_ui(input, |ui| {
@@ -8229,7 +8205,8 @@ impl Headless {
     }
 
     /// One frame in which the window is asked to close, as far as what `logic` does about it.
-    fn close_request(&mut self) {
+    /// Returns whether the close was cancelled.
+    fn close_request(&mut self) -> bool {
         self.time += 0.02;
         let mut input = egui::RawInput {
             time: Some(self.time),
@@ -8245,7 +8222,16 @@ impl Headless {
         let output = self
             .ctx
             .run_ui(input, |ui| app.handle_close_request(ui.ctx()));
+        let cancelled = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|viewport| {
+                viewport
+                    .commands
+                    .contains(&egui::ViewportCommand::CancelClose)
+            });
         output.drop_without_applying_deltas();
+        cancelled
     }
 
     /// The window on top of the others.

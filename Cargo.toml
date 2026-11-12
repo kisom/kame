@@ -29,8 +29,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # rfd's file dialog backend is platform-specific: the XDG desktop portal on
 # Linux, the native AppKit panels on macOS (compiled in automatically via
-# target-gated deps, no feature flag). The synchronous `FileDialog` API is
-# identical on both, so only the feature set differs.
+# target-gated deps, no feature flag). The `AsyncFileDialog` API, which
+# `src/browse.rs` asks without stopping the frame, is identical on both, so
+# only the feature set differs.
 [target.'cfg(target_os = "linux")'.dependencies]
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 

@@ -3084,12 +3084,18 @@ mod tests {
         let mut page = crate::Headless::new(session);
         page.frame(Vec::new());
 
+        let query =
+            |page: &crate::Headless| page.app.nb.jump.as_ref().map(|jump| jump.query.clone());
         page.app.toggle_jump();
+        // The field takes the keyboard on its first frame.
+        page.frame(Vec::new());
         type_text(&mut page, "fresh");
         page.frame(Vec::new());
+        assert_eq!(query(&page).as_deref(), Some("fresh"));
         assert!(page.can_press("Create"), "a name with no # is offered");
         type_text(&mut page, "#part");
         page.frame(Vec::new());
+        assert_eq!(query(&page).as_deref(), Some("fresh#part"));
         assert!(!page.sees("Create"));
         press(&mut page, egui::Key::Enter, egui::Modifiers::NONE);
         assert!(!root.join("fresh.kame").exists());
